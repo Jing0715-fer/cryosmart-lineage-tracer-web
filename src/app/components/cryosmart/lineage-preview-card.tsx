@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildLineageHtmlV2 } from "@/lib/cryosmart/report-html";
 import { makePreview } from "@/lib/cryosmart/lineage";
+import { LineageGraph } from "./lineage-graph";
 
 interface Props {
   summary: LineageSummary | null;
@@ -102,15 +103,20 @@ export function LineagePreviewCard({ summary }: Props) {
         </div>
 
         <Tabs value={reportTab} onValueChange={setReportTab}>
-          <TabsList className="grid w-full grid-cols-4 bg-slate-100 sm:w-auto sm:grid-cols-4">
-            <TabsTrigger value="stats" className="text-[12px] data-[state=active]:bg-white">Overview</TabsTrigger>
-            <TabsTrigger value="report" className="text-[12px] data-[state=active]:bg-white">Report</TabsTrigger>
-            <TabsTrigger value="mermaid" className="text-[12px] data-[state=active]:bg-white">Mermaid</TabsTrigger>
-            <TabsTrigger value="preview" className="text-[12px] data-[state=active]:bg-white">Preview</TabsTrigger>
+          <TabsList className="grid w-full grid-cols-5 bg-slate-100 sm:w-auto sm:grid-cols-5">
+            <TabsTrigger value="stats" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Overview</TabsTrigger>
+            <TabsTrigger value="graph" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Graph</TabsTrigger>
+            <TabsTrigger value="report" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Report</TabsTrigger>
+            <TabsTrigger value="mermaid" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Mermaid</TabsTrigger>
+            <TabsTrigger value="preview" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Preview</TabsTrigger>
           </TabsList>
 
           <TabsContent value="stats" className="mt-3 space-y-3">
             <OverviewPanel summary={summary} />
+          </TabsContent>
+
+          <TabsContent value="graph" className="mt-3">
+            <LineageGraph summary={summary} />
           </TabsContent>
 
           <TabsContent value="report" className="mt-3">

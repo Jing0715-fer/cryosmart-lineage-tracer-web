@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
+import { ThemeProvider } from "@/components/theme-provider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -14,24 +15,32 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Z.ai Code Scaffold - AI-Powered Development",
-  description: "Modern Next.js scaffold optimized for AI-powered development with Z.ai. Built with TypeScript, Tailwind CSS, and shadcn/ui.",
-  keywords: ["Z.ai", "Next.js", "TypeScript", "Tailwind CSS", "shadcn/ui", "AI development", "React"],
-  authors: [{ name: "Z.ai Team" }],
+  title: "CryoSmart Lineage Tracer — Web",
+  description:
+    "Cross-browser reimplementation of the CryoSmart Lineage Tracer 3.0 Chrome extension. Trace particle & map lineage, build HTML/SVG/PPTX reports, download full bundles — no extension install required.",
+  keywords: [
+    "CryoSmart",
+    "cryo-EM",
+    "lineage tracer",
+    "ChimeraX",
+    "Next.js",
+    "TypeScript",
+  ],
+  authors: [{ name: "CryoSmart Lineage Tracer Web" }],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
   openGraph: {
-    title: "Z.ai Code Scaffold",
-    description: "AI-powered development with modern React stack",
-    url: "https://chat.z.ai",
-    siteName: "Z.ai",
+    title: "CryoSmart Lineage Tracer — Web",
+    description:
+      "Trace particle & map lineage for any CryoSmart job. Cross-browser, no install required.",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Z.ai Code Scaffold",
-    description: "AI-powered development with modern React stack",
+    title: "CryoSmart Lineage Tracer — Web",
+    description:
+      "Trace particle & map lineage for any CryoSmart job. Cross-browser, no install required.",
   },
 };
 
@@ -45,8 +54,15 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
-        {children}
-        <Toaster />
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="light"
+          enableSystem
+          disableTransitionOnChange
+        >
+          {children}
+          <Toaster />
+        </ThemeProvider>
       </body>
     </html>
   );

@@ -353,3 +353,51 @@ Unresolved / next steps:
 - CryoSmart REST endpoints are guessed (4 candidates) — real CryoSmart deployments may need adjustment. Only testable with a real instance.
 - Consider adding: dark mode toggle, recent sessions in localStorage, export lineage graph as PNG.
 
+
+---
+Task ID: 11
+Agent: main-orchestrator (cron review #2)
+Task: QA review, add dark mode + recent sessions + interactive lineage graph
+
+Work Log:
+- **QA**: dev server stable, lint clean, tsc clean, no hydration errors. Full sample → trace → Job Explorer → ZIP bundle flow passes.
+- **NEW FEATURE: Dark Mode** (VLM 9/10)
+  - Wired `next-themes` ThemeProvider in layout.tsx (attribute="class", defaultTheme="light", enableSystem).
+  - Created `src/components/theme-provider.tsx` (client wrapper).
+  - Created `src/components/theme-toggle.tsx` — cycles light → dark → system, renders Sun/Moon/Monitor icon, mountsafe placeholder to avoid hydration mismatch.
+  - Updated `site-chrome.tsx` — added ThemeToggle + Keyboard shortcuts popover (with kbd badges) to header, dark: variants on all surfaces.
+  - Updated `globals.css` — added custom scrollbar styling (light + dark), selection color, focus-visible ring (accessible).
+  - Added dark: variants throughout site-chrome (header, footer, nav links).
+- **NEW FEATURE: Recent Sessions** (localStorage-backed)
+  - Created `src/lib/cryosmart/recent-sessions.ts` — stores last 8 sessions (projectUid, startJob, source, jobCount, cryosmartOrigin, fileName, createdAt). Deduped by projectUid+startJob. Custom event dispatch for live updates.
+  - Created `src/app/components/cryosmart/recent-sessions-card.tsx` — dashed card showing session list with source-type icon, project/job badges, relative timestamps, Reload button (re-loads sample or scrolls to data source), Remove (per-session) + Clear all.
+  - Wired `recordSession` effect in page.tsx (fires on successful trace).
+  - Only renders when sessions exist (empty → hidden).
+- **NEW FEATURE: Interactive Lineage Graph** (VLM 9/10)
+  - Created `src/app/components/cryosmart/lineage-graph.tsx` — SVG-based DAG renderer with:
+    - Topological layer layout (import → motion → CTF → picker → extract → 2D → ab initio → refine)
+    - Pan (drag) + zoom (buttons, 30%–300%) + reset view
+    - Click node to highlight connected edges/nodes (dims unconnected)
+    - Hover ring + selection ring + START job glow
+    - Color-coded edges by kind (particle=emerald, volume=teal, exposure=cyan, other=slate)
+    - Legend dots, node info popover (uid, job_type, metrics, title)
+    - Export PNG (SVG → canvas → Blob → download)
+  - Added "Graph" tab to LineagePreviewCard (now 5 tabs: Overview / Graph / Report / Mermaid / Preview).
+- **POLISH**: Added dark: variants to all TabsTrigger backgrounds.
+
+Stage Summary:
+- **Verification via agent-browser (all passed)**:
+  - Page loads, no hydration errors, no console errors.
+  - Theme toggle cycles light → dark → system → light. Dark mode renders correctly (VLM 9/10: "sophisticated palette, high contrast, no accessibility issues").
+  - Try Sample → Load → Trace → 10 nodes, 10 edges. Recent Sessions card appears with "just now" entry showing P52 → J10, Sample badge, 10 jobs.
+  - Graph tab renders interactive DAG with 10 nodes, edges color-coded, pan/zoom/export-PNG toolbar buttons present.
+  - Ctrl+K focuses Job Explorer search (verified last round, still works).
+  - VLM: Hero 9/10, Job Explorer 9/10, Lineage Graph 9/10, Dark Mode 9/10.
+- **Lint**: 0 errors. **TypeScript**: 0 errors. **Dev server**: stable.
+- **Files produced**: 4 new (theme-provider.tsx, theme-toggle.tsx, recent-sessions.ts, recent-sessions-card.tsx, lineage-graph.tsx), 4 updated (layout.tsx, site-chrome.tsx, page.tsx, lineage-preview-card.tsx, globals.css).
+
+Unresolved / next steps:
+- Bookmarklet href still set via ref+setAttribute (React blocks javascript: URLs) — necessary workaround.
+- CryoSmart REST endpoints are guessed (4 candidates) — only testable with a real CryoSmart instance.
+- Consider: export lineage graph as SVG (in addition to PNG), batch compare multiple start jobs, FSC plot viewer.
+

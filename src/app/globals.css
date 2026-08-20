@@ -120,3 +120,59 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* CryoSmart Lineage Tracer Web — custom dark mode surface tweaks */
+@layer base {
+  /* Smooth theme transition (only on the html element, not children, to avoid
+     jankiness during scroll). */
+  html {
+    color-scheme: light dark;
+  }
+
+  /* Custom scrollbar (works in both themes). */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: oklch(0.7 0 0) transparent;
+  }
+  .dark * {
+    scrollbar-color: oklch(0.4 0 0) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: oklch(0.85 0 0);
+    border-radius: 4px;
+  }
+  .dark *::-webkit-scrollbar-thumb {
+    background-color: oklch(0.35 0 0);
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: oklch(0.7 0 0);
+  }
+  .dark *::-webkit-scrollbar-thumb:hover {
+    background-color: oklch(0.45 0 0);
+  }
+
+  /* Selection color. */
+  ::selection {
+    background-color: oklch(0.85 0.13 162);
+    color: oklch(0.2 0 0);
+  }
+  .dark ::selection {
+    background-color: oklch(0.4 0.13 162);
+    color: oklch(0.95 0 0);
+  }
+}
+
+/* Focus-visible ring (accessible). */
+@layer base {
+  :focus-visible {
+    outline: 2px solid oklch(0.6 0.13 162);
+    outline-offset: 2px;
+  }
+}

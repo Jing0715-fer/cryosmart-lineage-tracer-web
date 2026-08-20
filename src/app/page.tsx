@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { SiteHeader, SiteFooter } from "./components/cryosmart/site-chrome";
 import { DataSourceCard, type LoadedMetadata } from "./components/cryosmart/data-source-card";
 import { ConfigureCard, type TraceOptions } from "./components/cryosmart/configure-card";
@@ -9,8 +9,10 @@ import { DownloadCard } from "./components/cryosmart/download-card";
 import { HelpCard } from "./components/cryosmart/help-card";
 import { HeroVisualization } from "./components/cryosmart/hero-visualization";
 import { JobExplorerCard } from "./components/cryosmart/job-explorer-card";
+import { RecentSessionsCard } from "./components/cryosmart/recent-sessions-card";
 import { useImportedMetadata } from "./components/cryosmart/use-imported-metadata";
 import { useKeyboardShortcuts } from "./components/cryosmart/use-keyboard-shortcuts";
+import { recordSession, type RecentSession } from "@/lib/cryosmart/recent-sessions";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { ShieldCheck, Globe, Zap, FileCheck2, Loader2, CheckCircle2, AlertCircle, ArrowRight, MousePointer2, Keyboard } from "lucide-react";
 
@@ -46,6 +48,19 @@ export default function Home() {
       document.getElementById("job-explorer")?.scrollIntoView({ behavior: "smooth", block: "start" });
     },
   });
+
+  // Record a session whenever tracing succeeds.
+  useEffect(() => {
+    if (!summary || !loaded) return;
+    recordSession({
+      projectUid: summary.project_uid || loaded.projectUid,
+      startJob: summary.start_uid || undefined,
+      source: loaded.source,
+      jobCount: loaded.jobCount,
+      cryosmartOrigin: loaded.cryosmartOrigin,
+      fileName: loaded.source === "upload" ? "uploaded.json" : undefined,
+    });
+  }, [summary, loaded]);
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50/50">
@@ -195,6 +210,28 @@ export default function Home() {
       {/* Main workflow */}
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-10 sm:px-6 lg:px-8">
         <div className="space-y-6">
+          <RecentSessionsCard
+            onReload={(session: RecentSession) => {
+              // We can't fully reload the raw payload (it's not in localStorage),
+              // but we can re-load the sample or scroll to the data source.
+              if (session.source === "sample") {
+                import("@/lib/cryosmart/sample-data").then(({ buildSampleExportedMetadata }) => {
+                  const startJobNum = session.startJob ? parseInt(session.startJob.replace(/^J/i, ""), 10) : 10;
+                  const sample = buildSampleExportedMetadata({ startJob: isNaN(startJobNum) ? 10 : startJobNum });
+                  setLoaded({
+                    raw: sample,
+                    projectUid: sample.project_uid,
+                    jobCount: sample.jobs.length,
+                    source: "sample",
+                  });
+                });
+              } else {
+                // For upload / live / bookmarklet — scroll to data source so the
+                // user can re-run the capture. We can't replay the original payload.
+                document.getElementById("data-source")?.scrollIntoView({ behavior: "smooth", block: "start" });
+              }
+            }}
+          />
           <DataSourceCard loaded={loaded} onLoad={setLoaded} />
 
           <ConfigureCard
