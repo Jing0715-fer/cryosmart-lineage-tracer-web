@@ -24,6 +24,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { LineageSummary, LineageNode, LineageEdge } from "@/lib/cryosmart/types";
+import { JobCompareButton } from "./job-compare-button";
 
 interface Props {
   summary: LineageSummary | null;
@@ -170,9 +171,12 @@ export function JobExplorerCard({ summary }: Props) {
             <GitBranch className="h-4 w-4" />
           </span>
           <CardTitle className="text-lg">Job Explorer</CardTitle>
-          <Badge variant="secondary" className="ml-1 bg-slate-100 text-slate-600">
+          <Badge variant="secondary" className="ml-1 bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
             {nodes.length} jobs
           </Badge>
+          <div className="ml-auto">
+            <JobCompareButton summary={summary} />
+          </div>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
           Search, filter, and inspect each traced job in an interactive drawer. Click any card to see full metadata, upstream sources, and downstream outputs.

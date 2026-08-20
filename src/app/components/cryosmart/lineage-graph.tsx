@@ -162,6 +162,29 @@ export function LineageGraph({ summary }: Props) {
     img.src = url;
   }, [bounds, summary]);
 
+  const exportSvg = useCallback(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    // Clone the SVG and inline a white background rect so it renders well
+    // on dark themes / when opened standalone.
+    const clone = svg.cloneNode(true) as SVGSVGElement;
+    const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    bg.setAttribute("x", "0");
+    bg.setAttribute("y", "0");
+    bg.setAttribute("width", String(bounds.w));
+    bg.setAttribute("height", String(bounds.h));
+    bg.setAttribute("fill", "#ffffff");
+    clone.insertBefore(bg, clone.firstChild);
+    const xml = new XMLSerializer().serializeToString(clone);
+    const blob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_graph.svg`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [bounds, summary]);
+
   const resetView = () => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
@@ -194,9 +217,14 @@ export function LineageGraph({ summary }: Props) {
           </Button>
           <span className="px-1.5 font-mono text-[10px] text-slate-500">{Math.round(zoom * 100)}%</span>
         </div>
-        <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={exportPng}>
-          <Download className="mr-1 h-3 w-3" /> Export PNG
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={exportPng} title="Export as raster PNG (2x retina)">
+            <Download className="mr-1 h-3 w-3" /> PNG
+          </Button>
+          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={exportSvg} title="Export as vector SVG (scalable, editable)">
+            <Download className="mr-1 h-3 w-3" /> SVG
+          </Button>
+        </div>
         <div className="ml-auto flex items-center gap-2 text-[10.5px] text-slate-500">
           <LegendDot color={KIND_COLOR.exposure} label="Micrograph" />
           <LegendDot color={KIND_COLOR.particle} label="Particle" />

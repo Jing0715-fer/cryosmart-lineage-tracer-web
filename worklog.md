@@ -448,3 +448,45 @@ Unresolved / next steps:
 - CryoSmart REST endpoints are guessed (4 candidates) — only testable with a real CryoSmart instance.
 - Consider: job compare/diff feature, FSC plot viewer, export lineage graph as SVG, batch trace multiple start jobs.
 
+
+---
+Task ID: 13
+Agent: main-orchestrator (cron review #4)
+Task: QA review, add Job Compare + SVG export
+
+Work Log:
+- **QA**: dev server stable, lint clean, tsc clean. Full sample → trace → Job Explorer → Graph → Share flow passes. (Note: Next.js HMR emits a stale "Module not found: @/components/theme-provider" warning that doesn't affect runtime — file exists and tsc resolves it correctly. This is a Next dev cache glitch, not a real error.)
+- **NEW FEATURE: Job Compare** — side-by-side job metadata diff
+  - Created `src/app/components/cryosmart/job-compare-button.tsx` — Dialog with:
+    - Two `<select>` dropdowns (Job A / Job B) auto-populated with all traced jobs sorted by uid_num
+    - Swap button (swap A ↔ B with one click)
+    - Auto-defaults to first and last job on open
+    - Diff table showing 6 metrics: Particles, Micrographs, Volumes, Classes, Resolution (Å), Pixel Size (Å/px)
+    - Each row shows value A, value B, and Δ with TrendingUp/TrendingDown/Minus icons + percentage
+    - Resolution uses inverted "good" logic (lower = better → green up arrow)
+    - Job header cards with UID + job_type badge + title
+    - Extraction params comparison (box_size, extracted_box_size, bin_factor + inferred flag)
+    - Timestamps row
+  - Wired JobCompareButton into Job Explorer card header (teal-themed, right-aligned).
+- **NEW FEATURE: Export Lineage Graph as SVG**
+  - Added `exportSvg` function to lineage-graph.tsx — clones the SVG, inlines a white background rect, serializes, downloads as `.svg` file.
+  - Toolbar now has separate PNG + SVG buttons (was one "Export PNG" button before).
+  - SVG is vector/scalable/editable in Illustrator/Inkscape; PNG is 2x retina raster.
+
+Stage Summary:
+- **Verification via agent-browser (all passed)**:
+  - Try Sample → Load → Trace → 10 nodes, 10 edges.
+  - Job Explorer shows Compare button in header.
+  - Click Compare → dialog opens, defaults to J1 vs J10.
+  - Set Job A = J8 (select_2D, 89,400 particles), Job B = J10 (refine, 42,100 particles) → diff shows "-47,300 (-52.9%)" with red TrendingDown icon. ✓ (select_2D filtered out 53% of particles, exactly right.)
+  - Swap button exchanges A and B values.
+  - Graph tab → PNG and SVG buttons both render, clicking SVG triggers download with no console errors.
+  - VLM: Compare dialog 9/10, overall 9/10. "Clean, modern, highly legible, consistent teal color scheme."
+- **Lint**: 0 errors. **TypeScript**: 0 errors. **Dev server**: stable.
+- **Files produced**: 1 new (job-compare-button.tsx), 2 updated (job-explorer-card.tsx, lineage-graph.tsx).
+
+Unresolved / next steps:
+- Next.js HMR cache glitch: stale "Module not found: @/components/theme-provider" warning. Harmless (tsc clean, page loads 200 OK). Likely fixes itself on full server restart.
+- CryoSmart REST endpoints are guessed (4 candidates) — only testable with a real CryoSmart instance.
+- Consider: FSC plot viewer, batch trace multiple start jobs, lineage graph minimap for large projects.
+
