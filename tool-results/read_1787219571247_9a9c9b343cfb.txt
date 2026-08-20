@@ -1,0 +1,1576 @@
+     1→const TRACE_JOB_TYPES = [
+     2→  ["nonuniform_refine_new", /nonuniform[_ ]refine[_ ]new/i],
+     3→  ["nonuniform_refine", /nonuniform[_ ]refine/i],
+     4→  ["homo_refine_new", /homo[_ ]refine[_ ]new/i],
+     5→  ["homo_refine", /homo[_ ]refine/i],
+     6→  ["new_local_refine", /new[_ ]local[_ ]refine|local[_ ]refine/i],
+     7→  ["hetero_refine", /hetero[_ ]refine/i],
+     8→  ["homo_abinit", /homo[_ ]abinit|ab[- ]?init/i],
+     9→  ["class_2D", /class[_ ]?2d/i],
+    10→  ["class_3D", /class[_ ]?3d/i],
+    11→  ["select_2D", /select[_ ]?2d/i],
+    12→  ["topaz_cross_validation", /topaz[_ ]cross[_ ]validation/i],
+    13→  ["topaz_train", /topaz[_ ]train/i],
+    14→  ["topaz_extract", /topaz[_ ]extract/i],
+    15→  ["extract_micrographs_multi", /extract[_ ]micrographs[_ ]multi/i],
+    16→  ["remove_duplicate_particles", /remove[_ ]duplicate[_ ]particles/i],
+    17→  ["blob_picker_gpu", /blob[_ ]picker/i],
+    18→  ["auto_blob_picker_gpu", /auto[_ ]blob[_ ]picker/i],
+    19→  ["template_picker_gpu", /template[_ ]picker/i],
+    20→  ["deep_picker_train", /deep[_ ]picker[_ ]train/i],
+    21→  ["deep_picker_inference", /deep[_ ]picker[_ ]inference/i],
+    22→  ["filament_tracer_gpu", /filament[_ ]tracer/i],
+    23→  ["manual_picker", /manual[_ ]picker/i],
+    24→  ["ctf_refine_global", /ctf[_ ]refine[_ ]global/i],
+    25→  ["ctf_refine_local", /ctf[_ ]refine[_ ]local/i],
+    26→  ["ctf_estimation", /ctf[_ ]estimation|patch[_ ]ctf/i],
+    27→  ["curate_exposures", /curate[_ ]exposures/i],
+    28→  ["import_movies", /import[_ ]movies/i],
+    29→  ["import_micrographs", /import[_ ]micrographs/i],
+    30→  ["import_particles", /import[_ ]particles/i],
+    31→  ["import_volumes", /import[_ ]volumes/i],
+    32→  ["volume_tools", /volume[_ ]tools/i],
+    33→  ["volume_alignment_tools", /volume[_ ]alignment/i],
+    34→  ["homo_reconstruct", /homo[_ ]reconstruct/i],
+    35→  ["sym_expand", /sym[_ ]expand/i],
+    36→  ["particle_subtract", /particle[_ ]subtract/i],
+    37→  ["var_3D", /var[_ ]?3d/i]
+    38→];
+    39→
+    40→const TRACE_MAJOR_TYPES = new Set([
+    41→  "import_movies",
+    42→  "import_micrographs",
+    43→  "import_particles",
+    44→  "import_volumes",
+    45→  "manual_picker",
+    46→  "blob_picker_gpu",
+    47→  "auto_blob_picker_gpu",
+    48→  "template_picker_gpu",
+    49→  "deep_picker_train",
+    50→  "deep_picker_inference",
+    51→  "filament_tracer_gpu",
+    52→  "topaz_train",
+    53→  "topaz_extract",
+    54→  "extract_micrographs_multi",
+    55→  "extract_micrographs_cpu_parallel",
+    56→  "remove_duplicate_particles",
+    57→  "particle_sets",
+    58→  "downsample_particles",
+    59→  "standardize_particle_psize",
+    60→  "check_corrupt_particles",
+    61→  "reassign_particles_mics",
+    62→  "class_2D",
+    63→  "class_3D",
+    64→  "select_2D",
+    65→  "rebalance_classes_2D",
+    66→  "class_probability_filter",
+    67→  "homo_abinit",
+    68→  "hetero_refine",
+    69→  "homo_refine",
+    70→  "homo_refine_new",
+    71→  "nonuniform_refine_new",
+    72→  "nonuniform_refine",
+    73→  "new_local_refine",
+    74→  "naive_local_refine",
+    75→  "homo_reconstruct",
+    76→  "align_3D",
+    77→  "sym_expand",
+    78→  "particle_subtract",
+    79→  "var_3D",
+    80→  "var_3D_disp",
+    81→  "auto3Dre_pipeline_ctrl",
+    82→  "auto3Dre_rank",
+    83→  "auto3Dre_select_ranked_ptcls",
+    84→  "cryodrgn",
+    85→  "helix_search",
+    86→  "helix_initmodel",
+    87→  "helix_refine",
+    88→  "helix_symmetrize",
+    89→  "relion_auto_refine",
+    90→  "relion_3d_classification"
+    91→]);
+    92→
+    93→const TRACE_SMALL_TYPES = new Set([
+    94→  "motion_correction_motioncor2",
+    95→  "patch_motion_correction_multi",
+    96→  "local_motion_correction",
+    97→  "local_motion_correction_multi",
+    98→  "rigid_motion_correction",
+    99→  "rigid_motion_correction_multi",
+   100→  "ctf_estimation",
+   101→  "patch_ctf_estimation_multi",
+   102→  "ctf_estimation_gctf",
+   103→  "patch_ctf_extract",
+   104→  "ctf_refine_global",
+   105→  "ctf_refine_local",
+   106→  "curate_exposures",
+   107→  "exposure_sets",
+   108→  "exposure_tools",
+   109→  "exposure_groups",
+   110→  "inspect_simple",
+   111→  "volume_tools",
+   112→  "volume_alignment_tools",
+   113→  "local_resolution",
+   114→  "local_filter",
+   115→  "sharpen",
+   116→  "deep_emhancer",
+   117→  "fsc3D",
+   118→  "reslog",
+   119→  "validation",
+   120→  "generate_thumbs",
+   121→  "topaz_denoise",
+   122→  "topaz_cross_validation",
+   123→  "junk_filter"
+   124→]);
+   125→
+   126→const TRACE_MAP_SUFFIXES = [
+   127→  "volume.map"
+   128→];
+   129→
+   130→const TRACE_FINAL_GRAPH_TARGETS = [
+   131→  {
+   132→    key: "fsc",
+   133→    title: "FSC",
+   134→    titleRegex: /\bFSC\s+Iteration\s+(\d{1,4})\b/gi,
+   135→    folderPrefix: "FSC_Iteration",
+   136→    fileBase: "FSC",
+   137→    exts: ["png", "pdf", "txt", "xml"]
+   138→  },
+   139→  {
+   140→    key: "direction_distribution",
+   141→    title: "Direction Distribution",
+   142→    titleRegex: /\b(?:Viewing\s+Direction\s+Distribution|Posterior\s+Precision\s+Directional\s+Distribution|Directional?\s+Distribution|Direction\s+Distribution)\s+Iteration\s+(\d{1,4})\b/gi,
+   143→    folderPrefix: "Direction Distribution Iteration",
+   144→    fileBase: "Direction Distribution",
+   145→    exts: ["png", "pdf"]
+   146→  },
+   147→  {
+   148→    key: "guinier",
+   149→    title: "Guinier Plot",
+   150→    titleRegex: /\bGuinier\s+Plot\s+Iteration\s+(\d{1,4})\b/gi,
+   151→    folderPrefix: "Guinier_Plot_Iteration",
+   152→    fileBase: "Guinier_Plot",
+   153→    exts: ["png", "pdf"]
+   154→  }
+   155→];
+   156→
+   157→const TRACE_FINAL_MAP_TARGETS = [
+   158→  { suffix: "volume.map" },
+   159→  { suffix: "volume.map_sharp" },
+   160→  { suffix: "volume.map_half_A" },
+   161→  { suffix: "volume.map_half_B" },
+   162→  { suffix: "volume.mask_refine" },
+   163→  { suffix: "mask.mask_refine" }
+   164→];
+   165→
+   166→function traceSleep(ms) {
+   167→  return new Promise((resolve) => setTimeout(resolve, ms));
+   168→}
+   169→
+   170→function traceNormalizeJsonText(text) {
+   171→  return String(text || "")
+   172→    .replace(/[“”]/g, "\"")
+   173→    .replace(/[‘’]/g, "'");
+   174→}
+   175→
+   176→function traceFindJsonEnd(text, start) {
+   177→  let depth = 0;
+   178→  let inString = false;
+   179→  let escaped = false;
+   180→  for (let i = start; i < text.length; i += 1) {
+   181→    const ch = text[i];
+   182→    if (inString) {
+   183→      if (escaped) {
+   184→        escaped = false;
+   185→      } else if (ch === "\\") {
+   186→        escaped = true;
+   187→      } else if (ch === "\"") {
+   188→        inString = false;
+   189→      }
+   190→      continue;
+   191→    }
+   192→    if (ch === "\"") {
+   193→      inString = true;
+   194→    } else if (ch === "{") {
+   195→      depth += 1;
+   196→    } else if (ch === "}") {
+   197→      depth -= 1;
+   198→      if (depth === 0) return i + 1;
+   199→    }
+   200→  }
+   201→  return -1;
+   202→}
+   203→
+   204→function traceExtractMetadataObject(text) {
+   205→  const normalized = traceNormalizeJsonText(text);
+   206→  const first = normalized.indexOf("{");
+   207→  if (first < 0) throw new Error("Metadata 页面里没有找到 JSON 开头。");
+   208→  const end = traceFindJsonEnd(normalized, first);
+   209→  if (end < 0) throw new Error("Metadata JSON 没有完整结束。");
+   210→  const rawJson = normalized.slice(first, end);
+   211→  const job = JSON.parse(rawJson);
+   212→  if (!job.uid) {
+   213→    const uidMatch = normalized.match(/\bJ\d+\b/i);
+   214→    if (uidMatch) job.uid = uidMatch[0].toUpperCase();
+   215→  }
+   216→  if (!Number.isInteger(job.uid_num)) {
+   217→    job.uid_num = traceJobNum(job.uid);
+   218→  }
+   219→  return { job, rawJson };
+   220→}
+   221→
+   222→function traceRoute() {
+   223→  const match = location.href.match(/#\/projects\/([^/]+)(?:\/([^/]+))?(?:\/(J\d+))?/i);
+   224→  return {
+   225→    projectId: match ? match[1] : "",
+   226→    experimentId: match && match[2] ? match[2] : "",
+   227→    jobId: match && match[3] ? match[3].toUpperCase() : ""
+   228→  };
+   229→}
+   230→
+   231→function traceJobNum(uid) {
+   232→  const match = String(uid || "").match(/J(\d+)/i);
+   233→  return match ? Number(match[1]) : null;
+   234→}
+   235→
+   236→function traceNormalizeJob(value) {
+   237→  const text = String(value || "").trim();
+   238→  return /^J/i.test(text) ? text.toUpperCase() : `J${text}`;
+   239→}
+   240→
+   241→function traceVisible(el) {
+   242→  const rect = el.getBoundingClientRect();
+   243→  return rect.width > 0 && rect.height > 0;
+   244→}
+   245→
+   246→function traceFindClickableByText(text) {
+   247→  const wanted = text.toLowerCase();
+   248→  const elements = Array.from(document.querySelectorAll("a, button, [role='button'], [tabindex], div, span"));
+   249→  const candidates = elements
+   250→    .filter((el) => traceVisible(el))
+   251→    .filter((el) => (el.innerText || el.textContent || "").trim().toLowerCase().includes(wanted))
+   252→    .sort((a, b) => (a.innerText || a.textContent || "").length - (b.innerText || b.textContent || "").length);
+   253→
+   254→  for (const el of candidates) {
+   255→    return el.closest("a, button, [role='button'], [tabindex]") || el;
+   256→  }
+   257→  return null;
+   258→}
+   259→
+   260→function traceFindJobElement(uid) {
+   261→  const re = new RegExp(`\\b${uid}\\b`, "i");
+   262→  const elements = Array.from(document.querySelectorAll("a, button, [role='button'], [tabindex], div, span"));
+   263→  const candidates = elements
+   264→    .filter((el) => traceVisible(el))
+   265→    .filter((el) => re.test((el.innerText || el.textContent || "").trim()))
+   266→    .sort((a, b) => (a.innerText || a.textContent || "").length - (b.innerText || b.textContent || "").length);
+   267→
+   268→  for (const el of candidates) {
+   269→    return el.closest("a, button, [role='button'], [tabindex]") || el;
+   270→  }
+   271→  return null;
+   272→}
+   273→
+   274→async function traceWaitForRoute(uid, timeoutMs = 12000) {
+   275→  const started = Date.now();
+   276→  while (Date.now() - started < timeoutMs) {
+   277→    if (traceRoute().jobId === uid) return true;
+   278→    await traceSleep(250);
+   279→  }
+   280→  return false;
+   281→}
+   282→
+   283→async function traceWaitForProject(projectId, timeoutMs = 12000) {
+   284→  const started = Date.now();
+   285→  while (Date.now() - started < timeoutMs) {
+   286→    const route = traceRoute();
+   287→    if (route.projectId === projectId && !route.jobId) return true;
+   288→    await traceSleep(250);
+   289→  }
+   290→  return false;
+   291→}
+   292→
+   293→async function traceOpenProject(projectId) {
+   294→  location.hash = `#/projects/${projectId}`;
+   295→  await traceWaitForProject(projectId, 12000);
+   296→  await traceSleep(900);
+   297→}
+   298→
+   299→async function traceOpenJob(uid, projectId, experimentId) {
+   300→  uid = traceNormalizeJob(uid);
+   301→  if (traceRoute().jobId === uid) return true;
+   302→
+   303→  if (experimentId) {
+   304→    location.hash = `#/projects/${projectId}/${experimentId}/${uid}`;
+   305→    if (await traceWaitForRoute(uid, 10000)) {
+   306→      await traceSleep(900);
+   307→      return true;
+   308→    }
+   309→  }
+   310→
+   311→  const viewAll = traceFindClickableByText("View All");
+   312→  if (viewAll) {
+   313→    viewAll.click();
+   314→    await traceSleep(700);
+   315→  }
+   316→
+   317→  const jobEl = traceFindJobElement(uid);
+   318→  if (!jobEl) return false;
+   319→  jobEl.click();
+   320→  if (await traceWaitForRoute(uid, 15000)) {
+   321→    await traceSleep(1000);
+   322→    return true;
+   323→  }
+   324→  return false;
+   325→}
+   326→
+   327→async function traceClickTab(name) {
+   328→  const tab = traceFindClickableByText(name);
+   329→  if (!tab) return false;
+   330→  tab.click();
+   331→  await traceSleep(1000);
+   332→  return true;
+   333→}
+   334→
+   335→function traceAbsoluteUrl(value) {
+   336→  try {
+   337→    return new URL(value, location.origin).href;
+   338→  } catch (err) {
+   339→    return "";
+   340→  }
+   341→}
+   342→
+   343→function traceElementLogText(el) {
+   344→  let best = "";
+   345→  let node = el;
+   346→  while (node && node !== document.body && node.parentElement) {
+   347→    const text = (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
+   348→    if (/Selected\s+\d+\s+classes/i.test(text) && (!best || text.length < best.length)) best = text;
+   349→    node = node.parentElement;
+   350→  }
+   351→  if (best) return best;
+   352→  const containers = [
+   353→    el.closest("[class*='item']"),
+   354→    el.closest("[class*='row']"),
+   355→    el.closest("tr"),
+   356→    el.closest("li"),
+   357→    el.closest(".log"),
+   358→    el.closest("[class*='log']"),
+   359→    el.closest("div")
+   360→  ].filter(Boolean);
+   361→  for (const container of containers) {
+   362→    const text = (container.innerText || container.textContent || "").replace(/\s+/g, " ").trim();
+   363→    if (text) return text;
+   364→  }
+   365→  return (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+   366→}
+   367→
+   368→function traceNearestSelectedClassText(el) {
+   369→  let node = el;
+   370→  while (node && node !== document.body && node.parentElement) {
+   371→    const text = (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
+   372→    if (/Selected\s+\d+\s+classes/i.test(text)) return text;
+   373→    if (/Excluded\s+\d+\s+classes/i.test(text)) return "";
+   374→    node = node.parentElement;
+   375→  }
+   376→  return "";
+   377→}
+   378→
+   379→function traceLogContainerCandidates() {
+   380→  const nodes = Array.from(document.querySelectorAll("li, tr, [class*='log'], [class*='item'], [class*='row'], div"));
+   381→  return nodes
+   382→    .filter((el) => traceVisible(el))
+   383→    .map((el, index) => ({
+   384→      el,
+   385→      index,
+   386→      text: (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim()
+   387→    }))
+   388→    .filter((item) => /Selected\s+\d+\s+classes/i.test(item.text))
+   389→    .sort((a, b) => {
+   390→      const areaA = a.el.getBoundingClientRect().width * a.el.getBoundingClientRect().height;
+   391→      const areaB = b.el.getBoundingClientRect().width * b.el.getBoundingClientRect().height;
+   392→      return areaA - areaB || a.index - b.index;
+   393→    });
+   394→}
+   395→
+   396→function traceSelectedClassesTimestamp(text) {
+   397→  const match = String(text || "").match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})/);
+   398→  if (!match) return 0;
+   399→  return new Date(
+   400→    Number(match[1]),
+   401→    Number(match[2]) - 1,
+   402→    Number(match[3]),
+   403→    Number(match[4]),
+   404→    Number(match[5]),
+   405→    Number(match[6])
+   406→  ).getTime() || 0;
+   407→}
+   408→
+   409→function traceIsPngLogLink(link) {
+   410→  const label = (link.innerText || link.textContent || link.getAttribute("aria-label") || "").trim().toLowerCase();
+   411→  const href = link.getAttribute("href") || "";
+   412→  if (label === "pdf" || /\bpdf\b/i.test(label) || /\.pdf(?:$|\?)/i.test(href)) return false;
+   413→  return label === "png" || /\[png\]|\bpng\b/i.test(label) || /(?:^|[._-])png(?:$|[._-])/i.test(href);
+   414→}
+   415→
+   416→function traceFirstPngLikeLogLink(container) {
+   417→  const links = Array.from((container && container.querySelectorAll ? container : document).querySelectorAll("a[href*='/api/log_image/']"));
+   418→  return links.find(traceIsPngLogLink) || links.find((link) => {
+   419→    const label = (link.innerText || link.textContent || link.getAttribute("aria-label") || "").trim().toLowerCase();
+   420→    const href = link.getAttribute("href") || "";
+   421→    return !/download_result_file|\.pdf(?:$|\?)|\bpdf\b/i.test(`${href} ${label}`);
+   422→  }) || null;
+   423→}
+   424→
+   425→function traceSelectImageSourceRank(source) {
+   426→  const value = String(source || "");
+   427→  if (value === "png_link_direct") return 0;
+   428→  if (value === "png_link") return 1;
+   429→  if (value === "png_link_fallback") return 2;
+   430→  if (value === "inline_image") return 3;
+   431→  if (value === "image_fallback") return 4;
+   432→  return 9;
+   433→}
+   434→
+   435→function traceSelectImagePenalty(item) {
+   436→  const text = String((item && item.text) || "");
+   437→  let penalty = traceSelectImageSourceRank(item && item.source) * 10;
+   438→  if (!/Selected\s+\d+\s+classes/i.test(text)) penalty += 200;
+   439→  if (/Excluded\s+\d+\s+classes/i.test(text)) penalty += 80;
+   440→  if (/Job complete|Checking outputs|Loaded output dset|Passing through outputs/i.test(text)) penalty += 60;
+   441→  if (text.length > 900) penalty += 40;
+   442→  if (text.length > 2200) penalty += 80;
+   443→  return penalty;
+   444→}
+   445→
+   446→function traceBestSelectImageCandidate(candidates) {
+   447→  return (candidates || [])
+   448→    .filter((item) => item && item.url)
+   449→    .sort((a, b) => {
+   450→      const penaltyA = traceSelectImagePenalty(a);
+   451→      const penaltyB = traceSelectImagePenalty(b);
+   452→      return (penaltyA - penaltyB) || (b.timestamp - a.timestamp) || (a.index - b.index);
+   453→    })[0] || null;
+   454→}
+   455→
+   456→function traceCollectOverviewSelect2DImage() {
+   457→  const candidates = [];
+   458→  const seen = new Set();
+   459→  function pushCandidate(item) {
+   460→    if (!item || !item.url || seen.has(item.url)) return;
+   461→    seen.add(item.url);
+   462→    candidates.push(item);
+   463→  }
+   464→  const pngLinks = Array.from(document.querySelectorAll("a[href*='/api/log_image/']"))
+   465→    .filter(traceIsPngLogLink);
+   466→  for (const link of pngLinks) {
+   467→    const text = traceNearestSelectedClassText(link);
+   468→    const match = text.match(/Selected\s+(\d+)\s+classes/i);
+   469→    if (!match) continue;
+   470→    pushCandidate({
+   471→      url: traceAbsoluteUrl(link.getAttribute("href") || ""),
+   472→      text,
+   473→      classes_selected: Number(match[1]),
+   474→      timestamp: traceSelectedClassesTimestamp(text),
+   475→      index: candidates.length,
+   476→      source: "png_link_direct"
+   477→    });
+   478→  }
+   479→  for (const container of traceLogContainerCandidates()) {
+   480→    const match = container.text.match(/Selected\s+(\d+)\s+classes/i);
+   481→    const pngLink = traceFirstPngLikeLogLink(container.el);
+   482→    const img = container.el.querySelector("img[src*='/api/log_image/']");
+   483→    const rawUrl = (pngLink && pngLink.getAttribute("href")) || (img && img.getAttribute("src")) || "";
+   484→    if (!rawUrl || /download_result_file|\.pdf(?:$|\?)/i.test(rawUrl)) continue;
+   485→    pushCandidate({
+   486→      url: traceAbsoluteUrl(rawUrl),
+   487→      text: container.text,
+   488→      classes_selected: Number(match[1]),
+   489→      timestamp: traceSelectedClassesTimestamp(container.text),
+   490→      index: container.index,
+   491→      source: pngLink ? "png_link" : "inline_image"
+   492→    });
+   493→  }
+   494→  const elements = Array.from(document.querySelectorAll("a[href*='/api/log_image/'], img[src*='/api/log_image/']"));
+   495→  for (const el of elements) {
+   496→    const rawUrl = el.getAttribute("href") || el.getAttribute("src") || "";
+   497→    if (!rawUrl || /download_result_file|\.pdf(?:$|\?)/i.test(rawUrl)) continue;
+   498→    const text = traceElementLogText(el);
+   499→    const label = (el.innerText || el.textContent || el.getAttribute("alt") || "").trim().toLowerCase();
+   500→    if (label === "pdf" || /\bpdf\b/i.test(label)) continue;
+   501→    const match = text.match(/Selected\s+(\d+)\s+classes/i);
+   502→    if (!match) continue;
+   503→    pushCandidate({
+   504→      url: traceAbsoluteUrl(rawUrl),
+   505→      text,
+   506→      classes_selected: Number(match[1]),
+   507→      timestamp: traceSelectedClassesTimestamp(text),
+   508→      index: candidates.length,
+   509→      source: el.tagName === "A" ? "png_link_fallback" : "image_fallback"
+   510→    });
+   511→  }
+   512→  return traceBestSelectImageCandidate(candidates);
+   513→}
+   514→
+   515→function traceScrollableElements() {
+   516→  const elements = [document.scrollingElement || document.documentElement];
+   517→  for (const element of document.querySelectorAll("*")) {
+   518→    const style = getComputedStyle(element);
+   519→    const canScroll = /(auto|scroll)/.test(`${style.overflow}${style.overflowY}${style.overflowX}`);
+   520→    if (!canScroll) continue;
+   521→    if (element.scrollHeight <= element.clientHeight + 80) continue;
+   522→    elements.push(element);
+   523→  }
+   524→  return Array.from(new Set(elements))
+   525→    .filter(Boolean)
+   526→    .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+   527→}
+   528→
+   529→function traceSetScrollTop(scroller, value) {
+   530→  if (scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body) {
+   531→    window.scrollTo(0, value);
+   532→  } else {
+   533→    scroller.scrollTop = value;
+   534→  }
+   535→}
+   536→
+   537→function traceGetScrollTop(scroller) {
+   538→  if (scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body) {
+   539→    return window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+   540→  }
+   541→  return scroller.scrollTop;
+   542→}
+   543→
+   544→function traceGetMaxScrollTop(scroller) {
+   545→  if (scroller === document.scrollingElement || scroller === document.documentElement || scroller === document.body) {
+   546→    return Math.max(document.documentElement.scrollHeight, document.body.scrollHeight) - window.innerHeight;
+   547→  }
+   548→  return scroller.scrollHeight - scroller.clientHeight;
+   549→}
+   550→
+   551→async function traceScanOverviewSelect2DImage() {
+   552→  const candidates = [];
+   553→  const seen = new Set();
+   554→  function harvest() {
+   555→    const item = traceCollectOverviewSelect2DImage();
+   556→    if (item && item.url && !seen.has(item.url)) {
+   557→      seen.add(item.url);
+   558→      candidates.push({ ...item, index: candidates.length });
+   559→    }
+   560→  }
+   561→
+   562→  harvest();
+   563→  for (const label of ["Show from top", "Show from bottom"]) {
+   564→    const button = traceFindClickableByText(label);
+   565→    if (button) {
+   566→      button.click();
+   567→      await traceSleep(850);
+   568→      harvest();
+   569→    }
+   570→  }
+   571→
+   572→  const scrollers = traceScrollableElements().slice(0, 5);
+   573→  for (const scroller of scrollers) {
+   574→    const maxTop = traceGetMaxScrollTop(scroller);
+   575→    if (maxTop <= 0) continue;
+   576→    const amount = Math.max(220, Math.floor((scroller.clientHeight || window.innerHeight) * 0.72));
+   577→
+   578→    for (const start of [0, maxTop]) {
+   579→      traceSetScrollTop(scroller, start);
+   580→      await traceSleep(180);
+   581→      harvest();
+   582→
+   583→      let stalled = 0;
+   584→      let previousTop = -1;
+   585→      for (let step = 0; step < 90; step += 1) {
+   586→        const currentTop = traceGetScrollTop(scroller);
+   587→        const nextTop = start === 0
+   588→          ? Math.min(maxTop, currentTop + amount)
+   589→          : Math.max(0, currentTop - amount);
+   590→        if (Math.abs(nextTop - currentTop) < 3) break;
+   591→        traceSetScrollTop(scroller, nextTop);
+   592→        await traceSleep(110);
+   593→        harvest();
+   594→        const afterTop = traceGetScrollTop(scroller);
+   595→        if (Math.abs(afterTop - previousTop) < 3) stalled += 1;
+   596→        else stalled = 0;
+   597→        previousTop = afterTop;
+   598→        if (stalled >= 6) break;
+   599→      }
+   600→    }
+   601→  }
+   602→
+   603→  return traceBestSelectImageCandidate(candidates);
+   604→}
+   605→
+   606→function traceParseResolutionText(value) {
+   607→  const text = String(value || "").replace(/\s+/g, " ");
+   608→  const patterns = [
+   609→    /(?:resolution|res|FSC[^:]{0,40})[^0-9]{0,30}([0-9]+(?:\.[0-9]+)?)\s*(?:Å|A\b|angstrom)/i,
+   610→    /([0-9]+(?:\.[0-9]+)?)\s*(?:Å|A\b|angstrom)[^.;]{0,60}(?:resolution|FSC|res)/i
+   611→  ];
+   612→  for (const pattern of patterns) {
+   613→    const match = text.match(pattern);
+   614→    const number = match && Number(match[1]);
+   615→    if (Number.isFinite(number) && number >= 1 && number <= 20) return Math.round(number * 100) / 100;
+   616→  }
+   617→  return null;
+   618→}
+   619→
+   620→function traceCollectOverviewResolution() {
+   621→  return traceParseResolutionText(document.body.innerText || "");
+   622→}
+   623→
+   624→async function traceReadCurrentOverviewAssets() {
+   625→  await traceClickTab("Overview");
+   626→  let selected = null;
+   627→  let resolution = null;
+   628→  const started = Date.now();
+   629→  let lastTextLength = 0;
+   630→  let lastChanged = Date.now();
+   631→  let maybeSelect2D = false;
+   632→  while (Date.now() - started < 10000) {
+   633→    const bodyText = document.body.innerText || "";
+   634→    if (bodyText.length !== lastTextLength) {
+   635→      lastTextLength = bodyText.length;
+   636→      lastChanged = Date.now();
+   637→    }
+   638→    maybeSelect2D = maybeSelect2D || /select[_ ]?2D|Selected\s+\d+\s+classes/i.test(bodyText);
+   639→    selected = traceCollectOverviewSelect2DImage();
+   640→    resolution = resolution || traceCollectOverviewResolution();
+   641→    if (selected && Date.now() - lastChanged > 700) break;
+   642→    if (!maybeSelect2D && Date.now() - started > 2300) break;
+   643→    await traceSleep(300);
+   644→  }
+   645→  if (maybeSelect2D) {
+   646→    const scanned = await traceScanOverviewSelect2DImage();
+   647→    if (scanned) selected = scanned;
+   648→  }
+   649→  const assets = {};
+   650→  if (selected) {
+   651→    assets.select_2d = {
+   652→      selected_classes_image: selected.url,
+   653→      selected_classes_src: selected.url,
+   654→      selected_classes_original_url: selected.url,
+   655→      classes_selected: selected.classes_selected,
+   656→      source: "overview_log_selected_classes",
+   657→      log_text: selected.text,
+   658→      log_timestamp: selected.timestamp || null
+   659→    };
+   660→  }
+   661→  if (resolution) assets.resolution_A = resolution;
+   662→  return assets;
+   663→}
+   664→
+   665→async function traceWaitForMetadataText(timeoutMs = 15000) {
+   666→  const started = Date.now();
+   667→  let last = "";
+   668→  while (Date.now() - started < timeoutMs) {
+   669→    last = document.body.innerText || "";
+   670→    if (/"input_slot_groups"|"output_result_groups"|"job_type"|"uid"/.test(last) && last.includes("{")) {
+   671→      return last;
+   672→    }
+   673→    await traceSleep(300);
+   674→  }
+   675→  return last || document.body.innerText || "";
+   676→}
+   677→
+   678→function traceCollectProjectJobIds() {
+   679→  const ids = new Set();
+   680→  const elements = Array.from(document.querySelectorAll("a, button, [role='button'], [tabindex], div, span"));
+   681→  for (const el of elements) {
+   682→    if (!traceVisible(el)) continue;
+   683→    const text = (el.innerText || el.textContent || "").trim();
+   684→    if (!text || text.length > 160) continue;
+   685→    let match;
+   686→    const re = /\bJ(\d+)\b/gi;
+   687→    while ((match = re.exec(text))) ids.add(`J${match[1]}`);
+   688→  }
+   689→  return Array.from(ids).sort((a, b) => (traceJobNum(a) || 0) - (traceJobNum(b) || 0));
+   690→}
+   691→
+   692→async function traceExpandProjectJobs() {
+   693→  const viewAll = traceFindClickableByText("View All");
+   694→  if (viewAll) {
+   695→    viewAll.click();
+   696→    await traceSleep(1000);
+   697→  }
+   698→  for (let i = 0; i < 8; i += 1) {
+   699→    window.scrollTo(0, document.body.scrollHeight);
+   700→    await traceSleep(250);
+   701→  }
+   702→  window.scrollTo(0, 0);
+   703→  await traceSleep(300);
+   704→}
+   705→
+   706→async function traceReadCurrentMetadataJob(projectId) {
+   707→  const route = traceRoute();
+   708→  await traceClickTab("Metadata");
+   709→  const metadataText = await traceWaitForMetadataText();
+   710→  const { job, rawJson } = traceExtractMetadataObject(metadataText);
+   711→  if (!job.project_uid) job.project_uid = projectId;
+   712→  if (!job.uid && route.jobId) job.uid = route.jobId;
+   713→  if (!Number.isInteger(job.uid_num)) job.uid_num = traceJobNum(job.uid);
+   714→  return { job, rawJsonLength: rawJson.length };
+   715→}
+   716→
+   717→async function traceExportProjectMetadata(projectId) {
+   718→  await traceOpenProject(projectId);
+   719→  await traceExpandProjectJobs();
+   720→  const jobIds = traceCollectProjectJobIds();
+   721→  if (!jobIds.length) throw new Error("Project 页没有找到 Job 编号；请先打开 View All 后重试。");
+   722→
+   723→  const jobs = [];
+   724→  const failures = [];
+   725→  let experimentId = "";
+   726→
+   727→  for (const uid of jobIds) {
+   728→    await traceOpenProject(projectId);
+   729→    await traceExpandProjectJobs();
+   730→    const opened = await traceOpenJob(uid, projectId, "");
+   731→    if (!opened) {
+   732→      failures.push({ uid, error: "没有打开这个 Job 页面" });
+   733→      continue;
+   734→    }
+   735→    const route = traceRoute();
+   736→    experimentId = route.experimentId || experimentId;
+   737→    try {
+   738→      const overviewAssets = await traceReadCurrentOverviewAssets();
+   739→      const item = await traceReadCurrentMetadataJob(projectId);
+   740→      if (item.job && item.job.uid) {
+   741→        if (overviewAssets && Object.keys(overviewAssets).length) {
+   742→          item.job.overview_assets = overviewAssets;
+   743→        }
+   744→        jobs.push(item.job);
+   745→      } else {
+   746→        failures.push({ uid, error: "Metadata JSON 里没有 uid" });
+   747→      }
+   748→    } catch (err) {
+   749→      failures.push({ uid, error: err.message });
+   750→    }
+   751→  }
+   752→
+   753→  const unique = new Map();
+   754→  for (const job of jobs) unique.set(job.uid, job);
+   755→  const sortedJobs = Array.from(unique.values()).sort((a, b) => (a.uid_num || 0) - (b.uid_num || 0));
+   756→  return {
+   757→    ok: true,
+   758→    source: "cryosmart-project-metadata-export",
+   759→    project_uid: projectId,
+   760→    experiment_uid: experimentId,
+   761→    exported_at: new Date().toISOString(),
+   762→    discovered_job_count: jobIds.length,
+   763→    parsed_job_count: sortedJobs.length,
+   764→    failed_job_count: failures.length,
+   765→    failed_jobs: failures,
+   766→    jobs: sortedJobs
+   767→  };
+   768→}
+   769→
+   770→function traceGuessJobType(text) {
+   771→  for (const [type, regex] of TRACE_JOB_TYPES) {
+   772→    if (regex.test(text)) return type;
+   773→  }
+   774→  return "";
+   775→}
+   776→
+   777→function traceMaxNumberBeforeWord(text, words) {
+   778→  let best = null;
+   779→  const wordPattern = words.join("|");
+   780→  const regexes = [
+   781→    new RegExp(`([0-9][0-9,]*)\\s*(?:${wordPattern})`, "gi"),
+   782→    new RegExp(`(?:${wordPattern})[^0-9]{0,40}([0-9][0-9,]*)`, "gi")
+   783→  ];
+   784→  for (const regex of regexes) {
+   785→    let match;
+   786→    while ((match = regex.exec(text))) {
+   787→      const value = Number(match[1].replace(/,/g, ""));
+   788→      if (Number.isFinite(value)) best = best === null ? value : Math.max(best, value);
+   789→    }
+   790→  }
+   791→  return best;
+   792→}
+   793→
+   794→function tracePixelSizeFromText(text) {
+   795→  const match = String(text || "").replace(/\s+/g, " ").match(/(?:psize[_-]?A|pixel\s*size)[^0-9]{0,40}([0-9]+(?:\.[0-9]+)?)/i);
+   796→  return tracePixelSizeNumber(match && match[1]);
+   797→}
+   798→
+   799→function traceContextsForUid(text, uid) {
+   800→  const contexts = [];
+   801→  const re = new RegExp(`\\b${uid}\\b`, "gi");
+   802→  let match;
+   803→  while ((match = re.exec(text))) {
+   804→    const start = Math.max(0, match.index - 180);
+   805→    const end = Math.min(text.length, match.index + 240);
+   806→    contexts.push(text.slice(start, end).replace(/\s+/g, " ").trim());
+   807→  }
+   808→  return contexts.slice(0, 8);
+   809→}
+   810→
+   811→function traceKindFromContext(context) {
+   812→  const lower = context.toLowerCase();
+   813→  const kinds = new Set();
+   814→  if (/particle|particles|alignments|blob|pick/.test(lower)) kinds.add("particle");
+   815→  if (/volume|map|half|refine|mask_fsc/.test(lower)) kinds.add("volume");
+   816→  if (/mask/.test(lower)) kinds.add("mask");
+   817→  if (/micrograph|exposure|ctf/.test(lower)) kinds.add("exposure");
+   818→  if (/template/.test(lower)) kinds.add("template");
+   819→  return Array.from(kinds);
+   820→}
+   821→
+   822→function traceExtractSources(text, currentUid) {
+   823→  const currentNum = traceJobNum(currentUid);
+   824→  const seen = new Map();
+   825→  const re = /\bJ\d+\b/g;
+   826→  let match;
+   827→  while ((match = re.exec(text))) {
+   828→    const uid = match[0].toUpperCase();
+   829→    if (uid === currentUid) continue;
+   830→    const num = traceJobNum(uid);
+   831→    if (currentNum !== null && num !== null && num >= currentNum) continue;
+   832→    const context = text.slice(Math.max(0, match.index - 180), Math.min(text.length, match.index + 240)).replace(/\s+/g, " ").trim();
+   833→    if (!seen.has(uid)) seen.set(uid, { uid, contexts: [], kinds: new Set() });
+   834→    const item = seen.get(uid);
+   835→    if (item.contexts.length < 8) item.contexts.push(context);
+   836→    for (const kind of traceKindFromContext(context)) item.kinds.add(kind);
+   837→  }
+   838→  return Array.from(seen.values()).map((item) => ({
+   839→    uid: item.uid,
+   840→    contexts: item.contexts,
+   841→    kinds: Array.from(item.kinds)
+   842→  }));
+   843→}
+   844→
+   845→function traceClassSplitsFromText(job, baseUrl) {
+   846→  if (!/abinit|hetero/i.test(job.job_type || "")) return [];
+   847→  const text = `${job.tabs.outputs || ""}\n${job.tabs.metadata || ""}`;
+   848→  const rows = [];
+   849→  const total = traceMaxNumberBeforeWord(text, ["particles_all_classes", "All particles", "particles"]);
+   850→
+   851→  for (let i = 0; i < 10; i += 1) {
+   852→    const patterns = [
+   853→      new RegExp(`particles[_ ]class[_ ]0*${i}([\\s\\S]{0,500})`, "i"),
+   854→      new RegExp(`class\\s+${i}([\\s\\S]{0,500})`, "i"),
+   855→      new RegExp(`volume[_ ]class[_ ]0*${i}([\\s\\S]{0,500})`, "i")
+   856→    ];
+   857→    const chunk = patterns.map((regex) => text.match(regex)).find(Boolean);
+   858→    if (!chunk) continue;
+   859→    const context = chunk[0];
+   860→    const count = traceMaxNumberBeforeWord(context, ["particles", "particle"]) || null;
+   861→    const percent = count && total ? Math.round(count / total * 10000) / 100 : null;
+   862→    const volumeGroup = new RegExp(`volume[_ ]class[_ ]0*${i}`, "i").test(text) ? `volume_class_${i}` : null;
+   863→    rows.push({
+   864→      class_index: i,
+   865→      particle_count: count,
+   866→      particle_percent: percent,
+   867→      total_particles: total,
+   868→      volume_group: volumeGroup,
+   869→      maps: volumeGroup ? [
+   870→        { result_name: "map", download_url: `${baseUrl}/api/log_image/download_result_file/${job.project_uid}/${job.uid}.${volumeGroup}.map` }
+   871→      ] : []
+   872→    });
+   873→  }
+   874→  return rows;
+   875→}
+   876→
+   877→async function traceReadCurrentJob(projectId, baseUrl) {
+   878→  const route = traceRoute();
+   879→  const uid = route.jobId;
+   880→  const tabs = {};
+   881→
+   882→  await traceClickTab("Inputs and Parameters");
+   883→  tabs.inputs = document.body.innerText || "";
+   884→  await traceClickTab("Outputs");
+   885→  tabs.outputs = document.body.innerText || "";
+   886→  await traceClickTab("Metadata");
+   887→  tabs.metadata = document.body.innerText || "";
+   888→  await traceClickTab("Overview");
+   889→  tabs.overview = document.body.innerText || "";
+   890→
+   891→  const allText = Object.values(tabs).join("\n");
+   892→  const sourceText = `${tabs.inputs}\n${tabs.metadata}`;
+   893→  const job = {
+   894→    uid,
+   895→    uid_num: traceJobNum(uid),
+   896→    project_uid: projectId,
+   897→    job_type: traceGuessJobType(allText),
+   898→    title: (allText.match(/New Job\s+J\d+/i) || [uid])[0],
+   899→    status: /completed/i.test(allText) ? "completed" : "",
+   900→    particle_count: traceMaxNumberBeforeWord(allText, ["particles", "particle"]),
+   901→    micrograph_count: traceMaxNumberBeforeWord(allText, ["micrographs", "micrograph", "exposures"]),
+   902→    pixel_size_A: tracePixelSizeFromText(allText),
+   903→    volume_count: /volume|map/i.test(allText) ? 1 : null,
+   904→    raw_text_length: allText.length,
+   905→    tabs,
+   906→    sources: traceExtractSources(sourceText, uid)
+   907→  };
+   908→  job.class_splits = traceClassSplitsFromText(job, baseUrl);
+   909→  return job;
+   910→}
+   911→
+   912→function traceImportance(job, startUid) {
+   913→  if (job.uid === startUid && !/nonuniform_refine/i.test(job.job_type || "")) return "final";
+   914→  if (TRACE_MAJOR_TYPES.has(job.job_type)) return "major";
+   915→  if (TRACE_SMALL_TYPES.has(job.job_type)) return "small";
+   916→  if (job.particle_count || job.volume_count) return "major";
+   917→  return "small";
+   918→}
+   919→
+   920→function traceFocusedMermaid(nodes, edges, startUid) {
+   921→  const lines = ["flowchart LR"];
+   922→  const sorted = Array.from(nodes.values()).sort((a, b) => (a.uid_num || 0) - (b.uid_num || 0));
+   923→  for (const job of sorted) {
+   924→    const label = [job.uid, job.job_type || "", job.particle_count ? `${job.particle_count} particles` : "", job.micrograph_count ? `${job.micrograph_count} micrographs` : ""]
+   925→      .filter(Boolean)
+   926→      .join("<br/>")
+   927→      .replace(/"/g, "'");
+   928→    const cls = traceImportance(job, startUid);
+   929→    lines.push(cls === "final" ? `  ${job.uid}[["${label}"]]` : `  ${job.uid}["${label}"]`);
+   930→    lines.push(`  class ${job.uid} ${cls};`);
+   931→  }
+   932→
+   933→  const merged = new Map();
+   934→  for (const edge of edges) {
+   935→    if (!nodes.has(edge.source) || !nodes.has(edge.target)) continue;
+   936→    const key = `${edge.source}->${edge.target}`;
+   937→    if (!merged.has(key)) merged.set(key, { source: edge.source, target: edge.target, kinds: new Set() });
+   938→    for (const kind of edge.kinds || ["parent"]) merged.get(key).kinds.add(kind);
+   939→  }
+   940→
+   941→  const labels = { particle: "particles", volume: "map", mask: "mask", exposure: "micrographs", template: "template", parent: "parent" };
+   942→  const order = ["particle", "volume", "mask", "template", "exposure", "parent"];
+   943→  for (const item of merged.values()) {
+   944→    const label = order.filter((kind) => item.kinds.has(kind)).map((kind) => labels[kind]).join(" + ");
+   945→    lines.push(`  ${item.source} -- "${label || "source"}" --> ${item.target}`);
+   946→  }
+   947→
+   948→  lines.push("  classDef final fill:#fee2e2,stroke:#b91c1c,stroke-width:3px,color:#111827;");
+   949→  lines.push("  classDef major fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#111827;");
+   950→  lines.push("  classDef small fill:#f3f4f6,stroke:#9ca3af,stroke-width:1px,color:#4b5563,font-size:11px;");
+   951→  return `${lines.join("\n")}\n`;
+   952→}
+   953→
+   954→function traceMapUrls(baseUrl, projectId, jobUid) {
+   955→  return Object.fromEntries(TRACE_MAP_SUFFIXES.map((suffix) => [
+   956→    suffix,
+   957→    `${baseUrl}/api/log_image/download_result_file/${projectId}/${jobUid}.${suffix}`
+   958→  ]));
+   959→}
+   960→
+   961→function traceOutputGroups(job, type) {
+   962→  const groups = Array.isArray(job.output_result_groups) ? job.output_result_groups : [];
+   963→  return type ? groups.filter((group) => group.type === type) : groups;
+   964→}
+   965→
+   966→function traceMaxGroupNumItems(job, type) {
+   967→  const values = traceOutputGroups(job, type)
+   968→    .map((group) => group.num_items)
+   969→    .filter((value) => Number.isInteger(value));
+   970→  return values.length ? Math.max(...values) : null;
+   971→}
+   972→
+   973→function traceParamSpecNumber(job, names) {
+   974→  const params = (job && job.params_spec) || {};
+   975→  for (const name of names) {
+   976→    const entry = params[name];
+   977→    const value = entry && typeof entry === "object" && "value" in entry ? entry.value : entry;
+   978→    const number = Number(value);
+   979→    if (Number.isFinite(number)) return number;
+   980→  }
+   981→  return null;
+   982→}
+   983→
+   984→function traceOutputSummaryNumber(job, patterns) {
+   985→  for (const group of traceOutputGroups(job)) {
+   986→    const summary = group && group.summary && typeof group.summary === "object" ? group.summary : {};
+   987→    for (const [key, value] of Object.entries(summary)) {
+   988→      if (!patterns.some((pattern) => pattern.test(key))) continue;
+   989→      const number = Number(value);
+   990→      if (Number.isFinite(number)) return number;
+   991→    }
+   992→  }
+   993→  return null;
+   994→}
+   995→
+   996→function tracePixelSizeNumber(value) {
+   997→  const number = Number(value);
+   998→  return Number.isFinite(number) && number > 0 && number < 100
+   999→    ? Math.round(number * 10000) / 10000
+  1000→    : null;
+  1001→}
+  1002→
+  1003→function tracePixelSizeFromJob(job) {
+  1004→  return tracePixelSizeNumber(traceOutputSummaryNumber(job, [/psize[_-]?A$/i, /pixel[^a-z0-9]*size/i])) ||
+  1005→    tracePixelSizeNumber(traceParamSpecNumber(job, ["psize_A", "pixel_size_A", "pixel_size", "micrograph_pixel_size_A"]));
+  1006→}
+  1007→
+  1008→function traceMetadataJobNode(job) {
+  1009→  return {
+  1010→    uid: job.uid,
+  1011→    uid_num: job.uid_num || traceJobNum(job.uid),
+  1012→    project_uid: job.project_uid,
+  1013→    job_type: job.job_type || "",
+  1014→    title: job.title || "",
+  1015→    status: job.status || "",
+  1016→    created_at: job.created_at,
+  1017→    completed_at: job.completed_at,
+  1018→    parents: job.parents || [],
+  1019→    children: job.children || [],
+  1020→    particle_count: traceMaxGroupNumItems(job, "particle"),
+  1021→    micrograph_count: traceMaxGroupNumItems(job, "exposure"),
+  1022→    pixel_size_A: tracePixelSizeFromJob(job),
+  1023→    volume_count: traceMaxGroupNumItems(job, "volume")
+  1024→  };
+  1025→}
+  1026→
+  1027→function traceMetadataEdgeKind(edge) {
+  1028→  if (["particle", "volume", "mask", "template", "exposure"].includes(edge.input_type)) return edge.input_type;
+  1029→  const types = (edge.slots || []).map((slot) => slot.result_type || "").join(" ");
+  1030→  for (const kind of ["particle", "volume", "mask", "template", "exposure"]) {
+  1031→    if (types.includes(kind)) return kind;
+  1032→  }
+  1033→  return edge.input_type || "parent";
+  1034→}
+  1035→
+  1036→function traceMetadataConnectionEdges(job) {
+  1037→  const edges = [];
+  1038→  for (const inputGroup of job.input_slot_groups || []) {
+  1039→    for (const connection of inputGroup.connections || []) {
+  1040→      if (!connection.job_uid) continue;
+  1041→      const edge = {
+  1042→        source: connection.job_uid,
+  1043→        target: job.uid,
+  1044→        input_type: inputGroup.type,
+  1045→        input_name: inputGroup.name,
+  1046→        input_title: inputGroup.title,
+  1047→        source_group: connection.group_name,
+  1048→        slots: (connection.slots || []).map((slot) => ({
+  1049→          slot_name: slot.slot_name,
+  1050→          source_group: slot.group_name,
+  1051→          result_name: slot.result_name,
+  1052→          result_type: slot.result_type,
+  1053→          version: slot.version
+  1054→        }))
+  1055→      };
+  1056→      edge.kind = traceMetadataEdgeKind(edge);
+  1057→      edge.kinds = [edge.kind];
+  1058→      edges.push(edge);
+  1059→    }
+  1060→  }
+  1061→  return edges;
+  1062→}
+  1063→
+  1064→function traceMetadataFallbackParentEdges(job, explicitSources) {
+  1065→  return (job.parents || [])
+  1066→    .filter((uid) => !explicitSources.has(uid))
+  1067→    .map((uid) => ({
+  1068→      source: uid,
+  1069→      target: job.uid,
+  1070→      input_type: "parent",
+  1071→      input_name: "parent",
+  1072→      input_title: "Parent job",
+  1073→      source_group: null,
+  1074→      slots: [],
+  1075→      kind: "parent",
+  1076→      kinds: ["parent"]
+  1077→    }));
+  1078→}
+  1079→
+  1080→function traceParseClassIndex(name) {
+  1081→  const match = String(name || "").match(/class[_-](\d+)/);
+  1082→  return match ? Number(match[1]) : null;
+  1083→}
+  1084→
+  1085→function traceMetadataClassSplits(job, baseUrl) {
+  1086→  const type = job.job_type || "";
+  1087→  if (!type.includes("abinit") && !type.includes("hetero")) return [];
+  1088→
+  1089→  let total = null;
+  1090→  const classes = new Map();
+  1091→
+  1092→  for (const group of traceOutputGroups(job, "particle")) {
+  1093→    if (group.name === "particles_all_classes") {
+  1094→      total = group.num_items;
+  1095→      continue;
+  1096→    }
+  1097→    const idx = traceParseClassIndex(group.name);
+  1098→    if (idx === null) continue;
+  1099→    if (!classes.has(idx)) classes.set(idx, {});
+  1100→    classes.get(idx).particle_count = group.num_items;
+  1101→  }
+  1102→
+  1103→  for (const group of traceOutputGroups(job, "volume")) {
+  1104→    const idx = traceParseClassIndex(group.name);
+  1105→    if (idx === null) continue;
+  1106→    if (!classes.has(idx)) classes.set(idx, {});
+  1107→    const entry = classes.get(idx);
+  1108→    entry.volume_group = group.name;
+  1109→    entry.maps = (group.contains || [])
+  1110→      .filter((item) => item.type === "volume.blob")
+  1111→      .map((item) => ({
+  1112→        result_name: item.name,
+  1113→        download_url: `${baseUrl.replace(/\/$/, "")}/api/log_image/download_result_file/${job.project_uid}/${job.uid}.${group.name}.${item.name}`
+  1114→      }));
+  1115→  }
+  1116→
+  1117→  return Array.from(classes.entries()).sort((a, b) => a[0] - b[0]).map(([idx, entry]) => ({
+  1118→    class_index: idx,
+  1119→    particle_count: Number.isInteger(entry.particle_count) ? entry.particle_count : null,
+  1120→    particle_percent: Number.isInteger(entry.particle_count) && Number.isInteger(total) && total
+  1121→      ? Math.round(entry.particle_count / total * 10000) / 100
+  1122→      : null,
+  1123→    total_particles: total,
+  1124→    volume_group: entry.volume_group || null,
+  1125→    maps: (entry.maps || []).filter((item) => item.result_name === "map")
+  1126→  }));
+  1127→}
+  1128→
+  1129→function tracePreview(summary) {
+  1130→  const lines = [];
+  1131→  lines.push(`${summary.project_uid}/${summary.start_uid}`);
+  1132→  lines.push(`来源：按需打开上游 Job Metadata`);
+  1133→  lines.push(`最终颗粒数：${summary.final_particle_count ?? "待确认"}`);
+  1134→  lines.push(`照片/micrograph 数：${summary.final_micrograph_count ?? "上游节点中查看"}`);
+  1135→  lines.push("");
+  1136→  lines.push("读取到的节点：");
+  1137→  for (const node of summary.nodes) {
+  1138→    lines.push(`- ${node.uid} ${node.job_type || "unknown"} particles=${node.particle_count ?? "?"} micrographs=${node.micrograph_count ?? "?"}`);
+  1139→  }
+  1140→  lines.push("");
+  1141→  lines.push("Ab / Hetero class:");
+  1142→  for (const item of summary.class_split_jobs) {
+  1143→    lines.push(`- ${item.uid} ${item.job_type}`);
+  1144→    for (const cls of item.classes) {
+  1145→      lines.push(`  class ${cls.class_index}: ${cls.particle_count || "?"} particles (${cls.particle_percent ?? "?"}%)`);
+  1146→    }
+  1147→  }
+  1148→  return lines.join("\n");
+  1149→}
+  1150→
+  1151→function tracePadIteration(iteration) {
+  1152→  return String(iteration).padStart(3, "0");
+  1153→}
+  1154→
+  1155→function traceFinalGraphFolderName(target, iteration) {
+  1156→  const iter = tracePadIteration(iteration);
+  1157→  return /\s/.test(target.folderPrefix)
+  1158→    ? `${target.folderPrefix} ${iter}`
+  1159→    : `${target.folderPrefix}_${iter}`;
+  1160→}
+  1161→
+  1162→function traceDecodeEntities(value) {
+  1163→  const textarea = document.createElement("textarea");
+  1164→  textarea.innerHTML = value;
+  1165→  return textarea.value;
+  1166→}
+  1167→
+  1168→function traceFinalMapFileName(jobInfo, suffix) {
+  1169→  return `BJ.${jobInfo.projectId}.${jobInfo.jobId}.${suffix}.mrc`;
+  1170→}
+  1171→
+  1172→function traceFinalEnsureGraphRecord(store, target, iteration) {
+  1173→  const key = `${target.key}:${iteration}`;
+  1174→  if (!store.has(key)) {
+  1175→    store.set(key, {
+  1176→      key: target.key,
+  1177→      title: target.title,
+  1178→      iteration,
+  1179→      links: {},
+  1180→      texts: []
+  1181→    });
+  1182→  }
+  1183→  return store.get(key);
+  1184→}
+  1185→
+  1186→function traceFinalFindLogContainer(anchor) {
+  1187→  let node = anchor;
+  1188→  for (let depth = 0; node && depth < 8; depth += 1) {
+  1189→    if (node.matches && node.matches("tr, li, .column, .q-item, .q-card, .row, [class*='log'], [class*='item']")) {
+  1190→      const text = node.innerText || "";
+  1191→      if (/Iteration\s+\d{1,4}|Selected\s+\d+\s+classes|Guinier|FSC/i.test(text)) return node;
+  1192→    }
+  1193→    node = node.parentElement;
+  1194→  }
+  1195→  return anchor.closest("tr") || anchor.closest("li") || anchor.parentElement;
+  1196→}
+  1197→
+  1198→function traceFinalHarvestGraphCandidates(store) {
+  1199→  const anchors = Array.from(document.querySelectorAll('a[href*="/api/log_image/"]'))
+  1200→    .filter((anchor) => !anchor.href.includes("/download_result_file/"));
+  1201→
+  1202→  for (const anchor of anchors) {
+  1203→    const label = (anchor.innerText || anchor.textContent || "").toLowerCase();
+  1204→    const container = traceFinalFindLogContainer(anchor);
+  1205→    const text = container ? (container.innerText || "") : "";
+  1206→
+  1207→    for (const target of TRACE_FINAL_GRAPH_TARGETS) {
+  1208→      const titleRegex = new RegExp(target.titleRegex.source, "i");
+  1209→      const titleMatch = text.match(titleRegex);
+  1210→      if (!titleMatch) continue;
+  1211→
+  1212→      let ext = "";
+  1213→      const extMatch = label.match(/\[(png|pdf|txt|xml)\]|\b(png|pdf|txt|xml)\b/i);
+  1214→      if (extMatch) {
+  1215→        ext = (extMatch[1] || extMatch[2] || "").toLowerCase();
+  1216→      } else if (container) {
+  1217→        const containerAnchors = Array.from(container.querySelectorAll('a[href*="/api/log_image/"]'))
+  1218→          .filter((item) => !item.href.includes("/download_result_file/"));
+  1219→        const afterTitle = text.slice((titleMatch.index || 0) + titleMatch[0].length, (titleMatch.index || 0) + titleMatch[0].length + 260);
+  1220→        const labels = Array.from(afterTitle.matchAll(/\[(png|pdf|txt|xml)\]|\b(png|pdf|txt|xml)\b/gi))
+  1221→          .map((match) => (match[1] || match[2] || "").toLowerCase())
+  1222→          .filter((item) => target.exts.includes(item));
+  1223→        const index = containerAnchors.indexOf(anchor);
+  1224→        if (index >= 0 && labels[index]) ext = labels[index];
+  1225→      }
+  1226→      if (!target.exts.includes(ext)) continue;
+  1227→
+  1228→      const record = traceFinalEnsureGraphRecord(store, target, Number(titleMatch[1]));
+  1229→      record.links[ext] = traceAbsoluteUrl(anchor.getAttribute("href") || anchor.href);
+  1230→      const cleanText = text.replace(/\s+/g, " ").trim();
+  1231→      if (cleanText && !record.texts.includes(cleanText)) record.texts.push(cleanText);
+  1232→    }
+  1233→  }
+  1234→}
+  1235→
+  1236→function traceFinalHasOverviewLogs() {
+  1237→  const bodyText = document.body ? document.body.innerText || "" : "";
+  1238→  return Boolean(
+  1239→    document.querySelector('[id^="logs-"]') ||
+  1240→    document.querySelector('a[href*="/api/log_image/"]') ||
+  1241→    /Job complete|Start Iteration|Iteration\s+\d{1,4}|Guinier|FSC/i.test(bodyText)
+  1242→  );
+  1243→}
+  1244→
+  1245→async function traceFinalWaitForOverviewLogs(timeoutMs = 45000) {
+  1246→  const started = Date.now();
+  1247→  let previousLength = 0;
+  1248→  let stableSince = Date.now();
+  1249→  while (Date.now() - started < timeoutMs) {
+  1250→    const textLength = (document.body && document.body.innerText || "").length;
+  1251→    if (textLength !== previousLength) {
+  1252→      previousLength = textLength;
+  1253→      stableSince = Date.now();
+  1254→    }
+  1255→    if (traceFinalHasOverviewLogs() && Date.now() - stableSince > 700) return true;
+  1256→    await traceSleep(350);
+  1257→  }
+  1258→  return traceFinalHasOverviewLogs();
+  1259→}
+  1260→
+  1261→async function traceFinalScanGraphsByScrolling(store) {
+  1262→  await traceFinalWaitForOverviewLogs();
+  1263→  traceFinalHarvestGraphCandidates(store);
+  1264→
+  1265→  for (const label of ["Show from top", "Show from bottom"]) {
+  1266→    const button = traceFindClickableByText(label);
+  1267→    if (button) {
+  1268→      button.click();
+  1269→      await traceSleep(900);
+  1270→      traceFinalHarvestGraphCandidates(store);
+  1271→    }
+  1272→  }
+  1273→
+  1274→  const scrollers = traceScrollableElements().slice(0, 5);
+  1275→  for (const scroller of scrollers) {
+  1276→    const maxTop = traceGetMaxScrollTop(scroller);
+  1277→    if (maxTop <= 0) continue;
+  1278→    const amount = Math.max(260, Math.floor((scroller.clientHeight || window.innerHeight) * 0.72));
+  1279→
+  1280→    traceSetScrollTop(scroller, 0);
+  1281→    await traceSleep(220);
+  1282→    let stalled = 0;
+  1283→    let previousTop = -1;
+  1284→    for (let step = 0; step < 180; step += 1) {
+  1285→      traceFinalHarvestGraphCandidates(store);
+  1286→      const currentTop = traceGetScrollTop(scroller);
+  1287→      if (currentTop >= maxTop - 4) break;
+  1288→      traceSetScrollTop(scroller, Math.min(maxTop, currentTop + amount));
+  1289→      await traceSleep(120);
+  1290→      const nextTop = traceGetScrollTop(scroller);
+  1291→      if (Math.abs(nextTop - previousTop) < 3) stalled += 1;
+  1292→      else stalled = 0;
+  1293→      previousTop = nextTop;
+  1294→      if (stalled >= 6) break;
+  1295→    }
+  1296→  }
+  1297→
+  1298→  traceFinalHarvestGraphCandidates(store);
+  1299→}
+  1300→
+  1301→function traceFinalResolutionFromText(value) {
+  1302→  const text = String(value || "").replace(/\s+/g, " ");
+  1303→  const patterns = [
+  1304→    /(?:FSC|resolution|res)[^0-9]{0,60}([0-9]+(?:\.[0-9]+)?)\s*(?:Å|A\b|angstrom)/i,
+  1305→    /([0-9]+(?:\.[0-9]+)?)\s*(?:Å|A\b|angstrom)[^.;]{0,80}(?:FSC|resolution|res)/i
+  1306→  ];
+  1307→  for (const pattern of patterns) {
+  1308→    const match = text.match(pattern);
+  1309→    const number = match && Number(match[1]);
+  1310→    if (Number.isFinite(number) && number >= 1 && number <= 20) return Math.round(number * 100) / 100;
+  1311→  }
+  1312→  return null;
+  1313→}
+  1314→
+  1315→function traceFinalBFactorFromText(value) {
+  1316→  const text = String(value || "").replace(/\s+/g, " ");
+  1317→  const patterns = [
+  1318→    /(?:B[-\s]*factor|bfactor)[^-\d]{0,40}(-?\d+(?:\.\d+)?)/i,
+  1319→    /(?:estimated\s+B)[^-\d]{0,40}(-?\d+(?:\.\d+)?)/i
+  1320→  ];
+  1321→  for (const pattern of patterns) {
+  1322→    const match = text.match(pattern);
+  1323→    const number = match && Number(match[1]);
+  1324→    if (Number.isFinite(number) && Math.abs(number) <= 10000) return Math.round(number * 100) / 100;
+  1325→  }
+  1326→  return null;
+  1327→}
+  1328→
+  1329→function traceFinalCollectGraphItemsFromStore(store, warnings) {
+  1330→  const items = [];
+  1331→  const missingRequired = [];
+  1332→  const graphs = {};
+  1333→  const metrics = {
+  1334→    fsc_resolution_A: null,
+  1335→    guinier_b_factor: null
+  1336→  };
+  1337→
+  1338→  for (const target of TRACE_FINAL_GRAPH_TARGETS) {
+  1339→    const latest = Array.from(store.values())
+  1340→      .filter((candidate) => candidate.key === target.key)
+  1341→      .filter((candidate) => target.exts.every((ext) => candidate.links[ext]))
+  1342→      .sort((a, b) => b.iteration - a.iteration)[0];
+  1343→
+  1344→    if (!latest) {
+  1345→      warnings.push(`未找到完整的 ${target.title} 文件组。`);
+  1346→      missingRequired.push(target.title);
+  1347→      continue;
+  1348→    }
+  1349→
+  1350→    const combinedText = latest.texts.join(" | ");
+  1351→    graphs[target.key] = {
+  1352→      title: target.title,
+  1353→      iteration: latest.iteration,
+  1354→      links: latest.links,
+  1355→      text: combinedText.slice(0, 4000)
+  1356→    };
+  1357→    if (target.key === "fsc") metrics.fsc_resolution_A = traceFinalResolutionFromText(combinedText);
+  1358→    if (target.key === "guinier") metrics.guinier_b_factor = traceFinalBFactorFromText(combinedText);
+  1359→
+  1360→    const folderName = traceFinalGraphFolderName(target, latest.iteration);
+  1361→    for (const ext of target.exts) {
+  1362→      items.push({
+  1363→        kind: "graph",
+  1364→        group: target.key,
+  1365→        iteration: latest.iteration,
+  1366→        url: latest.links[ext],
+  1367→        relativePath: `${folderName}/${target.fileBase}.${ext}`
+  1368→      });
+  1369→    }
+  1370→  }
+  1371→
+  1372→  return { items, missingRequired, graphs, metrics };
+  1373→}
+  1374→
+  1375→function traceFinalCollectMapItems(jobInfo, warnings) {
+  1376→  const items = [];
+  1377→  const anchors = Array.from(document.querySelectorAll('a[href*="/api/log_image/download_result_file/"]'));
+  1378→  const linkBySuffix = new Map();
+  1379→
+  1380→  for (const anchor of anchors) {
+  1381→    const href = anchor.href;
+  1382→    const fileName = traceDecodeEntities(decodeURIComponent(href.split("/").pop() || ""));
+  1383→    if (!fileName.startsWith(`${jobInfo.jobId}.`)) continue;
+  1384→
+  1385→    for (const target of TRACE_FINAL_MAP_TARGETS) {
+  1386→      if (fileName === `${jobInfo.jobId}.${target.suffix}`) {
+  1387→        linkBySuffix.set(target.suffix, href);
+  1388→      }
+  1389→    }
+  1390→  }
+  1391→
+  1392→  for (const target of TRACE_FINAL_MAP_TARGETS) {
+  1393→    const constructed = `${location.origin}/api/log_image/download_result_file/${jobInfo.projectId}/${jobInfo.jobId}.${target.suffix}`;
+  1394→    const url = linkBySuffix.get(target.suffix) || constructed;
+  1395→    items.push({
+  1396→      kind: "final_map",
+  1397→      suffix: target.suffix,
+  1398→      url,
+  1399→      relativePath: `Map/${traceFinalMapFileName(jobInfo, target.suffix)}`
+  1400→    });
+  1401→  }
+  1402→
+  1403→  if (linkBySuffix.size === 0) {
+  1404→    warnings.push("当前页面未显示最终 Map 的 Outputs 链接，已按 Project/Job 自动拼接最终 Map 地址。");
+  1405→  }
+  1406→
+  1407→  return items;
+  1408→}
+  1409→
+  1410→async function traceScanFinalResults(projectId, startJob) {
+  1411→  const startUid = traceNormalizeJob(startJob);
+  1412→  let route = traceRoute();
+  1413→  const pid = projectId || route.projectId;
+  1414→  if (!pid) throw new Error("没有识别到 Project ID。请在 CryoSmart 项目或 Job 页面运行。");
+  1415→  let experimentId = route.experimentId;
+  1416→
+  1417→  if (route.jobId !== startUid) {
+  1418→    const opened = await traceOpenJob(startUid, pid, experimentId);
+  1419→    if (!opened) throw new Error(`没有打开最终 Job ${startUid}；请先停在 CryoSmart 项目页或目标 Job 页面。`);
+  1420→  }
+  1421→
+  1422→  route = traceRoute();
+  1423→  experimentId = route.experimentId || experimentId;
+  1424→  await traceClickTab("Overview");
+  1425→
+  1426→  const warnings = [];
+  1427→  const graphStore = new Map();
+  1428→  await traceFinalScanGraphsByScrolling(graphStore);
+  1429→  const graphResult = traceFinalCollectGraphItemsFromStore(graphStore, warnings);
+  1430→  const jobInfo = {
+  1431→    projectId: pid,
+  1432→    experimentId: experimentId || route.experimentId || "",
+  1433→    jobId: startUid
+  1434→  };
+  1435→
+  1436→  return {
+  1437→    ok: true,
+  1438→    projectId: pid,
+  1439→    experimentId: jobInfo.experimentId,
+  1440→    jobId: startUid,
+  1441→    baseUrl: location.origin,
+  1442→    items: [
+  1443→      ...graphResult.items,
+  1444→      ...traceFinalCollectMapItems(jobInfo, warnings)
+  1445→    ],
+  1446→    graphs: graphResult.graphs,
+  1447→    metrics: graphResult.metrics,
+  1448→    missingRequired: graphResult.missingRequired,
+  1449→    warnings
+  1450→  };
+  1451→}
+  1452→
+  1453→async function traceLineageFromPage(startJob, requestedProject) {
+  1454→  const startUid = traceNormalizeJob(startJob);
+  1455→  let route = traceRoute();
+  1456→  const projectId = requestedProject || route.projectId;
+  1457→  const baseUrl = location.origin;
+  1458→  const nodes = new Map();
+  1459→  const rawJobs = new Map();
+  1460→  const edges = [];
+  1461→  const queue = [startUid];
+  1462→  const enqueued = new Set(queue);
+  1463→  let experimentId = route.experimentId;
+  1464→
+  1465→  for (let step = 0; queue.length && step < 80; step += 1) {
+  1466→    const uid = queue.shift();
+  1467→    const opened = await traceOpenJob(uid, projectId, experimentId);
+  1468→    if (!opened) {
+  1469→      nodes.set(uid, {
+  1470→        uid,
+  1471→        uid_num: traceJobNum(uid),
+  1472→        project_uid: projectId,
+  1473→        job_type: "",
+  1474→        title: uid,
+  1475→        status: "not_opened",
+  1476→        particle_count: null,
+  1477→        micrograph_count: null,
+  1478→        sources: []
+  1479→      });
+  1480→      continue;
+  1481→    }
+  1482→    route = traceRoute();
+  1483→    experimentId = route.experimentId || experimentId;
+  1484→    const overviewAssets = await traceReadCurrentOverviewAssets();
+  1485→    const item = await traceReadCurrentMetadataJob(projectId);
+  1486→    const job = item.job;
+  1487→    if (overviewAssets && Object.keys(overviewAssets).length) {
+  1488→      job.overview_assets = overviewAssets;
+  1489→    }
+  1490→    rawJobs.set(uid, job);
+  1491→    nodes.set(uid, traceMetadataJobNode(job));
+  1492→
+  1493→    const explicit = traceMetadataConnectionEdges(job);
+  1494→    const sources = new Set(explicit.map((edge) => edge.source));
+  1495→    const jobEdges = explicit.concat(traceMetadataFallbackParentEdges(job, sources));
+  1496→    edges.push(...jobEdges);
+  1497→
+  1498→    for (const edge of jobEdges) {
+  1499→      if (!enqueued.has(edge.source)) {
+  1500→        queue.push(edge.source);
+  1501→        enqueued.add(edge.source);
+  1502→      }
+  1503→    }
+  1504→  }
+  1505→
+  1506→  const startNode = nodes.get(startUid) || {};
+  1507→  const nodeList = Array.from(nodes.values()).sort((a, b) => (a.uid_num || 0) - (b.uid_num || 0));
+  1508→  const importJobs = nodeList.filter((job) => /import_micrographs/.test(job.job_type || "") || !(job.parents || []).length);
+  1509→  const classJobs = Array.from(rawJobs.values())
+  1510→    .map((job) => ({ uid: job.uid, job_type: job.job_type, classes: traceMetadataClassSplits(job, baseUrl) }))
+  1511→    .filter((item) => item.classes.length);
+  1512→  const summary = {
+  1513→    ok: true,
+  1514→    source: "metadata-lineage-page-crawl",
+  1515→    project_uid: projectId,
+  1516→    base_url: baseUrl,
+  1517→    experiment_uid: experimentId,
+  1518→    start_uid: startUid,
+  1519→    start_job: startNode,
+  1520→    final_particle_count: startNode.particle_count ?? null,
+  1521→    final_micrograph_count: startNode.micrograph_count ?? null,
+  1522→    final_resolution_A: null,
+  1523→    resolution_note: "按需 metadata 追溯模式暂未解析 FSC 分辨率。",
+  1524→    map_download_urls: traceMapUrls(baseUrl, projectId, startUid),
+  1525→    nodes: nodeList,
+  1526→    edges,
+  1527→    raw_jobs: Array.from(rawJobs.values()).sort((a, b) => (a.uid_num || traceJobNum(a.uid)) - (b.uid_num || traceJobNum(b.uid))),
+  1528→    import_or_leaf_jobs: importJobs,
+  1529→    class_split_jobs: classJobs,
+  1530→    focused_mermaid: traceFocusedMermaid(nodes, edges, startUid)
+  1531→  };
+  1532→  summary.preview = tracePreview(summary);
+  1533→  return summary;
+  1534→}
+  1535→
+  1536→function traceBlobToDataUrl(blob) {
+  1537→  return new Promise((resolve, reject) => {
+  1538→    const reader = new FileReader();
+  1539→    reader.onload = () => resolve(reader.result);
+  1540→    reader.onerror = () => reject(reader.error || new Error("blob read failed"));
+  1541→    reader.readAsDataURL(blob);
+  1542→  });
+  1543→}
+  1544→
+  1545→async function traceFetchAsset(url) {
+  1546→  if (!url) throw new Error("missing asset url");
+  1547→  const response = await fetch(url, { credentials: "include" });
+  1548→  if (!response.ok) throw new Error(`HTTP ${response.status}: ${url}`);
+  1549→  const blob = await response.blob();
+  1550→  return {
+  1551→    url,
+  1552→    status: response.status,
+  1553→    content_type: blob.type || response.headers.get("content-type") || "",
+  1554→    size: blob.size,
+  1555→    data_url: await traceBlobToDataUrl(blob)
+  1556→  };
+  1557→}
+  1558→
+  1559→chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  1560→  if (!message || !["traceCryoSmartLineageFromPage", "exportCryoSmartProjectMetadata", "scanCryoSmartFinalResults", "fetchCryoSmartAsset"].includes(message.action)) return false;
+  1561→  let task;
+  1562→  if (message.action === "fetchCryoSmartAsset") {
+  1563→    task = traceFetchAsset(message.url);
+  1564→  } else if (message.action === "exportCryoSmartProjectMetadata") {
+  1565→    task = traceExportProjectMetadata(message.projectId);
+  1566→  } else if (message.action === "scanCryoSmartFinalResults") {
+  1567→    task = traceScanFinalResults(message.projectId, message.startJob);
+  1568→  } else {
+  1569→    task = traceLineageFromPage(message.startJob, message.projectId);
+  1570→  }
+  1571→  task
+  1572→    .then((summary) => sendResponse({ ok: true, summary }))
+  1573→    .catch((err) => sendResponse({ ok: false, error: err.message }));
+  1574→  return true;
+  1575→});
+  1576→

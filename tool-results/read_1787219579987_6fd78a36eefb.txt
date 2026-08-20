@@ -1,0 +1,1097 @@
+     1→     1→# -*- coding: utf-8 -*-
+     2→     2→"""
+     3→     3→CryoSmart_align_optimize_export.py
+     4→     4→
+     5→     5→一键完成：
+     6→     6→  1. 自动对齐所有地图（候选测试、选最佳、继承变换）
+     7→     7→  2. 基于当前基准视角，自动测试 5 个方向（基准、Y±90、X±90）选择最优视角
+     8→     8→  3. 以该视角导出所有地图高清截图，裁剪白边并替换 PPT
+     9→     9→
+    10→    10→运行环境：ChimeraX
+    11→    11→"""
+    12→    12→
+    13→    13→import csv
+    14→    14→import json
+    15→    15→import os
+    16→    16→import re
+    17→    17→import sys
+    18→    18→import tempfile
+    19→    19→import time
+    20→    20→import zipfile
+    21→    21→from pathlib import Path
+    22→    22→
+    23→    23→try:
+    24→    24→    import numpy as np
+    25→    25→    from PIL import Image
+    26→    26→except ImportError:
+    27→    27→    np = None
+    28→    28→    Image = None
+    29→    29→
+    30→    30→from chimerax.core.commands import run as cxrun
+    31→    31→
+    32→    32→
+    33→    33→# ==================== 常量 ====================
+    34→    34→LEVEL_RATIO = 0.25
+    35→    35→STEP = 1
+    36→    36→FIT_SEARCH = 15
+    37→    37→CORR_EPSILON = 0.0001
+    38→    38→
+    39→    39→GENERATE_DEBUG_IMAGES = False
+    40→    40→GENERATE_CXC = False
+    41→    41→
+    42→    42→SNAPSHOT_WIDTH = 1600
+    43→    43→SNAPSHOT_HEIGHT = 1200
+    44→    44→GROUP_TRIM_PADDING_FRACTION = 0.035
+    45→    45→WHITE_TRIM_DELTA = 8
+    46→    46→MIN_TRIM_PADDING_PX = 60
+    47→    47→EXTRA_WHITE_MARGIN_FRACTION = 0.05
+    48→    48→
+    49→    49→SCORE_THUMB_SIZE = 220
+    50→    50→
+    51→    51→
+    52→    52→# ==================== 通用工具函数 ====================
+    53→    53→def q(path):
+    54→    54→    return '"' + str(path).replace('"', '\\"') + '"'
+    55→    55→
+    56→    56→def safe_name(value):
+    57→    57→    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "item")).strip("_") or "item"
+    58→    58→
+    59→    59→def volume_models(session):
+    60→    60→    return [m for m in session.models.list() if m.__class__.__name__ == "Volume"]
+    61→    61→
+    62→    62→def max_density(vol):
+    63→    63→    try:
+    64→    64→        return float(vol.data.full_matrix().max())
+    65→    65→    except Exception:
+    66→    66→        return 0.0
+    67→    67→
+    68→    68→def position_text(model):
+    69→    69→    try:
+    70→    70→        return str(model.position)
+    71→    71→    except Exception as exc:
+    72→    72→        return f"position unavailable: {exc}"
+    73→    73→
+    74→    74→def parse_job_num(uid):
+    75→    75→    m = re.search(r"J(\d+)", str(uid or ""), re.I)
+    76→    76→    return int(m.group(1)) if m else -1
+    77→    77→
+    78→    78→
+    79→    79→# ==================== 对齐核心函数（完整） ====================
+    80→    80→def parse_corr(text):
+    81→    81→    if text is None:
+    82→    82→        return None
+    83→    83→    if isinstance(text, (int, float)):
+    84→    84→        value = float(text)
+    85→    85→        return value if -1.0 <= value <= 1.0 else None
+    86→    86→    text = str(text)
+    87→    87→    m = re.search(r"correlation\s*=?\s*([-+]?\d*\.?\d+)", text, re.I)
+    88→    88→    if m:
+    89→    89→        value = float(m.group(1))
+    90→    90→        return value if -1.0 <= value <= 1.0 else None
+    91→    91→    return None
+    92→    92→
+    93→    93→def run_capture(session, cmd, command_log=None):
+    94→    94→    if command_log is not None:
+    95→    95→        command_log.append(cmd)
+    96→    96→    with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as tmp:
+    97→    97→        log_path = tmp.name
+    98→    98→    try:
+    99→    99→        cxrun(session, "log clear")
+   100→   100→        result = cxrun(session, cmd)
+   101→   101→        cxrun(session, "log save " + q(log_path))
+   102→   102→        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+   103→   103→            log_text = f.read()
+   104→   104→        return result, log_text
+   105→   105→    finally:
+   106→   106→        if os.path.exists(log_path):
+   107→   107→            os.unlink(log_path)
+   108→   108→
+   109→   109→def measure_corr(session, vol_id, ref_id, command_log=None):
+   110→   110→    cmd = f"measure correlation #{vol_id} inMap #{ref_id}"
+   111→   111→    result, log_text = run_capture(session, cmd, command_log)
+   112→   112→    corr = parse_corr(result)
+   113→   113→    if corr is None:
+   114→   114→        corr = parse_corr(log_text)
+   115→   115→    return corr, str(result), log_text
+   116→   116→
+   117→   117→def fit_corr(session, vol_id, ref_id, search=None, command_log=None):
+   118→   118→    cmd = f"fit #{vol_id} in #{ref_id}"
+   119→   119→    if search is not None:
+   120→   120→        cmd += f" search {search}"
+   121→   121→    result, log_text = run_capture(session, cmd, command_log)
+   122→   122→    corr = parse_corr(result)
+   123→   123→    if corr is None:
+   124→   124→        corr = parse_corr(log_text)
+   125→   125→    if corr is None:
+   126→   126→        corr, _, _ = measure_corr(session, vol_id, ref_id, command_log)
+   127→   127→    return corr, str(result), log_text
+   128→   128→
+   129→   129→def open_volume(session, path, command_log=None):
+   130→   130→    cmd = "open " + q(path)
+   131→   131→    if command_log is not None:
+   132→   132→        command_log.append(cmd)
+   133→   133→    before = {m for m in session.models.list()}
+   134→   134→    cxrun(session, cmd)
+   135→   135→    after = [m for m in session.models.list() if m not in before]
+   136→   136→    volumes = [m for m in after if m.__class__.__name__ == "Volume"]
+   137→   137→    if not volumes:
+   138→   138→        raise RuntimeError("Opened file is not a Volume: " + str(path))
+   139→   139→    return volumes[-1]
+   140→   140→
+   141→   141→def close_model(session, model, command_log=None):
+   142→   142→    if not model:
+   143→   143→        return
+   144→   144→    cmd = f"close #{model.id_string}"
+   145→   145→    if command_log is not None:
+   146→   146→        command_log.append(cmd)
+   147→   147→    try:
+   148→   148→        cxrun(session, cmd)
+   149→   149→    except Exception:
+   150→   150→        pass
+   151→   151→
+   152→   152→def set_volume_display(session, vol, ref_density, command_log=None):
+   153→   153→    density = max_density(vol) or ref_density
+   154→   154→    level = density * LEVEL_RATIO
+   155→   155→    cmd = f"volume #{vol.id_string} level {level:.4f} step {STEP}"
+   156→   156→    if command_log is not None:
+   157→   157→        command_log.append(cmd)
+   158→   158→    try:
+   159→   159→        cxrun(session, cmd)
+   160→   160→    except Exception:
+   161→   161→        pass
+   162→   162→
+   163→   163→def map_group_key(group):
+   164→   164→    value = str(group or "volume")
+   165→   165→    if value.lower() in ("volume", "map", "volume.map"):
+   166→   166→        return "volume"
+   167→   167→    value = re.sub(r"\.map$", "", value, flags=re.I)
+   168→   168→    return safe_name(value)
+   169→   169→
+   170→   170→def canonical_map_key(uid, group):
+   171→   171→    return f"{safe_name(uid)}/{map_group_key(group)}"
+   172→   172→
+   173→   173→def group_from_mrc_name(path):
+   174→   174→    name = Path(path).name
+   175→   175→    name = re.sub(r"\.mrc$", "", name, flags=re.I)
+   176→   176→    name = re.sub(r"\.map$", "", name, flags=re.I)
+   177→   177→    name = re.sub(r"^BJ\.[^.]+\.[^.]+\.", "", name)
+   178→   178→    return map_group_key(name)
+   179→   179→
+   180→   180→def find_lineage_json(folder):
+   181→   181→    candidates = sorted(folder.glob("*_lineage.json"))
+   182→   182→    if candidates:
+   183→   183→        return candidates[0]
+   184→   184→    candidates = sorted(folder.glob("*.json"))
+   185→   185→    if not candidates:
+   186→   186→        raise FileNotFoundError("No lineage JSON found in " + str(folder))
+   187→   187→    return candidates[0]
+   188→   188→
+   189→   189→def normal_map_assets(node):
+   190→   190→    out = []
+   191→   191→    for item in node.get("maps") or []:
+   192→   192→        group = str(item.get("group") or "")
+   193→   193→        if item.get("group_type") and item.get("group_type") != "volume":
+   194→   194→            continue
+   195→   195→        if "mask" in group.lower():
+   196→   196→            continue
+   197→   197→        url = item.get("download_url") or ""
+   198→   198→        if item.get("result_name") == "map" or url.endswith(".map"):
+   199→   199→            out.append(item)
+   200→   200→    return out
+   201→   201→
+   202→   202→def map_key_for_node_item(node, item):
+   203→   203→    return canonical_map_key(node.get("uid"), item.get("group") or "volume")
+   204→   204→
+   205→   205→def mrc_candidates_from_summary(folder, summary):
+   206→   206→    candidates = {}
+   207→   207→    project = summary.get("project_uid") or ""
+   208→   208→    for node in summary.get("nodes") or []:
+   209→   209→        uid = node.get("uid")
+   210→   210→        if not uid:
+   211→   211→            continue
+   212→   212→        for item in normal_map_assets(node):
+   213→   213→            group = item.get("group") or "volume"
+   214→   214→            suffix = f"{group}.{item.get('result_name') or 'map'}"
+   215→   215→            path = folder / "maps" / safe_name(uid) / f"BJ.{safe_name(project)}.{safe_name(uid)}.{safe_name(suffix)}.mrc"
+   216→   216→            key = map_key_for_node_item(node, item)
+   217→   217→            candidates[key] = {
+   218→   218→                "key": key,
+   219→   219→                "uid": uid,
+   220→   220→                "job_type": node.get("job_type") or "",
+   221→   221→                "group": group,
+   222→   222→                "path": path,
+   223→   223→                "is_final": uid == summary.get("start_uid"),
+   224→   224→            }
+   225→   225→
+   226→   226→    start_uid = summary.get("start_uid")
+   227→   227→    for name in (summary.get("map_download_urls") or {}).keys():
+   228→   228→        path = folder / "maps" / safe_name(start_uid) / f"BJ.{safe_name(project)}.{safe_name(start_uid)}.{safe_name(name)}.mrc"
+   229→   229→        key = canonical_map_key(start_uid, name)
+   230→   230→        candidates.setdefault(key, {
+   231→   231→            "key": key,
+   232→   232→            "uid": start_uid,
+   233→   233→            "job_type": (summary.get("start_job") or {}).get("job_type") or "",
+   234→   234→            "group": name,
+   235→   235→            "path": path,
+   236→   236→            "is_final": True,
+   237→   237→        })
+   238→   238→
+   239→   239→    maps_dir = folder / "maps"
+   240→   240→    for path in sorted(maps_dir.glob("**/*")) if maps_dir.exists() else []:
+   241→   241→        if path.is_file() and path.suffix.lower() in (".mrc", ".map"):
+   242→   242→            m = re.search(r"\.(J\d+)\.", "." + path.name)
+   243→   243→            uid = m.group(1) if m else path.parent.name
+   244→   244→            group = group_from_mrc_name(path)
+   245→   245→            key = canonical_map_key(uid, group)
+   246→   246→            candidates.setdefault(key, {
+   247→   247→                "key": key,
+   248→   248→                "uid": uid,
+   249→   249→                "job_type": "",
+   250→   250→                "group": group,
+   251→   251→                "path": path,
+   252→   252→                "is_final": uid == start_uid,
+   253→   253→            })
+   254→   254→
+   255→   255→    unique = []
+   256→   256→    seen_paths = set()
+   257→   257→    for item in candidates.values():
+   258→   258→        if not item["path"].exists():
+   259→   259→            continue
+   260→   260→        resolved = item["path"].resolve()
+   261→   261→        if resolved in seen_paths:
+   262→   262→            continue
+   263→   263→        seen_paths.add(resolved)
+   264→   264→        unique.append(item)
+   265→   265→    return unique
+   266→   266→
+   267→   267→def choose_reference(items, summary):
+   268→   268→    start_uid = summary.get("start_uid")
+   269→   269→    final_items = [item for item in items if item.get("uid") == start_uid]
+   270→   270→    preferred = [item for item in final_items if item.get("key") == canonical_map_key(start_uid, "volume")]
+   271→   271→    if preferred:
+   272→   272→        return preferred[0]
+   273→   273→    if final_items:
+   274→   274→        return final_items[0]
+   275→   275→    return sorted(items, key=lambda item: parse_job_num(item.get("uid")))[-1] if items else None
+   276→   276→
+   277→   277→def class_index_from_group(group):
+   278→   278→    m = re.search(r"(?:volume|particles)_class_(\d+)", str(group or ""), re.I)
+   279→   279→    return int(m.group(1)) if m else None
+   280→   280→
+   281→   281→def target_map_groups_for_edge(edge, target_node, item_by_key):
+   282→   282→    target_uid = edge.get("target")
+   283→   283→    source_group = map_group_key(edge.get("source_group"))
+   284→   284→    source_class = class_index_from_group(source_group)
+   285→   285→    target_groups = []
+   286→   286→    if target_node:
+   287→   287→        for map_item in normal_map_assets(target_node):
+   288→   288→            group = map_group_key(map_item.get("group") or "volume")
+   289→   289→            if group not in target_groups:
+   290→   290→                target_groups.append(group)
+   291→   291→
+   292→   292→    candidates = []
+   293→   293→    if canonical_map_key(target_uid, source_group) in item_by_key:
+   294→   294→        candidates.append(source_group)
+   295→   295→    if source_class is not None:
+   296→   296→        for group in target_groups:
+   297→   297→            if class_index_from_group(group) == source_class and group not in candidates:
+   298→   298→                candidates.append(group)
+   299→   299→    if not candidates and "volume" in target_groups:
+   300→   300→        candidates.append("volume")
+   301→   301→    if not candidates and len(target_groups) == 1:
+   302→   302→        candidates.append(target_groups[0])
+   303→   303→    return [group for group in candidates if canonical_map_key(target_uid, group) in item_by_key]
+   304→   304→
+   305→   305→def build_map_lineage(summary, items):
+   306→   306→    item_by_key = {item["key"]: item for item in items}
+   307→   307→    nodes_by_uid = {node.get("uid"): node for node in summary.get("nodes") or [] if node.get("uid")}
+   308→   308→    edges = []
+   309→   309→    seen = set()
+   310→   310→    warnings = []
+   311→   311→
+   312→   312→    for edge in summary.get("edges") or []:
+   313→   313→        if edge.get("input_type") != "volume":
+   314→   314→            continue
+   315→   315→        source_uid = edge.get("source")
+   316→   316→        target_uid = edge.get("target")
+   317→   317→        source_group = map_group_key(edge.get("source_group"))
+   318→   318→        source_key = canonical_map_key(source_uid, source_group)
+   319→   319→        if source_key not in item_by_key:
+   320→   320→            warnings.append(f"skip volume edge {source_uid}.{source_group} -> {target_uid}: source MRC missing")
+   321→   321→            continue
+   322→   322→        target_node = nodes_by_uid.get(target_uid)
+   323→   323→        for target_group in target_map_groups_for_edge(edge, target_node, item_by_key):
+   324→   324→            target_key = canonical_map_key(target_uid, target_group)
+   325→   325→            edge_key = (source_key, target_key)
+   326→   326→            if edge_key in seen:
+   327→   327→                continue
+   328→   328→            seen.add(edge_key)
+   329→   329→            edges.append({
+   330→   330→                "source": source_key,
+   331→   331→                "target": target_key,
+   332→   332→                "reason": f"{source_uid}.{source_group} -> {target_uid}.{target_group}",
+   333→   333→            })
+   334→   334→
+   335→   335→    incoming = {}
+   336→   336→    outgoing = {}
+   337→   337→    for edge in edges:
+   338→   338→        outgoing.setdefault(edge["source"], []).append(edge["target"])
+   339→   339→        incoming.setdefault(edge["target"], []).append(edge["source"])
+   340→   340→
+   341→   341→    start_keys = [key for key in item_by_key if key not in incoming]
+   342→   342→    if not start_keys:
+   343→   343→        start_keys = sorted(item_by_key)
+   344→   344→        warnings.append("No start map inferred; treating every downloaded map as a possible start.")
+   345→   345→
+   346→   346→    chains = []
+   347→   347→
+   348→   348→    def walk(start_key, current_key, path):
+   349→   349→        children = sorted(outgoing.get(current_key) or [])
+   350→   350→        if not children:
+   351→   351→            chains.append({"start": start_key, "terminal": current_key, "keys": list(path)})
+   352→   352→            return
+   353→   353→        for child in children:
+   354→   354→            if child in path:
+   355→   355→                warnings.append(f"Cycle detected in map lineage: {' -> '.join(path + [child])}")
+   356→   356→                continue
+   357→   357→            walk(start_key, child, path + [child])
+   358→   358→
+   359→   359→    for start_key in sorted(start_keys, key=lambda key: (parse_job_num(key), key)):
+   360→   360→        walk(start_key, start_key, [start_key])
+   361→   361→    if not chains:
+   362→   362→        chains = [{"start": key, "terminal": key, "keys": [key]} for key in sorted(item_by_key)]
+   363→   363→
+   364→   364→    return {
+   365→   365→        "items": item_by_key,
+   366→   366→        "edges": edges,
+   367→   367→        "incoming": incoming,
+   368→   368→        "outgoing": outgoing,
+   369→   369→        "starts": sorted(start_keys, key=lambda key: (parse_job_num(key), key)),
+   370→   370→        "chains": chains,
+   371→   371→        "warnings": warnings,
+   372→   372→    }
+   373→   373→
+   374→   374→def chain_label(chain):
+   375→   375→    return " -> ".join(chain.get("keys") or [])
+   376→   376→
+   377→   377→def chain_for_key(lineage, key):
+   378→   378→    containing = [chain for chain in lineage.get("chains") or [] if key in (chain.get("keys") or [])]
+   379→   379→    if not containing:
+   380→   380→        return None
+   381→   381→    return sorted(containing, key=lambda chain: (-len(chain.get("keys") or []), chain_label(chain)))[0]
+   382→   382→
+   383→   383→def lineage_terminal_results_for_key(lineage, terminal_results, key):
+   384→   384→    chain = chain_for_key(lineage, key)
+   385→   385→    if not chain:
+   386→   386→        return None, None
+   387→   387→    return chain, terminal_results.get(chain.get("terminal"))
+   388→   388→
+   389→   389→def candidate_specs():
+   390→   390→    return [
+   391→   391→        {"name": "original", "kind": "original"},
+   392→   392→        {"name": "rot_x_180", "kind": "rotate", "axis": "x", "angle": 180},
+   393→   393→        {"name": "rot_y_180", "kind": "rotate", "axis": "y", "angle": 180},
+   394→   394→        {"name": "rot_z_180", "kind": "rotate", "axis": "z", "angle": 180},
+   395→   395→        {"name": "flip_z", "kind": "flip", "axis": "z"},
+   396→   396→    ]
+   397→   397→
+   398→   398→def test_candidate(session, item, reference, ref_vol, ref_density, spec):
+   399→   399→    commands = []
+   400→   400→    errors = []
+   401→   401→    opened = []
+   402→   402→    active = None
+   403→   403→    try:
+   404→   404→        vol = open_volume(session, item["path"], commands)
+   405→   405→        opened.append(vol)
+   406→   406→        vol.name = f"{item['key']}__{spec['name']}"
+   407→   407→        set_volume_display(session, vol, ref_density, commands)
+   408→   408→        active = vol
+   409→   409→
+   410→   410→        if spec["kind"] == "rotate":
+   411→   411→            cmd = f"turn {spec['axis']} {spec['angle']} models #{vol.id_string} center #{vol.id_string}"
+   412→   412→            commands.append(cmd)
+   413→   413→            cxrun(session, cmd)
+   414→   414→            commands.append("wait 1")
+   415→   415→            cxrun(session, "wait 1")
+   416→   416→        elif spec["kind"] == "flip":
+   417→   417→            flip_id = max([m.id[0] for m in session.models.list() if getattr(m, "id", None)] + [0]) + 1
+   418→   418→            cmd = f"volume flip #{vol.id_string} axis {spec['axis']} modelId {flip_id}"
+   419→   419→            commands.append(cmd)
+   420→   420→            cxrun(session, cmd)
+   421→   421→            flip_model = next((m for m in volume_models(session) if m.id[0] == flip_id), None)
+   422→   422→            if flip_model is None:
+   423→   423→                raise RuntimeError("flip model was not created")
+   424→   424→            flip_model.name = f"{item['key']}__{spec['name']}"
+   425→   425→            set_volume_display(session, flip_model, ref_density, commands)
+   426→   426→            active = flip_model
+   427→   427→            close_model(session, vol, commands)
+   428→   428→            opened = [flip_model]
+   429→   429→
+   430→   430→        pre_corr, pre_raw, pre_log = measure_corr(session, active.id_string, ref_vol.id_string, commands)
+   431→   431→        fit1_corr, fit1_raw, fit1_log = fit_corr(session, active.id_string, ref_vol.id_string, search=None, command_log=commands)
+   432→   432→        fit2_corr, fit2_raw, fit2_log = fit_corr(session, active.id_string, ref_vol.id_string, search=FIT_SEARCH, command_log=commands)
+   433→   433→
+   434→   434→        score = fit2_corr if fit2_corr is not None else fit1_corr
+   435→   435→        if score is None:
+   436→   436→            score = pre_corr
+   437→   437→
+   438→   438→        return {
+   439→   439→            "candidate": spec["name"],
+   440→   440→            "kind": spec["kind"],
+   441→   441→            "model": active,
+   442→   442→            "model_id": active.id_string,
+   443→   443→            "score": score,
+   444→   444→            "pre_corr": pre_corr,
+   445→   445→            "fit_no_search_corr": fit1_corr,
+   446→   446→            "fit_search_corr": fit2_corr,
+   447→   447→            "position": position_text(active),
+   448→   448→            "commands": commands,
+   449→   449→            "errors": errors,
+   450→   450→            "raw": {
+   451→   451→                "pre": pre_raw,
+   452→   452→                "fit_no_search": fit1_raw,
+   453→   453→                "fit_search": fit2_raw,
+   454→   454→                "pre_log": pre_log,
+   455→   455→                "fit_no_search_log": fit1_log,
+   456→   456→                "fit_search_log": fit2_log,
+   457→   457→            },
+   458→   458→            "opened_models": opened,
+   459→   459→        }
+   460→   460→    except Exception as exc:
+   461→   461→        errors.append(str(exc))
+   462→   462→        for model in opened:
+   463→   463→            close_model(session, model, commands)
+   464→   464→        return {
+   465→   465→            "candidate": spec["name"],
+   466→   466→            "kind": spec["kind"],
+   467→   467→            "model": None,
+   468→   468→            "model_id": "",
+   469→   469→            "score": None,
+   470→   470→            "pre_corr": None,
+   471→   471→            "fit_no_search_corr": None,
+   472→   472→            "fit_search_corr": None,
+   473→   473→            "position": "",
+   474→   474→            "commands": commands,
+   475→   475→            "errors": errors,
+   476→   476→            "raw": {},
+   477→   477→            "opened_models": [],
+   478→   478→        }
+   479→   479→
+   480→   480→def choose_best(rows):
+   481→   481→    valid = [row for row in rows if row.get("score") is not None and row.get("model") is not None]
+   482→   482→    if not valid:
+   483→   483→        return None
+   484→   484→    return sorted(valid, key=lambda row: float(row["score"]), reverse=True)[0]
+   485→   485→
+   486→   486→def write_candidate_cxc(cxc_dir, item, reference, rows):
+   487→   487→    path = cxc_dir / (safe_name(item["key"].replace("/", "__")) + "_fit_candidates.cxc")
+   488→   488→    lines = [
+   489→   489→        "# CryoSmart fit candidate debug",
+   490→   490→        f"# map: {item['key']}",
+   491→   491→        f"# reference: {reference['key']}",
+   492→   492→        "set bgColor white",
+   493→   493→        "",
+   494→   494→    ]
+   495→   495→    for row in rows:
+   496→   496→        lines.append(f"# Candidate: {row['candidate']}")
+   497→   497→        for cmd in row.get("commands", []):
+   498→   498→            lines.append(cmd)
+   499→   499→        lines.append("")
+   500→   500→    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+   501→   501→    return path
+   502→   502→
+   503→   503→def write_debug_logs(out_dir, manifest, candidate_rows):
+   504→   504→    tsv_path = out_dir / "fit_candidate_debug.tsv"
+   505→   505→    columns = [
+   506→   506→        "map_key", "candidate", "chosen", "model_id", "score",
+   507→   507→        "pre_corr", "fit_no_search_corr", "fit_search_corr",
+   508→   508→        "reference_key", "source_mrc", "reference_mrc", "position", "cxc_file", "errors",
+   509→   509→    ]
+   510→   510→    with tsv_path.open("w", encoding="utf-8", newline="") as f:
+   511→   511→        writer = csv.DictWriter(f, fieldnames=columns, delimiter="\t")
+   512→   512→        writer.writeheader()
+   513→   513→        for row in candidate_rows:
+   514→   514→            writer.writerow({col: row.get(col, "") for col in columns})
+   515→   515→
+   516→   516→    txt_path = out_dir / "fit_candidate_debug.txt"
+   517→   517→    lines = [
+   518→   518→        "CryoSmart fit candidate debug",
+   519→   519→        f"created_at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+   520→   520→        f"lineage_folder: {manifest.get('lineage_folder')}",
+   521→   521→        f"reference: {manifest.get('reference_key')} -> {manifest.get('reference_path')}",
+   522→   522→        "",
+   523→   523→    ]
+   524→   524→    current = None
+   525→   525→    for row in candidate_rows:
+   526→   526→        if row["map_key"] != current:
+   527→   527→            current = row["map_key"]
+   528→   528→            lines.append("")
+   529→   529→            lines.append("=" * 80)
+   530→   530→            lines.append(current)
+   531→   531→            lines.append("=" * 80)
+   532→   532→        mark = "CHOSEN" if row.get("chosen") else "test"
+   533→   533→        lines.append(
+   534→   534→            f"[{mark}] {row['candidate']} model={row.get('model_id')} "
+   535→   535→            f"score={row.get('score')} pre={row.get('pre_corr')} "
+   536→   536→            f"fit1={row.get('fit_no_search_corr')} fit_search={row.get('fit_search_corr')}"
+   537→   537→        )
+   538→   538→        if row.get("errors"):
+   539→   539→            lines.append("  errors: " + row["errors"])
+   540→   540→        lines.append("  position: " + str(row.get("position") or ""))
+   541→   541→        if row.get("cxc_file"):
+   542→   542→            lines.append("  cxc: " + row["cxc_file"])
+   543→   543→    txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+   544→   544→
+   545→   545→    manifest_path = out_dir / "fit_candidate_debug_manifest.json"
+   546→   546→    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+   547→   547→    return txt_path, tsv_path, manifest_path
+   548→   548→
+   549→   549→
+   550→   550→# ==================== 导出相关函数（来自第二个脚本） ====================
+   551→   551→def find_volume_by_key(session, key, manifest):
+   552→   552→    entry = manifest.get("models", {}).get(key)
+   553→   553→    if not entry:
+   554→   554→        return None
+   555→   555→    wanted_id = str(entry.get("model_id") or "")
+   556→   556→    wanted_name = str(entry.get("model_name") or "")
+   557→   557→    wanted_path = str(entry.get("source_mrc") or "")
+   558→   558→    for model in volume_models(session):
+   559→   559→        if wanted_id and str(getattr(model, "id_string", "")) == wanted_id:
+   560→   560→            return model
+   561→   561→        if wanted_name and str(getattr(model, "name", "")) == wanted_name:
+   562→   562→            return model
+   563→   563→        if wanted_path:
+   564→   564→            data_path = getattr(getattr(model, "data", None), "path", None)
+   565→   565→            if data_path and str(Path(data_path).resolve()) == str(Path(wanted_path).resolve()):
+   566→   566→                return model
+   567→   567→    return None
+   568→   568→
+   569→   569→def export_images_with_current_view(session, folder, manifest):
+   570→   570→    model_entries = manifest.get("models") or {}
+   571→   571→    if not model_entries:
+   572→   572→        raise RuntimeError("Manifest 中没有模型列表")
+   573→   573→    output_dir = folder / "chimerax_rendered_maps"
+   574→   574→    output_dir.mkdir(exist_ok=True)
+   575→   575→    manifest.setdefault("images", {})
+   576→   576→    manifest.setdefault("warnings", [])
+   577→   577→
+   578→   578→    all_vols = volume_models(session)
+   579→   579→    matched = {}
+   580→   580→    for key, entry in model_entries.items():
+   581→   581→        model = find_volume_by_key(session, key, manifest)
+   582→   582→        if model is None:
+   583→   583→            manifest["warnings"].append(f"找不到模型: {key}")
+   584→   584→            continue
+   585→   585→        matched[key] = model
+   586→   586→
+   587→   587→    if not matched:
+   588→   588→        raise RuntimeError("没有可用的 Volume 模型")
+   589→   589→
+   590→   590→    for vol in all_vols:
+   591→   591→        cxrun(session, f"show #{vol.id_string} models")
+   592→   592→    cxrun(session, "wait 1")
+   593→   593→
+   594→   594→    session.logger.info(f"开始导出 {len(matched)} 张图像，使用当前视角...")
+   595→   595→
+   596→   596→    for key, model in matched.items():
+   597→   597→        for vol in all_vols:
+   598→   598→            if vol.id_string == model.id_string:
+   599→   599→                cxrun(session, f"show #{vol.id_string} models")
+   600→   600→            else:
+   601→   601→                cxrun(session, f"hide #{vol.id_string} models")
+   602→   602→        cxrun(session, "wait 1")
+   603→   603→
+   604→   604→        png_name = safe_name(key.replace("/", "__")) + ".png"
+   605→   605→        png_path = output_dir / png_name
+   606→   606→        cxrun(session, f"save {q(png_path)} width {SNAPSHOT_WIDTH} height {SNAPSHOT_HEIGHT} supersample 3 transparentBackground false")
+   607→   607→
+   608→   608→        entry = dict(model_entries.get(key) or {})
+   609→   609→        manifest["images"][key] = {
+   610→   610→            **entry,
+   611→   611→            "png": str(png_path),
+   612→   612→            "model_id_at_export": getattr(model, "id_string", None),
+   613→   613→            "model_name_at_export": getattr(model, "name", None),
+   614→   614→        }
+   615→   615→        session.logger.info(f"  已保存: {png_path.name}")
+   616→   616→
+   617→   617→    for vol in all_vols:
+   618→   618→        cxrun(session, f"show #{vol.id_string} models")
+   619→   619→
+   620→   620→    return manifest
+   621→   621→
+   622→   622→def content_bbox(image):
+   623→   623→    arr = np.asarray(image.convert("RGBA"))
+   624→   624→    alpha = arr[:, :, 3] > 10
+   625→   625→    distance_from_white = np.max(255 - arr[:, :, :3].astype(np.int16), axis=2)
+   626→   626→    nonwhite = alpha & (distance_from_white > WHITE_TRIM_DELTA)
+   627→   627→    if not nonwhite.any():
+   628→   628→        return None
+   629→   629→    ys, xs = np.where(nonwhite)
+   630→   630→    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+   631→   631→
+   632→   632→def expand_box_to_aspect(box, size, target_aspect):
+   633→   633→    left, top, right, bottom = [float(v) for v in box]
+   634→   634→    w, h = size
+   635→   635→    box_w = right - left
+   636→   636→    box_h = bottom - top
+   637→   637→    if box_w <= 0 or box_h <= 0:
+   638→   638→        return 0, 0, w, h
+   639→   639→    current = box_w / box_h
+   640→   640→    if abs(current - target_aspect) < 0.002:
+   641→   641→        return int(round(left)), int(round(top)), int(round(right)), int(round(bottom))
+   642→   642→    if current > target_aspect:
+   643→   643→        needed_h = box_w / target_aspect
+   644→   644→        extra = needed_h - box_h
+   645→   645→        top -= extra / 2
+   646→   646→        bottom += extra / 2
+   647→   647→        if top < 0:
+   648→   648→            bottom -= top
+   649→   649→            top = 0
+   650→   650→        if bottom > h:
+   651→   651→            top -= bottom - h
+   652→   652→            bottom = h
+   653→   653→        top = max(0, top)
+   654→   654→    else:
+   655→   655→        needed_w = box_h * target_aspect
+   656→   656→        extra = needed_w - box_w
+   657→   657→        left -= extra / 2
+   658→   658→        right += extra / 2
+   659→   659→        if left < 0:
+   660→   660→            right -= left
+   661→   661→            left = 0
+   662→   662→        if right > w:
+   663→   663→            left -= right - w
+   664→   664→            right = w
+   665→   665→        left = max(0, left)
+   666→   666→    return int(round(max(0, left))), int(round(max(0, top))), int(round(min(w, right))), int(round(min(h, bottom)))
+   667→   667→
+   668→   668→def common_trim_box(entries):
+   669→   669→    margins = []
+   670→   670→    image_size = None
+   671→   671→    for _, data in entries:
+   672→   672→        src = Path(data.get("png") or "")
+   673→   673→        if not src.exists():
+   674→   674→            continue
+   675→   675→        image = Image.open(src).convert("RGBA")
+   676→   676→        image_size = image.size
+   677→   677→        box = content_bbox(image)
+   678→   678→        if box:
+   679→   679→            left, top, right, bottom = box
+   680→   680→            w, h = image.size
+   681→   681→            margins.append((left, top, w - right, h - bottom))
+   682→   682→    if not margins or not image_size:
+   683→   683→        return None
+   684→   684→    w, h = image_size
+   685→   685→    min_left = min(item[0] for item in margins)
+   686→   686→    min_top = min(item[1] for item in margins)
+   687→   687→    min_right = min(item[2] for item in margins)
+   688→   688→    min_bottom = min(item[3] for item in margins)
+   689→   689→    keep_x = max(MIN_TRIM_PADDING_PX, int(round(w * EXTRA_WHITE_MARGIN_FRACTION)))
+   690→   690→    keep_y = max(MIN_TRIM_PADDING_PX, int(round(h * EXTRA_WHITE_MARGIN_FRACTION)))
+   691→   691→    crop_left = max(0, min_left - keep_x)
+   692→   692→    crop_top = max(0, min_top - keep_y)
+   693→   693→    crop_right = max(0, min_right - keep_x)
+   694→   694→    crop_bottom = max(0, min_bottom - keep_y)
+   695→   695→    box = (crop_left, crop_top, w - crop_right, h - crop_bottom)
+   696→   696→    return expand_box_to_aspect(box, image_size, w / h)
+   697→   697→
+   698→   698→def prepare_trimmed_images(folder, manifest):
+   699→   699→    trimmed = {}
+   700→   700→    out_dir = folder / "chimerax_rendered_maps_trimmed"
+   701→   701→    if Image is None or np is None:
+   702→   702→        return trimmed
+   703→   703→    entries = list((manifest.get("images") or {}).items())
+   704→   704→    trim_box = common_trim_box(entries)
+   705→   705→    if not trim_box:
+   706→   706→        return trimmed
+   707→   707→    manifest["common_trim_box"] = list(trim_box)
+   708→   708→    for key, data in entries:
+   709→   709→        src = Path(data.get("png") or "")
+   710→   710→        if not src.exists():
+   711→   711→            continue
+   712→   712→        image = Image.open(src).convert("RGBA")
+   713→   713→        cropped = image.crop(trim_box)
+   714→   714→        white = Image.new("RGB", cropped.size, "white")
+   715→   715→        white.paste(cropped, mask=cropped.split()[3])
+   716→   716→        dst = out_dir / (safe_name(key.replace("/", "__")) + ".png")
+   717→   717→        dst.parent.mkdir(parents=True, exist_ok=True)
+   718→   718→        white.save(dst)
+   719→   719→        data["ppt_png"] = str(dst)
+   720→   720→        trimmed[key] = {"path": dst, "trim_box": list(trim_box)}
+   721→   721→    return trimmed
+   722→   722→
+   723→   723→def find_pptx(folder):
+   724→   724→    candidates = [p for p in sorted(folder.glob("*picture_flow*.pptx")) if "_chimerax" not in p.stem]
+   725→   725→    return candidates[0] if candidates else None
+   726→   726→
+   727→   727→def ppt_key_candidates(key):
+   728→   728→    parts = str(key or "").split("/", 1)
+   729→   729→    if len(parts) != 2:
+   730→   730→        return [key]
+   731→   731→    uid, group = parts
+   732→   732→    candidates = [key]
+   733→   733→    legacy_group = "volume_preview" if group == "volume" else f"{group}_preview"
+   734→   734→    candidates.append(f"{uid}/{legacy_group}")
+   735→   735→    return list(dict.fromkeys(candidates))
+   736→   736→
+   737→   737→def replace_ppt_media(session, folder, manifest):
+   738→   738→    pptx = find_pptx(folder)
+   739→   739→    if not pptx:
+   740→   740→        session.logger.info("未找到 PPTX 文件，跳过替换")
+   741→   741→        return None
+   742→   742→    out_pptx = pptx.with_name(pptx.stem + "_chimerax.pptx")
+   743→   743→    replacements = {}
+   744→   744→    prepare_trimmed_images(folder, manifest)
+   745→   745→
+   746→   746→    with zipfile.ZipFile(pptx, "r") as src:
+   747→   747→        names = set(src.namelist())
+   748→   748→        for slide_name in sorted(n for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n)):
+   749→   749→            rels_name = "ppt/slides/_rels/" + Path(slide_name).name + ".rels"
+   750→   750→            if rels_name not in names:
+   751→   751→                continue
+   752→   752→            slide_xml = src.read(slide_name).decode("utf-8", errors="ignore")
+   753→   753→            rels_xml = src.read(rels_name).decode("utf-8", errors="ignore")
+   754→   754→            rel_targets = {
+   755→   755→                m.group(1): m.group(2)
+   756→   756→                for m in re.finditer(r'<Relationship[^>]+Id="([^"]+)"[^>]+Target="([^"]+)"', rels_xml)
+   757→   757→            }
+   758→   758→            for pic_match in re.finditer(r"<p:pic\b.*?</p:pic>", slide_xml, re.S):
+   759→   759→                pic_xml = pic_match.group(0)
+   760→   760→                name_match = re.search(r'<p:cNvPr[^>]+name="CryoSmartImage:([^"]+)"', pic_xml)
+   761→   761→                if not name_match:
+   762→   762→                    continue
+   763→   763→                key = name_match.group(1).replace("&amp;", "&").replace("&quot;", '"')
+   764→   764→                image_key = next((c for c in ppt_key_candidates(key) if c in manifest.get("images", {})), None)
+   765→   765→                if not image_key:
+   766→   766→                    continue
+   767→   767→                embed_match = re.search(r'<a:blip[^>]+r:embed="([^"]+)"', pic_xml)
+   768→   768→                if not embed_match:
+   769→   769→                    continue
+   770→   770→                target = rel_targets.get(embed_match.group(1))
+   771→   771→                if not target:
+   772→   772→                    continue
+   773→   773→                media_name = str((Path(slide_name).parent / target).as_posix())
+   774→   774→                media_name = str(Path(media_name).as_posix())
+   775→   775→                while "/../" in media_name:
+   776→   776→                    media_name = re.sub(r"[^/]+/\.\./", "", media_name, count=1)
+   777→   777→                if not media_name.startswith("ppt/media/"):
+   778→   778→                    media_name = "ppt/media/" + Path(target).name
+   779→   779→                png_path = Path(manifest["images"][image_key].get("ppt_png") or manifest["images"][image_key].get("png") or "")
+   780→   780→                if png_path.exists():
+   781→   781→                    replacements[media_name] = png_path.read_bytes()
+   782→   782→
+   783→   783→        with zipfile.ZipFile(out_pptx, "w", zipfile.ZIP_DEFLATED) as dst:
+   784→   784→            for item in src.infolist():
+   785→   785→                data = replacements.get(item.filename)
+   786→   786→                if data is None:
+   787→   787→                    data = src.read(item.filename)
+   788→   788→                dst.writestr(item, data)
+   789→   789→
+   790→   790→    session.logger.info(f"PPT 已生成: {out_pptx}")
+   791→   791→    return out_pptx
+   792→   792→
+   793→   793→
+   794→   794→# ==================== 新增：90°视角自动优化函数（来自第三个脚本） ====================
+   795→   795→def score_current_view(session):
+   796→   796→    """截取当前视角缩略图，计算非白色像素比例作为评分（地图覆盖率）"""
+   797→   797→    if np is None or Image is None:
+   798→   798→        return 0.0
+   799→   799→    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+   800→   800→        path = tmp.name
+   801→   801→    try:
+   802→   802→        cxrun(session, f"save {q(path)} width {SCORE_THUMB_SIZE} height {SCORE_THUMB_SIZE} supersample 1 transparentBackground false")
+   803→   803→        img = Image.open(path).convert("RGB")
+   804→   804→        arr = np.array(img)
+   805→   805→        bg = np.all(arr > 240, axis=-1)
+   806→   806→        score = float((arr.shape[0] * arr.shape[1] - np.sum(bg)) / (arr.shape[0] * arr.shape[1]))
+   807→   807→        return score
+   808→   808→    except Exception as e:
+   809→   809→        session.logger.warning(f"视角评分失败: {e}")
+   810→   810→        return 0.0
+   811→   811→    finally:
+   812→   812→        if os.path.exists(path):
+   813→   813→            os.unlink(path)
+   814→   814→
+   815→   815→def select_best_90_view(session, test_vol):
+   816→   816→    """
+   817→   817→    基于当前视角（需先手动调好基准），测试5个方向（基准、Y±90、X±90），
+   818→   818→    选择地图占画面比例最大的方向，并应用该视角。
+   819→   819→    """
+   820→   820→    session.logger.info("===== 90° 视角自动优化 =====")
+   821→   821→
+   822→   822→    # 保存当前视角为基准
+   823→   823→    cxrun(session, "view name base_view")
+   824→   824→    cxrun(session, "wait 1")
+   825→   825→
+   826→   826→    # 只显示测试地图
+   827→   827→    all_vols = volume_models(session)
+   828→   828→    for vol in all_vols:
+   829→   829→        if vol.id_string == test_vol.id_string:
+   830→   830→            cxrun(session, f"show #{vol.id_string} models")
+   831→   831→        else:
+   832→   832→            cxrun(session, f"hide #{vol.id_string} models")
+   833→   833→    cxrun(session, "wait 1")
+   834→   834→
+   835→   835→    candidates = [
+   836→   836→        ("base", 0, 0),
+   837→   837→        ("y+90", 0, 90),
+   838→   838→        ("y-90", 0, -90),
+   839→   839→        ("x+90", 90, 0),
+   840→   840→        ("x-90", -90, 0),
+   841→   841→    ]
+   842→   842→
+   843→   843→    best_score = -1.0
+   844→   844→    best_desc = "base"
+   845→   845→    best_rot = (0, 0)
+   846→   846→
+   847→   847→    for desc, x_rot, y_rot in candidates:
+   848→   848→        cxrun(session, "view base_view")
+   849→   849→        cxrun(session, "wait 1")
+   850→   850→        if x_rot != 0:
+   851→   851→            cxrun(session, f"turn x {x_rot}")
+   852→   852→        if y_rot != 0:
+   853→   853→            cxrun(session, f"turn y {y_rot}")
+   854→   854→        cxrun(session, "wait 1")
+   855→   855→        score = score_current_view(session)
+   856→   856→        session.logger.info(f"  {desc}: X={x_rot}°, Y={y_rot}°, Score={score:.4f}")
+   857→   857→        if score > best_score:
+   858→   858→            best_score = score
+   859→   859→            best_desc = desc
+   860→   860→            best_rot = (x_rot, y_rot)
+   861→   861→
+   862→   862→    # 应用最佳视角
+   863→   863→    session.logger.info(f"最佳视角: {best_desc} (X={best_rot[0]}°, Y={best_rot[1]}°), Score={best_score:.4f}")
+   864→   864→    cxrun(session, "view base_view")
+   865→   865→    cxrun(session, "wait 1")
+   866→   866→    if best_rot[0] != 0:
+   867→   867→        cxrun(session, f"turn x {best_rot[0]}")
+   868→   868→    if best_rot[1] != 0:
+   869→   869→        cxrun(session, f"turn y {best_rot[1]}")
+   870→   870→    cxrun(session, "wait 1")
+   871→   871→
+   872→   872→    # 恢复显示所有地图
+   873→   873→    for vol in all_vols:
+   874→   874→        cxrun(session, f"show #{vol.id_string} models")
+   875→   875→    cxrun(session, "wait 1")
+   876→   876→
+   877→   877→    return {"desc": best_desc, "x": best_rot[0], "y": best_rot[1], "score": best_score}
+   878→   878→
+   879→   879→
+   880→   880→# ==================== 主流程 ====================
+   881→   881→def main(session, lineage_folder=None):
+   882→   882→    if lineage_folder is None:
+   883→   883→        argv = list(sys.argv[1:])
+   884→   884→        if argv and Path(argv[0]).expanduser().exists():
+   885→   885→            lineage_folder = argv[0]
+   886→   886→        else:
+   887→   887→            script_path = Path(__file__).expanduser().resolve() if "__file__" in globals() else None
+   888→   888→            lineage_folder = script_path.parent if script_path else os.getcwd()
+   889→   889→    folder = Path(lineage_folder).expanduser().resolve()
+   890→   890→    if folder.is_file():
+   891→   891→        folder = folder.parent
+   892→   892→
+   893→   893→    session.logger.info("===== CryoSmart 自动对齐 + 视角优化 + 导出 PPT =====")
+   894→   894→    session.logger.info(f"工作目录: {folder}")
+   895→   895→
+   896→   896→    # ---- 1. 加载谱系数据 ----
+   897→   897→    summary_path = find_lineage_json(folder)
+   898→   898→    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+   899→   899→    items = mrc_candidates_from_summary(folder, summary)
+   900→   900→    if not items:
+   901→   901→        raise RuntimeError("没有找到可用的 MRC 文件")
+   902→   902→    reference = choose_reference(items, summary)
+   903→   903→    if not reference:
+   904→   904→        raise RuntimeError("无法确定参考地图")
+   905→   905→
+   906→   906→    session.logger.info(f"参考地图: {reference['key']} -> {reference['path']}")
+   907→   907→
+   908→   908→    # ---- 2. 构建 map 谱系 ----
+   909→   909→    lineage = build_map_lineage(summary, items)
+   910→   910→    manifest = {
+   911→   911→        "lineage_folder": str(folder),
+   912→   912→        "lineage_json": str(summary_path),
+   913→   913→        "reference_key": reference["key"],
+   914→   914→        "reference_path": str(reference["path"]),
+   915→   915→        "fit_search": FIT_SEARCH,
+   916→   916→        "map_lineage": {
+   917→   917→            "starts": lineage["starts"],
+   918→   918→            "edges": lineage["edges"],
+   919→   919→            "chains": lineage["chains"],
+   920→   920→            "warnings": lineage["warnings"],
+   921→   921→        },
+   922→   922→        "models": {},
+   923→   923→        "terminal_results": {},
+   924→   924→        "warnings": list(lineage["warnings"]),
+   925→   925→    }
+   926→   926→
+   927→   927→    # ---- 3. 打开参考地图 ----
+   928→   928→    ref_commands = []
+   929→   929→    ref_vol = open_volume(session, reference["path"], ref_commands)
+   930→   930→    ref_vol.name = reference["key"]
+   931→   931→    ref_density = max_density(ref_vol)
+   932→   932→    set_volume_display(session, ref_vol, ref_density, ref_commands)
+   933→   933→    manifest["models"][reference["key"]] = {
+   934→   934→        "role": "reference",
+   935→   935→        "model_id": ref_vol.id_string,
+   936→   936→        "source_mrc": str(reference["path"]),
+   937→   937→        "position": position_text(ref_vol),
+   938→   938→        "commands": ref_commands,
+   939→   939→    }
+   940→   940→
+   941→   941→    loaded_by_key = {reference["key"]: {"model": ref_vol, **reference, "score": 1.0}}
+   942→   942→    terminal_results = {reference["key"]: loaded_by_key[reference["key"]]}
+   943→   943→    all_candidate_rows = []
+   944→   944→
+   945→   945→    # ---- 4. 对每个终端地图测试候选 ----
+   946→   946→    terminal_keys = sorted({chain["terminal"] for chain in lineage["chains"]})
+   947→   947→    for terminal_key in terminal_keys:
+   948→   948→        if terminal_key == reference["key"]:
+   949→   949→            continue
+   950→   950→        item = lineage["items"].get(terminal_key)
+   951→   951→        if not item:
+   952→   952→            continue
+   953→   953→        session.logger.info(f"测试终端地图: {terminal_key}")
+   954→   954→
+   955→   955→        candidate_rows = []
+   956→   956→        for spec in candidate_specs():
+   957→   957→            row = test_candidate(session, item, reference, ref_vol, ref_density, spec)
+   958→   958→            candidate_rows.append(row)
+   959→   959→            session.logger.info(
+   960→   960→                f"  {spec['name']}: score={row.get('score')} "
+   961→   961→                f"fit1={row.get('fit_no_search_corr')} fit_search={row.get('fit_search_corr')}"
+   962→   962→            )
+   963→   963→
+   964→   964→        best = choose_best(candidate_rows)
+   965→   965→        if GENERATE_CXC:
+   966→   966→            cxc_dir = folder / "debug_cxc"
+   967→   967→            cxc_dir.mkdir(exist_ok=True)
+   968→   968→            cxc_path = write_candidate_cxc(cxc_dir, item, reference, candidate_rows)
+   969→   969→        else:
+   970→   970→            cxc_path = None
+   971→   971→
+   972→   972→        for row in candidate_rows:
+   973→   973→            row["map_key"] = item["key"]
+   974→   974→            row["chosen"] = bool(best and row is best)
+   975→   975→            row["reference_key"] = reference["key"]
+   976→   976→            row["source_mrc"] = str(item["path"])
+   977→   977→            row["reference_mrc"] = str(reference["path"])
+   978→   978→            row["cxc_file"] = str(cxc_path) if cxc_path else ""
+   979→   979→            row["errors"] = "; ".join(row.get("errors") or [])
+   980→   980→            all_candidate_rows.append(row)
+   981→   981→
+   982→   982→        if best is None:
+   983→   983→            manifest["warnings"].append(f"没有找到有效候选: {item['key']}")
+   984→   984→            continue
+   985→   985→
+   986→   986→        for row in candidate_rows:
+   987→   987→            if row is best:
+   988→   988→                continue
+   989→   989→            for model in row.get("opened_models") or []:
+   990→   990→                close_model(session, model)
+   991→   991→
+   992→   992→        best_model = best["model"]
+   993→   993→        best_model.name = item["key"] + "__BEST_" + best["candidate"]
+   994→   994→        result = {
+   995→   995→            **item,
+   996→   996→            "model": best_model,
+   997→   997→            "score": best["score"],
+   998→   998→            "candidate": best["candidate"],
+   999→   999→            "model_id": best_model.id_string,
+  1000→  1000→            "position": position_text(best_model),
+  1001→  1001→            "cxc_file": str(cxc_path) if cxc_path else "",
+  1002→  1002→        }
+  1003→  1003→        terminal_results[terminal_key] = result
+  1004→  1004→        loaded_by_key[terminal_key] = result
+  1005→  1005→        manifest["terminal_results"][terminal_key] = {
+  1006→  1006→            "chosen_candidate": best["candidate"],
+  1007→  1007→            "score": best["score"],
+  1008→  1008→            "model_id": best_model.id_string,
+  1009→  1009→            "source_mrc": str(item["path"]),
+  1010→  1010→            "position": position_text(best_model),
+  1011→  1011→        }
+  1012→  1012→        manifest["models"][item["key"]] = {
+  1013→  1013→            "role": "chain_terminal",
+  1014→  1014→            "model_id": best_model.id_string,
+  1015→  1015→            "chosen_candidate": best["candidate"],
+  1016→  1016→            "score": best["score"],
+  1017→  1017→            "source_mrc": str(item["path"]),
+  1018→  1018→            "position": position_text(best_model),
+  1019→  1019→        }
+  1020→  1020→        session.logger.info(f"  选中 {terminal_key}: {best['candidate']} score={best['score']}")
+  1021→  1021→
+  1022→  1022→    # ---- 5. 继承变换给链上非终端成员 ----
+  1023→  1023→    for item in items:
+  1024→  1024→        if item["key"] in loaded_by_key:
+  1025→  1025→            continue
+  1026→  1026→        chain, terminal_result = lineage_terminal_results_for_key(lineage, terminal_results, item["key"])
+  1027→  1027→        if not terminal_result or not terminal_result.get("model"):
+  1028→  1028→            manifest["warnings"].append(f"无法继承变换: {item['key']}（缺少终端结果）")
+  1029→  1029→            continue
+  1030→  1030→        commands = []
+  1031→  1031→        try:
+  1032→  1032→            vol = open_volume(session, item["path"], commands)
+  1033→  1033→            vol.name = item["key"] + "__inherited"
+  1034→  1034→            set_volume_display(session, vol, ref_density, commands)
+  1035→  1035→            vol.position = terminal_result["model"].position
+  1036→  1036→            loaded_by_key[item["key"]] = {**item, "model": vol}
+  1037→  1037→            manifest["models"][item["key"]] = {
+  1038→  1038→                "role": "chain_member_inherited",
+  1039→  1039→                "model_id": vol.id_string,
+  1040→  1040→                "source_mrc": str(item["path"]),
+  1041→  1041→                "inherited_from_terminal": chain["terminal"] if chain else "",
+  1042→  1042→                "terminal_candidate": terminal_result.get("candidate", ""),
+  1043→  1043→                "terminal_score": terminal_result.get("score", ""),
+  1044→  1044→                "position": position_text(vol),
+  1045→  1045→                "commands": commands,
+  1046→  1046→            }
+  1047→  1047→        except Exception as exc:
+  1048→  1048→            manifest["warnings"].append(f"继承失败 {item['key']}: {exc}")
+  1049→  1049→
+  1050→  1050→    # ---- 6. （可选）生成调试日志 ----
+  1051→  1051→    if GENERATE_DEBUG_IMAGES:
+  1052→  1052→        out_dir = folder / "chimerax_fit_candidate_debug"
+  1053→  1053→        out_dir.mkdir(exist_ok=True)
+  1054→  1054→        write_debug_logs(out_dir, manifest, all_candidate_rows)
+  1055→  1055→
+  1056→  1056→    # ---- 7. 显示所有模型，提示用户手动调整基准视角（非阻塞） ----
+  1057→  1057→    for vol in volume_models(session):
+  1058→  1058→        cxrun(session, f"show #{vol.id_string} models")
+  1059→  1059→    cxrun(session, "set bgColor white")
+  1060→  1060→    cxrun(session, "view pad 0.25")
+  1061→  1061→    cxrun(session, "wait 1")
+  1062→  1062→
+  1063→  1063→    session.logger.info("\n" + "=" * 60)
+  1064→  1064→    session.logger.info("请手动旋转/缩放视角到您想要的基准方向（使地图居中且特征明显）。")
+  1065→  1065→    session.logger.info("调整好后，脚本将自动测试 5 个方向（基准、Y±90、X±90）并选出最优视角。")
+  1066→  1066→    session.logger.info("如果您已经调整好，脚本会立即开始优化；否则请先调整，然后继续运行。")
+  1067→  1067→    session.logger.info("=" * 60 + "\n")
+  1068→  1068→
+  1069→  1069→    # ---- 8. 执行 90° 视角自动优化（基于当前基准） ----
+  1070→  1070→    best_view = select_best_90_view(session, ref_vol)
+  1071→  1071→    manifest["best_90_view"] = best_view
+  1072→  1072→
+  1073→  1073→    # ---- 9. 导出图像（使用优化后的视角） ----
+  1074→  1074→    manifest = export_images_with_current_view(session, folder, manifest)
+  1075→  1075→
+  1076→  1076→    # ---- 10. 替换 PPT ----
+  1077→  1077→    out_pptx = replace_ppt_media(session, folder, manifest)
+  1078→  1078→
+  1079→  1079→    # ---- 11. 保存 manifest ----
+  1080→  1080→    manifest_path = folder / "chimerax_rendered_maps" / "rendered_map_manifest.json"
+  1081→  1081→    manifest_path.parent.mkdir(exist_ok=True)
+  1082→  1082→    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+  1083→  1083→
+  1084→  1084→    session.logger.info("===== 全部完成 =====")
+  1085→  1085→    session.logger.info(f"最佳视角: {best_view['desc']} (X={best_view['x']}°, Y={best_view['y']}°)")
+  1086→  1086→    session.logger.info(f"得分: {best_view['score']:.4f}")
+  1087→  1087→    if out_pptx:
+  1088→  1088→        session.logger.info(f"PPT 已生成: {out_pptx}")
+  1089→  1089→    session.logger.info(f"渲染图片目录: {folder / 'chimerax_rendered_maps'}")
+  1090→  1090→    session.logger.info(f"裁剪图片目录: {folder / 'chimerax_rendered_maps_trimmed'}")
+  1091→  1091→
+  1092→  1092→
+  1093→  1093→# ==================== 入口 ====================
+  1094→  1094→if "session" in globals():
+  1095→  1095→    main(session)
+  1096→  1096→else:
+  1097→  1097→    print("请在 ChimeraX 中打开此脚本运行。")

@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "CryoSmart Lineage Tracer 3.0",
+  "version": "0.6.0",
+  "description": "Export CryoSmart metadata, build lineage/Picture Flow reports, download preview images/maps/final assets, and export a ChimeraX map rendering script.",
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,602 @@
+  1200→    }));
+  1201→}
+  1202→
+  1203→function finalResultMetadata(summary, scanSummary) {
+  1204→  const metrics = (scanSummary && scanSummary.metrics) || {};
+  1205→  return {
+  1206→    project_uid: summary.project_uid,
+  1207→    start_uid: summary.start_uid,
+  1208→    base_url: summary.base_url || (scanSummary && scanSummary.baseUrl) || "",
+  1209→    final_particle_count: summary.final_particle_count ?? null,
+  1210→    final_resolution_A: metrics.fsc_resolution_A || summary.final_resolution_A || null,
+  1211→    guinier_b_factor: metrics.guinier_b_factor || null,
+  1212→    micrograph_pixel_size_A: pixelSizeNumber(summary.micrograph_pixel_size_A) || null,
+  1213→    graphs: (scanSummary && scanSummary.graphs) || {},
+  1214→    missing_required: (scanSummary && scanSummary.missingRequired) || [],
+  1215→    warnings: (scanSummary && scanSummary.warnings) || [],
+  1216→    files: (scanSummary && scanSummary.items || []).map((item) => ({
+  1217→      kind: item.kind,
+  1218→      group: item.group || item.suffix || "",
+  1219→      iteration: item.iteration || null,
+  1220→      relative_path: item.relativePath,
+  1221→      url: item.url
+  1222→    }))
+  1223→  };
+  1224→}
+  1225→
+  1226→function finalResultMetadataText(data) {
+  1227→  const lines = [];
+  1228→  lines.push(`${data.project_uid}/${data.start_uid} final results`);
+  1229→  lines.push(`final particles: ${data.final_particle_count !== null && data.final_particle_count !== undefined ? fmt(data.final_particle_count) : "unknown"}`);
+  1230→  lines.push(`FSC resolution: ${data.final_resolution_A ? `${formatBinFactor(data.final_resolution_A)} Å` : "unknown"}`);
+  1231→  lines.push(`Guinier B-factor: ${data.guinier_b_factor !== null && data.guinier_b_factor !== undefined ? data.guinier_b_factor : "unknown"}`);
+  1232→  lines.push(`micrograph pixel size: ${data.micrograph_pixel_size_A ? `${formatPixelSize(data.micrograph_pixel_size_A)} Å/px` : "unknown"}`);
+  1233→  lines.push("");
+  1234→  lines.push("graph iterations:");
+  1235→  for (const [key, graph] of Object.entries(data.graphs || {})) {
+  1236→    lines.push(`- ${key}: Iteration ${traceSafeIteration(graph.iteration)}`);
+  1237→  }
+  1238→  if (data.warnings && data.warnings.length) {
+  1239→    lines.push("");
+  1240→    lines.push("warnings:");
+  1241→    for (const warning of data.warnings) lines.push(`- ${warning}`);
+  1242→  }
+  1243→  return lines.join("\n");
+  1244→}
+  1245→
+  1246→function traceSafeIteration(value) {
+  1247→  return value === null || value === undefined ? "unknown" : String(value).padStart(3, "0");
+  1248→}
+  1249→
+  1250→function dedupeAssets(assets) {
+  1251→  const seen = new Set();
+  1252→  return assets.filter((asset) => {
+  1253→    const key = asset && (asset.filename || asset.url);
+  1254→    if (!asset || !asset.url || !key || seen.has(key)) return false;
+  1255→    seen.add(key);
+  1256→    return true;
+  1257→  });
+  1258→}
+  1259→
+  1260→function escHtml(value) {
+  1261→  return String(value ?? "")
+  1262→    .replace(/&/g, "&amp;")
+  1263→    .replace(/</g, "&lt;")
+  1264→    .replace(/>/g, "&gt;")
+  1265→    .replace(/"/g, "&quot;")
+  1266→    .replace(/'/g, "&#39;");
+  1267→}
+  1268→
+  1269→function fmt(value) {
+  1270→  return Number.isInteger(value) ? value.toLocaleString("en-US") : escHtml(value);
+  1271→}
+  1272→
+  1273→function summaryNodeMap(summary) {
+  1274→  return new Map((summary.nodes || []).map((node) => [node.uid, node]));
+  1275→}
+  1276→
+  1277→function summaryKind(edge) {
+  1278→  if (edge.kind) return edge.kind;
+  1279→  if (edge.input_type) return edgeKind({ input_type: edge.input_type, slots: edge.slots || [] });
+  1280→  if (Array.isArray(edge.kinds) && edge.kinds.length) return edge.kinds[0];
+  1281→  return "parent";
+  1282→}
+  1283→
+  1284→function htmlKindClass(kind) {
+  1285→  return {
+  1286→    particle: "particle",
+  1287→    volume: "volume",
+  1288→    mask: "volume",
+  1289→    exposure: "exposure",
+  1290→    template: "template"
+  1291→  }[kind] || "other";
+  1292→}
+  1293→
+  1294→function htmlKindLabel(kind) {
+  1295→  return {
+  1296→    particle: "particles",
+  1297→    volume: "map",
+  1298→    mask: "mask",
+  1299→    exposure: "micrographs",
+  1300→    template: "2D classes/templates",
+  1301→    parent: "parent"
+  1302→  }[kind] || kind || "";
+  1303→}
+  1304→
+  1305→function htmlNodeKind(node) {
+  1306→  const type = node.job_type || "";
+  1307→  if (node.volume_count !== null && node.volume_count !== undefined) return "volume";
+  1308→  if (/refine|abinit|volume|class_3D/i.test(type)) return "volume";
+  1309→  if (node.particle_count !== null && node.particle_count !== undefined) return "particle";
+  1310→  if (/particle|picker|topaz/i.test(type)) return "particle";
+  1311→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) return "exposure";
+  1312→  if (/micrograph|ctf|exposure/i.test(type)) return "exposure";
+  1313→  return "other";
+  1314→}
+  1315→
+  1316→function htmlMetricChips(node) {
+  1317→  const chips = [];
+  1318→  if (node.particle_count !== null && node.particle_count !== undefined) chips.push(["颗粒数", node.particle_count]);
+  1319→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) chips.push(["照片数", node.micrograph_count]);
+  1320→  if (pixelSizeText(node)) chips.push(["pixel size", pixelSizeText(node)]);
+  1321→  if (node.volume_count !== null && node.volume_count !== undefined) chips.push(["volume 数", node.volume_count]);
+  1322→  return chips.map(([label, value]) => `<span class="metric">${label}: ${fmt(value)}</span>`).join("");
+  1323→}
+  1324→
+  1325→function htmlCompactMetric(node) {
+  1326→  if (!node) return "";
+  1327→  const parts = [];
+  1328→  if (node.particle_count !== null && node.particle_count !== undefined) parts.push(`颗粒数 ${fmt(node.particle_count)}`);
+  1329→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) parts.push(`照片数 ${fmt(node.micrograph_count)}`);
+  1330→  if (pixelSizeText(node)) parts.push(`pixel ${pixelSizeText(node)}`);
+  1331→  if (node.volume_count !== null && node.volume_count !== undefined) parts.push(`volume 数 ${fmt(node.volume_count)}`);
+  1332→  return parts.join("; ");
+  1333→}
+  1334→
+  1335→function htmlJobRef(uid, nodeMap) {
+  1336→  const node = nodeMap.get(uid);
+  1337→  return node
+  1338→    ? `<a href="#${escHtml(uid)}">${escHtml(uid)} ${escHtml(node.job_type || "")}</a>`
+  1339→    : escHtml(uid);
+  1340→}
+  1341→
+  1342→function htmlGroupLabel(edge) {
+  1343→  return edge.source_group || edge.input_name || "";
+  1344→}
+  1345→
+  1346→function htmlRelationPills(edge) {
+  1347→  const kind = summaryKind(edge);
+  1348→  const cls = htmlKindClass(kind);
+  1349→  const groups = [];
+  1350→  const group = htmlGroupLabel(edge);
+  1351→  if (group) groups.push(group);
+  1352→  return `<span class="edge-pills"><span class="kind-pill kind-${cls}">${escHtml(htmlKindLabel(kind))}</span>${groups.map((item) => `<span class="group-pill group-${cls}">${escHtml(item)}</span>`).join("")}</span>`;
+  1353→}
+  1354→
+  1355→function groupedHtmlEdges(edges, peerKey) {
+  1356→  const grouped = new Map();
+  1357→  for (const edge of edges) {
+  1358→    const peer = edge[peerKey];
+  1359→    if (!peer) continue;
+  1360→    const kind = summaryKind(edge);
+  1361→    const group = htmlGroupLabel(edge);
+  1362→    const key = `${peer}\t${kind}\t${group}`;
+  1363→    if (!grouped.has(key)) grouped.set(key, { ...edge, kind, peer });
+  1364→  }
+  1365→  return Array.from(grouped.values());
+  1366→}
+  1367→
+  1368→function htmlSmallSourceHops(peerUid, kind, edges, nodeMap) {
+  1369→  const peer = nodeMap.get(peerUid);
+  1370→  if (!peer || importance(peer, "") !== "small") return "";
+  1371→  const incoming = edges.filter((edge) => edge.target === peerUid && summaryKind(edge) === kind).slice(0, 3);
+  1372→  if (!incoming.length) return "";
+  1373→  return `<div class="hop-stack">${incoming.map((edge) => {
+  1374→    const source = nodeMap.get(edge.source);
+  1375→    const cls = htmlKindClass(summaryKind(edge));
+  1376→    const metric = htmlCompactMetric(source);
+  1377→    return `<div class="hop-row hop-${cls}"><span class="hop-label">上一层来源</span><span class="hop-main">${htmlJobRef(edge.source, nodeMap)} <span class="muted">-> ${escHtml(peerUid)}</span></span>${htmlRelationPills(edge)}${metric ? `<span class="hop-metric">${metric}</span>` : ""}</div>`;
+  1378→  }).join("")}</div>`;
+  1379→}
+  1380→
+  1381→function htmlSourceRows(node, summary, nodeMap) {
+  1382→  const edges = summary.edges || [];
+  1383→  const incoming = groupedHtmlEdges(edges.filter((edge) => edge.target === node.uid), "source");
+  1384→  const outgoing = groupedHtmlEdges(edges.filter((edge) => edge.source === node.uid), "target");
+  1385→  if (!incoming.length && !outgoing.length) return "";
+  1386→  const inHtml = incoming.length ? `<div class="source-col"><b>来源</b>${incoming.map((edge) => `<div class="source-row"><span>${htmlJobRef(edge.source, nodeMap)}</span>${htmlRelationPills(edge)}</div>${htmlSmallSourceHops(edge.source, summaryKind(edge), edges, nodeMap)}`).join("")}</div>` : "";
+  1387→  const outHtml = outgoing.length ? `<div class="source-col source-col-out"><b>流向</b>${outgoing.slice(0, 10).map((edge) => `<div class="source-row source-row-out"><span>${htmlJobRef(edge.target, nodeMap)}</span>${htmlRelationPills(edge)}</div>`).join("")}</div>` : "";
+  1388→  return `<div class="source-grid">${inHtml}${outHtml}</div>`;
+  1389→}
+  1390→
+  1391→function htmlClassTable(node, summary) {
+  1392→  const classJob = (summary.class_split_jobs || []).find((item) => item.uid === node.uid);
+  1393→  if (!classJob || !classJob.classes || !classJob.classes.length) return "";
+  1394→  const rows = classJob.classes.map((cls) => {
+  1395→    const links = (cls.maps || []).map((map) => `<a href="${escHtml(map.download_url)}" target="_blank">${escHtml(map.result_name)}</a>`).join(" ");
+  1396→    return `<tr><td>${escHtml(cls.class_index)}</td><td>${cls.particle_count === null || cls.particle_count === undefined ? "" : fmt(cls.particle_count)}</td><td>${cls.particle_percent === null || cls.particle_percent === undefined ? "" : escHtml(cls.particle_percent)}</td><td>${links}</td></tr>`;
+  1397→  }).join("");
+  1398→  return `<h3>Class / MRC 来源</h3><table><tr><th>Class</th><th>Particles</th><th>%</th><th>Map downloads</th></tr>${rows}</table>`;
+  1399→}
+  1400→
+  1401→function htmlMapTable(node, summary) {
+  1402→  if (node.uid !== summary.start_uid || !summary.map_download_urls) return "";
+  1403→  const rows = Object.entries(summary.map_download_urls).map(([name, url]) => (
+  1404→    `<tr><td>${escHtml(name)}</td><td><a href="${escHtml(url)}" target="_blank">download</a></td></tr>`
+  1405→  )).join("");
+  1406→  return `<h3>MRC Maps</h3><table><tr><th>Result</th><th>Download</th></tr>${rows}</table>`;
+  1407→}
+  1408→
+  1409→function buildLineageHtml(summary) {
+  1410→  const nodeMap = summaryNodeMap(summary);
+  1411→  const nodes = (summary.nodes || []).filter((node) => {
+  1412→    const cls = importance(node, summary.start_uid);
+  1413→    return cls === "major" || cls === "final";
+  1414→  });
+  1415→  const css = [
+  1416→    "body{font-family:'Times New Roman',Times,serif;margin:24px;color:#17202a;background:#f8fafc}",
+  1417→    "h1,h2,h3{margin:0 0 10px} h3{font-size:16px;margin-top:14px} a{color:#0b74de;text-decoration:none}",
+  1418→    ".muted{color:#64748b}.metric{display:inline-block;margin:0 8px 8px 0;padding:3px 8px;border:1px solid #cbd5e1;border-radius:999px;background:#f8fafc;font-size:12px}",
+  1419→    ".flow{position:relative;margin-left:12px}.flow::before{content:'';position:absolute;left:10px;top:0;bottom:0;width:3px;background:#cbd5e1}.flow-card{position:relative;background:white;border:1px solid #d8e0ea;border-left:5px solid #0284c7;border-radius:8px;margin:14px 0 14px 34px;padding:14px}.flow-card::before{content:'';position:absolute;left:-31px;top:24px;width:24px;height:3px;background:#38bdf8}.flow-card::after{content:'';position:absolute;left:-39px;top:18px;width:14px;height:14px;border-radius:50%;background:#0284c7;border:3px solid #e0f2fe}",
+  1420→    ".card-exposure{background:#f7fef9;border-left-color:#16a34a}.card-exposure::before{background:#16a34a}.card-exposure::after{background:#16a34a;border-color:#dcfce7}.card-particle{background:#fffdf4;border-left-color:#d97706}.card-particle::before{background:#d97706}.card-particle::after{background:#d97706;border-color:#fef3c7}.card-volume{background:#f8faff;border-left-color:#2563eb}.card-volume::before{background:#2563eb}.card-volume::after{background:#2563eb;border-color:#e0e7ff}",
+  1421→    ".source-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:12px;margin:10px 0}.source-col-out{background:#f8fafc;border:1px solid #edf2f7;border-radius:8px;padding:8px}.source-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0;padding:6px 8px;background:#fff;border:1px solid #dbe5ee;border-radius:6px}.source-row-out{background:#fbfdff;border-color:#edf2f7}",
+  1422→    ".hop-stack{display:grid;gap:5px;margin:0 0 8px 18px;padding-left:12px;border-left:2px solid #dbe5ee}.hop-row{display:grid;grid-template-columns:auto minmax(210px,1fr) auto auto;align-items:center;gap:8px;padding:6px 8px;border:1px solid #dbe5ee;border-radius:6px;background:#fbfdff;font-size:12px}.hop-label{font-size:11px;color:#64748b;background:#eef2f7;border:1px solid #dbe5ee;border-radius:999px;padding:1px 7px}.hop-main{font-weight:600}.hop-metric{justify-self:end;color:#475569;white-space:nowrap}.hop-particle{background:#fffdf4;border-color:#fcd34d}.hop-volume{background:#f8faff;border-color:#a5b4fc}.hop-exposure{background:#f7fef9;border-color:#86efac}",
+  1423→    ".edge-pills{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.kind-pill,.group-pill{white-space:nowrap;border-radius:999px;padding:2px 7px;font-size:12px}.kind-pill{color:#475569;background:#eef2f7;border:1px solid #dbe5ee}.group-pill{color:#334155;background:#f8fafc;border:1px solid #cbd5e1}.kind-particle,.group-particle{background:#fef3c7;border-color:#fcd34d;color:#78350f}.kind-volume,.group-volume{background:#e0e7ff;border-color:#a5b4fc;color:#1e3a8a}.kind-exposure,.group-exposure{background:#dcfce7;border-color:#86efac;color:#14532d}.kind-template,.group-template{background:#f1f5f9;border-color:#cbd5e1;color:#334155}",
+  1424→    "table{border-collapse:collapse;width:100%;font-size:13px} th,td{border-bottom:1px solid #e5e7eb;padding:6px;text-align:left;vertical-align:top}"
+  1425→  ].join("\n");
+  1426→  const cards = nodes.map((node) => `<article id="${escHtml(node.uid)}" class="flow-card card-${htmlNodeKind(node)}"><h2>${escHtml(node.uid)} ${escHtml(node.job_type || "")}</h2><div>${htmlMetricChips(node)}</div>${htmlSourceRows(node, summary, nodeMap)}${htmlClassTable(node, summary)}${htmlMapTable(node, summary)}</article>`).join("\n");
+  1427→  return `<!doctype html><html><head><meta charset="utf-8"><title>CryoSmart ${escHtml(summary.project_uid)} ${escHtml(summary.start_uid)} Lineage</title><style>${css}</style></head><body><h1>CryoSmart Lineage Report: ${escHtml(summary.project_uid)}/${escHtml(summary.start_uid)}</h1><p class="muted">Nodes: ${(summary.nodes || []).length} | data edges: ${(summary.edges || []).length}</p><h2>Main Data Chain</h2><div class="flow">${cards}</div></body></html>`;
+  1428→}
+  1429→
+  1430→function reportJobNum(uid) {
+  1431→  const match = String(uid || "").match(/J(\d+)/i);
+  1432→  return match ? Number(match[1]) : 0;
+  1433→}
+  1434→
+  1435→function reportEdgeKind(edge) {
+  1436→  return summaryKind(edge);
+  1437→}
+  1438→
+  1439→function reportKindFamily(kind) {
+  1440→  if (kind === "mask") return "volume";
+  1441→  if (kind === "exposure") return "exposure";
+  1442→  if (kind === "particle") return "particle";
+  1443→  if (kind === "volume") return "volume";
+  1444→  if (kind === "template" || kind === "ml_model" || kind === "model") return "template";
+  1445→  return kind || "other";
+  1446→}
+  1447→
+  1448→function reportKindLabel(kind) {
+  1449→  return {
+  1450→    particle: "颗粒",
+  1451→    volume: "map",
+  1452→    mask: "mask",
+  1453→    exposure: "照片",
+  1454→    template: "template",
+  1455→    ml_model: "model",
+  1456→    model: "model",
+  1457→    parent: "parent"
+  1458→  }[kind] || kind || "";
+  1459→}
+  1460→
+  1461→function reportIsPickingNode(node) {
+  1462→  return PICKING_JOB_TYPES.has(node && node.job_type);
+  1463→}
+  1464→
+  1465→function reportIsRepickParticleProducer(node) {
+  1466→  return Boolean(
+  1467→    node &&
+  1468→    REPICK_PARTICLE_PRODUCER_TYPES.has(node.job_type) &&
+  1469→    node.particle_count !== null &&
+  1470→    node.particle_count !== undefined
+  1471→  );
+  1472→}
+  1473→
+  1474→function reportIsRepickSetupNode(node) {
+  1475→  return REPICK_SETUP_JOB_TYPES.has(node && node.job_type);
+  1476→}
+  1477→
+  1478→function reportIsParticleAuxNode(node) {
+  1479→  return PARTICLE_AUX_JOB_TYPES.has(node && node.job_type);
+  1480→}
+  1481→
+  1482→function reportIsVolumeSourceNode(node) {
+  1483→  const type = (node && node.job_type) || "";
+  1484→  return Boolean(
+  1485→    node && (
+  1486→      node.volume_count !== null && node.volume_count !== undefined ||
+  1487→      /homo_abinit|hetero|nonuniform|homo_refine|local_refine|class_3D|var_3D|volume|map|align_3D|homo_reconstruct|sym_expand|particle_subtract/i.test(type)
+  1488→    )
+  1489→  );
+  1490→}
+  1491→
+  1492→function reportHasRepickSeed(uid, state, visited = new Set(), depth = 0) {
+  1493→  if (!uid || visited.has(uid) || depth > 8) return false;
+  1494→  if (state.repickSeedMemo && state.repickSeedMemo.has(uid)) return state.repickSeedMemo.get(uid);
+  1495→  visited.add(uid);
+  1496→  const node = state.nodeMap.get(uid);
+  1497→  if (!node) return false;
+  1498→  const finish = (value) => {
+  1499→    if (state.repickSeedMemo) state.repickSeedMemo.set(uid, value);
+  1500→    return value;
+  1501→  };
+  1502→  if (reportIsVolumeSourceNode(node)) return finish(true);
+  1503→  if (reportIsRepickParticleProducer(node)) return finish(false);
+  1504→
+  1505→  const incoming = state.incomingByTarget.get(uid) || [];
+  1506→  for (const edge of incoming) {
+  1507→    const source = state.nodeMap.get(edge.source);
+  1508→    if (edge.family === "volume" || edge.kind === "mask") return finish(true);
+  1509→    if (edge.family === "particle" && reportIsVolumeSourceNode(source)) return finish(true);
+  1510→    if (reportIsRepickSetupNode(node) || reportIsRepickSetupNode(source) || edge.family === "particle") {
+  1511→      if (reportHasRepickSeed(edge.source, state, new Set(visited), depth + 1)) return finish(true);
+  1512→    }
+  1513→  }
+  1514→  return finish(false);
+  1515→}
+  1516→
+  1517→function reportFeedsVolumeMainline(uid, state, visited = new Set(), depth = 0) {
+  1518→  if (!uid || visited.has(uid) || depth > 10) return false;
+  1519→  visited.add(uid);
+  1520→  const node = state.nodeMap.get(uid);
+  1521→  if (!node) return false;
+  1522→  if (depth > 0 && reportIsVolumeSourceNode(node)) return true;
+  1523→  const outgoing = state.outgoingBySource ? state.outgoingBySource.get(uid) || [] : [];
+  1524→  for (const edge of outgoing) {
+  1525→    const target = state.nodeMap.get(edge.target);
+  1526→    if (!target) continue;
+  1527→    if (edge.family === "particle" || edge.family === "volume" || edge.family === "template" || /model/i.test(edge.kind || "")) {
+  1528→      if (reportFeedsVolumeMainline(edge.target, state, new Set(visited), depth + 1)) return true;
+  1529→    }
+  1530→  }
+  1531→  return false;
+  1532→}
+  1533→
+  1534→function reportRepickSeedSourceRounds(incoming, state, visited = new Set()) {
+  1535→  return incoming.map((edge) => {
+  1536→    const sourceNode = state.nodeMap.get(edge.source);
+  1537→    const directSeed = edge.family === "volume" ||
+  1538→      edge.kind === "mask" ||
+  1539→      (edge.family === "particle" && reportIsVolumeSourceNode(sourceNode));
+  1540→    const inheritedSeed = reportIsRepickSetupNode(sourceNode) && reportHasRepickSeed(edge.source, state);
+  1541→    if (!directSeed && !inheritedSeed) return null;
+  1542→    return reportLineageRound(edge.source, state, new Set(visited));
+  1543→  }).filter((value) => Number.isInteger(value));
+  1544→}
+  1545→
+  1546→function reportMaxRoundFromEdges(edges, state, visited) {
+  1547→  const rounds = edges.map((edge) => reportLineageRound(edge.source, state, new Set(visited)));
+  1548→  return rounds.length ? Math.max(...rounds) : 0;
+  1549→}
+  1550→
+  1551→function reportParticleSourceRound(incoming, state, visited) {
+  1552→  const particleIncoming = incoming.filter((edge) => edge.family === "particle");
+  1553→  return particleIncoming.length ? reportMaxRoundFromEdges(particleIncoming, state, visited) : null;
+  1554→}
+  1555→
+  1556→function reportLineageRound(uid, state, visited = new Set()) {
+  1557→  if (!uid || visited.has(uid)) return 0;
+  1558→  if (state.roundMemo && state.roundMemo.has(uid)) return state.roundMemo.get(uid);
+  1559→  visited.add(uid);
+  1560→  const node = state.nodeMap.get(uid);
+  1561→  if (!node) return 0;
+  1562→  const type = node.job_type || "";
+  1563→  const finish = (value) => {
+  1564→    if (state.roundMemo) state.roundMemo.set(uid, value);
+  1565→    return value;
+  1566→  };
+  1567→
+  1568→  if (/import_(movies|micrographs)/i.test(type)) return finish(0);
+  1569→  if (/import_particles/i.test(type)) return finish(1);
+  1570→
+  1571→  const incoming = state.incomingByTarget.get(uid) || [];
+  1572→  const maxSourceRound = reportMaxRoundFromEdges(incoming, state, visited);
+  1573→  const particleSourceRound = reportParticleSourceRound(incoming, state, visited);
+  1574→  const seedSourceRounds = reportRepickSeedSourceRounds(incoming, state, visited);
+  1575→  const seedRound = seedSourceRounds.length ? Math.max(...seedSourceRounds) : null;
+  1576→
+  1577→  if (reportIsRepickSetupNode(node)) {
+  1578→    if (seedRound !== null && reportFeedsVolumeMainline(uid, state)) {
+  1579→      return finish(Math.max(2, seedRound + 1));
+  1580→    }
+  1581→    return finish(Math.max(1, (particleSourceRound ?? maxSourceRound) || seedRound || 1));
+  1582→  }
+  1583→
+  1584→  if (reportIsRepickParticleProducer(node)) {
+  1585→    const setupSourceRounds = incoming
+  1586→      .filter((edge) => reportIsRepickSetupNode(state.nodeMap.get(edge.source)))
+  1587→      .map((edge) => reportLineageRound(edge.source, state, new Set(visited)));
+  1588→    if (setupSourceRounds.length) {
+  1589→      return finish(Math.max(1, ...setupSourceRounds));
+  1590→    }
+  1591→    if (seedRound !== null && reportFeedsVolumeMainline(uid, state)) {
+  1592→      return finish(Math.max(2, seedRound + 1));
+  1593→    }
+  1594→    return finish(Math.max(1, (particleSourceRound ?? maxSourceRound) || seedRound || 1));
+  1595→  }
+  1596→
+  1597→  if (reportIsPickingNode(node)) {
+  1598→    return finish(Math.max(1, (particleSourceRound ?? maxSourceRound) || 1));
+  1599→  }
+  1600→
+  1601→  if (reportIsParticleAuxNode(node)) {
+  1602→    return finish(particleSourceRound ?? maxSourceRound);
+  1603→  }
+  1604→
+  1605→  if (/class_2D|select_2D|rebalance_classes_2D|class_probability_filter/i.test(type)) {
+  1606→    return finish(Math.max(1, particleSourceRound ?? maxSourceRound));
+  1607→  }
+  1608→
+  1609→  if (/homo_abinit|import_volumes|import_templates|create_templates|hetero|nonuniform|homo_refine|local_refine|class_3D|var_3D|align_3D|homo_reconstruct|sym_expand|particle_subtract|volume_tools|volume_alignment|local_resolution|sharpen|fsc3D|cryodrgn|relion|helix|auto3Dre/i.test(type)) {
+  1610→    return finish(particleSourceRound ?? maxSourceRound);
+  1611→  }
+  1612→
+  1613→  return finish(particleSourceRound ?? maxSourceRound);
+  1614→}
+  1615→
+  1616→function reportNodeIsMajor(node, summary) {
+  1617→  const type = node.job_type || "";
+  1618→  if (node.uid === summary.start_uid) return true;
+  1619→  if (MAJOR_JOB_TYPES.has(type)) return true;
+  1620→  if (/local_refine|topaz_train|topaz_extract/i.test(type)) return true;
+  1621→  if (node.particle_count !== null && node.particle_count !== undefined) return true;
+  1622→  if (node.volume_count !== null && node.volume_count !== undefined) return true;
+  1623→  return false;
+  1624→}
+  1625→
+  1626→function reportStageName(node, summary, state) {
+  1627→  const type = node.job_type || "";
+  1628→  if (/import_(movies|micrographs)/i.test(type)) return "Micrographs";
+  1629→  const round = state ? reportLineageRound(node.uid, state) : 0;
+  1630→  if (round > 0) {
+  1631→    return `Round ${round}`;
+  1632→  }
+  1633→  return "Auxiliary";
+  1634→}
+  1635→
+  1636→function reportIsPostMapExtraction(node, state) {
+  1637→  if (!node || !/extract_micrographs/i.test(node.job_type || "")) return false;
+  1638→  const incoming = state.incomingByTarget.get(node.uid) || [];
+  1639→  return incoming.some((edge) => {
+  1640→    const source = state.nodeMap.get(edge.source);
+  1641→    return /class_\d+/i.test(edge.group || "") || edge.family === "volume" || reportIsVolumeSourceNode(source);
+  1642→  });
+  1643→}
+  1644→
+  1645→function reportIsParticlePipelineNode(node) {
+  1646→  const type = (node && node.job_type) || "";
+  1647→  return /import_particles|picker|topaz|extract_micrographs|remove_duplicate|particle_sets|downsample|standardize_particle|check_corrupt|reassign_particles/i.test(type);
+  1648→}
+  1649→
+  1650→function reportIsSelect2DNode(node) {
+  1651→  return Boolean(node && (node.select_2d || /select_2D/i.test(node.job_type || "")));
+  1652→}
+  1653→
+  1654→function reportHasUpstreamSelectInSameRound(uid, state, round, visited = new Set(), depth = 0) {
+  1655→  if (!uid || visited.has(uid) || depth > 10) return false;
+  1656→  visited.add(uid);
+  1657→  for (const edge of state.incomingByTarget.get(uid) || []) {
+  1658→    const source = state.nodeMap.get(edge.source);
+  1659→    if (!source || reportLineageRound(source.uid, state) !== round) continue;
+  1660→    if (reportIsSelect2DNode(source)) return true;
+  1661→    if (reportIsParticlePipelineNode(source) || reportIsPickingNode(source) || reportIsParticleAuxNode(source) || reportIsRepickSetupNode(source)) {
+  1662→      if (reportHasUpstreamSelectInSameRound(source.uid, state, round, new Set(visited), depth + 1)) return true;
+  1663→    }
+  1664→  }
+  1665→  return false;
+  1666→}
+  1667→
+  1668→function reportRoundParticleNodes(summary, state, round, postSelect = null) {
+  1669→  return reportRoundNodes(summary, state, round, reportIsParticlePipelineNode)
+  1670→    .filter((node) => {
+  1671→      if (postSelect === null) return true;
+  1672→      return reportHasUpstreamSelectInSameRound(node.uid, state, round) === postSelect;
+  1673→    });
+  1674→}
+  1675→
+  1676→function reportPhaseName(node, summary, state) {
+  1677→  const type = node.job_type || "";
+  1678→  if (/import_(movies|micrographs)/i.test(type)) return "导入 / 预处理";
+  1679→  if (/class_2D|select_2D|rebalance_classes_2D|class_probability_filter/i.test(type)) return "2D";
+  1680→  if (/homo_abinit|import_volumes|import_templates|create_templates/i.test(type)) return "初始建模";
+  1681→  if (/hetero|nonuniform|homo_refine|local_refine|class_3D|var_3D|align_3D|homo_reconstruct|sym_expand|particle_subtract|volume_tools|volume_alignment|local_resolution|sharpen|fsc3D|cryodrgn|relion|helix|auto3Dre/i.test(type)) {
+  1682→    return "refine / final";
+  1683→  }
+  1684→  if (reportIsPostMapExtraction(node, state)) return "refine / final";
+  1685→  if (reportIsParticlePipelineNode(node)) {
+  1686→    const round = state ? reportLineageRound(node.uid, state) : 0;
+  1687→    if (round > 0 && state && reportHasUpstreamSelectInSameRound(node.uid, state, round)) {
+  1688→      return "再挑颗粒 / 提取";
+  1689→    }
+  1690→    return "挑颗粒 / 提取";
+  1691→  }
+  1692→  return "附属";
+  1693→}
+  1694→
+  1695→function reportNodeCardKind(node) {
+  1696→  const kind = htmlNodeKind(node);
+  1697→  return kind === "exposure" ? "micrograph" : kind;
+  1698→}
+  1699→
+  1700→function reportMetricText(node, compact = false) {
+  1701→  const parts = [];
+  1702→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) parts.push(`照片 ${fmt(node.micrograph_count)}`);
+  1703→  if (pixelSizeText(node)) parts.push(`pixel ${pixelSizeText(node)}`);
+  1704→  if (node.particle_count !== null && node.particle_count !== undefined) parts.push(`颗粒 ${fmt(node.particle_count)}`);
+  1705→  if (node.class_count !== null && node.class_count !== undefined) parts.push(`class ${fmt(node.class_count)}`);
+  1706→  if (node.volume_count !== null && node.volume_count !== undefined) parts.push(`volume ${fmt(node.volume_count)}`);
+  1707→  const res = resolutionText(node);
+  1708→  if (res) parts.push(res);
+  1709→  const bin = extractionBinText(node);
+  1710→  if (bin) parts.push(bin);
+  1711→  return compact ? parts.join(" · ") : parts.join(" · ");
+  1712→}
+  1713→
+  1714→function reportPictureParticleMetricText(node) {
+  1715→  const parts = [];
+  1716→  if (node.particle_count !== null && node.particle_count !== undefined) parts.push(`颗粒 ${fmt(node.particle_count)}`);
+  1717→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) parts.push(`照片 ${fmt(node.micrograph_count)}`);
+  1718→  const bin = extractionBinText(node);
+  1719→  if (bin) parts.push(bin);
+  1720→  return parts.join(" · ");
+  1721→}
+  1722→
+  1723→function reportNormalizedEdges(summary) {
+  1724→  if (summary && REPORT_NORMALIZED_EDGES_CACHE.has(summary)) return REPORT_NORMALIZED_EDGES_CACHE.get(summary);
+  1725→  const edges = (summary.edges || []).map((edge) => ({
+  1726→    ...edge,
+  1727→    kind: reportEdgeKind(edge),
+  1728→    family: reportKindFamily(reportEdgeKind(edge)),
+  1729→    group: htmlGroupLabel(edge)
+  1730→  }));
+  1731→  if (summary) REPORT_NORMALIZED_EDGES_CACHE.set(summary, edges);
+  1732→  return edges;
+  1733→}
+  1734→
+  1735→function reportGroupedIncoming(summary, nodeUid) {
+  1736→  const grouped = new Map();
+  1737→  for (const edge of reportNormalizedEdges(summary).filter((item) => item.target === nodeUid)) {
+  1738→    const key = `${edge.source}\t${edge.kind}`;
+  1739→    if (!grouped.has(key)) {
+  1740→      grouped.set(key, { source: edge.source, kind: edge.kind, family: edge.family, groups: [] });
+  1741→    }
+  1742→    if (edge.group && !grouped.get(key).groups.includes(edge.group)) {
+  1743→      grouped.get(key).groups.push(edge.group);
+  1744→    }
+  1745→  }
+  1746→  return Array.from(grouped.values()).sort((a, b) => reportJobNum(a.source) - reportJobNum(b.source));
+  1747→}
+  1748→
+  1749→function reportGroupedOutgoing(summary, nodeUid) {
+  1750→  const grouped = new Map();
+  1751→  for (const edge of reportNormalizedEdges(summary).filter((item) => item.source === nodeUid)) {
+  1752→    const key = `${edge.target}\t${edge.kind}`;
+  1753→    if (!grouped.has(key)) {
+  1754→      grouped.set(key, { target: edge.target, kind: edge.kind, family: edge.family, groups: [] });
+  1755→    }
+  1756→    if (edge.group && !grouped.get(key).groups.includes(edge.group)) {
+  1757→      grouped.get(key).groups.push(edge.group);
+  1758→    }
+  1759→  }
+  1760→  return Array.from(grouped.values()).sort((a, b) => reportJobNum(a.target) - reportJobNum(b.target));
+  1761→}
+  1762→
+  1763→function reportTraceVisibleSources(sourceUid, family, visible, incomingByTarget, visited = new Set(), depth = 0) {
+  1764→  const memo = incomingByTarget.__traceVisibleMemo;
+  1765→  const memoKey = `${sourceUid}\t${family}`;
+  1766→  const useMemo = visited.size === 0 && memo;
+  1767→  if (useMemo && memo.has(memoKey)) return memo.get(memoKey);
+  1768→  if (!sourceUid || visited.has(sourceUid) || depth > 8) return [];
+  1769→  visited.add(sourceUid);
+  1770→  if (visible.has(sourceUid)) {
+  1771→    const result = [sourceUid];
+  1772→    if (useMemo) memo.set(memoKey, result);
+  1773→    return result;
+  1774→  }
+  1775→  const allIncoming = incomingByTarget.get(sourceUid) || [];
+  1776→  let incoming = allIncoming.filter((edge) => edge.family === family);
+  1777→  if (!incoming.length) incoming = allIncoming;
+  1778→  if (!incoming.length) return [];
+  1779→  const results = [];
+  1780→  for (const edge of incoming) {
+  1781→    results.push(...reportTraceVisibleSources(edge.source, family, visible, incomingByTarget, new Set(visited), depth + 1));
+  1782→  }
+  1783→  const result = Array.from(new Set(results)).sort((a, b) => reportJobNum(a) - reportJobNum(b));
+  1784→  if (useMemo) memo.set(memoKey, result);
+  1785→  return result;
+  1786→}
+  1787→
+  1788→function reportVisibleOutlineNodes(summary, nodeMap) {
+  1789→  const nodes = (summary.nodes || []).filter((node) => {
+  1790→    if (reportNodeIsMajor(node, summary)) return true;
+  1791→    return false;
+  1792→  });
+  1793→  return nodes.sort((a, b) => (a.uid_num || reportJobNum(a.uid)) - (b.uid_num || reportJobNum(b.uid)));
+  1794→}
+  1795→
+  1796→function reportBuildLineageState(summary) {
+  1797→  const nodeMap = summaryNodeMap(summary);
+  1798→  const edges = reportNormalizedEdges(summary);
+  1799→  const incomingByTarget = new Map();
+
+[showing lines 1200-1799 of 3615; use offset=1800 with limit to continue reading]

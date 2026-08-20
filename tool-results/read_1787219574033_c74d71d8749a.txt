@@ -1,0 +1,838 @@
+     1→# -*- coding: utf-8 -*-
+     2→"""
+     3→CryoSmart_align_and_optimize_view.py
+     4→
+     5→功能：
+     6→  1. 自动对齐所有地图（候选测试、选最佳、继承变换）
+     7→  2. 基于当前基准视角，自动测试 5 个方向（基准、Y±90、X±90）选择最优视角
+     8→  3. 记录最佳视角信息后停止（不导出图像，不替换 PPT）
+     9→
+    10→运行环境：ChimeraX
+    11→"""
+    12→
+    13→import csv
+    14→import json
+    15→import os
+    16→import re
+    17→import sys
+    18→import tempfile
+    19→import time
+    20→from pathlib import Path
+    21→
+    22→try:
+    23→    import numpy as np
+    24→    from PIL import Image
+    25→except ImportError:
+    26→    np = None
+    27→    Image = None
+    28→
+    29→from chimerax.core.commands import run as cxrun
+    30→
+    31→
+    32→# ==================== 常量 ====================
+    33→LEVEL_RATIO = 0.25
+    34→STEP = 1
+    35→FIT_SEARCH = 15
+    36→CORR_EPSILON = 0.0001
+    37→
+    38→GENERATE_DEBUG_IMAGES = False   # 是否生成候选调试日志（TSV/TXT）
+    39→GENERATE_CXC = False            # 是否生成候选CXC文件
+    40→
+    41→SCORE_THUMB_SIZE = 220          # 视角评分缩略图尺寸
+    42→
+    43→
+    44→# ==================== 通用工具函数 ====================
+    45→def q(path):
+    46→    return '"' + str(path).replace('"', '\\"') + '"'
+    47→
+    48→def safe_name(value):
+    49→    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "item")).strip("_") or "item"
+    50→
+    51→def volume_models(session):
+    52→    return [m for m in session.models.list() if m.__class__.__name__ == "Volume"]
+    53→
+    54→def max_density(vol):
+    55→    try:
+    56→        return float(vol.data.full_matrix().max())
+    57→    except Exception:
+    58→        return 0.0
+    59→
+    60→def position_text(model):
+    61→    try:
+    62→        return str(model.position)
+    63→    except Exception as exc:
+    64→        return f"position unavailable: {exc}"
+    65→
+    66→def parse_job_num(uid):
+    67→    m = re.search(r"J(\d+)", str(uid or ""), re.I)
+    68→    return int(m.group(1)) if m else -1
+    69→
+    70→
+    71→# ==================== 对齐核心函数（完整） ====================
+    72→def parse_corr(text):
+    73→    if text is None:
+    74→        return None
+    75→    if isinstance(text, (int, float)):
+    76→        value = float(text)
+    77→        return value if -1.0 <= value <= 1.0 else None
+    78→    text = str(text)
+    79→    m = re.search(r"correlation\s*=?\s*([-+]?\d*\.?\d+)", text, re.I)
+    80→    if m:
+    81→        value = float(m.group(1))
+    82→        return value if -1.0 <= value <= 1.0 else None
+    83→    return None
+    84→
+    85→def run_capture(session, cmd, command_log=None):
+    86→    if command_log is not None:
+    87→        command_log.append(cmd)
+    88→    with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as tmp:
+    89→        log_path = tmp.name
+    90→    try:
+    91→        cxrun(session, "log clear")
+    92→        result = cxrun(session, cmd)
+    93→        cxrun(session, "log save " + q(log_path))
+    94→        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+    95→            log_text = f.read()
+    96→        return result, log_text
+    97→    finally:
+    98→        if os.path.exists(log_path):
+    99→            os.unlink(log_path)
+   100→
+   101→def measure_corr(session, vol_id, ref_id, command_log=None):
+   102→    cmd = f"measure correlation #{vol_id} inMap #{ref_id}"
+   103→    result, log_text = run_capture(session, cmd, command_log)
+   104→    corr = parse_corr(result)
+   105→    if corr is None:
+   106→        corr = parse_corr(log_text)
+   107→    return corr, str(result), log_text
+   108→
+   109→def fit_corr(session, vol_id, ref_id, search=None, command_log=None):
+   110→    cmd = f"fit #{vol_id} in #{ref_id}"
+   111→    if search is not None:
+   112→        cmd += f" search {search}"
+   113→    result, log_text = run_capture(session, cmd, command_log)
+   114→    corr = parse_corr(result)
+   115→    if corr is None:
+   116→        corr = parse_corr(log_text)
+   117→    if corr is None:
+   118→        corr, _, _ = measure_corr(session, vol_id, ref_id, command_log)
+   119→    return corr, str(result), log_text
+   120→
+   121→def open_volume(session, path, command_log=None):
+   122→    cmd = "open " + q(path)
+   123→    if command_log is not None:
+   124→        command_log.append(cmd)
+   125→    before = {m for m in session.models.list()}
+   126→    cxrun(session, cmd)
+   127→    after = [m for m in session.models.list() if m not in before]
+   128→    volumes = [m for m in after if m.__class__.__name__ == "Volume"]
+   129→    if not volumes:
+   130→        raise RuntimeError("Opened file is not a Volume: " + str(path))
+   131→    return volumes[-1]
+   132→
+   133→def close_model(session, model, command_log=None):
+   134→    if not model:
+   135→        return
+   136→    cmd = f"close #{model.id_string}"
+   137→    if command_log is not None:
+   138→        command_log.append(cmd)
+   139→    try:
+   140→        cxrun(session, cmd)
+   141→    except Exception:
+   142→        pass
+   143→
+   144→def set_volume_display(session, vol, ref_density, command_log=None):
+   145→    density = max_density(vol) or ref_density
+   146→    level = density * LEVEL_RATIO
+   147→    cmd = f"volume #{vol.id_string} level {level:.4f} step {STEP}"
+   148→    if command_log is not None:
+   149→        command_log.append(cmd)
+   150→    try:
+   151→        cxrun(session, cmd)
+   152→    except Exception:
+   153→        pass
+   154→
+   155→def map_group_key(group):
+   156→    value = str(group or "volume")
+   157→    if value.lower() in ("volume", "map", "volume.map"):
+   158→        return "volume"
+   159→    value = re.sub(r"\.map$", "", value, flags=re.I)
+   160→    return safe_name(value)
+   161→
+   162→def canonical_map_key(uid, group):
+   163→    return f"{safe_name(uid)}/{map_group_key(group)}"
+   164→
+   165→def group_from_mrc_name(path):
+   166→    name = Path(path).name
+   167→    name = re.sub(r"\.mrc$", "", name, flags=re.I)
+   168→    name = re.sub(r"\.map$", "", name, flags=re.I)
+   169→    name = re.sub(r"^BJ\.[^.]+\.[^.]+\.", "", name)
+   170→    return map_group_key(name)
+   171→
+   172→def find_lineage_json(folder):
+   173→    candidates = sorted(folder.glob("*_lineage.json"))
+   174→    if candidates:
+   175→        return candidates[0]
+   176→    candidates = sorted(folder.glob("*.json"))
+   177→    if not candidates:
+   178→        raise FileNotFoundError("No lineage JSON found in " + str(folder))
+   179→    return candidates[0]
+   180→
+   181→def normal_map_assets(node):
+   182→    out = []
+   183→    for item in node.get("maps") or []:
+   184→        group = str(item.get("group") or "")
+   185→        if item.get("group_type") and item.get("group_type") != "volume":
+   186→            continue
+   187→        if "mask" in group.lower():
+   188→            continue
+   189→        url = item.get("download_url") or ""
+   190→        if item.get("result_name") == "map" or url.endswith(".map"):
+   191→            out.append(item)
+   192→    return out
+   193→
+   194→def map_key_for_node_item(node, item):
+   195→    return canonical_map_key(node.get("uid"), item.get("group") or "volume")
+   196→
+   197→def mrc_candidates_from_summary(folder, summary):
+   198→    candidates = {}
+   199→    project = summary.get("project_uid") or ""
+   200→    for node in summary.get("nodes") or []:
+   201→        uid = node.get("uid")
+   202→        if not uid:
+   203→            continue
+   204→        for item in normal_map_assets(node):
+   205→            group = item.get("group") or "volume"
+   206→            suffix = f"{group}.{item.get('result_name') or 'map'}"
+   207→            path = folder / "maps" / safe_name(uid) / f"BJ.{safe_name(project)}.{safe_name(uid)}.{safe_name(suffix)}.mrc"
+   208→            key = map_key_for_node_item(node, item)
+   209→            candidates[key] = {
+   210→                "key": key,
+   211→                "uid": uid,
+   212→                "job_type": node.get("job_type") or "",
+   213→                "group": group,
+   214→                "path": path,
+   215→                "is_final": uid == summary.get("start_uid"),
+   216→            }
+   217→
+   218→    start_uid = summary.get("start_uid")
+   219→    for name in (summary.get("map_download_urls") or {}).keys():
+   220→        path = folder / "maps" / safe_name(start_uid) / f"BJ.{safe_name(project)}.{safe_name(start_uid)}.{safe_name(name)}.mrc"
+   221→        key = canonical_map_key(start_uid, name)
+   222→        candidates.setdefault(key, {
+   223→            "key": key,
+   224→            "uid": start_uid,
+   225→            "job_type": (summary.get("start_job") or {}).get("job_type") or "",
+   226→            "group": name,
+   227→            "path": path,
+   228→            "is_final": True,
+   229→        })
+   230→
+   231→    maps_dir = folder / "maps"
+   232→    for path in sorted(maps_dir.glob("**/*")) if maps_dir.exists() else []:
+   233→        if path.is_file() and path.suffix.lower() in (".mrc", ".map"):
+   234→            m = re.search(r"\.(J\d+)\.", "." + path.name)
+   235→            uid = m.group(1) if m else path.parent.name
+   236→            group = group_from_mrc_name(path)
+   237→            key = canonical_map_key(uid, group)
+   238→            candidates.setdefault(key, {
+   239→                "key": key,
+   240→                "uid": uid,
+   241→                "job_type": "",
+   242→                "group": group,
+   243→                "path": path,
+   244→                "is_final": uid == start_uid,
+   245→            })
+   246→
+   247→    unique = []
+   248→    seen_paths = set()
+   249→    for item in candidates.values():
+   250→        if not item["path"].exists():
+   251→            continue
+   252→        resolved = item["path"].resolve()
+   253→        if resolved in seen_paths:
+   254→            continue
+   255→        seen_paths.add(resolved)
+   256→        unique.append(item)
+   257→    return unique
+   258→
+   259→def choose_reference(items, summary):
+   260→    start_uid = summary.get("start_uid")
+   261→    final_items = [item for item in items if item.get("uid") == start_uid]
+   262→    preferred = [item for item in final_items if item.get("key") == canonical_map_key(start_uid, "volume")]
+   263→    if preferred:
+   264→        return preferred[0]
+   265→    if final_items:
+   266→        return final_items[0]
+   267→    return sorted(items, key=lambda item: parse_job_num(item.get("uid")))[-1] if items else None
+   268→
+   269→def class_index_from_group(group):
+   270→    m = re.search(r"(?:volume|particles)_class_(\d+)", str(group or ""), re.I)
+   271→    return int(m.group(1)) if m else None
+   272→
+   273→def target_map_groups_for_edge(edge, target_node, item_by_key):
+   274→    target_uid = edge.get("target")
+   275→    source_group = map_group_key(edge.get("source_group"))
+   276→    source_class = class_index_from_group(source_group)
+   277→    target_groups = []
+   278→    if target_node:
+   279→        for map_item in normal_map_assets(target_node):
+   280→            group = map_group_key(map_item.get("group") or "volume")
+   281→            if group not in target_groups:
+   282→                target_groups.append(group)
+   283→
+   284→    candidates = []
+   285→    if canonical_map_key(target_uid, source_group) in item_by_key:
+   286→        candidates.append(source_group)
+   287→    if source_class is not None:
+   288→        for group in target_groups:
+   289→            if class_index_from_group(group) == source_class and group not in candidates:
+   290→                candidates.append(group)
+   291→    if not candidates and "volume" in target_groups:
+   292→        candidates.append("volume")
+   293→    if not candidates and len(target_groups) == 1:
+   294→        candidates.append(target_groups[0])
+   295→    return [group for group in candidates if canonical_map_key(target_uid, group) in item_by_key]
+   296→
+   297→def build_map_lineage(summary, items):
+   298→    item_by_key = {item["key"]: item for item in items}
+   299→    nodes_by_uid = {node.get("uid"): node for node in summary.get("nodes") or [] if node.get("uid")}
+   300→    edges = []
+   301→    seen = set()
+   302→    warnings = []
+   303→
+   304→    for edge in summary.get("edges") or []:
+   305→        if edge.get("input_type") != "volume":
+   306→            continue
+   307→        source_uid = edge.get("source")
+   308→        target_uid = edge.get("target")
+   309→        source_group = map_group_key(edge.get("source_group"))
+   310→        source_key = canonical_map_key(source_uid, source_group)
+   311→        if source_key not in item_by_key:
+   312→            warnings.append(f"skip volume edge {source_uid}.{source_group} -> {target_uid}: source MRC missing")
+   313→            continue
+   314→        target_node = nodes_by_uid.get(target_uid)
+   315→        for target_group in target_map_groups_for_edge(edge, target_node, item_by_key):
+   316→            target_key = canonical_map_key(target_uid, target_group)
+   317→            edge_key = (source_key, target_key)
+   318→            if edge_key in seen:
+   319→                continue
+   320→            seen.add(edge_key)
+   321→            edges.append({
+   322→                "source": source_key,
+   323→                "target": target_key,
+   324→                "reason": f"{source_uid}.{source_group} -> {target_uid}.{target_group}",
+   325→            })
+   326→
+   327→    incoming = {}
+   328→    outgoing = {}
+   329→    for edge in edges:
+   330→        outgoing.setdefault(edge["source"], []).append(edge["target"])
+   331→        incoming.setdefault(edge["target"], []).append(edge["source"])
+   332→
+   333→    start_keys = [key for key in item_by_key if key not in incoming]
+   334→    if not start_keys:
+   335→        start_keys = sorted(item_by_key)
+   336→        warnings.append("No start map inferred; treating every downloaded map as a possible start.")
+   337→
+   338→    chains = []
+   339→
+   340→    def walk(start_key, current_key, path):
+   341→        children = sorted(outgoing.get(current_key) or [])
+   342→        if not children:
+   343→            chains.append({"start": start_key, "terminal": current_key, "keys": list(path)})
+   344→            return
+   345→        for child in children:
+   346→            if child in path:
+   347→                warnings.append(f"Cycle detected in map lineage: {' -> '.join(path + [child])}")
+   348→                continue
+   349→            walk(start_key, child, path + [child])
+   350→
+   351→    for start_key in sorted(start_keys, key=lambda key: (parse_job_num(key), key)):
+   352→        walk(start_key, start_key, [start_key])
+   353→    if not chains:
+   354→        chains = [{"start": key, "terminal": key, "keys": [key]} for key in sorted(item_by_key)]
+   355→
+   356→    return {
+   357→        "items": item_by_key,
+   358→        "edges": edges,
+   359→        "incoming": incoming,
+   360→        "outgoing": outgoing,
+   361→        "starts": sorted(start_keys, key=lambda key: (parse_job_num(key), key)),
+   362→        "chains": chains,
+   363→        "warnings": warnings,
+   364→    }
+   365→
+   366→def chain_label(chain):
+   367→    return " -> ".join(chain.get("keys") or [])
+   368→
+   369→def chain_for_key(lineage, key):
+   370→    containing = [chain for chain in lineage.get("chains") or [] if key in (chain.get("keys") or [])]
+   371→    if not containing:
+   372→        return None
+   373→    return sorted(containing, key=lambda chain: (-len(chain.get("keys") or []), chain_label(chain)))[0]
+   374→
+   375→def lineage_terminal_results_for_key(lineage, terminal_results, key):
+   376→    chain = chain_for_key(lineage, key)
+   377→    if not chain:
+   378→        return None, None
+   379→    return chain, terminal_results.get(chain.get("terminal"))
+   380→
+   381→def candidate_specs():
+   382→    return [
+   383→        {"name": "original", "kind": "original"},
+   384→        {"name": "rot_x_180", "kind": "rotate", "axis": "x", "angle": 180},
+   385→        {"name": "rot_y_180", "kind": "rotate", "axis": "y", "angle": 180},
+   386→        {"name": "rot_z_180", "kind": "rotate", "axis": "z", "angle": 180},
+   387→        {"name": "flip_z", "kind": "flip", "axis": "z"},
+   388→    ]
+   389→
+   390→def test_candidate(session, item, reference, ref_vol, ref_density, spec):
+   391→    commands = []
+   392→    errors = []
+   393→    opened = []
+   394→    active = None
+   395→    try:
+   396→        vol = open_volume(session, item["path"], commands)
+   397→        opened.append(vol)
+   398→        vol.name = f"{item['key']}__{spec['name']}"
+   399→        set_volume_display(session, vol, ref_density, commands)
+   400→        active = vol
+   401→
+   402→        if spec["kind"] == "rotate":
+   403→            cmd = f"turn {spec['axis']} {spec['angle']} models #{vol.id_string} center #{vol.id_string}"
+   404→            commands.append(cmd)
+   405→            cxrun(session, cmd)
+   406→            commands.append("wait 1")
+   407→            cxrun(session, "wait 1")
+   408→        elif spec["kind"] == "flip":
+   409→            flip_id = max([m.id[0] for m in session.models.list() if getattr(m, "id", None)] + [0]) + 1
+   410→            cmd = f"volume flip #{vol.id_string} axis {spec['axis']} modelId {flip_id}"
+   411→            commands.append(cmd)
+   412→            cxrun(session, cmd)
+   413→            flip_model = next((m for m in volume_models(session) if m.id[0] == flip_id), None)
+   414→            if flip_model is None:
+   415→                raise RuntimeError("flip model was not created")
+   416→            flip_model.name = f"{item['key']}__{spec['name']}"
+   417→            set_volume_display(session, flip_model, ref_density, commands)
+   418→            active = flip_model
+   419→            close_model(session, vol, commands)
+   420→            opened = [flip_model]
+   421→
+   422→        pre_corr, pre_raw, pre_log = measure_corr(session, active.id_string, ref_vol.id_string, commands)
+   423→        fit1_corr, fit1_raw, fit1_log = fit_corr(session, active.id_string, ref_vol.id_string, search=None, command_log=commands)
+   424→        fit2_corr, fit2_raw, fit2_log = fit_corr(session, active.id_string, ref_vol.id_string, search=FIT_SEARCH, command_log=commands)
+   425→
+   426→        score = fit2_corr if fit2_corr is not None else fit1_corr
+   427→        if score is None:
+   428→            score = pre_corr
+   429→
+   430→        return {
+   431→            "candidate": spec["name"],
+   432→            "kind": spec["kind"],
+   433→            "model": active,
+   434→            "model_id": active.id_string,
+   435→            "score": score,
+   436→            "pre_corr": pre_corr,
+   437→            "fit_no_search_corr": fit1_corr,
+   438→            "fit_search_corr": fit2_corr,
+   439→            "position": position_text(active),
+   440→            "commands": commands,
+   441→            "errors": errors,
+   442→            "raw": {
+   443→                "pre": pre_raw,
+   444→                "fit_no_search": fit1_raw,
+   445→                "fit_search": fit2_raw,
+   446→                "pre_log": pre_log,
+   447→                "fit_no_search_log": fit1_log,
+   448→                "fit_search_log": fit2_log,
+   449→            },
+   450→            "opened_models": opened,
+   451→        }
+   452→    except Exception as exc:
+   453→        errors.append(str(exc))
+   454→        for model in opened:
+   455→            close_model(session, model, commands)
+   456→        return {
+   457→            "candidate": spec["name"],
+   458→            "kind": spec["kind"],
+   459→            "model": None,
+   460→            "model_id": "",
+   461→            "score": None,
+   462→            "pre_corr": None,
+   463→            "fit_no_search_corr": None,
+   464→            "fit_search_corr": None,
+   465→            "position": "",
+   466→            "commands": commands,
+   467→            "errors": errors,
+   468→            "raw": {},
+   469→            "opened_models": [],
+   470→        }
+   471→
+   472→def choose_best(rows):
+   473→    valid = [row for row in rows if row.get("score") is not None and row.get("model") is not None]
+   474→    if not valid:
+   475→        return None
+   476→    return sorted(valid, key=lambda row: float(row["score"]), reverse=True)[0]
+   477→
+   478→def write_candidate_cxc(cxc_dir, item, reference, rows):
+   479→    path = cxc_dir / (safe_name(item["key"].replace("/", "__")) + "_fit_candidates.cxc")
+   480→    lines = [
+   481→        "# CryoSmart fit candidate debug",
+   482→        f"# map: {item['key']}",
+   483→        f"# reference: {reference['key']}",
+   484→        "set bgColor white",
+   485→        "",
+   486→    ]
+   487→    for row in rows:
+   488→        lines.append(f"# Candidate: {row['candidate']}")
+   489→        for cmd in row.get("commands", []):
+   490→            lines.append(cmd)
+   491→        lines.append("")
+   492→    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+   493→    return path
+   494→
+   495→def write_debug_logs(out_dir, manifest, candidate_rows):
+   496→    tsv_path = out_dir / "fit_candidate_debug.tsv"
+   497→    columns = [
+   498→        "map_key", "candidate", "chosen", "model_id", "score",
+   499→        "pre_corr", "fit_no_search_corr", "fit_search_corr",
+   500→        "reference_key", "source_mrc", "reference_mrc", "position", "cxc_file", "errors",
+   501→    ]
+   502→    with tsv_path.open("w", encoding="utf-8", newline="") as f:
+   503→        writer = csv.DictWriter(f, fieldnames=columns, delimiter="\t")
+   504→        writer.writeheader()
+   505→        for row in candidate_rows:
+   506→            writer.writerow({col: row.get(col, "") for col in columns})
+   507→
+   508→    txt_path = out_dir / "fit_candidate_debug.txt"
+   509→    lines = [
+   510→        "CryoSmart fit candidate debug",
+   511→        f"created_at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+   512→        f"lineage_folder: {manifest.get('lineage_folder')}",
+   513→        f"reference: {manifest.get('reference_key')} -> {manifest.get('reference_path')}",
+   514→        "",
+   515→    ]
+   516→    current = None
+   517→    for row in candidate_rows:
+   518→        if row["map_key"] != current:
+   519→            current = row["map_key"]
+   520→            lines.append("")
+   521→            lines.append("=" * 80)
+   522→            lines.append(current)
+   523→            lines.append("=" * 80)
+   524→        mark = "CHOSEN" if row.get("chosen") else "test"
+   525→        lines.append(
+   526→            f"[{mark}] {row['candidate']} model={row.get('model_id')} "
+   527→            f"score={row.get('score')} pre={row.get('pre_corr')} "
+   528→            f"fit1={row.get('fit_no_search_corr')} fit_search={row.get('fit_search_corr')}"
+   529→        )
+   530→        if row.get("errors"):
+   531→            lines.append("  errors: " + row["errors"])
+   532→        lines.append("  position: " + str(row.get("position") or ""))
+   533→        if row.get("cxc_file"):
+   534→            lines.append("  cxc: " + row["cxc_file"])
+   535→    txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+   536→
+   537→    manifest_path = out_dir / "fit_candidate_debug_manifest.json"
+   538→    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+   539→    return txt_path, tsv_path, manifest_path
+   540→
+   541→
+   542→# ==================== 视角自动优化函数（来自第三个脚本） ====================
+   543→def score_current_view(session):
+   544→    """截取当前视角缩略图，计算非白色像素比例作为评分（地图覆盖率）"""
+   545→    if np is None or Image is None:
+   546→        return 0.0
+   547→    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+   548→        path = tmp.name
+   549→    try:
+   550→        cxrun(session, f"save {q(path)} width {SCORE_THUMB_SIZE} height {SCORE_THUMB_SIZE} supersample 1 transparentBackground false")
+   551→        img = Image.open(path).convert("RGB")
+   552→        arr = np.array(img)
+   553→        bg = np.all(arr > 240, axis=-1)
+   554→        score = float((arr.shape[0] * arr.shape[1] - np.sum(bg)) / (arr.shape[0] * arr.shape[1]))
+   555→        return score
+   556→    except Exception as e:
+   557→        session.logger.warning(f"视角评分失败: {e}")
+   558→        return 0.0
+   559→    finally:
+   560→        if os.path.exists(path):
+   561→            os.unlink(path)
+   562→
+   563→def select_best_90_view(session, test_vol):
+   564→    """
+   565→    基于当前视角（需先手动调好基准），测试5个方向（基准、Y±90、X±90），
+   566→    选择地图占画面比例最大的方向，并应用该视角。
+   567→    """
+   568→    session.logger.info("===== 90° 视角自动优化 =====")
+   569→
+   570→    # 保存当前视角为基准
+   571→    cxrun(session, "view name base_view")
+   572→    cxrun(session, "wait 1")
+   573→
+   574→    # 只显示测试地图
+   575→    all_vols = volume_models(session)
+   576→    for vol in all_vols:
+   577→        if vol.id_string == test_vol.id_string:
+   578→            cxrun(session, f"show #{vol.id_string} models")
+   579→        else:
+   580→            cxrun(session, f"hide #{vol.id_string} models")
+   581→    cxrun(session, "wait 1")
+   582→
+   583→    candidates = [
+   584→        ("base", 0, 0),
+   585→        ("y+90", 0, 90),
+   586→        ("y-90", 0, -90),
+   587→        ("x+90", 90, 0),
+   588→        ("x-90", -90, 0),
+   589→    ]
+   590→
+   591→    best_score = -1.0
+   592→    best_desc = "base"
+   593→    best_rot = (0, 0)
+   594→
+   595→    for desc, x_rot, y_rot in candidates:
+   596→        cxrun(session, "view base_view")
+   597→        cxrun(session, "wait 1")
+   598→        if x_rot != 0:
+   599→            cxrun(session, f"turn x {x_rot}")
+   600→        if y_rot != 0:
+   601→            cxrun(session, f"turn y {y_rot}")
+   602→        cxrun(session, "wait 1")
+   603→        score = score_current_view(session)
+   604→        session.logger.info(f"  {desc}: X={x_rot}°, Y={y_rot}°, Score={score:.4f}")
+   605→        if score > best_score:
+   606→            best_score = score
+   607→            best_desc = desc
+   608→            best_rot = (x_rot, y_rot)
+   609→
+   610→    # 应用最佳视角
+   611→    session.logger.info(f"最佳视角: {best_desc} (X={best_rot[0]}°, Y={best_rot[1]}°), Score={best_score:.4f}")
+   612→    cxrun(session, "view base_view")
+   613→    cxrun(session, "wait 1")
+   614→    if best_rot[0] != 0:
+   615→        cxrun(session, f"turn x {best_rot[0]}")
+   616→    if best_rot[1] != 0:
+   617→        cxrun(session, f"turn y {best_rot[1]}")
+   618→    cxrun(session, "wait 1")
+   619→
+   620→    # 恢复显示所有地图
+   621→    for vol in all_vols:
+   622→        cxrun(session, f"show #{vol.id_string} models")
+   623→    cxrun(session, "wait 1")
+   624→
+   625→    return {"desc": best_desc, "x": best_rot[0], "y": best_rot[1], "score": best_score}
+   626→
+   627→
+   628→# ==================== 主流程 ====================
+   629→def main(session, lineage_folder=None):
+   630→    if lineage_folder is None:
+   631→        argv = list(sys.argv[1:])
+   632→        if argv and Path(argv[0]).expanduser().exists():
+   633→            lineage_folder = argv[0]
+   634→        else:
+   635→            script_path = Path(__file__).expanduser().resolve() if "__file__" in globals() else None
+   636→            lineage_folder = script_path.parent if script_path else os.getcwd()
+   637→    folder = Path(lineage_folder).expanduser().resolve()
+   638→    if folder.is_file():
+   639→        folder = folder.parent
+   640→
+   641→    session.logger.info("===== CryoSmart 自动对齐 + 视角优化（无导出） =====")
+   642→    session.logger.info(f"工作目录: {folder}")
+   643→
+   644→    # ---- 1. 加载谱系数据 ----
+   645→    summary_path = find_lineage_json(folder)
+   646→    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+   647→    items = mrc_candidates_from_summary(folder, summary)
+   648→    if not items:
+   649→        raise RuntimeError("没有找到可用的 MRC 文件")
+   650→    reference = choose_reference(items, summary)
+   651→    if not reference:
+   652→        raise RuntimeError("无法确定参考地图")
+   653→
+   654→    session.logger.info(f"参考地图: {reference['key']} -> {reference['path']}")
+   655→
+   656→    # ---- 2. 构建 map 谱系 ----
+   657→    lineage = build_map_lineage(summary, items)
+   658→    manifest = {
+   659→        "lineage_folder": str(folder),
+   660→        "lineage_json": str(summary_path),
+   661→        "reference_key": reference["key"],
+   662→        "reference_path": str(reference["path"]),
+   663→        "fit_search": FIT_SEARCH,
+   664→        "map_lineage": {
+   665→            "starts": lineage["starts"],
+   666→            "edges": lineage["edges"],
+   667→            "chains": lineage["chains"],
+   668→            "warnings": lineage["warnings"],
+   669→        },
+   670→        "models": {},
+   671→        "terminal_results": {},
+   672→        "warnings": list(lineage["warnings"]),
+   673→    }
+   674→
+   675→    # ---- 3. 打开参考地图 ----
+   676→    ref_commands = []
+   677→    ref_vol = open_volume(session, reference["path"], ref_commands)
+   678→    ref_vol.name = reference["key"]
+   679→    ref_density = max_density(ref_vol)
+   680→    set_volume_display(session, ref_vol, ref_density, ref_commands)
+   681→    manifest["models"][reference["key"]] = {
+   682→        "role": "reference",
+   683→        "model_id": ref_vol.id_string,
+   684→        "source_mrc": str(reference["path"]),
+   685→        "position": position_text(ref_vol),
+   686→        "commands": ref_commands,
+   687→    }
+   688→
+   689→    loaded_by_key = {reference["key"]: {"model": ref_vol, **reference, "score": 1.0}}
+   690→    terminal_results = {reference["key"]: loaded_by_key[reference["key"]]}
+   691→    all_candidate_rows = []
+   692→
+   693→    # ---- 4. 对每个终端地图测试候选 ----
+   694→    terminal_keys = sorted({chain["terminal"] for chain in lineage["chains"]})
+   695→    for terminal_key in terminal_keys:
+   696→        if terminal_key == reference["key"]:
+   697→            continue
+   698→        item = lineage["items"].get(terminal_key)
+   699→        if not item:
+   700→            continue
+   701→        session.logger.info(f"测试终端地图: {terminal_key}")
+   702→
+   703→        candidate_rows = []
+   704→        for spec in candidate_specs():
+   705→            row = test_candidate(session, item, reference, ref_vol, ref_density, spec)
+   706→            candidate_rows.append(row)
+   707→            session.logger.info(
+   708→                f"  {spec['name']}: score={row.get('score')} "
+   709→                f"fit1={row.get('fit_no_search_corr')} fit_search={row.get('fit_search_corr')}"
+   710→            )
+   711→
+   712→        best = choose_best(candidate_rows)
+   713→        if GENERATE_CXC:
+   714→            cxc_dir = folder / "debug_cxc"
+   715→            cxc_dir.mkdir(exist_ok=True)
+   716→            cxc_path = write_candidate_cxc(cxc_dir, item, reference, candidate_rows)
+   717→        else:
+   718→            cxc_path = None
+   719→
+   720→        for row in candidate_rows:
+   721→            row["map_key"] = item["key"]
+   722→            row["chosen"] = bool(best and row is best)
+   723→            row["reference_key"] = reference["key"]
+   724→            row["source_mrc"] = str(item["path"])
+   725→            row["reference_mrc"] = str(reference["path"])
+   726→            row["cxc_file"] = str(cxc_path) if cxc_path else ""
+   727→            row["errors"] = "; ".join(row.get("errors") or [])
+   728→            all_candidate_rows.append(row)
+   729→
+   730→        if best is None:
+   731→            manifest["warnings"].append(f"没有找到有效候选: {item['key']}")
+   732→            continue
+   733→
+   734→        for row in candidate_rows:
+   735→            if row is best:
+   736→                continue
+   737→            for model in row.get("opened_models") or []:
+   738→                close_model(session, model)
+   739→
+   740→        best_model = best["model"]
+   741→        best_model.name = item["key"] + "__BEST_" + best["candidate"]
+   742→        result = {
+   743→            **item,
+   744→            "model": best_model,
+   745→            "score": best["score"],
+   746→            "candidate": best["candidate"],
+   747→            "model_id": best_model.id_string,
+   748→            "position": position_text(best_model),
+   749→            "cxc_file": str(cxc_path) if cxc_path else "",
+   750→        }
+   751→        terminal_results[terminal_key] = result
+   752→        loaded_by_key[terminal_key] = result
+   753→        manifest["terminal_results"][terminal_key] = {
+   754→            "chosen_candidate": best["candidate"],
+   755→            "score": best["score"],
+   756→            "model_id": best_model.id_string,
+   757→            "source_mrc": str(item["path"]),
+   758→            "position": position_text(best_model),
+   759→        }
+   760→        manifest["models"][item["key"]] = {
+   761→            "role": "chain_terminal",
+   762→            "model_id": best_model.id_string,
+   763→            "chosen_candidate": best["candidate"],
+   764→            "score": best["score"],
+   765→            "source_mrc": str(item["path"]),
+   766→            "position": position_text(best_model),
+   767→        }
+   768→        session.logger.info(f"  选中 {terminal_key}: {best['candidate']} score={best['score']}")
+   769→
+   770→    # ---- 5. 继承变换给链上非终端成员 ----
+   771→    for item in items:
+   772→        if item["key"] in loaded_by_key:
+   773→            continue
+   774→        chain, terminal_result = lineage_terminal_results_for_key(lineage, terminal_results, item["key"])
+   775→        if not terminal_result or not terminal_result.get("model"):
+   776→            manifest["warnings"].append(f"无法继承变换: {item['key']}（缺少终端结果）")
+   777→            continue
+   778→        commands = []
+   779→        try:
+   780→            vol = open_volume(session, item["path"], commands)
+   781→            vol.name = item["key"] + "__inherited"
+   782→            set_volume_display(session, vol, ref_density, commands)
+   783→            vol.position = terminal_result["model"].position
+   784→            loaded_by_key[item["key"]] = {**item, "model": vol}
+   785→            manifest["models"][item["key"]] = {
+   786→                "role": "chain_member_inherited",
+   787→                "model_id": vol.id_string,
+   788→                "source_mrc": str(item["path"]),
+   789→                "inherited_from_terminal": chain["terminal"] if chain else "",
+   790→                "terminal_candidate": terminal_result.get("candidate", ""),
+   791→                "terminal_score": terminal_result.get("score", ""),
+   792→                "position": position_text(vol),
+   793→                "commands": commands,
+   794→            }
+   795→        except Exception as exc:
+   796→            manifest["warnings"].append(f"继承失败 {item['key']}: {exc}")
+   797→
+   798→    # ---- 6. （可选）生成调试日志 ----
+   799→    if GENERATE_DEBUG_IMAGES:
+   800→        out_dir = folder / "chimerax_fit_candidate_debug"
+   801→        out_dir.mkdir(exist_ok=True)
+   802→        write_debug_logs(out_dir, manifest, all_candidate_rows)
+   803→
+   804→    # ---- 7. 显示所有模型，提示用户手动调整基准视角（非阻塞） ----
+   805→    for vol in volume_models(session):
+   806→        cxrun(session, f"show #{vol.id_string} models")
+   807→    cxrun(session, "set bgColor white")
+   808→    cxrun(session, "view pad 0.25")
+   809→    cxrun(session, "wait 1")
+   810→
+   811→    session.logger.info("\n" + "=" * 60)
+   812→    session.logger.info("请手动旋转/缩放视角到您想要的基准方向（使地图居中且特征明显）。")
+   813→    session.logger.info("调整好后，脚本将自动测试 5 个方向（基准、Y±90、X±90）并选出最优视角。")
+   814→    session.logger.info("如果您已经调整好，脚本会立即开始优化；否则请先调整，然后继续运行。")
+   815→    session.logger.info("=" * 60 + "\n")
+   816→
+   817→    # ---- 8. 执行 90° 视角自动优化（基于当前基准） ----
+   818→    best_view = select_best_90_view(session, ref_vol)
+   819→    manifest["best_90_view"] = best_view
+   820→
+   821→    # ---- 9. 保存 manifest（不含图像信息） ----
+   822→    manifest_path = folder / "chimerax_rendered_maps" / "rendered_map_manifest.json"
+   823→    manifest_path.parent.mkdir(exist_ok=True)
+   824→    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+   825→
+   826→    # ---- 10. 输出最终信息 ----
+   827→    session.logger.info("===== 对齐与视角优化完成 =====")
+   828→    session.logger.info(f"最佳视角: {best_view['desc']} (X={best_view['x']}°, Y={best_view['y']}°)")
+   829→    session.logger.info(f"得分: {best_view['score']:.4f}")
+   830→    session.logger.info(f"Manifest 已保存至: {manifest_path}")
+   831→    session.logger.info("您现在的 ChimeraX 视角已应用最佳方向，可自行截图或手动调整。")
+   832→
+   833→
+   834→# ==================== 入口 ====================
+   835→if "session" in globals():
+   836→    main(session)
+   837→else:
+   838→    print("请在 ChimeraX 中打开此脚本运行。")
