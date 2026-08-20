@@ -65,7 +65,7 @@ export function HelpCard() {
               </p>
               <ul className="mb-2 ml-5 list-disc space-y-1">
                 <li><strong className="text-emerald-700">Pure JS logic (~6500 lines)</strong> — verbatim port. All the lineage tracing, BFS walk, HTML/SVG/PPTX report generation, and the hand-rolled ZIP writer run client-side.</li>
-                <li><strong className="text-amber-700">DOM scraper (1575 lines)</strong> — replaced by two modes: (a) <em>JSON Upload</em> — you export metadata via the original extension or any REST call, then upload the file; (b) <em>Live Connect</em> — a Next.js API route <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">/api/cryosmart/[...path]</code> proxies authenticated requests to CryoSmart.</li>
+                <li><strong className="text-amber-700">DOM scraper (1575 lines)</strong> — replaced by three modes: (a) <em>Bookmarklet</em> (recommended) — drag a button to your bookmarks bar, then click it on the CryoSmart project page; it runs same-origin with your cookie auto-attached, captures the metadata, and opens the web app with everything loaded; (b) <em>JSON Upload</em> — you export metadata via the original extension or any REST call, then upload the file; (c) <em>Live Connect</em> — a Next.js API route <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">/api/cryosmart/[...path]</code> proxies authenticated requests to CryoSmart with a pasted cookie.</li>
                 <li><strong className="text-rose-700">ChimeraX Python scripts (~2300 lines)</strong> — kept as downloadable desktop helpers. They require ChimeraX (UCSF molecular visualization software) which cannot run in a browser.</li>
               </ul>
               <p>
@@ -78,18 +78,32 @@ export function HelpCard() {
             <AccordionTrigger className="text-[13px] hover:no-underline">
               <span className="flex items-center gap-2">
                 <FileCode2 className="h-3.5 w-3.5 text-teal-600" />
-                How do I export the CryoSmart metadata JSON?
+                How do I get CryoSmart metadata into the web app?
               </span>
             </AccordionTrigger>
             <AccordionContent className="space-y-2 text-[12.5px] leading-relaxed text-slate-600">
-              <p><strong>Option A (easiest):</strong> Use the original Chrome extension&apos;s <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">可选：导出当前 Project 全部 metadata</code> button — it downloads a JSON file with all job metadata. Upload that file here.</p>
-              <p><strong>Option B (manual REST):</strong> Open CryoSmart in your browser, log in, open DevTools → Network. Navigate to your project page. Find the XHR call to one of these endpoints (CryoSmart deployments vary):</p>
+              <div className="rounded-md border border-emerald-200 bg-emerald-50/60 p-2.5">
+                <p className="mb-1"><strong className="text-emerald-800">Option A — Bookmarklet (recommended, no cookie pasting)</strong></p>
+                <ol className="ml-4 list-decimal space-y-0.5">
+                  <li>Go to the <em>Bookmarklet</em> tab above.</li>
+                  <li>Drag the green <span className="font-medium">Capture CryoSmart</span> button to your browser&apos;s bookmarks bar (Ctrl/Cmd+Shift+B to show it).</li>
+                  <li>Open CryoSmart in a normal tab and log in.</li>
+                  <li>Navigate to a project page (URL like <code className="rounded bg-emerald-100 px-1 font-mono text-[10.5px]">http://your-cryosmart/#/projects/P52</code>).</li>
+                  <li>Click the <span className="font-medium">Capture CryoSmart</span> bookmark.</li>
+                  <li>A status box appears in the top-left; the web app opens in a new tab with all jobs auto-loaded. Click <span className="font-medium">Trace Lineage</span>.</li>
+                </ol>
+                <p className="mt-1.5 text-[11px] text-emerald-700">
+                  <strong>Why this works:</strong> the bookmark runs <em>inside</em> the CryoSmart tab (same-origin), so the browser automatically attaches your session cookie — including HttpOnly cookies that JavaScript cannot read. No pasting, no token, works in Chrome/Firefox/Safari/Edge.
+                </p>
+              </div>
+              <p className="mt-2"><strong>Option B (upload JSON file):</strong> Use the original Chrome extension&apos;s <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">可选：导出当前 Project 全部 metadata</code> button — it downloads a JSON file with all job metadata. Upload that file via the <em>Upload JSON</em> tab.</p>
+              <p><strong>Option C (manual REST):</strong> Open CryoSmart, log in, open DevTools → Network. Navigate to your project page. Find the XHR call to one of these endpoints (CryoSmart deployments vary):</p>
               <pre className="rounded-md bg-slate-950 p-2.5 font-mono text-[10.5px] text-emerald-300">{`GET /api/projects/P52/jobs
 GET /api/jobs?project_uid=P52
 GET /api/projects/P52/metadata
 GET /api/meteor/jobs?project_uid=P52`}</pre>
               <p>Right-click the request → <em>Copy response</em> → paste into a <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">.json</code> file. Upload here.</p>
-              <p><strong>Option C (Live Connect):</strong> Use the <em>Live Connect</em> tab above. Paste your CryoSmart base URL and the value of your session cookie (from DevTools → Application → Cookies). The web app&apos;s backend proxy will fetch the metadata for you.</p>
+              <p><strong>Option D (Live Connect with cookie paste):</strong> Use the <em>Live Connect</em> tab. Paste your CryoSmart base URL and the value of your session cookie (from DevTools → Application → Cookies). The web app&apos;s backend proxy will fetch the metadata for you. Most users should prefer Option A — it avoids manual cookie handling entirely.</p>
             </AccordionContent>
           </AccordionItem>
 
@@ -156,7 +170,7 @@ GET /api/meteor/jobs?project_uid=P52`}</pre>
                   <tbody className="divide-y divide-slate-200 bg-white">
                     <Row c="popup.js pure functions (lineage, HTML, SVG, PPTX, ZIP)" l="~6500" s="Ported verbatim to TS" tone="emerald" />
                     <Row c="popup.js chrome.* glue (tabs, downloads, scripting)" l="~600" s="Replaced with fetch + Blob + &lt;a download&gt;" tone="amber" />
-                    <Row c="content.js DOM scraper" l="1575" s="Replaced with REST proxy + JSON upload" tone="amber" />
+                    <Row c="content.js DOM scraper" l="1575" s="Replaced with bookmarklet + JSON upload + REST proxy" tone="amber" />
                     <Row c="background.js (service worker)" l="37" s="Dropped (Blob download)" tone="rose" />
                     <Row c="rebuild_picture_flow_pptx.mjs (Node)" l="454" s="Ported to TS + kept as downloadable helper" tone="emerald" />
                     <Row c="3 ChimeraX Python scripts" l="~2300" s="Kept as downloadable desktop helpers" tone="rose" />
@@ -171,7 +185,8 @@ GET /api/meteor/jobs?project_uid=P52`}</pre>
           <div className="flex items-start gap-2.5">
             <ArrowRight className="mt-0.5 h-4 w-4 shrink-0 text-teal-600" />
             <div className="text-[12px] text-teal-900">
-              <strong>Quick start:</strong> Click <em>Try Sample</em> in the Data Source card above, then <em>Trace Lineage</em>, then <em>Build &amp; download ZIP</em>. No real CryoSmart instance needed.
+              <strong>Quick start (no CryoSmart):</strong> Click <em>Try Sample</em> in the Data Source card above, then <em>Trace Lineage</em>, then <em>Build &amp; download ZIP</em>.<br />
+              <strong>With real CryoSmart:</strong> Go to the <em>Bookmarklet</em> tab, drag the green button to your bookmarks bar, open your CryoSmart project page, click the bookmark — the web app opens with everything auto-loaded.
             </div>
           </div>
         </div>

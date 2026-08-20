@@ -55,3 +55,5 @@ server.log
 # Internal scratchpad & redundant uploads
 /tool-results/
 /upload/
+*.db
+*.db-journal

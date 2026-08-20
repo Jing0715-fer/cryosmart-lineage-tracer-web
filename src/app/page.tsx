@@ -7,8 +7,9 @@ import { ConfigureCard, type TraceOptions } from "./components/cryosmart/configu
 import { LineagePreviewCard } from "./components/cryosmart/lineage-preview-card";
 import { DownloadCard } from "./components/cryosmart/download-card";
 import { HelpCard } from "./components/cryosmart/help-card";
+import { useImportedMetadata } from "./components/cryosmart/use-imported-metadata";
 import type { LineageSummary } from "@/lib/cryosmart/types";
-import { ShieldCheck, Globe, Zap, FileCheck2 } from "lucide-react";
+import { ShieldCheck, Globe, Zap, FileCheck2, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 
 export default function Home() {
   const [loaded, setLoaded] = useState<LoadedMetadata | null>(null);
@@ -18,6 +19,16 @@ export default function Home() {
     includeImages: true,
     includeMaps: false,
     includeFinalResults: false,
+  });
+
+  // Auto-load bookmarklet-captured data when ?imported=<token> is in the URL.
+  const importState = useImportedMetadata({
+    onLoaded: (data) => {
+      setLoaded({
+        ...data,
+        source: "bookmarklet",
+      });
+    },
   });
 
   return (
@@ -88,6 +99,29 @@ export default function Home() {
           </div>
         </div>
       </section>
+
+      {/* Floating bookmarklet-import status banner */}
+      {importState.status !== "idle" && (
+        <div className="sticky top-14 z-30 mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div
+            className={`mt-2 flex items-center gap-2.5 rounded-lg border px-3 py-2 text-[12.5px] shadow-sm backdrop-blur ${
+              importState.status === "loaded"
+                ? "border-emerald-300 bg-emerald-50/90 text-emerald-900"
+                : importState.status === "error" || importState.status === "expired"
+                ? "border-rose-300 bg-rose-50/90 text-rose-900"
+                : "border-teal-300 bg-teal-50/90 text-teal-900"
+            }`}
+          >
+            {importState.status === "polling" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            {importState.status === "loaded" && <CheckCircle2 className="h-3.5 w-3.5" />}
+            {(importState.status === "error" || importState.status === "expired") && <AlertCircle className="h-3.5 w-3.5" />}
+            <span className="flex-1">{importState.message}</span>
+            {importState.token && (
+              <code className="rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] opacity-70">{importState.token}</code>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Main workflow */}
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 lg:px-8">

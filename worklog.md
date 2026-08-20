@@ -273,3 +273,32 @@ Stage Summary:
 - **Lint**: 0 errors. **TypeScript**: 0 errors. **Dev server**: stable on port 3000.
 - **Files produced**: 7 cryosmart lib modules (~7000 LOC ported), 6 UI components, 1 API route, 4 public helper scripts, updated page.tsx + worklog.md.
 
+
+---
+Task ID: 9
+Agent: main-orchestrator
+Task: Add bookmarklet one-click capture mode (auto-fetch CryoSmart metadata with cookie auto-attached, no manual paste)
+
+Work Log:
+- Created `/src/lib/cryosmart/pending-store.ts` — server-side in-memory store with TTL (10 min, single-use, max 200 entries). Survives HMR reloads via globalThis.
+- Created `/src/app/api/cryosmart/import/route.ts` — POST endpoint receiving bookmarklet-captured jobs. Returns `{ ok, token, count, project_uid, expires_in }`.
+- Created `/src/app/api/cryosmart/pending/route.ts` — GET endpoint. Single-use: data is deleted on first successful read. Returns 404 (not found / consumed) or 410 (expired).
+- Created `/src/lib/cryosmart/bookmarklet.ts` — builds a self-contained `javascript:` URL. ES5-compatible (var/function, no template literals, no arrow functions) for max browser support. The bookmarklet: detects project_uid from URL hash → tries 4 candidate REST endpoints (`/api/projects/{pid}/jobs`, `/api/jobs?project_uid=`, `/api/projects/{pid}/metadata`, `/api/meteor/jobs?project_uid=`) → POSTs to `/api/cryosmart/import` → opens web app with `?imported=<token>`. Shows a status overlay in the CryoSmart tab.
+- Created `/src/app/components/cryosmart/use-imported-metadata.ts` — React hook. Watches URL for `?imported=<token>`, polls `/api/cryosmart/pending?token=` every 500ms for up to 20s (handles race where bookmarklet POST hasn't landed yet), loads data into the regular pipeline on success, cleans the URL.
+- Created `/src/app/components/cryosmart/bookmarklet-panel.tsx` — UI: green draggable "Capture CryoSmart" button (href set via ref + setAttribute to bypass React's javascript: URL sanitizer), Copy link button, CryoSmart URL helper field, 6-step install instructions, privacy note, mixed-content (http/https) warning. Auto-shows "Auto-loaded N jobs" indicator when source is bookmarklet.
+- Updated `/src/app/components/cryosmart/data-source-card.tsx` — Tabs now 4 cols: **Bookmarklet (default, recommended)** / Upload JSON / Live Connect / Try Sample. Added `source: "bookmarklet"` to LoadedMetadata, plus `cryosmartOrigin` field.
+- Updated `/src/app/page.tsx` — wired `useImportedMetadata` hook. Added floating sticky status banner (polling / loaded / error / expired) below the header.
+- Updated `/src/app/components/cryosmart/help-card.tsx` — accordion "How do I get CryoSmart metadata" now lists Option A (Bookmarklet, recommended) first, with detailed 6-step instructions and explanation of why it works (same-origin = HttpOnly cookies auto-attached). Feasibility accordion and port-vs-replace table updated.
+
+Stage Summary:
+- **Verified end-to-end via agent-browser**:
+  - POST /api/cryosmart/import with 3-job sample → returns token `1-43770337`, count 3.
+  - GET /api/cryosmart/pending?token=... → returns data (200). Second GET → 404 (single-use confirmed).
+  - Open `http://localhost:3000/?imported=<token>` → page shows "Loaded 3 jobs from CryoSmart bookmarklet" green banner within 3s. Badge shows "Captured". Bookmarklet tab auto-selected. URL cleaned (token removed).
+  - Set Start Job = J3, click Trace Lineage → 3 nodes, 2 edges, Resolution 3.12 Å. ✅
+  - Verified the bookmarklet `<a>` element's `href` attribute is the real `javascript:` URL (not React's blocked stub) — drag-to-bookmarks-bar will work in all browsers.
+  - Console: no errors. VLM visual analysis: "green banner at top, Captured badge, Capture CryoSmart button visible, rest of UI clean".
+- **Lint**: 0 errors. **TypeScript**: 0 errors in our code (1 pre-existing in skills/, out of scope). **Dev server**: stable.
+- **Files produced**: 5 new (pending-store.ts, bookmarklet.ts, use-imported-metadata.ts, bookmarklet-panel.tsx, 2 API routes), 3 updated (data-source-card, page, help-card).
+- **User workflow now**: install bookmark (drag once) → click bookmark on CryoSmart project page → web app auto-opens with jobs loaded → click Trace → click Download ZIP. Total clicks after install: 2 (bookmark + trace) vs previous ~5 (paste cookie, load jobs, enter start job, trace). No cookie pasting, no token, works with HttpOnly cookies in Chrome/Firefox/Safari/Edge.
+

@@ -15,6 +15,7 @@ import {
   FileJson,
   Server,
   Plug,
+  Bookmark,
   CheckCircle2,
   AlertCircle,
   Loader2,
@@ -23,16 +24,19 @@ import {
 } from "lucide-react";
 import { loadSession, saveSession, fetchProjectJobs, type CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 import { buildSampleExportedMetadata } from "@/lib/cryosmart/sample-data";
+import { BookmarkletPanel } from "./bookmarklet-panel";
 
 export interface LoadedMetadata {
   /** Either raw array of jobs or { jobs: [...] }. */
   raw: unknown;
   projectUid: string;
   jobCount: number;
-  source: "upload" | "sample" | "live";
+  source: "upload" | "sample" | "live" | "bookmarklet";
   session?: CryoSmartSession | null;
   /** When source is "live", a list of job uids discovered. */
   liveJobUids?: string[];
+  /** When source is "bookmarklet", the origin of the CryoSmart instance captured from. */
+  cryosmartOrigin?: string;
 }
 
 interface Props {
@@ -57,25 +61,34 @@ export function DataSourceCard({ loaded, onLoad }: Props) {
           {loaded && (
             <Badge variant="secondary" className="gap-1.5 bg-emerald-100 text-emerald-700 hover:bg-emerald-100">
               <CheckCircle2 className="h-3.5 w-3.5" />
-              {loaded.source === "upload" ? "JSON loaded" : loaded.source === "sample" ? "Sample loaded" : "Live connected"}
+              {loaded.source === "upload" ? "JSON loaded"
+                : loaded.source === "sample" ? "Sample loaded"
+                : loaded.source === "bookmarklet" ? "Captured"
+                : "Live connected"}
             </Badge>
           )}
         </div>
       </CardHeader>
       <CardContent className="p-4 pt-4">
-        <Tabs defaultValue="upload" className="w-full">
-          <TabsList className="grid w-full grid-cols-3 bg-slate-100">
-            <TabsTrigger value="upload" className="text-[13px] data-[state=active]:bg-white">
-              <FileJson className="mr-1.5 h-3.5 w-3.5" /> Upload JSON
+        <Tabs defaultValue="bookmarklet" className="w-full">
+          <TabsList className="grid w-full grid-cols-4 bg-slate-100">
+            <TabsTrigger value="bookmarklet" className="text-[12.5px] data-[state=active]:bg-white">
+              <Bookmark className="mr-1 h-3.5 w-3.5" /> Bookmarklet
             </TabsTrigger>
-            <TabsTrigger value="live" className="text-[13px] data-[state=active]:bg-white">
-              <Server className="mr-1.5 h-3.5 w-3.5" /> Live Connect
+            <TabsTrigger value="upload" className="text-[12.5px] data-[state=active]:bg-white">
+              <FileJson className="mr-1 h-3.5 w-3.5" /> Upload JSON
             </TabsTrigger>
-            <TabsTrigger value="sample" className="text-[13px] data-[state=active]:bg-white">
-              <FlaskConical className="mr-1.5 h-3.5 w-3.5" /> Try Sample
+            <TabsTrigger value="live" className="text-[12.5px] data-[state=active]:bg-white">
+              <Server className="mr-1 h-3.5 w-3.5" /> Live Connect
+            </TabsTrigger>
+            <TabsTrigger value="sample" className="text-[12.5px] data-[state=active]:bg-white">
+              <FlaskConical className="mr-1 h-3.5 w-3.5" /> Try Sample
             </TabsTrigger>
           </TabsList>
 
+          <TabsContent value="bookmarklet" className="mt-4">
+            <BookmarkletPanel loaded={loaded} onLoad={onLoad} />
+          </TabsContent>
           <TabsContent value="upload" className="mt-4">
             <UploadJsonPanel loaded={loaded} onLoad={onLoad} />
           </TabsContent>
