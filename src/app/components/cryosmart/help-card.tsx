@@ -4,7 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
-import { Download, BookOpen, FlaskConical, Terminal, FileCode2, ArrowRight, Info } from "lucide-react";
+import { Download, BookOpen, FlaskConical, Terminal, FileCode2, ArrowRight, Info, Share2 } from "lucide-react";
 
 const HELPER_FILES = [
   {
@@ -147,6 +147,26 @@ GET /api/meteor/jobs?project_uid=P52`}</pre>
                   <li>Or skip steps 3–4 and run <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px]">CryoSmart_auto_align_export_ppt.py</code> for a one-shot automatic pass.</li>
                 </ol>
               </div>
+            </AccordionContent>
+          </AccordionItem>
+
+          <AccordionItem value="share" className="border-slate-200">
+            <AccordionTrigger className="text-[13px] hover:no-underline">
+              <span className="flex items-center gap-2">
+                <Share2 className="h-3.5 w-3.5 text-teal-600" />
+                How do I share a lineage with a colleague?
+              </span>
+            </AccordionTrigger>
+            <AccordionContent className="space-y-2 text-[12.5px] leading-relaxed text-slate-600">
+              <p>After tracing lineage, click the green <strong>Share</strong> button in the top-right of the Lineage Preview card.</p>
+              <p>The web app compresses the full lineage summary (project IDs, job types, particle counts, edges) into a URL-safe base64url string appended to the page URL as <code className="rounded bg-slate-100 px-1 font-mono text-[11px] dark:bg-slate-800">#s=...</code>.</p>
+              <p>Your colleague opens the link → the web app decodes the hash automatically → the same graph, stats, and report render without them needing to load any data source.</p>
+              <div className="rounded-md border border-amber-200 bg-amber-50/60 p-2 text-[11px] text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                <strong>What&apos;s shared:</strong> job UIDs, types, particle counts, resolution, edges, Mermaid source.<br />
+                <strong>What&apos;s NOT shared:</strong> image/map URLs (stripped — recipient re-fetches via their own CryoSmart session), your CryoSmart cookie, your name/email.<br />
+                <strong>Size:</strong> ~1-10 KB for typical projects; up to ~48 KB before the app falls back to suggesting JSON download instead.
+              </div>
+              <p>The Share dialog also renders a QR code so you can scan it from a phone camera to open the lineage on mobile.</p>
             </AccordionContent>
           </AccordionItem>
 

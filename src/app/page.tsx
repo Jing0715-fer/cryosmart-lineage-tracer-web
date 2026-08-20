@@ -10,7 +10,9 @@ import { HelpCard } from "./components/cryosmart/help-card";
 import { HeroVisualization } from "./components/cryosmart/hero-visualization";
 import { JobExplorerCard } from "./components/cryosmart/job-explorer-card";
 import { RecentSessionsCard } from "./components/cryosmart/recent-sessions-card";
+import { ScrollToTop } from "./components/cryosmart/scroll-to-top";
 import { useImportedMetadata } from "./components/cryosmart/use-imported-metadata";
+import { useSharedSummary } from "./components/cryosmart/use-shared-summary";
 import { useKeyboardShortcuts } from "./components/cryosmart/use-keyboard-shortcuts";
 import { recordSession, type RecentSession } from "@/lib/cryosmart/recent-sessions";
 import type { LineageSummary } from "@/lib/cryosmart/types";
@@ -34,6 +36,18 @@ export default function Home() {
         source: "bookmarklet",
       });
     },
+  });
+
+  // Auto-load shared lineage when URL has #s=<compressed> (Share URL feature).
+  const shareState = useSharedSummary((sharedSummary) => {
+    setSummary(sharedSummary);
+    setLoaded({
+      raw: { jobs: sharedSummary.nodes || [] },
+      projectUid: sharedSummary.project_uid || "P",
+      jobCount: sharedSummary.nodes?.length || 0,
+      source: "bookmarklet", // re-use "captured" badge styling
+      cryosmartOrigin: sharedSummary.base_url,
+    });
   });
 
   // Global keyboard shortcuts.
@@ -190,10 +204,10 @@ export default function Home() {
           <div
             className={`mt-2 flex items-center gap-2.5 rounded-lg border px-3 py-2 text-[12.5px] shadow-sm backdrop-blur ${
               importState.status === "loaded"
-                ? "border-emerald-300 bg-emerald-50/90 text-emerald-900"
+                ? "border-emerald-300 bg-emerald-50/90 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-200"
                 : importState.status === "error" || importState.status === "expired"
-                ? "border-rose-300 bg-rose-50/90 text-rose-900"
-                : "border-teal-300 bg-teal-50/90 text-teal-900"
+                ? "border-rose-300 bg-rose-50/90 text-rose-900 dark:border-rose-700 dark:bg-rose-950/80 dark:text-rose-200"
+                : "border-teal-300 bg-teal-50/90 text-teal-900 dark:border-teal-700 dark:bg-teal-950/80 dark:text-teal-200"
             }`}
           >
             {importState.status === "polling" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -201,8 +215,28 @@ export default function Home() {
             {(importState.status === "error" || importState.status === "expired") && <AlertCircle className="h-3.5 w-3.5" />}
             <span className="flex-1">{importState.message}</span>
             {importState.token && (
-              <code className="rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] opacity-70">{importState.token}</code>
+              <code className="rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] opacity-70 dark:bg-slate-800/70">{importState.token}</code>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Floating share-URL status banner */}
+      {shareState.status !== "idle" && (
+        <div className="sticky top-14 z-30 mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div
+            className={`mt-2 flex items-center gap-2.5 rounded-lg border px-3 py-2 text-[12.5px] shadow-sm backdrop-blur ${
+              shareState.status === "loaded"
+                ? "border-emerald-300 bg-emerald-50/90 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-200"
+                : shareState.status === "error"
+                ? "border-rose-300 bg-rose-50/90 text-rose-900 dark:border-rose-700 dark:bg-rose-950/80 dark:text-rose-200"
+                : "border-teal-300 bg-teal-50/90 text-teal-900 dark:border-teal-700 dark:bg-teal-950/80 dark:text-teal-200"
+            }`}
+          >
+            {shareState.status === "decoding" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            {shareState.status === "loaded" && <CheckCircle2 className="h-3.5 w-3.5" />}
+            {shareState.status === "error" && <AlertCircle className="h-3.5 w-3.5" />}
+            <span className="flex-1">{shareState.message}</span>
           </div>
         </div>
       )}
@@ -251,6 +285,8 @@ export default function Home() {
           <HelpCard />
         </div>
       </main>
+
+      <ScrollToTop />
 
       <SiteFooter />
     </div>

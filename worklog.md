@@ -401,3 +401,50 @@ Unresolved / next steps:
 - CryoSmart REST endpoints are guessed (4 candidates) — only testable with a real CryoSmart instance.
 - Consider: export lineage graph as SVG (in addition to PNG), batch compare multiple start jobs, FSC plot viewer.
 
+
+---
+Task ID: 12
+Agent: main-orchestrator (cron review #3)
+Task: QA review, add Share URL + ScrollToTop + Stats card hover polish
+
+Work Log:
+- **QA**: dev server stable, lint clean, tsc clean, no errors. Full sample → trace → Job Explorer → Graph → Share flow passes end-to-end.
+- **NEW FEATURE: Share URL** — full lineage summary compressed into a URL hash
+  - Created `src/lib/cryosmart/share-url.ts` — encodes LineageSummary as JSON → UTF-8 → deflate-raw (native CompressionStream) → base64url. Strips heavy image URLs (kept fileid only). 48 KB URL size budget with graceful fallback to JSON download suggestion. Decoder uses DecompressionStream with uncompressed fallback.
+  - Created `src/app/components/cryosmart/use-shared-summary.ts` — React hook detecting `#s=<base64url>` on mount, decoding async, surfacing idle/decoding/loaded/error states. Cleans URL hash via history.replaceState after load.
+  - Created `src/app/components/cryosmart/share-lineage-button.tsx` — Dialog with:
+    - Copyable URL input (select-on-focus, Copy button with checkmark feedback)
+    - QR code rendered via `qrcode` npm package (teal brand color, 160px canvas)
+    - Size badge (KB), large warning when >32 KB
+    - "Open in new tab" + "Copy link" buttons
+    - Privacy note explaining what's shared vs stripped
+  - Installed `qrcode` + `@types/qrcode` npm packages.
+  - Wired ShareLineageButton into LineagePreviewCard header (right-aligned, teal-themed).
+  - Wired useSharedSummary into page.tsx → auto-loads shared summary on URL open, sets loaded+summary state, surfaces floating status banner.
+  - Added dark: variants to floating bookmarklet/share status banners.
+- **NEW FEATURE: ScrollToTop button** — floating bottom-right, appears after 600px scroll, smooth scroll to top, dark-mode aware.
+- **POLISH: Stats cards** — added hover effects:
+  - Hover lift (-translate-y-0.5) + shadow-md on non-placeholder cards
+  - Teal accent strip animates in from left on hover (scale-x-0 → 100)
+  - Icon scales 110% on hover
+  - Border color shifts to teal-300 on hover
+  - Placeholder cards (— values) get muted styling
+  - Dark mode variants throughout
+- **DOCS**: Added "How do I share a lineage with a colleague?" accordion to Help card explaining the Share URL feature, what's shared vs stripped, size budget, and QR code for mobile.
+
+Stage Summary:
+- **Verification via agent-browser (all passed)**:
+  - Page loads, no errors, no hydration issues.
+  - Try Sample → Load → Trace → 10 nodes, 10 edges, Share button visible in Lineage Preview header.
+  - Click Share → dialog opens with compressed URL (~3.4 KB for 10-job sample), Copy button shows "Copied" feedback, QR code renders.
+  - Open the share URL in a fresh navigation → lineage auto-loads: "Done. 10 nodes, 10 edges", stats show 42,100 / 3.12 Å / 10, Job Explorer shows J10 START.
+  - ScrollToTop button appears after scrolling, click returns to y=0.
+  - VLM: 9/10 — "exceptionally clean, modern, and professional. Excellent typography hierarchy, consistent spacing, cohesive teal/green palette."
+- **Lint**: 0 errors. **TypeScript**: 0 errors. **Dev server**: stable.
+- **Files produced**: 4 new (share-url.ts, use-shared-summary.ts, share-lineage-button.tsx, scroll-to-top.tsx), 4 updated (page.tsx, lineage-preview-card.tsx, help-card.tsx, package.json).
+
+Unresolved / next steps:
+- Bookmarklet href still set via ref+setAttribute (React blocks javascript: URLs) — necessary workaround.
+- CryoSmart REST endpoints are guessed (4 candidates) — only testable with a real CryoSmart instance.
+- Consider: job compare/diff feature, FSC plot viewer, export lineage graph as SVG, batch trace multiple start jobs.
+

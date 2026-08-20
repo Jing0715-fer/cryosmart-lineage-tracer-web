@@ -12,6 +12,7 @@ import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildLineageHtmlV2 } from "@/lib/cryosmart/report-html";
 import { makePreview } from "@/lib/cryosmart/lineage";
 import { LineageGraph } from "./lineage-graph";
+import { ShareLineageButton } from "./share-lineage-button";
 
 interface Props {
   summary: LineageSummary | null;
@@ -68,9 +69,12 @@ export function LineagePreviewCard({ summary }: Props) {
         <div className="flex items-center gap-2">
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-teal-600 text-[13px] font-bold text-white">3</span>
           <CardTitle className="text-lg">Lineage Preview</CardTitle>
+          <div className="ml-auto">
+            <ShareLineageButton summary={summary} />
+          </div>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          Interactive view of the traced lineage — same data layout as the original extension&apos;s report: left outline + right chain cards.
+          Interactive view of the traced lineage — same data layout as the original extension&apos;s report: left outline + right chain cards. Use <strong>Share</strong> to generate a linkable URL.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -205,14 +209,31 @@ export function LineagePreviewCard({ summary }: Props) {
 }
 
 function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub: string }) {
+  const isPlaceholder = value === "—" || value === "0";
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-2.5">
-      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-slate-500">
-        <span className="text-teal-500">{icon}</span>
+    <div
+      className={`group relative overflow-hidden rounded-lg border bg-white p-2.5 transition-all hover:-translate-y-0.5 hover:shadow-md dark:bg-slate-900 ${
+        isPlaceholder
+          ? "border-slate-200/60 dark:border-slate-700/60"
+          : "border-slate-200 hover:border-teal-300 dark:border-slate-700 dark:hover:border-teal-700"
+      }`}
+    >
+      {/* Accent strip on hover */}
+      {!isPlaceholder && (
+        <div className="absolute inset-x-0 top-0 h-0.5 origin-left scale-x-0 bg-gradient-to-r from-teal-500 to-emerald-500 transition-transform duration-300 group-hover:scale-x-100" />
+      )}
+      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        <span className="text-teal-500 transition-transform group-hover:scale-110">{icon}</span>
         {label}
       </div>
-      <div className="mt-1 text-[18px] font-semibold leading-tight text-slate-900">{value}</div>
-      <div className="text-[10.5px] text-slate-400">{sub}</div>
+      <div
+        className={`mt-1 text-[18px] font-semibold leading-tight ${
+          isPlaceholder ? "text-slate-400 dark:text-slate-600" : "text-slate-900 dark:text-slate-100"
+        }`}
+      >
+        {value}
+      </div>
+      <div className="text-[10.5px] text-slate-400 dark:text-slate-500">{sub}</div>
     </div>
   );
 }
