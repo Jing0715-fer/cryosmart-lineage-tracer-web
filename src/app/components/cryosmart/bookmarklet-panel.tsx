@@ -26,9 +26,11 @@ interface Props {
 
 export function BookmarkletPanel({ loaded, onLoad }: Props) {
   // The web app's own origin (where the user is viewing this page).
-  const appOrigin = useMemo(() => {
-    if (typeof window === "undefined") return "";
-    return window.location.origin;
+  // MUST be set in useEffect (not useMemo) to avoid SSR/CSR hydration mismatch:
+  // server renders "" (no window), client renders the real origin → mismatch.
+  const [appOrigin, setAppOrigin] = useState("");
+  useEffect(() => {
+    setAppOrigin(window.location.origin);
   }, []);
 
   const [cryosmartUrl, setCryosmartUrl] = useState("http://192.168.4.3:8080");

@@ -7,9 +7,12 @@ import { ConfigureCard, type TraceOptions } from "./components/cryosmart/configu
 import { LineagePreviewCard } from "./components/cryosmart/lineage-preview-card";
 import { DownloadCard } from "./components/cryosmart/download-card";
 import { HelpCard } from "./components/cryosmart/help-card";
+import { HeroVisualization } from "./components/cryosmart/hero-visualization";
+import { JobExplorerCard } from "./components/cryosmart/job-explorer-card";
 import { useImportedMetadata } from "./components/cryosmart/use-imported-metadata";
+import { useKeyboardShortcuts } from "./components/cryosmart/use-keyboard-shortcuts";
 import type { LineageSummary } from "@/lib/cryosmart/types";
-import { ShieldCheck, Globe, Zap, FileCheck2, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { ShieldCheck, Globe, Zap, FileCheck2, Loader2, CheckCircle2, AlertCircle, ArrowRight, MousePointer2, Keyboard } from "lucide-react";
 
 export default function Home() {
   const [loaded, setLoaded] = useState<LoadedMetadata | null>(null);
@@ -31,67 +34,133 @@ export default function Home() {
     },
   });
 
+  // Global keyboard shortcuts.
+  useKeyboardShortcuts({
+    onTrace: () => {
+      document.getElementById("configure")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    },
+    onDownload: () => {
+      document.getElementById("download")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    },
+    onFocusSearch: () => {
+      document.getElementById("job-explorer")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    },
+  });
+
   return (
     <div className="flex min-h-screen flex-col bg-slate-50/50">
       <SiteHeader />
 
       {/* Hero */}
-      <section className="border-b border-slate-200 bg-gradient-to-br from-white via-slate-50 to-teal-50/40">
-        <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8 lg:py-14">
-          <div className="grid grid-cols-1 items-center gap-8 lg:grid-cols-5">
-            <div className="lg:col-span-3">
-              <div className="inline-flex items-center gap-1.5 rounded-full border border-teal-200 bg-teal-50 px-3 py-1 text-[11px] font-medium text-teal-700">
-                <span className="flex h-1.5 w-1.5 rounded-full bg-teal-500" />
+      <section className="relative overflow-hidden border-b border-slate-200 bg-gradient-to-br from-white via-slate-50 to-teal-50/40">
+        {/* Subtle grid pattern overlay */}
+        <div
+          className="pointer-events-none absolute inset-0 opacity-[0.035]"
+          style={{
+            backgroundImage:
+              "linear-gradient(#0d9488 1px, transparent 1px), linear-gradient(90deg, #0d9488 1px, transparent 1px)",
+            backgroundSize: "24px 24px",
+          }}
+        />
+        {/* Decorative gradient blobs */}
+        <div className="pointer-events-none absolute -left-24 -top-24 h-72 w-72 rounded-full bg-teal-500/10 blur-3xl" />
+        <div className="pointer-events-none absolute -right-24 bottom-0 h-72 w-72 rounded-full bg-emerald-500/10 blur-3xl" />
+
+        <div className="relative mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8 lg:py-16">
+          <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-2">
+            {/* Left: copy */}
+            <div>
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-teal-200 bg-teal-50/80 px-3 py-1 text-[11px] font-medium text-teal-700 backdrop-blur">
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-teal-400 opacity-75" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-teal-500" />
+                </span>
                 Chrome extension → Cross-browser web app
               </div>
-              <h1 className="mt-4 text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl lg:text-[2.75rem] lg:leading-[1.1]">
-                CryoSmart Lineage Tracer, <span className="text-teal-600">reborn for the web</span>
+              <h1 className="mt-5 text-[2rem] font-bold leading-[1.1] tracking-tight text-slate-900 sm:text-[2.5rem] lg:text-[3.25rem]">
+                CryoSmart Lineage Tracer,
+                <br />
+                <span className="bg-gradient-to-r from-teal-600 via-emerald-600 to-cyan-600 bg-clip-text text-transparent">
+                  reborn for the web
+                </span>
               </h1>
-              <p className="mt-4 max-w-2xl text-[14px] leading-relaxed text-slate-600 sm:text-[15px]">
-                Trace particle &amp; map lineage for any CryoSmart job, build an interactive HTML / SVG / PPTX
-                report, and download the full bundle — including ChimeraX alignment scripts —
-                from any modern browser. No extension install required.
+              <p className="mt-5 max-w-xl text-[14.5px] leading-[1.7] text-slate-600 sm:text-[15.5px]">
+                Trace particle &amp; map lineage for any CryoSmart job. Build interactive HTML / SVG / PPTX
+                reports and download the full bundle — including ChimeraX alignment scripts —
+                right from your browser. No extension install required.
               </p>
-              <div className="mt-6 flex flex-wrap gap-3">
+              <div className="mt-7 flex flex-wrap items-center gap-3">
                 <a
                   href="#data-source"
-                  className="inline-flex h-9 items-center gap-1.5 rounded-md bg-teal-600 px-4 text-[13px] font-medium text-white shadow-sm transition-colors hover:bg-teal-700"
+                  className="group inline-flex h-10 items-center gap-2 rounded-lg bg-teal-600 px-5 text-[13.5px] font-semibold text-white shadow-md shadow-teal-600/20 transition-all hover:bg-teal-700 hover:shadow-lg hover:shadow-teal-600/30"
                 >
                   Get started
+                  <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
                 </a>
                 <a
                   href="#help"
-                  className="inline-flex h-9 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-4 text-[13px] font-medium text-slate-700 transition-colors hover:bg-slate-50"
+                  className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-300 bg-white/70 px-5 text-[13.5px] font-medium text-slate-700 backdrop-blur transition-all hover:border-slate-400 hover:bg-white"
                 >
                   How does it work?
                 </a>
               </div>
+
+              {/* Quick stats / trust signals */}
+              <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-2 text-[12px] text-slate-500">
+                <span className="inline-flex items-center gap-1.5">
+                  <MousePointer2 className="h-3.5 w-3.5 text-teal-500" />
+                  One-click bookmarklet capture
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <Keyboard className="h-3.5 w-3.5 text-teal-500" />
+                  Keyboard shortcuts
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <Globe className="h-3.5 w-3.5 text-teal-500" />
+                  Chrome · Firefox · Safari · Edge
+                </span>
+              </div>
             </div>
 
-            <div className="lg:col-span-2">
-              <div className="grid grid-cols-2 gap-3">
+            {/* Right: visualization + feature cards */}
+            <div className="space-y-4">
+              {/* Animated lineage DAG */}
+              <div className="rounded-2xl border border-slate-200/80 bg-white/70 p-4 shadow-xl shadow-slate-900/5 backdrop-blur">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Live lineage trace preview
+                  </span>
+                  <span className="rounded-full bg-teal-50 px-2 py-0.5 text-[10px] font-medium text-teal-700">
+                    9 jobs · 9 edges
+                  </span>
+                </div>
+                <HeroVisualization />
+              </div>
+
+              {/* Feature cards row */}
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-2 xl:grid-cols-4">
                 <FeatureCard
                   icon={<Globe className="h-4 w-4" />}
                   title="Cross-browser"
-                  desc="Chrome · Firefox · Safari · Edge"
+                  desc="Works everywhere"
                   tone="teal"
                 />
                 <FeatureCard
                   icon={<ShieldCheck className="h-4 w-4" />}
                   title="No install"
-                  desc="Pure web app, no extension"
+                  desc="Pure web app"
                   tone="emerald"
                 />
                 <FeatureCard
                   icon={<Zap className="h-4 w-4" />}
                   title="Client-side"
-                  desc="All tracing runs in browser"
+                  desc="Fast & private"
                   tone="cyan"
                 />
                 <FeatureCard
                   icon={<FileCheck2 className="h-4 w-4" />}
                   title="Full bundle"
-                  desc="JSON · HTML · SVG · PPTX"
+                  desc="JSON · HTML · PPTX"
                   tone="teal"
                 />
               </div>
@@ -124,7 +193,7 @@ export default function Home() {
       )}
 
       {/* Main workflow */}
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
+      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-10 sm:px-6 lg:px-8">
         <div className="space-y-6">
           <DataSourceCard loaded={loaded} onLoad={setLoaded} />
 
@@ -137,6 +206,8 @@ export default function Home() {
           />
 
           <LineagePreviewCard summary={summary} />
+
+          <JobExplorerCard summary={summary} />
 
           <DownloadCard summary={summary} options={traceOptions} loaded={loaded} />
 
@@ -160,19 +231,41 @@ function FeatureCard({
   desc: string;
   tone: "teal" | "emerald" | "cyan";
 }) {
-  const toneCls =
-    tone === "teal"
-      ? "from-teal-50 to-teal-100/50 text-teal-700 border-teal-200"
-      : tone === "emerald"
-      ? "from-emerald-50 to-emerald-100/50 text-emerald-700 border-emerald-200"
-      : "from-cyan-50 to-cyan-100/50 text-cyan-700 border-cyan-200";
+  const toneMap = {
+    teal: {
+      bg: "from-teal-50 to-teal-100/40",
+      border: "border-teal-200/60",
+      iconBg: "bg-teal-100 text-teal-600",
+      title: "text-teal-800",
+      hoverBorder: "hover:border-teal-300",
+    },
+    emerald: {
+      bg: "from-emerald-50 to-emerald-100/40",
+      border: "border-emerald-200/60",
+      iconBg: "bg-emerald-100 text-emerald-600",
+      title: "text-emerald-800",
+      hoverBorder: "hover:border-emerald-300",
+    },
+    cyan: {
+      bg: "from-cyan-50 to-cyan-100/40",
+      border: "border-cyan-200/60",
+      iconBg: "bg-cyan-100 text-cyan-600",
+      title: "text-cyan-800",
+      hoverBorder: "hover:border-cyan-300",
+    },
+  };
+  const t = toneMap[tone];
   return (
-    <div className={`rounded-xl border bg-gradient-to-br ${toneCls} p-3`}>
-      <div className="flex items-center gap-1.5">
-        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-white/70 text-current">{icon}</span>
-        <span className="text-[12.5px] font-semibold">{title}</span>
+    <div
+      className={`group rounded-xl border bg-gradient-to-br ${t.bg} ${t.border} ${t.hoverBorder} p-3 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={`flex h-7 w-7 items-center justify-center rounded-lg ${t.iconBg} transition-transform group-hover:scale-110`}>
+          {icon}
+        </span>
+        <span className={`text-[12.5px] font-semibold ${t.title}`}>{title}</span>
       </div>
-      <p className="mt-1 pl-1 text-[11px] opacity-80">{desc}</p>
+      <p className="mt-1.5 pl-1 text-[11px] text-slate-500">{desc}</p>
     </div>
   );
 }

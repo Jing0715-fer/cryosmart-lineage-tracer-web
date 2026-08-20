@@ -40,23 +40,33 @@ interface UseImportedOpts {
  * to ~20 seconds, then give up.
  */
 export function useImportedMetadata(opts?: UseImportedOpts) {
-  const [state, setState] = useState<ImportState>(() => {
-    if (typeof window === "undefined") return { status: "idle", message: "", token: null, startedAt: null };
-    const u = new URL(window.location.href);
-    const token = u.searchParams.get("imported");
-    if (!token) return { status: "idle", message: "", token: null, startedAt: null };
-    return {
-      status: "polling",
-      message: "Waiting for CryoSmart metadata to arrive…",
-      token,
-      startedAt: Date.now(),
-    };
+  // Always start with idle state on both server and client to avoid hydration
+  // mismatch. We detect ?imported=<token> in useEffect (client-only).
+  const [state, setState] = useState<ImportState>({
+    status: "idle",
+    message: "",
+    token: null,
+    startedAt: null,
   });
 
   const onLoadedRef = useRef(opts?.onLoaded);
   useEffect(() => {
     onLoadedRef.current = opts?.onLoaded;
   }, [opts?.onLoaded]);
+
+  // On client mount, check for ?imported=<token> in the URL.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const u = new URL(window.location.href);
+    const token = u.searchParams.get("imported");
+    if (!token) return;
+    setState({
+      status: "polling",
+      message: "Waiting for CryoSmart metadata to arrive…",
+      token,
+      startedAt: Date.now(),
+    });
+  }, []);
 
   useEffect(() => {
     if (state.status !== "polling" || !state.token) return;
