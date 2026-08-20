@@ -490,3 +490,47 @@ Unresolved / next steps:
 - CryoSmart REST endpoints are guessed (4 candidates) — only testable with a real CryoSmart instance.
 - Consider: FSC plot viewer, batch trace multiple start jobs, lineage graph minimap for large projects.
 
+
+---
+Task ID: 14
+Agent: main-orchestrator (cron review #5)
+Task: QA review, fix HMR cache glitch, add FSC Plot Viewer + skeleton loading
+
+Work Log:
+- **FIX: Next.js HMR "module not found" error** — Stale `.next/cache` had a corrupt module graph for `@/components/theme-provider`. Fixed by `pkill next dev` → `rm -rf .next` → restart. Page now loads 200 OK with zero console errors. (This was a dev cache glitch, not a real code bug — tsc always resolved the path correctly.)
+- **NEW FEATURE: FSC Plot Viewer** (VLM 10/10)
+  - Created `src/lib/cryosmart/fsc-parser.ts` — pure string parser for FSC (Fourier Shell Correlation) data. Supports: single/multi-curve formats, `# Iteration N` headers, `# Resolution: X Å` hint lines, two-column whitespace/comma data, threshold-crossing frequency detection. Exports `parseFscText()` + `buildSampleFscMulti()` (synthetic 4-iteration curve set for demo).
+  - Created `src/app/components/cryosmart/fsc-plot-viewer.tsx` — Recharts-based interactive viewer:
+    - Three input modes: "Try Sample FSC" button (synthetic 4-iter curves), "Upload .txt" file picker, "Paste text" textarea
+    - Interactive LineChart with ResponsiveContainer, CartesianGrid, XAxis (spatial frequency 0..1), YAxis (FSC 0..1), Tooltip
+    - ReferenceLine at y=0.143 (gold standard FSC threshold, dashed amber)
+    - Legend with per-curve resolution Å annotation
+    - Clickable curve chips below chart to toggle visibility (hide/show individual iterations)
+    - Color palette: teal/emerald/cyan family (matches brand)
+    - Best resolution badge, curve count badge, threshold badge
+    - Warnings panel for skipped lines during parsing
+    - Info note explaining FSC + 0.143 threshold significance
+  - Added "FSC" tab to LineagePreviewCard (now 6 tabs: Overview / Graph / FSC / Report / Mermaid / Preview).
+- **POLISH: Skeleton loading state for Lineage Preview** (VLM 9/10)
+  - When no summary is loaded, the Lineage Preview card now shows:
+    - 4 skeleton stat cards (gray pulsing placeholder boxes for icon + label + value + sub)
+    - 6 skeleton tab placeholders (gray pulsing rectangles matching the 6-tab layout)
+    - Empty-state message with Layers icon, "No lineage traced yet" text, and hint "Load data above and click Trace Lineage (Ctrl+Enter)"
+  - Replaces the previous bare "opacity-60" placeholder with a structured skeleton that matches the final layout shape.
+
+Stage Summary:
+- **Verification via agent-browser (all passed)**:
+  - Page loads cleanly with zero console errors (HMR glitch fixed).
+  - Try Sample → Load → Trace → 10 nodes, 10 edges.
+  - FSC tab renders with "Try Sample FSC", "Upload .txt", "Paste text" toolbar buttons.
+  - Click "Try Sample FSC" → chart renders 4 iteration curves (Iter 22-25), 0.143 threshold line, "3.12 Å" best resolution badge, clickable curve chips.
+  - Skeleton state on fresh load: 4 pulsing stat cards + 6 tab placeholders + empty-state hint.
+  - VLM: FSC Plot Viewer 10/10 ("clean, professional, fully labeled, all expected scientific plotting features"), Skeleton state 9/10 ("clean, professional, highly intuitive").
+- **Lint**: 0 errors. **TypeScript**: 0 errors. **Dev server**: stable (after cache clear + restart).
+- **Files produced**: 2 new (fsc-parser.ts, fsc-plot-viewer.tsx), 1 updated (lineage-preview-card.tsx).
+
+Unresolved / next steps:
+- CryoSmart REST endpoints are guessed (4 candidates) — only testable with a real CryoSmart instance.
+- FSC viewer currently only loads sample/synthetic data; real CryoSmart FSC .txt integration requires Live Connect mode + the `/api/log_image/download_result_file/.../fsc.txt` endpoint. The parser is ready, just needs the fetch wiring.
+- Consider: batch trace multiple start jobs, lineage graph minimap, Guinier plot viewer (B-factor), auto-load FSC from the traced start job in Live Connect mode.
+

@@ -13,6 +13,7 @@ import { buildLineageHtmlV2 } from "@/lib/cryosmart/report-html";
 import { makePreview } from "@/lib/cryosmart/lineage";
 import { LineageGraph } from "./lineage-graph";
 import { ShareLineageButton } from "./share-lineage-button";
+import { FscPlotViewer } from "./fsc-plot-viewer";
 
 interface Props {
   summary: LineageSummary | null;
@@ -43,20 +44,42 @@ export function LineagePreviewCard({ summary }: Props) {
 
   if (!summary) {
     return (
-      <Card id="preview" className="scroll-mt-20 opacity-60">
+      <Card id="preview" className="scroll-mt-20 opacity-90">
         <CardHeader className="pb-4">
           <div className="flex items-center gap-2">
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-slate-300 text-[13px] font-bold text-white">3</span>
-            <CardTitle className="text-lg">Lineage Preview</CardTitle>
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-slate-300 text-[13px] font-bold text-white dark:bg-slate-700">3</span>
+            <CardTitle className="text-lg text-slate-700 dark:text-slate-300">Lineage Preview</CardTitle>
           </div>
           <CardDescription className="mt-1.5 pl-9 text-[13px]">
             Load data and trace lineage above — the lineage graph, stats, and full HTML report will appear here.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex h-48 items-center justify-center text-[12px] text-slate-400">
-          <div className="flex flex-col items-center gap-2">
-            <Layers className="h-6 w-6 text-slate-300" />
-            <span>No lineage traced yet.</span>
+        <CardContent className="space-y-4">
+          {/* Skeleton stat cards */}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="rounded-lg border border-slate-200 bg-white p-2.5 dark:border-slate-700 dark:bg-slate-900">
+                <div className="flex items-center gap-1">
+                  <div className="h-3 w-3 animate-pulse rounded bg-slate-200 dark:bg-slate-700" />
+                  <div className="h-2.5 w-16 animate-pulse rounded bg-slate-200 dark:bg-slate-700" />
+                </div>
+                <div className="mt-1.5 h-5 w-20 animate-pulse rounded bg-slate-200 dark:bg-slate-700" />
+                <div className="mt-0.5 h-2 w-12 animate-pulse rounded bg-slate-100 dark:bg-slate-800" />
+              </div>
+            ))}
+          </div>
+          {/* Skeleton tabs + content */}
+          <div className="flex gap-1">
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className="h-7 w-20 animate-pulse rounded bg-slate-100 dark:bg-slate-800" />
+            ))}
+          </div>
+          <div className="flex h-48 flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50/40 text-[12px] text-slate-400 dark:border-slate-600 dark:bg-slate-900/40">
+            <div className="flex flex-col items-center gap-2">
+              <Layers className="h-6 w-6 text-slate-300 dark:text-slate-600" />
+              <span>No lineage traced yet.</span>
+              <span className="text-[10.5px] text-slate-400 dark:text-slate-500">Load data above and click <strong className="text-teal-600 dark:text-teal-400">Trace Lineage</strong> (Ctrl+Enter).</span>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -107,12 +130,13 @@ export function LineagePreviewCard({ summary }: Props) {
         </div>
 
         <Tabs value={reportTab} onValueChange={setReportTab}>
-          <TabsList className="grid w-full grid-cols-5 bg-slate-100 sm:w-auto sm:grid-cols-5">
-            <TabsTrigger value="stats" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Overview</TabsTrigger>
-            <TabsTrigger value="graph" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Graph</TabsTrigger>
-            <TabsTrigger value="report" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Report</TabsTrigger>
-            <TabsTrigger value="mermaid" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Mermaid</TabsTrigger>
-            <TabsTrigger value="preview" className="text-[12px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Preview</TabsTrigger>
+          <TabsList className="grid w-full grid-cols-6 bg-slate-100 sm:w-auto sm:grid-cols-6">
+            <TabsTrigger value="stats" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Overview</TabsTrigger>
+            <TabsTrigger value="graph" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Graph</TabsTrigger>
+            <TabsTrigger value="fsc" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">FSC</TabsTrigger>
+            <TabsTrigger value="report" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Report</TabsTrigger>
+            <TabsTrigger value="mermaid" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Mermaid</TabsTrigger>
+            <TabsTrigger value="preview" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Preview</TabsTrigger>
           </TabsList>
 
           <TabsContent value="stats" className="mt-3 space-y-3">
@@ -121,6 +145,10 @@ export function LineagePreviewCard({ summary }: Props) {
 
           <TabsContent value="graph" className="mt-3">
             <LineageGraph summary={summary} />
+          </TabsContent>
+
+          <TabsContent value="fsc" className="mt-3">
+            <FscPlotViewer />
           </TabsContent>
 
           <TabsContent value="report" className="mt-3">
