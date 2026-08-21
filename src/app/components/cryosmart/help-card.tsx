@@ -95,6 +95,15 @@ export function HelpCard() {
                 <p className="mt-1.5 text-[11px] text-emerald-700">
                   <strong>Why this works:</strong> the bookmark runs <em>inside</em> the CryoSmart tab (same-origin), so the browser automatically attaches your session cookie — including HttpOnly cookies that JavaScript cannot read. No pasting, no token, works in Chrome/Firefox/Safari/Edge.
                 </p>
+                <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/60 p-2 text-[11px] text-amber-800">
+                  <strong>Troubleshooting:</strong> If clicking the bookmark opens a blank <code className="rounded bg-amber-100 px-1 font-mono text-[10px]">about:blank</code> tab with an error, the bookmark URL was likely truncated or installed from a stale version. Fix:
+                  <ol className="ml-4 mt-1 list-decimal space-y-0.5">
+                    <li>Delete the old bookmark.</li>
+                    <li>Hard-refresh the web app (Ctrl/Cmd+Shift+R).</li>
+                    <li>Drag the <span className="font-medium">Capture CryoSmart</span> button from the Bookmarklet tab to your bookmarks bar again.</li>
+                    <li>Make sure you click the bookmark from the <strong>bookmarks bar</strong> (not the bookmarks menu or a context-menu).</li>
+                  </ol>
+                </div>
               </div>
               <p className="mt-2"><strong>Option B (upload JSON file):</strong> Use the original Chrome extension&apos;s <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">可选：导出当前 Project 全部 metadata</code> button — it downloads a JSON file with all job metadata. Upload that file via the <em>Upload JSON</em> tab.</p>
               <p><strong>Option C (manual REST):</strong> Open CryoSmart, log in, open DevTools → Network. Navigate to your project page. Find the XHR call to one of these endpoints (CryoSmart deployments vary):</p>
