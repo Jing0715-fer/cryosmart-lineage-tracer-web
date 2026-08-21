@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useTheme } from "next-themes";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ interface Props {
 
 export function LineagePreviewCard({ summary }: Props) {
   const [reportTab, setReportTab] = useState("stats");
+  const { resolvedTheme } = useTheme();
 
   const reportHtml = useMemo(() => {
     if (!summary) return "";
@@ -188,10 +190,11 @@ export function LineagePreviewCard({ summary }: Props) {
                 </div>
               </div>
               <iframe
+                key={`report-${resolvedTheme || "light"}`}
                 srcDoc={reportSrcDoc}
                 title="Lineage Report"
-                className="h-[600px] w-full rounded-lg border border-slate-300 bg-white"
-                sandbox="allow-same-origin allow-popups"
+                className="h-[600px] w-full rounded-lg border border-slate-300 bg-white dark:border-slate-700"
+                sandbox="allow-same-origin allow-scripts allow-popups"
               />
             </div>
           </TabsContent>
