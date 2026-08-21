@@ -21,6 +21,8 @@ import {
   Loader2,
   FlaskConical,
   ExternalLink,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { loadSession, saveSession, fetchProjectJobs, type CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 import { buildSampleExportedMetadata } from "@/lib/cryosmart/sample-data";
@@ -344,16 +346,186 @@ function LiveConnectPanel({ loaded, onLoad }: Props) {
         </div>
       )}
 
-      <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-2.5 text-[11.5px] text-blue-800">
+      {/* How it works + tutorial */}
+      <LiveConnectTutorial baseUrl={baseUrl} cryosmartOrigin={baseUrl.replace(/\/+$/, "")} />
+    </div>
+  );
+}
+
+function LiveConnectTutorial({ baseUrl, cryosmartOrigin }: { baseUrl: string; cryosmartOrigin: string }) {
+  const [showTutorial, setShowTutorial] = useState(false);
+  const [showCookieHelp, setShowCookieHelp] = useState(false);
+  const [showAuthHelp, setShowAuthHelp] = useState(false);
+
+  return (
+    <>
+      {/* Quick answer banner */}
+      <div className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 text-[11.5px] text-teal-900 dark:border-teal-700 dark:bg-teal-950/30 dark:text-teal-200">
         <div className="flex items-start gap-2">
           <Plug className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <div>
-            <span className="font-medium">How it works:</span> Your browser cannot call CryoSmart directly (CORS + HttpOnly cookies).
-            Our Next.js API route <code className="mx-1 rounded bg-blue-100 px-1 font-mono text-[10px]">/api/cryosmart/[...path]</code> acts as a server-side proxy, forwarding each request with your cookie attached. Your cookie is stored only in localStorage (never sent to us).
+            <span className="font-medium">Quick answer:</span> Most users only need to fill{" "}
+            <strong>Session Cookie</strong>. Authorization is only needed if your CryoSmart uses
+            JWT/token auth (rare). The web app&apos;s backend proxy forwards whichever you provide.
+            <button
+              onClick={() => setShowTutorial(!showTutorial)}
+              className="ml-1 font-semibold underline decoration-dotted underline-offset-2 hover:text-teal-700 dark:hover:text-teal-300"
+            >
+              {showTutorial ? "Hide tutorial" : "Show step-by-step tutorial →"}
+            </button>
           </div>
         </div>
       </div>
-    </div>
+
+      {/* Expandable tutorial */}
+      {showTutorial && (
+        <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-700 dark:bg-slate-900/40">
+          <div className="text-[12px] font-semibold text-slate-700 dark:text-slate-200">
+            How to get your Session Cookie
+          </div>
+
+          {/* Step 1 */}
+          <div className="flex gap-3">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">1</span>
+            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+              <p>Open <strong>CryoSmart</strong> in your browser and log in normally.</p>
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                URL looks like:{" "}
+                <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px] dark:bg-slate-800">
+                  {cryosmartOrigin || "http://192.168.4.3:8080"}
+                </code>
+              </p>
+            </div>
+          </div>
+
+          {/* Step 2 */}
+          <div className="flex gap-3">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">2</span>
+            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+              <p>Press <kbd className="rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-[10px] dark:border-slate-600 dark:bg-slate-800">F12</kbd> to open DevTools, then click the <strong>Application</strong> tab.</p>
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                (Chrome/Edge: Application → Storage → Cookies. Firefox: Storage → Cookies.
+                Safari: Storage → Cookies.)
+              </p>
+            </div>
+          </div>
+
+          {/* Step 3 */}
+          <div className="flex gap-3">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">3</span>
+            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+              <p>In the left sidebar, expand <strong>Cookies</strong> → click your CryoSmart domain.</p>
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                You&apos;ll see a table of cookie names and values.
+              </p>
+            </div>
+          </div>
+
+          {/* Step 4 */}
+          <div className="flex gap-3">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">4</span>
+            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+              <p>Find the session cookie. Common names: <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">session</code>, <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">connect.sid</code>, <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">sessionid</code>, or <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">csrftoken</code>.</p>
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                Copy the <strong>Value</strong> column for that row.
+              </p>
+            </div>
+          </div>
+
+          {/* Step 5 */}
+          <div className="flex gap-3">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">5</span>
+            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+              <p>Paste it into the <strong>Session Cookie</strong> field above in this format:</p>
+              <pre className="mt-1 overflow-x-auto rounded-md border border-slate-200 bg-slate-950 p-2 font-mono text-[10px] text-emerald-300 dark:border-slate-700">
+                <code>session=eyJhbGciOi...; csrftoken=abc123</code>
+              </pre>
+              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                Format: <code className="font-mono text-[10px]">name=value</code>. Multiple cookies separated by <code className="font-mono text-[10px]">; </code> (semicolon + space).
+              </p>
+            </div>
+          </div>
+
+          {/* Alternative: Network tab method */}
+          <button
+            onClick={() => setShowCookieHelp(!showCookieHelp)}
+            className="flex items-center gap-1 text-[11.5px] font-medium text-teal-700 hover:underline dark:text-teal-400"
+          >
+            {showCookieHelp ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            Alternative: get cookie from the Network tab
+          </button>
+          {showCookieHelp && (
+            <div className="ml-8 space-y-2 rounded-md border border-slate-200 bg-white p-3 text-[11.5px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+              <p>If you can&apos;t find the Application tab, use this method:</p>
+              <ol className="ml-4 list-decimal space-y-1">
+                <li>Open CryoSmart, press <kbd className="rounded border border-slate-300 bg-white px-1 py-0.5 font-mono text-[10px] dark:border-slate-600 dark:bg-slate-800">F12</kbd> → <strong>Network</strong> tab.</li>
+                <li>Refresh the page (F5).</li>
+                <li>Click any request in the list (e.g. <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">/api/...</code>).</li>
+                <li>In the right panel, scroll to <strong>Request Headers</strong> → find the <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">Cookie:</code> line.</li>
+                <li>Copy everything after <code className="font-mono text-[10px]">Cookie: </code> — that&apos;s your full cookie string.</li>
+              </ol>
+            </div>
+          )}
+
+          {/* Authorization help */}
+          <button
+            onClick={() => setShowAuthHelp(!showAuthHelp)}
+            className="flex items-center gap-1 text-[11.5px] font-medium text-slate-600 hover:underline dark:text-slate-400"
+          >
+            {showAuthHelp ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            When do I need Authorization? (rare)
+          </button>
+          {showAuthHelp && (
+            <div className="ml-8 space-y-2 rounded-md border border-slate-200 bg-white p-3 text-[11.5px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+              <p>
+                <strong>Most CryoSmart deployments don&apos;t need this.</strong> Skip it unless:
+              </p>
+              <ul className="ml-4 list-disc space-y-1">
+                <li>Your CryoSmart is configured with JWT bearer token auth (check with your admin).</li>
+                <li>You see an <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">Authorization: Bearer ...</code> header in DevTools → Network requests.</li>
+              </ul>
+              <p className="mt-1">If needed, copy the full value including <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">Bearer </code> prefix:</p>
+              <pre className="overflow-x-auto rounded-md border border-slate-200 bg-slate-950 p-2 font-mono text-[10px] text-emerald-300 dark:border-slate-700">
+                <code>Bearer eyJhbGciOiJIUzI1NiIs...</code>
+              </pre>
+            </div>
+          )}
+
+          <Separator className="my-2" />
+
+          {/* Privacy + how it works */}
+          <div className="rounded-md border border-blue-200 bg-blue-50/40 p-2.5 text-[11px] text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
+            <div className="flex items-start gap-2">
+              <Plug className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <div>
+                <span className="font-medium">How it works:</span> Your browser cannot call CryoSmart
+                directly (CORS + HttpOnly cookies). Our Next.js API route{" "}
+                <code className="mx-0.5 rounded bg-blue-100 px-1 font-mono text-[10px] dark:bg-blue-900">/api/cryosmart/[...path]</code>{" "}
+                acts as a server-side proxy, forwarding each request with your cookie attached.
+                Your cookie is stored only in <strong>localStorage</strong> in your browser — it is
+                never written to disk, never logged, and never sent to any third party.
+              </div>
+            </div>
+          </div>
+
+          {/* Which to fill summary */}
+          <div className="rounded-md border border-amber-200 bg-amber-50/60 p-2.5 text-[11px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <div>
+                <strong>Summary — which fields to fill:</strong>
+                <ul className="ml-4 mt-1 list-disc space-y-0.5">
+                  <li><strong>Cookie only</strong> (95% of cases): fill <em>Session Cookie</em>, leave <em>Authorization</em> empty.</li>
+                  <li><strong>Auth only</strong> (rare, JWT setups): fill <em>Authorization</em>, leave <em>Session Cookie</em> empty.</li>
+                  <li><strong>Both</strong> (very rare): fill both — the proxy forwards both headers.</li>
+                  <li><strong>Neither</strong>: only works if CryoSmart has no auth (public instance on your LAN).</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
