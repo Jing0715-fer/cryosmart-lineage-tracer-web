@@ -84,52 +84,114 @@ export function buildBookmarkletUrl(appOrigin: string): string {
  *   5. Logs progress to the Console so the user sees what's happening.
  */
 export function buildConsoleSnippet(appOrigin: string): string {
-  // We can use a more readable multi-line format here since it's pasted
-  // into the Console, not embedded in a URL. But keep it compact-ish.
   return `// CryoSmart Lineage Tracer — Console Capture
 // Paste this into the Console (F12) on your CryoSmart project page.
-// It fetches the project's jobs and sends them to the Lineage Tracer web app.
 (function(){
   var APP = ${JSON.stringify(appOrigin)};
   var href = location.href;
   var m = href.match(/\\/projects\\/([^\\/?#]+)/i);
-  if (!m) { console.error('No /projects/<PID> in URL:', href); alert('Open this CryoSmart project page first (URL like http://your-cryosmart/#/projects/P259), then re-run this snippet.'); return; }
+  if (!m) { console.error('[CryoSmart] No /projects/<PID> in URL:', href); alert('Open this CryoSmart project page first (URL like http://your-cryosmart/#/projects/P259), then re-run this snippet.'); return; }
   var pid = m[1];
   var origin = location.origin;
   console.log('[CryoSmart] Capturing project', pid, 'from', origin);
-  var endpoints = [
+
+  // Step 1: Auto-discover API endpoints from the page's network activity.
+  // CryoSmart SPA loads job data via XHR — we scan performance entries to
+  // find any URL that looks like an API call returning JSON, and try those.
+  var discovered = [];
+  try {
+    var entries = performance.getEntriesByType('resource');
+    for (var i = 0; i < entries.length; i++) {
+      var name = entries[i].name;
+      // Only same-origin requests that look like API calls.
+      if (name.indexOf(origin) !== 0) continue;
+      var relPath = name.slice(origin.length).replace(/^\\/+/, '');
+      // Skip static assets (images, css, js, fonts).
+      if (/\\.(png|jpg|jpeg|gif|svg|css|js|woff2?|ttf|ico|map)(\\?|$)/i.test(relPath)) continue;
+      // Keep paths that look like API calls or contain 'job' or 'project'.
+      if (relPath.indexOf('api/') === 0 || /job|project|exposure|metadata/i.test(relPath)) {
+        if (discovered.indexOf(relPath) === -1) discovered.push(relPath);
+      }
+    }
+  } catch(e) {}
+  if (discovered.length) console.log('[CryoSmart] Discovered API endpoints from page activity:', discovered);
+
+  // Step 2: Build candidate list — discovered endpoints first, then guesses.
+  var endpoints = discovered.slice();
+  var guesses = [
     'api/projects/' + pid + '/jobs',
     'api/jobs?project_uid=' + pid,
     'api/projects/' + pid + '/metadata',
-    'api/meteor/jobs?project_uid=' + pid
+    'api/meteor/jobs?project_uid=' + pid,
+    'api/v1/projects/' + pid + '/jobs',
+    'api/v1/projects/' + pid,
+    'api/projects/' + pid,
+    'api/project/' + pid + '/jobs',
+    'v1/projects/' + pid + '/jobs',
+    'projects/' + pid + '/jobs',
+    'api/projects/' + pid + '/exposures',
+    'api/projects/' + pid + '/exposures/jobs'
   ];
+  for (var g = 0; g < guesses.length; g++) {
+    if (endpoints.indexOf(guesses[g]) === -1) endpoints.push(guesses[g]);
+  }
+
   var errors = [];
+  function tryEndpoint(path) {
+    var url = origin + '/' + path;
+    console.log('[CryoSmart] Trying', url);
+    return fetch(url, { credentials: 'include' })
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        var ct = r.headers.get('content-type') || '';
+        if (ct.indexOf('json') === -1 && ct.indexOf('text') === -1) throw new Error('not JSON (content-type: ' + ct + ')');
+        return r.json();
+      })
+      .then(function(d) {
+        var jobs = Array.isArray(d) ? d : (d.jobs || d.items || d.data || d.results || d.exposures);
+        if (!jobs || !Array.isArray(jobs) || !jobs.length) {
+          throw new Error('no jobs array (keys: ' + (d && typeof d === 'object' ? Object.keys(d).join(',') : typeof d) + ')');
+        }
+        return jobs;
+      });
+  }
+
+  function upload(jobs, source) {
+    console.log('[CryoSmart] Found', jobs.length, 'jobs via', source);
+    console.log('[CryoSmart] Uploading to web app...');
+    return fetch(APP + '/api/cryosmart/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_uid: pid, source_url: href, jobs: jobs })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(res) {
+        if (!res || !res.ok || !res.token) throw new Error((res && res.error) || 'upload failed');
+        console.log('[CryoSmart] ✅ Done! ' + res.count + ' jobs captured. Opening web app...');
+        window.open(APP + '/?imported=' + encodeURIComponent(res.token) + '&pid=' + encodeURIComponent(pid), '_blank');
+      });
+  }
+
   function tryNext(i) {
     if (i >= endpoints.length) {
-      console.error('[CryoSmart] All endpoints failed:', errors);
-      alert('Could not fetch jobs from ' + origin + '.\\nTried:\\n' + endpoints.map(function(p){return '  ' + origin + '/' + p;}).join('\\n') + '\\n\\nErrors:\\n' + errors.map(function(e){return '  ' + e;}).join('\\n') + '\\n\\nOpen DevTools → Network, refresh the CryoSmart page, find the XHR that returns the job list, and report its path.');
+      console.error('[CryoSmart] ❌ All endpoints failed:', errors);
+      var msg = 'Could not fetch jobs from ' + origin + '.\\n\\n';
+      msg += 'Tried ' + endpoints.length + ' endpoints:\\n';
+      for (var e = 0; e < errors.length; e++) msg += '  ' + errors[e] + '\\n';
+      msg += '\\nHow to fix:\\n';
+      msg += '1. Open DevTools → Network tab on this CryoSmart page.\\n';
+      msg += '2. Refresh the page (F5).\\n';
+      msg += '3. Find the XHR/fetch request that returns the job list\\n';
+      msg += '   (look for a JSON response containing job objects).\\n';
+      msg += '4. Copy the full URL from the Network tab.\\n';
+      msg += '5. In the Lineage Tracer web app, go to the Upload JSON tab\\n';
+      msg += '   and paste the JSON response there manually.';
+      alert(msg);
       return;
     }
     var path = endpoints[i];
-    console.log('[CryoSmart] Trying', origin + '/' + path, '(' + (i+1) + '/' + endpoints.length + ')');
-    fetch(origin + '/' + path, { credentials: 'include' })
-      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(function(d) {
-        var jobs = Array.isArray(d) ? d : (d.jobs || d.items || d.data);
-        if (!jobs || !jobs.length) throw new Error('no jobs in response');
-        console.log('[CryoSmart] Found', jobs.length, 'jobs via', path);
-        console.log('[CryoSmart] Uploading to web app...');
-        return fetch(APP + '/api/cryosmart/import', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ project_uid: pid, source_url: href, jobs: jobs })
-        }).then(function(r) { return r.json(); });
-      })
-      .then(function(res) {
-        if (!res || !res.ok || !res.token) throw new Error((res && res.error) || 'upload failed');
-        console.log('[CryoSmart] Done! ' + res.count + ' jobs captured. Opening web app...');
-        window.open(APP + '/?imported=' + encodeURIComponent(res.token) + '&pid=' + encodeURIComponent(pid), '_blank');
-      })
+    tryEndpoint(path)
+      .then(function(jobs) { return upload(jobs, path); })
       .catch(function(e) {
         errors.push(path + ': ' + e.message);
         tryNext(i + 1);

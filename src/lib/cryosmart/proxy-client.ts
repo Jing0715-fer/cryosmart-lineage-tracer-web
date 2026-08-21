@@ -49,12 +49,18 @@ export async function cryoSmartFetch(
   cryosmartPath: string,
   init?: { signal?: AbortSignal }
 ): Promise<Response> {
+  // Split the CryoSmart path into path + query, because some candidate
+  // endpoints like "api/jobs?project_uid=P259" already contain a query
+  // string. We must NOT just append "?base=..." (that would create two "?"
+  // and break param parsing). Instead, merge the path's own query params
+  // with the proxy's params (base, cookie, auth) into one URLSearchParams.
   const cleanPath = cryosmartPath.replace(/^\/+/, "");
-  const params = new URLSearchParams();
+  const [pathOnly, existingQuery] = cleanPath.split("?");
+  const params = new URLSearchParams(existingQuery || "");
   params.set("base", session.baseUrl);
   if (session.cookie) params.set("cookie", session.cookie);
   if (session.auth) params.set("auth", session.auth);
-  const url = `/api/cryosmart/${cleanPath}?${params.toString()}`;
+  const url = `/api/cryosmart/${pathOnly}?${params.toString()}`;
   const resp = await fetch(url, {
     method: "GET",
     credentials: "same-origin",
@@ -106,13 +112,23 @@ export async function fetchProjectJobs(
   session: CryoSmartSession,
   projectId: string
 ): Promise<RawJobsResult> {
+  const pid = encodeURIComponent(projectId);
   const candidates = [
-    `api/projects/${encodeURIComponent(projectId)}/jobs`,
-    `api/jobs?project_uid=${encodeURIComponent(projectId)}`,
-    `api/projects/${encodeURIComponent(projectId)}/metadata`,
-    `api/meteor/jobs?project_uid=${encodeURIComponent(projectId)}`,
+    `api/projects/${pid}/jobs`,
+    `api/jobs?project_uid=${pid}`,
+    `api/projects/${pid}/metadata`,
+    `api/meteor/jobs?project_uid=${pid}`,
+    // Additional candidates for different CryoSmart deployments:
+    `api/v1/projects/${pid}/jobs`,
+    `api/v1/projects/${pid}`,
+    `api/projects/${pid}`,
+    `api/project/${pid}/jobs`,
+    `v1/projects/${pid}/jobs`,
+    `projects/${pid}/jobs`,
+    `api/projects/${pid}/exposures`,
+    `api/projects/${pid}/exposures/jobs`,
   ];
-  let lastErr: Error | null = null;
+  const errors: string[] = [];
   for (const path of candidates) {
     try {
       const data = await cryoSmartJson<unknown>(session, path);
@@ -121,15 +137,18 @@ export async function fetchProjectJobs(
         return { jobs: arr, source: path };
       }
     } catch (err) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
+      errors.push(`${path}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  if (lastErr) {
-    throw new Error(
-      `Could not list jobs for project ${projectId} on ${session.baseUrl}. Last error: ${lastErr.message}`
-    );
-  }
-  return { jobs: [], source: "none" };
+  throw new Error(
+    `Could not list jobs for project ${projectId} on ${session.baseUrl}.\n\n` +
+    `Tried ${candidates.length} candidate endpoints, all failed:\n` +
+    errors.map((e) => `  ${e}`).join("\n") +
+    `\n\nHow to fix: open CryoSmart in your browser, press F12 → Network tab, ` +
+    `refresh the page, and find the XHR request that returns the job list ` +
+    `(look for a JSON response containing job objects). Copy the URL path ` +
+    `(e.g. /api/custom/projects/P222/jobs) and report it so we can add it.`
+  );
 }
 
 function extractJobsArray(data: unknown): unknown[] | null {
