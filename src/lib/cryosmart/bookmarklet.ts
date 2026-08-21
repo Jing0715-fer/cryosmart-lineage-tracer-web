@@ -67,6 +67,80 @@ export function buildBookmarkletUrl(appOrigin: string): string {
 }
 
 /**
+ * Build a Console Snippet — plain JavaScript the user pastes into the
+ * CryoSmart page's DevTools Console (F12 → Console). This is the MOST
+ * RELIABLE capture method because:
+ *
+ *   - It runs in the exact page context (never about:blank).
+ *   - No javascript: URL encoding/length limits.
+ *   - No bookmark installation needed.
+ *   - Cookies are auto-attached (same-origin).
+ *
+ * The snippet is a self-contained IIFE that:
+ *   1. Detects the project ID from location.href.
+ *   2. Fetches the jobs metadata from CryoSmart (same-origin, cookies included).
+ *   3. POSTs the jobs to /api/cryosmart/import on this web app.
+ *   4. Opens this web app with ?imported=<token>.
+ *   5. Logs progress to the Console so the user sees what's happening.
+ */
+export function buildConsoleSnippet(appOrigin: string): string {
+  // We can use a more readable multi-line format here since it's pasted
+  // into the Console, not embedded in a URL. But keep it compact-ish.
+  return `// CryoSmart Lineage Tracer — Console Capture
+// Paste this into the Console (F12) on your CryoSmart project page.
+// It fetches the project's jobs and sends them to the Lineage Tracer web app.
+(function(){
+  var APP = ${JSON.stringify(appOrigin)};
+  var href = location.href;
+  var m = href.match(/\\/projects\\/([^\\/?#]+)/i);
+  if (!m) { console.error('No /projects/<PID> in URL:', href); alert('Open this CryoSmart project page first (URL like http://your-cryosmart/#/projects/P259), then re-run this snippet.'); return; }
+  var pid = m[1];
+  var origin = location.origin;
+  console.log('[CryoSmart] Capturing project', pid, 'from', origin);
+  var endpoints = [
+    'api/projects/' + pid + '/jobs',
+    'api/jobs?project_uid=' + pid,
+    'api/projects/' + pid + '/metadata',
+    'api/meteor/jobs?project_uid=' + pid
+  ];
+  var errors = [];
+  function tryNext(i) {
+    if (i >= endpoints.length) {
+      console.error('[CryoSmart] All endpoints failed:', errors);
+      alert('Could not fetch jobs from ' + origin + '.\\nTried:\\n' + endpoints.map(function(p){return '  ' + origin + '/' + p;}).join('\\n') + '\\n\\nErrors:\\n' + errors.map(function(e){return '  ' + e;}).join('\\n') + '\\n\\nOpen DevTools → Network, refresh the CryoSmart page, find the XHR that returns the job list, and report its path.');
+      return;
+    }
+    var path = endpoints[i];
+    console.log('[CryoSmart] Trying', origin + '/' + path, '(' + (i+1) + '/' + endpoints.length + ')');
+    fetch(origin + '/' + path, { credentials: 'include' })
+      .then(function(r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(d) {
+        var jobs = Array.isArray(d) ? d : (d.jobs || d.items || d.data);
+        if (!jobs || !jobs.length) throw new Error('no jobs in response');
+        console.log('[CryoSmart] Found', jobs.length, 'jobs via', path);
+        console.log('[CryoSmart] Uploading to web app...');
+        return fetch(APP + '/api/cryosmart/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_uid: pid, source_url: href, jobs: jobs })
+        }).then(function(r) { return r.json(); });
+      })
+      .then(function(res) {
+        if (!res || !res.ok || !res.token) throw new Error((res && res.error) || 'upload failed');
+        console.log('[CryoSmart] Done! ' + res.count + ' jobs captured. Opening web app...');
+        window.open(APP + '/?imported=' + encodeURIComponent(res.token) + '&pid=' + encodeURIComponent(pid), '_blank');
+      })
+      .catch(function(e) {
+        errors.push(path + ': ' + e.message);
+        tryNext(i + 1);
+      });
+  }
+  tryNext(0);
+})();
+`;
+}
+
+/**
  * Heuristic: detect if we're running on https and the user gave us an http app origin.
  * In that case the bookmarklet's fetch to an http app would be blocked as mixed content
  * when run on an https CryoSmart page. We warn about this.

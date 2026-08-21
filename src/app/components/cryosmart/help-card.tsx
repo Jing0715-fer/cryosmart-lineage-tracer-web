@@ -83,26 +83,19 @@ export function HelpCard() {
             </AccordionTrigger>
             <AccordionContent className="space-y-2 text-[12.5px] leading-relaxed text-slate-600">
               <div className="rounded-md border border-emerald-200 bg-emerald-50/60 p-2.5">
-                <p className="mb-1"><strong className="text-emerald-800">Option A — Bookmarklet (recommended, no cookie pasting)</strong></p>
+                <p className="mb-1"><strong className="text-emerald-800">Option A — Console Snippet (recommended, most reliable)</strong></p>
                 <ol className="ml-4 list-decimal space-y-0.5">
                   <li>Go to the <em>Bookmarklet</em> tab above.</li>
-                  <li>Drag the green <span className="font-medium">Capture CryoSmart</span> button to your browser&apos;s bookmarks bar (Ctrl/Cmd+Shift+B to show it).</li>
-                  <li>Open CryoSmart in a normal tab and log in.</li>
-                  <li>Navigate to a project page (URL like <code className="rounded bg-emerald-100 px-1 font-mono text-[10.5px]">http://your-cryosmart/#/projects/P52</code>).</li>
-                  <li>Click the <span className="font-medium">Capture CryoSmart</span> bookmark.</li>
-                  <li>A status box appears in the top-left; the web app opens in a new tab with all jobs auto-loaded. Click <span className="font-medium">Trace Lineage</span>.</li>
+                  <li>Open your CryoSmart project page (URL like <code className="rounded bg-emerald-100 px-1 font-mono text-[10.5px]">http://192.168.202.11:8080/#/projects/P259</code>).</li>
+                  <li>Press <kbd className="rounded border border-slate-300 bg-white px-1 py-0.5 font-mono text-[10px]">F12</kbd> → go to the <strong>Console</strong> tab.</li>
+                  <li>Click the <span className="font-medium">Copy</span> button next to the Console Snippet, paste into the Console (Ctrl/Cmd+V), press Enter.</li>
+                  <li>Watch the Console log — it fetches jobs and opens this web app in a new tab with everything loaded.</li>
                 </ol>
                 <p className="mt-1.5 text-[11px] text-emerald-700">
-                  <strong>Why this works:</strong> the bookmark runs <em>inside</em> the CryoSmart tab (same-origin), so the browser automatically attaches your session cookie — including HttpOnly cookies that JavaScript cannot read. No pasting, no token, works in Chrome/Firefox/Safari/Edge.
+                  <strong>Why this is best:</strong> it runs in the exact page context (never <code className="font-mono">about:blank</code>), no bookmark installation, no URL length limits, cookies auto-attached (same-origin). Works in Chrome/Firefox/Safari/Edge.
                 </p>
-                <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/60 p-2 text-[11px] text-amber-800">
-                  <strong>Troubleshooting:</strong> If clicking the bookmark opens a blank <code className="rounded bg-amber-100 px-1 font-mono text-[10px]">about:blank</code> tab with an error, the bookmark URL was likely truncated or installed from a stale version. Fix:
-                  <ol className="ml-4 mt-1 list-decimal space-y-0.5">
-                    <li>Delete the old bookmark.</li>
-                    <li>Hard-refresh the web app (Ctrl/Cmd+Shift+R).</li>
-                    <li>Drag the <span className="font-medium">Capture CryoSmart</span> button from the Bookmarklet tab to your bookmarks bar again.</li>
-                    <li>Make sure you click the bookmark from the <strong>bookmarks bar</strong> (not the bookmarks menu or a context-menu).</li>
-                  </ol>
+                <div className="mt-2 rounded-md border border-slate-200 bg-slate-50/60 p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+                  <strong>Alternative — Bookmarklet:</strong> If you prefer a one-click bookmark, the Bookmarklet tab also has a draggable button. But note: <strong>some browsers run <code className="font-mono">javascript:</code> bookmarks in a blank <code className="font-mono">about:blank</code> tab</strong> instead of the current page. If that happens, the Console Snippet is the fix.
                 </div>
               </div>
               <p className="mt-2"><strong>Option B (upload JSON file):</strong> Use the original Chrome extension&apos;s <code className="rounded bg-slate-100 px-1 font-mono text-[11px]">可选：导出当前 Project 全部 metadata</code> button — it downloads a JSON file with all job metadata. Upload that file via the <em>Upload JSON</em> tab.</p>
