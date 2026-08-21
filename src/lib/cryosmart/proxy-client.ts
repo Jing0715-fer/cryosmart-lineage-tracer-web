@@ -114,11 +114,19 @@ export async function fetchProjectJobs(
 ): Promise<RawJobsResult> {
   const pid = encodeURIComponent(projectId);
   const candidates = [
+    // Real CryoSmart API endpoints (verified from deployment at 192.168.202.11:8080):
+    `api/job/get_clear_job_list?project_uid=${pid}`,
+    `api/project/get_compound_time_project?project_id=${pid}`,
+    `api/job/get_clear_job_list?project_uid=${pid}&all=true`,
+    `api/job/get_job_list?project_uid=${pid}`,
+    `api/job/get_job_list?project_uid=${pid}&all=true`,
+    `api/project/get_project?project_id=${pid}`,
+    `api/project/get_project_info?project_id=${pid}`,
+    // Original guesses (for other CryoSmart deployments):
     `api/projects/${pid}/jobs`,
     `api/jobs?project_uid=${pid}`,
     `api/projects/${pid}/metadata`,
     `api/meteor/jobs?project_uid=${pid}`,
-    // Additional candidates for different CryoSmart deployments:
     `api/v1/projects/${pid}/jobs`,
     `api/v1/projects/${pid}`,
     `api/projects/${pid}`,
@@ -155,9 +163,46 @@ function extractJobsArray(data: unknown): unknown[] | null {
   if (Array.isArray(data)) return data;
   if (data && typeof data === "object") {
     const obj = data as Record<string, unknown>;
+    // Standard wrappers
     if (Array.isArray(obj.jobs)) return obj.jobs;
     if (Array.isArray(obj.items)) return obj.items;
-    if (Array.isArray(obj.data)) return obj.data;
+    if (Array.isArray(obj.data)) {
+      // data might itself be an object wrapping a jobs array
+      if (Array.isArray(obj.data)) return obj.data;
+      if (obj.data && typeof obj.data === "object") {
+        const inner = obj.data as Record<string, unknown>;
+        if (Array.isArray(inner.jobs)) return inner.jobs;
+        if (Array.isArray(inner.items)) return inner.items;
+        if (Array.isArray(inner.job_list)) return inner.job_list;
+        if (Array.isArray(inner.jobList)) return inner.jobList;
+      }
+    }
+    // CryoSmart-specific wrappers (get_clear_job_list, get_compound_time_project)
+    if (Array.isArray(obj.job_list)) return obj.job_list;
+    if (Array.isArray(obj.jobList)) return obj.jobList;
+    if (Array.isArray(obj.results)) return obj.results;
+    if (Array.isArray(obj.exposures)) return obj.exposures;
+    if (Array.isArray(obj.nodes)) return obj.nodes;
+    if (Array.isArray(obj.pipeline)) return obj.pipeline;
+    // Nested: { result: { jobs: [...] } } or { data: { result: [...] } }
+    if (obj.result && typeof obj.result === "object") {
+      const r = obj.result as Record<string, unknown>;
+      if (Array.isArray(r.jobs)) return r.jobs;
+      if (Array.isArray(r.job_list)) return r.job_list;
+      if (Array.isArray(r.items)) return r.items;
+      if (Array.isArray(r.data) && Array.isArray(r.data)) return r.data;
+    }
+    // Deep search: find any array property with > 0 items that looks like jobs
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+      if (Array.isArray(val) && val.length > 0) {
+        const first = val[0] as Record<string, unknown> | undefined;
+        // Check if items look like job objects (have uid or job_type)
+        if (first && typeof first === "object" && (first.uid || first.job_type || first.job_uid || first.project_uid)) {
+          return val;
+        }
+      }
+    }
   }
   return null;
 }

@@ -116,9 +116,19 @@ export function buildConsoleSnippet(appOrigin: string): string {
   } catch(e) {}
   if (discovered.length) console.log('[CryoSmart] Discovered API endpoints from page activity:', discovered);
 
-  // Step 2: Build candidate list — discovered endpoints first, then guesses.
+  // Step 2: Build candidate list — discovered endpoints first, then known
+  // CryoSmart API patterns (verified from real deployments), then guesses.
   var endpoints = discovered.slice();
   var guesses = [
+    // Real CryoSmart API endpoints (verified from deployment at 192.168.202.11:8080):
+    'api/job/get_clear_job_list?project_uid=' + pid,
+    'api/project/get_compound_time_project?project_id=' + pid,
+    'api/job/get_clear_job_list?project_uid=' + pid + '&all=true',
+    'api/job/get_job_list?project_uid=' + pid,
+    'api/job/get_job_list?project_uid=' + pid + '&all=true',
+    'api/project/get_project?project_id=' + pid,
+    'api/project/get_project_info?project_id=' + pid,
+    // Original guesses (for other CryoSmart deployments):
     'api/projects/' + pid + '/jobs',
     'api/jobs?project_uid=' + pid,
     'api/projects/' + pid + '/metadata',
@@ -148,7 +158,34 @@ export function buildConsoleSnippet(appOrigin: string): string {
         return r.json();
       })
       .then(function(d) {
-        var jobs = Array.isArray(d) ? d : (d.jobs || d.items || d.data || d.results || d.exposures);
+        // Try every possible wrapper for the jobs array.
+        var jobs = null;
+        if (Array.isArray(d)) jobs = d;
+        else if (d && typeof d === 'object') {
+          jobs = d.jobs || d.items || d.data || d.results || d.exposures || d.nodes || d.pipeline || d.job_list || d.jobList;
+          // Nested: { data: { jobs: [...] } }
+          if (!jobs && d.data && typeof d.data === 'object') {
+            var dd = d.data;
+            jobs = dd.jobs || dd.items || dd.job_list || dd.jobList || dd.results;
+          }
+          // Nested: { result: { jobs: [...] } }
+          if (!jobs && d.result && typeof d.result === 'object') {
+            var rr = d.result;
+            jobs = rr.jobs || rr.items || rr.job_list || rr.jobList || rr.results;
+          }
+          // Deep search: find any array property whose items look like jobs
+          if (!jobs) {
+            for (var k in d) {
+              if (Array.isArray(d[k]) && d[k].length > 0) {
+                var first = d[k][0];
+                if (first && typeof first === 'object' && (first.uid || first.job_type || first.job_uid || first.project_uid)) {
+                  jobs = d[k];
+                  break;
+                }
+              }
+            }
+          }
+        }
         if (!jobs || !Array.isArray(jobs) || !jobs.length) {
           throw new Error('no jobs array (keys: ' + (d && typeof d === 'object' ? Object.keys(d).join(',') : typeof d) + ')');
         }
