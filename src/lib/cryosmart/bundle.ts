@@ -6,7 +6,8 @@
  */
 
 import type { LineageSummary } from "./types";
-import { buildLineageHtmlV2 } from "./report-html";
+import { buildLineageHtmlV2, type ReportHtmlOptions } from "./report-html";
+import { prefetchImagesForReport } from "./image-embed";
 import { buildPictureFlowSvg } from "./report-svg";
 import { buildPictureFlowPptx } from "./report-pptx";
 import { makePreview } from "./lineage";
@@ -83,7 +84,16 @@ export async function buildBundle(
   files.push({ path: `${base}.json`, data: utf8(JSON.stringify(summary, null, 2)) });
 
   onProgress?.({ phase: "report", current: 1, total: 6, message: "Generating HTML report…" });
-  files.push({ path: `${base}_report.html`, data: utf8(buildLineageHtmlV2(summary)) });
+  // Build HTML report with embedded images when session is available
+  let htmlOpts: ReportHtmlOptions | undefined;
+  if (options.includeImages && options.session) {
+    onProgress?.({ phase: "images", current: 0, total: 2, message: "Prefetching images for report..." });
+    const embeddedImages = await prefetchImagesForReport(options.session, summary, (msg) =>
+      onProgress?.({ phase: "images", current: 0, total: 2, message: msg })
+    );
+    htmlOpts = { embeddedImages, session: options.session };
+  }
+  files.push({ path: `${base}_report.html`, data: utf8(buildLineageHtmlV2(summary, htmlOpts)) });
 
   onProgress?.({ phase: "report", current: 2, total: 6, message: "Generating SVG…" });
   try {
@@ -164,7 +174,7 @@ export async function buildBundle(
         });
       }
     } else {
-      warnings.push("Image download skipped: requires Live Connect mode (no session).");
+      warnings.push("Image download skipped: requires session from Smart Capture mode.");
     }
   }
 
@@ -190,7 +200,7 @@ export async function buildBundle(
         });
       }
     } else {
-      warnings.push("Map download skipped: requires Live Connect mode (no session).");
+      warnings.push("Map download skipped: requires session from Smart Capture mode.");
     }
   }
 
@@ -249,7 +259,7 @@ export async function buildBundle(
         `Generated at ${new Date().toISOString()}.\n`;
       files.push({ path: `Final_Result/final_result_summary.txt`, data: utf8(summaryText) });
     } else {
-      warnings.push("Final results scan skipped: requires Live Connect mode.");
+      warnings.push("Final results scan skipped: requires session from Smart Capture mode.");
     }
   }
 

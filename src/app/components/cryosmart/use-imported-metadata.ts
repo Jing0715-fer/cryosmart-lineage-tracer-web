@@ -1,7 +1,8 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState } from "react";
 import type { LoadedMetadata } from "@/app/components/cryosmart/data-source-card";
+import type { CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 
 interface PendingData {
   ok: boolean;
@@ -15,6 +16,10 @@ interface PendingData {
     source_url?: string;
     captured_at?: string;
     discovered_job_count?: number;
+    // CryoSmart session info
+    cryosmart_origin?: string;
+    cryosmart_auth?: string;
+    cryosmart_cookie?: string;
   };
 }
 
@@ -29,19 +34,16 @@ interface UseImportedOpts {
   onLoaded?: (loaded: LoadedMetadata) => void;
 }
 
-/**
- * Watches the URL for `?imported=<token>`.
- * When found, polls /api/cryosmart/pending?token=<token>, and on success
- * calls `onLoaded` so the data flows into the regular DataSourceCard pipeline.
- *
- * The polling is necessary because the bookmarklet POSTs the data and then
- * immediately opens the web app — there's a race where the web app might
- * load before the POST has landed in the in-memory store. We poll for up
- * to ~20 seconds, then give up.
- */
+function buildSessionFromPending(data: PendingData["data"]): CryoSmartSession | null {
+  if (!data?.cryosmart_origin) return null;
+  return {
+    baseUrl: data.cryosmart_origin,
+    auth: data.cryosmart_auth || undefined,
+    cookie: data.cryosmart_cookie || undefined,
+  };
+}
+
 export function useImportedMetadata(opts?: UseImportedOpts) {
-  // Always start with idle state on both server and client to avoid hydration
-  // mismatch. We detect ?imported=<token> in useEffect (client-only).
   const [state, setState] = useState<ImportState>({
     status: "idle",
     message: "",
@@ -54,16 +56,19 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     onLoadedRef.current = opts?.onLoaded;
   }, [opts?.onLoaded]);
 
-  // On client mount, check for ?imported=<token> in the URL.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const u = new URL(window.location.href);
     const token = u.searchParams.get("imported");
     if (!token) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- set "polling" status synchronously before the polling effect picks it up, so the banner renders immediately.
+    // Synchronous setState here is intentional: we're transitioning from
+    // "idle" (initial mount state) to "polling" once we detect an ?imported=
+    // query param. This is a one-time mount-time transition driven by an
+    // external value (URL), not a cascading render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setState({
       status: "polling",
-      message: "Waiting for CryoSmart metadata to arrive…",
+      message: "Waiting for CryoSmart metadata to arrive...",
       token,
       startedAt: Date.now(),
     });
@@ -77,7 +82,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
 
     const poll = async () => {
       let attempt = 0;
-      const MAX_ATTEMPTS = 40; // ~20 seconds at 500ms intervals
+      const MAX_ATTEMPTS = 40;
       while (!cancelled && attempt < MAX_ATTEMPTS) {
         attempt++;
         try {
@@ -90,20 +95,26 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
           if (resp.ok) {
             const data = (await resp.json()) as PendingData;
             if (data.ok && data.data && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
+              const session = buildSessionFromPending(data.data);
+              
               const loaded: LoadedMetadata = {
                 raw: data.data.raw || { jobs: data.data.jobs },
                 projectUid: data.data.project_uid || "P",
                 jobCount: data.data.jobs.length,
                 source: "upload",
+                session,
               };
               onLoadedRef.current?.(loaded);
               setState({
                 status: "loaded",
-                message: `Loaded ${data.data.jobs.length} jobs from CryoSmart bookmarklet.`,
+                message: session
+                  ? `Loaded ${data.data.jobs.length} jobs from CryoSmart (session available for maps/images).`
+                  : `Loaded ${data.data.jobs.length} jobs from CryoSmart.`,
                 token,
                 startedAt,
               });
-              // Clean the URL: remove ?imported=...&pid=...
+              
+              // Clean URL
               try {
                 const url = new URL(window.location.href);
                 url.searchParams.delete("imported");
@@ -115,25 +126,25 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               return;
             }
           } else if (resp.status === 404) {
-            // Not found yet — keep polling (race: POST hasn't landed yet).
+            // Keep polling
           } else if (resp.status === 410) {
             setState({
               status: "expired",
-              message: "Import token expired. Please re-run the CryoSmart bookmarklet.",
+              message: "Import token expired. Please re-run the CryoSmart capture.",
               token,
               startedAt,
             });
             return;
           }
         } catch {
-          // Network error — keep polling.
+          // Network error — keep polling
         }
         await new Promise((r) => setTimeout(r, 500));
       }
       if (!cancelled) {
         setState({
           status: "error",
-          message: "Timed out waiting for CryoSmart metadata. Please try the bookmarklet again.",
+          message: "Timed out waiting for CryoSmart metadata. Please try again.",
           token,
           startedAt,
         });

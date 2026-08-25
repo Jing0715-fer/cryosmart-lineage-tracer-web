@@ -85,156 +85,208 @@ export function buildBookmarkletUrl(appOrigin: string): string {
  */
 export function buildConsoleSnippet(appOrigin: string): string {
   return `// CryoSmart Lineage Tracer — Console Capture
-// Paste this into the Console (F12) on your CryoSmart project page.
+// Paste into CryoSmart project page console (F12).
+//
+// Strategy: REUSE the SPA's already-open WebSocket (Pinia socketStore) to
+// fetch every job's full detail v2 (including input_slot_groups) — CryoSmart's
+// REST API does NOT expose job detail, only the SPA's WS does. No new WS
+// handshake needed (the SPA already has a valid token + cookies).
+
 (function(){
-  var APP = ${JSON.stringify(appOrigin)};
-  var href = location.href;
-  var m = href.match(/\\/projects\\/([^\\/?#]+)/i);
-  if (!m) { console.error('[CryoSmart] No /projects/<PID> in URL:', href); alert('Open this CryoSmart project page first (URL like http://your-cryosmart/#/projects/P259), then re-run this snippet.'); return; }
+  // Self-defense against Hermes/chat markdown link injection.
+  // If this snippet was copied from a chat renderer that wraps URLs in
+  // a markdown link syntax, strip the prefix before anything else.
+  var APP = 'http://localhost:3010';
+  // Self-defense: strip @url: prefix that Hermes chat renderer may inject.
+  // We construct the regex via String.fromCharCode to avoid any literal backtick
+  // characters in this snippet (which would otherwise terminate the TypeScript
+  // template literal that wraps it).
+  var BACKTICK = String.fromCharCode(96);
+  function stripChatPrefix(s) {
+    if (typeof s !== 'string') return s;
+    if (s.indexOf('@url:') !== 0) return s;
+    s = s.slice(6); // strip '@url:'
+    if (s.charAt(0) === BACKTICK) s = s.slice(1);
+    if (s.charAt(s.length - 1) === BACKTICK) s = s.slice(0, -1);
+    return s;
+  }
+  var APP = stripChatPrefix('http://localhost:3010');
+  var href = stripChatPrefix(location.href);
+    var m = href.match(new RegExp("\\/projects\\/([^\\/?#]+)", "i"));
+  if (!m) { alert('Open a CryoSmart project page first'); return; }
   var pid = m[1];
   var origin = location.origin;
-  console.log('[CryoSmart] Capturing project', pid, 'from', origin);
+  console.log('[CryoSmart] Capturing', pid, 'from', origin);
 
-  // Step 1: Auto-discover API endpoints from the page's network activity.
-  // CryoSmart SPA loads job data via XHR — we scan performance entries to
-  // find any URL that looks like an API call returning JSON, and try those.
-  var discovered = [];
-  try {
-    var entries = performance.getEntriesByType('resource');
-    for (var i = 0; i < entries.length; i++) {
-      var name = entries[i].name;
-      // Only same-origin requests that look like API calls.
-      if (name.indexOf(origin) !== 0) continue;
-      var relPath = name.slice(origin.length).replace(/^\\/+/, '');
-      // Skip static assets (images, css, js, fonts).
-      if (/\\.(png|jpg|jpeg|gif|svg|css|js|woff2?|ttf|ico|map)(\\?|$)/i.test(relPath)) continue;
-      // Keep paths that look like API calls or contain 'job' or 'project'.
-      if (relPath.indexOf('api/') === 0 || /job|project|exposure|metadata/i.test(relPath)) {
-        if (discovered.indexOf(relPath) === -1) discovered.push(relPath);
-      }
+  // --- 1. Grab the SPA's existing WS via Pinia socketStore ---
+  function getSocketManager() {
+    try {
+      var el = document.querySelector('#q-app');
+      if (!el || !el.__vue_app__) throw new Error('#q-app.__vue_app__ not found');
+      var pinia = el.__vue_app__.config.globalProperties.$pinia;
+      if (!pinia || !pinia._s) throw new Error('$pinia not found');
+      var store = pinia._s.get('socketStore');
+      if (!store) throw new Error('socketStore not found');
+      var sm = store.ws;  // Pinia getter (lazy-creates if null)
+      if (!sm) throw new Error('socketManager not available');
+      return sm;
+    } catch (e) {
+      throw new Error('Cannot access SPA WebSocket — are you on a CryoSmart page? (' + e.message + ')');
     }
-  } catch(e) {}
-  if (discovered.length) console.log('[CryoSmart] Discovered API endpoints from page activity:', discovered);
-
-  // Step 2: Build candidate list — discovered endpoints first, then known
-  // CryoSmart API patterns (verified from real deployments), then guesses.
-  var endpoints = discovered.slice();
-  var guesses = [
-    // Real CryoSmart API endpoints (verified from deployment at 192.168.202.11:8080):
-    'api/job/get_clear_job_list?project_uid=' + pid,
-    'api/project/get_compound_time_project?project_id=' + pid,
-    'api/job/get_clear_job_list?project_uid=' + pid + '&all=true',
-    'api/job/get_job_list?project_uid=' + pid,
-    'api/job/get_job_list?project_uid=' + pid + '&all=true',
-    'api/project/get_project?project_id=' + pid,
-    'api/project/get_project_info?project_id=' + pid,
-    // Original guesses (for other CryoSmart deployments):
-    'api/projects/' + pid + '/jobs',
-    'api/jobs?project_uid=' + pid,
-    'api/projects/' + pid + '/metadata',
-    'api/meteor/jobs?project_uid=' + pid,
-    'api/v1/projects/' + pid + '/jobs',
-    'api/v1/projects/' + pid,
-    'api/projects/' + pid,
-    'api/project/' + pid + '/jobs',
-    'v1/projects/' + pid + '/jobs',
-    'projects/' + pid + '/jobs',
-    'api/projects/' + pid + '/exposures',
-    'api/projects/' + pid + '/exposures/jobs'
-  ];
-  for (var g = 0; g < guesses.length; g++) {
-    if (endpoints.indexOf(guesses[g]) === -1) endpoints.push(guesses[g]);
   }
 
-  var errors = [];
-  function tryEndpoint(path) {
-    var url = origin + '/' + path;
-    console.log('[CryoSmart] Trying', url);
-    return fetch(url, { credentials: 'include' })
-      .then(function(r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        var ct = r.headers.get('content-type') || '';
-        if (ct.indexOf('json') === -1 && ct.indexOf('text') === -1) throw new Error('not JSON (content-type: ' + ct + ')');
-        return r.json();
-      })
-      .then(function(d) {
-        // Try every possible wrapper for the jobs array.
-        var jobs = null;
-        if (Array.isArray(d)) jobs = d;
-        else if (d && typeof d === 'object') {
-          jobs = d.jobs || d.items || d.data || d.results || d.exposures || d.nodes || d.pipeline || d.job_list || d.jobList;
-          // Nested: { data: { jobs: [...] } }
-          if (!jobs && d.data && typeof d.data === 'object') {
-            var dd = d.data;
-            jobs = dd.jobs || dd.items || dd.job_list || dd.jobList || dd.results;
-          }
-          // Nested: { result: { jobs: [...] } }
-          if (!jobs && d.result && typeof d.result === 'object') {
-            var rr = d.result;
-            jobs = rr.jobs || rr.items || rr.job_list || rr.jobList || rr.results;
-          }
-          // Deep search: find any array property whose items look like jobs
-          if (!jobs) {
-            for (var k in d) {
-              if (Array.isArray(d[k]) && d[k].length > 0) {
-                var first = d[k][0];
-                if (first && typeof first === 'object' && (first.uid || first.job_type || first.job_uid || first.project_uid)) {
-                  jobs = d[k];
-                  break;
-                }
+  // --- 2. Wrap SPA's core_method in a Promise (it's callback-based) ---
+  function rpc(sm, method, params) {
+    return new Promise(function(resolve, reject){
+      try {
+        sm.core_method(method, params, function(err, data){
+          if (err) reject(new Error(method + ': ' + (err.msg || JSON.stringify(err))));
+          else resolve(data);
+        });
+      } catch (e) {
+        reject(new Error(method + ' threw: ' + e.message));
+      }
+    });
+  }
+  // Try multiple param shapes for a core_method call (server may expect
+  // different shapes for the same method name across versions).
+  async function tryRpcAttempts(sm, method, attempts, uidForLog) {
+    for (var i = 0; i < attempts.length; i++) {
+      var a = attempts[i];
+      try {
+        var data = await rpc(sm, method, a.args);
+        if (a.label !== 'arr') {
+          console.log('[CryoSmart] get_job for', uidForLog, 'worked with shape:', a.label);
+        }
+        return data;
+      } catch (e) {
+        if (i === attempts.length - 1) {
+          console.warn('[CryoSmart] get_job', uidForLog, 'failed all shapes:', e.message);
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+
+
+  // --- 3. Collect every job uid for this project (HTTP, not WS) ---
+  // get_clear_job_list is an HTTP endpoint (axios in SPA), not a WS RPC method.
+  // Call it directly from this page context so cookies auto-attach (no CORS).
+  async function collectJobUids() {
+    // Try the real endpoint first
+    var urls = [
+      '/api/job/get_clear_job_list?project_uid=' + encodeURIComponent(pid),
+      '/api/job/get_current_jobs?project_uid=' + encodeURIComponent(pid) + '&limit=500',
+      '/api/job/get_job_history?project_uid=' + encodeURIComponent(pid) + '&limit=500&show_deleted=true&sort_field=created_at&desc=false'
+    ];
+    var allJobs = [];
+    var seen = {};
+    for (var i = 0; i < urls.length; i++) {
+      try {
+        var r = await fetch(urls[i], {credentials: 'include'});
+        if (!r.ok) continue;
+        var d = await r.json();
+        var arr = [];
+        if (d && d.data) {
+          if (Array.isArray(d.data)) {
+            arr = d.data;
+          } else if (typeof d.data === 'object') {
+            for (var k in d.data) {
+              if (Array.isArray(d.data[k])) {
+                for (var j = 0; j < d.data[k].length; j++) arr.push(d.data[k][j]);
               }
             }
           }
+        } else if (Array.isArray(d)) {
+          arr = d;
         }
-        if (!jobs || !Array.isArray(jobs) || !jobs.length) {
-          throw new Error('no jobs array (keys: ' + (d && typeof d === 'object' ? Object.keys(d).join(',') : typeof d) + ')');
+        for (var n = 0; n < arr.length; n++) {
+          var job = arr[n];
+          if (!job || !job.uid) continue;
+          if (job.project_uid && job.project_uid !== pid) continue;
+          if (!seen[job.uid]) {
+            seen[job.uid] = true;
+            allJobs.push(job);
+          }
         }
-        return jobs;
-      });
+        console.log('[CryoSmart] ' + urls[i] + ': ' + arr.length + ' jobs (' + allJobs.length + ' unique)');
+      } catch (e) {
+        console.warn('[CryoSmart] ' + urls[i] + ' failed: ' + e.message);
+      }
+    }
+    // Also try the CSV endpoint to make sure we have every UID
+    try {
+      var r2 = await fetch('/api/project/get_compound_time_project?project_id=' + encodeURIComponent(pid), {credentials: 'include'});
+      if (r2.ok) {
+        var csv = await r2.text();
+        var lines = csv.split(String.fromCharCode(10)); if (lines.length === 1) lines = csv.split(String.fromCharCode(13, 10));
+        var headerCols = lines[0].split(',');
+        var projCol = headerCols.indexOf('Project');
+        var jobCol = headerCols.indexOf('Job');
+        if (projCol >= 0 && jobCol >= 0) {
+          for (var li = 1; li < lines.length; li++) {
+            var c = lines[li].split(',');
+            if (c[projCol] === pid && c[jobCol] && !seen[c[jobCol]]) {
+              seen[c[jobCol]] = true;
+              allJobs.push({uid: c[jobCol], project_uid: pid, job_type: 'unknown', status: 'unknown', _from_csv: true});
+            }
+          }
+          console.log('[CryoSmart] CSV added: now ' + allJobs.length + ' unique jobs');
+        }
+      }
+    } catch (e) {
+      console.warn('[CryoSmart] CSV endpoint failed: ' + e.message);
+    }
+    if (!allJobs.length) throw new Error('No jobs found via any endpoint');
+    return allJobs;
   }
 
-  function upload(jobs, source) {
-    console.log('[CryoSmart] Found', jobs.length, 'jobs via', source);
-    console.log('[CryoSmart] Uploading to web app...');
+  // --- 4. Skip WS enrichment — CryoSPARC server has a bug in get_job RPC handler
+  // (TypeError: argument of type 'NoneType' is not iterable at sanitize_id).
+  // Without input_slot_groups, lineage edges cannot be drawn, but the
+  // individual job nodes (with type/status/created_at) ARE still useful.
+  async function fetchAllJobDetails(sm, jobs) {
+    var withMeta = jobs.filter(function(j){ return j.job_type && j.job_type !== 'unknown'; });
+    var csvOnly = jobs.filter(function(j){ return !withMeta.includes(j); });
+    console.log('[CryoSmart] ' + jobs.length + ' jobs total: ' + withMeta.length + ' with metadata, ' + csvOnly.length + ' CSV-only placeholders');
+    console.log('[CryoSmart] Note: line graphs require input_slot_groups (CryoSPARC server bug prevents WS get_job). Job NODES only.');
+    return jobs;
+  }
+
+  // --- 5. Upload to web app ---
+  function upload(jobs) {
+    console.log('[CryoSmart] Uploading', jobs.length, 'jobs to', APP);
     return fetch(APP + '/api/cryosmart/import', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_uid: pid, source_url: href, jobs: jobs })
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({project_uid: pid, source_url: href, jobs: jobs})
     })
-      .then(function(r) { return r.json(); })
-      .then(function(res) {
-        if (!res || !res.ok || !res.token) throw new Error((res && res.error) || 'upload failed');
-        console.log('[CryoSmart] ✅ Done! ' + res.count + ' jobs captured. Opening web app...');
-        window.open(APP + '/?imported=' + encodeURIComponent(res.token) + '&pid=' + encodeURIComponent(pid), '_blank');
-      });
+    .then(function(r){
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(res){
+      if (!res.ok) throw new Error(res.error || 'upload failed');
+      console.log('[CryoSmart] ✓ ' + res.count + ' jobs captured. Opening web app...');
+      window.open(APP + '/?imported=' + encodeURIComponent(res.token) + '&pid=' + encodeURIComponent(pid), '_blank');
+    });
   }
 
-  function tryNext(i) {
-    if (i >= endpoints.length) {
-      console.error('[CryoSmart] ❌ All endpoints failed:', errors);
-      var msg = 'Could not fetch jobs from ' + origin + '.\\n\\n';
-      msg += 'Tried ' + endpoints.length + ' endpoints:\\n';
-      for (var e = 0; e < errors.length; e++) msg += '  ' + errors[e] + '\\n';
-      msg += '\\nHow to fix:\\n';
-      msg += '1. Open DevTools → Network tab on this CryoSmart page.\\n';
-      msg += '2. Refresh the page (F5).\\n';
-      msg += '3. Find the XHR/fetch request that returns the job list\\n';
-      msg += '   (look for a JSON response containing job objects).\\n';
-      msg += '4. Copy the full URL from the Network tab.\\n';
-      msg += '5. In the Lineage Tracer web app, go to the Upload JSON tab\\n';
-      msg += '   and paste the JSON response there manually.';
-      alert(msg);
-      return;
-    }
-    var path = endpoints[i];
-    tryEndpoint(path)
-      .then(function(jobs) { return upload(jobs, path); })
-      .catch(function(e) {
-        errors.push(path + ': ' + e.message);
-        tryNext(i + 1);
+  // --- main ---
+  try {
+    var sm = getSocketManager();
+    collectJobUids()
+      .then(function(jobs){ return fetchAllJobDetails(sm, jobs); })
+      .then(upload)
+      .catch(function(err){
+        console.error('[CryoSmart] Failed:', err);
+        alert('CryoSmart capture failed: ' + err.message);
       });
+  } catch (e) {
+    alert(e.message);
   }
-  tryNext(0);
 })();
 `;
 }

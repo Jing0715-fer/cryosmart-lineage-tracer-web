@@ -1,52 +1,50 @@
-import { NextRequest, NextResponse } from "next/server";
-import { takePending, peekPending } from "@/lib/cryosmart/pending-store";
+﻿import { NextRequest, NextResponse } from "next/server";
+import { takePending } from "@/lib/cryosmart/pending-store";
 
 /**
  * GET /api/cryosmart/pending?token=<token>
  *
- * Returns the bookmarklet-imported metadata for the given token.
- * Single-use: once read successfully, the token is consumed.
- *
- * Returns:
- *   - 200 { ok: true, data: { project_uid, jobs, ... } } on success
- *   - 404 { ok: false, error: "Token not found or already consumed." } on miss
- *   - 410 { ok: false, error: "Token expired." } on TTL expiry
+ * Returns the pending import data for a given token.
+ * Single-use: data is deleted after first successful read.
  */
 export async function GET(req: NextRequest) {
-  const url = new URL(req.url);
-  const token = (url.searchParams.get("token") || "").trim();
+  const token = req.nextUrl.searchParams.get("token");
   if (!token) {
-    return NextResponse.json(
-      { ok: false, error: "Missing 'token' query parameter." },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: "Missing token" }, { status: 400 });
   }
 
   const entry = takePending(token);
   if (!entry) {
-    // Distinguish "never existed / already consumed" from "expired".
-    const peek = peekPending(token);
-    if (peek.expired) {
-      return NextResponse.json(
-        { ok: false, error: "Token expired. Please re-run the bookmarklet." },
-        { status: 410 }
-      );
-    }
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "Token not found or already consumed. Please re-run the bookmarklet.",
-      },
-      { status: 404 }
-    );
+    return NextResponse.json({ ok: false, error: "Token not found or expired" }, { status: 404 });
   }
 
-  return NextResponse.json({
-    ok: true,
-    token,
-    captured_at: entry.data.captured_at || null,
-    data: entry.data,
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      token,
+      captured_at: entry.data.captured_at,
+      data: {
+        project_uid: entry.data.project_uid,
+        experiment_uid: entry.data.experiment_uid,
+        jobs: entry.data.jobs,
+        raw: entry.data.raw,
+        source_url: entry.data.source_url,
+        captured_at: entry.data.captured_at,
+        discovered_job_count: entry.data.discovered_job_count,
+        // Include session info for image/map proxy downloads
+        cryosmart_origin: entry.data.cryosmart_origin,
+        cryosmart_auth: entry.data.cryosmart_auth || undefined,
+        cryosmart_cookie: entry.data.cryosmart_cookie || undefined,
+      },
+    },
+    {
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      },
+    }
+  );
 }
 
 export async function OPTIONS() {
@@ -56,9 +54,9 @@ export async function OPTIONS() {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Max-Age": "86400",
     },
   });
 }
 
 export const dynamic = "force-dynamic";
-export const revalidate = 0;

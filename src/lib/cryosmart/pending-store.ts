@@ -1,16 +1,7 @@
-/**
- * Server-side, in-memory store for bookmarklet-imported CryoSmart metadata.
- *
- * Lifecycle:
- *   1. Bookmarklet (running inside the CryoSmart tab, same-origin, cookies auto-attached)
- *      fetches /api/projects/{pid}/jobs etc. on CryoSmart, then POSTs the JSON
- *      to /api/cryosmart/import — receives a token.
- *   2. Bookmarklet opens the web app with ?imported=<token>.
- *   3. Web app polls /api/cryosmart/pending?token=<token>, gets the data,
- *      loads it directly into the lineage workflow.
- *
- * The store is in-memory + TTL-bounded (10 minutes). It does NOT touch disk.
- * Each token is single-use (deleted on first successful read).
+﻿/**
+ * Server-side, in-memory store for CryoSmart metadata imports.
+ * Supports both bookmarklet captures (with cookies) and console captures
+ * (with auth tokens).
  */
 
 interface PendingImport {
@@ -22,15 +13,18 @@ interface PendingImport {
     source_url?: string;
     captured_at?: string;
     discovered_job_count?: number;
+    // CryoSmart session info for map/image downloads
+    cryosmart_origin?: string;
+    cryosmart_auth?: string;
+    cryosmart_cookie?: string;
   };
   createdAt: number;
   expiresAt: number;
 }
 
-const TTL_MS = 10 * 60 * 1000; // 10 minutes
+const TTL_MS = 10 * 60 * 1000;
 const MAX_ENTRIES = 200;
 
-// Persist across HMR reloads in dev.
 const globalRef = globalThis as unknown as {
   __cryoPendingStore?: Map<string, PendingImport>;
   __cryoPendingSeq?: number;
@@ -49,25 +43,19 @@ function gc() {
   for (const [k, v] of store) {
     if (v.expiresAt < now) store.delete(k);
   }
-  // Hard cap
   if (store.size > MAX_ENTRIES) {
-    const toDelete = store.size - MAX_ENTRIES;
     let i = 0;
     for (const k of store.keys()) {
       store.delete(k);
-      if (++i >= toDelete) break;
+      if (++i >= store.size - MAX_ENTRIES) break;
     }
   }
 }
 
 function newToken(): string {
-  // Short, opaque, unguessable-enough for an in-memory 10-min single-use token.
-  // Format: <seq>-<8 hex chars of entropy>
   seq += 1;
   globalRef.__cryoPendingSeq = seq;
-  const entropy = Math.floor(Math.random() * 0xffffffff)
-    .toString(16)
-    .padStart(8, "0");
+  const entropy = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, "0");
   return `${seq}-${entropy}`;
 }
 
@@ -88,7 +76,6 @@ export function takePending(token: string): PendingImport | null {
   gc();
   const entry = store.get(token);
   if (!entry) return null;
-  // Single-use: delete on read (regardless of success).
   store.delete(token);
   if (entry.expiresAt < Date.now()) return null;
   return entry;
@@ -109,5 +96,17 @@ export function peekPending(token: string): {
     expired: entry.expiresAt < Date.now(),
     createdAt: entry.createdAt,
     expiresAt: entry.expiresAt,
+  };
+}
+
+/** Build a CryoSmartSession from stored import data. */
+export function buildSessionFromPending(data: PendingImport["data"]) {
+  if (!data) return null;
+  const baseUrl = data.cryosmart_origin;
+  if (!baseUrl) return null;
+  return {
+    baseUrl,
+    auth: data.cryosmart_auth || undefined,
+    cookie: data.cryosmart_cookie || undefined,
   };
 }

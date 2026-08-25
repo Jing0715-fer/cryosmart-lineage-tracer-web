@@ -113,50 +113,147 @@ export async function fetchProjectJobs(
   projectId: string
 ): Promise<RawJobsResult> {
   const pid = encodeURIComponent(projectId);
-  const candidates = [
-    // Real CryoSmart API endpoints (verified from deployment at 192.168.202.11:8080):
-    `api/job/get_clear_job_list?project_uid=${pid}`,
-    `api/project/get_compound_time_project?project_id=${pid}`,
-    `api/job/get_clear_job_list?project_uid=${pid}&all=true`,
-    `api/job/get_job_list?project_uid=${pid}`,
-    `api/job/get_job_list?project_uid=${pid}&all=true`,
-    `api/project/get_project?project_id=${pid}`,
-    `api/project/get_project_info?project_id=${pid}`,
-    // Original guesses (for other CryoSmart deployments):
-    `api/projects/${pid}/jobs`,
-    `api/jobs?project_uid=${pid}`,
-    `api/projects/${pid}/metadata`,
-    `api/meteor/jobs?project_uid=${pid}`,
-    `api/v1/projects/${pid}/jobs`,
-    `api/v1/projects/${pid}`,
-    `api/projects/${pid}`,
-    `api/project/${pid}/jobs`,
-    `v1/projects/${pid}/jobs`,
-    `projects/${pid}/jobs`,
-    `api/projects/${pid}/exposures`,
-    `api/projects/${pid}/exposures/jobs`,
-  ];
+  // Helper: filter jobs by project_uid (the global endpoints don't filter server-side)
+  const belongsToProject = (job: unknown): boolean => {
+    if (!job || typeof job !== "object") return false;
+    const obj = job as Record<string, unknown>;
+    const jPid = obj.project_uid;
+    return jPid === undefined || jPid === null || jPid === projectId || jPid === pid;
+  };
+
+  // We collect (uid → job) across multiple endpoints, deduplicating by uid.
+  const jobsByUid = new Map<string, Record<string, unknown>>();
+  const recordJobs = (jobs: unknown[]) => {
+    for (const job of jobs) {
+      if (!job || typeof job !== "object") continue;
+      const obj = job as Record<string, unknown>;
+      const uid = obj.uid;
+      if (typeof uid !== "string" || jobsByUid.has(uid)) continue;
+      if (!belongsToProject(job)) continue;
+      jobsByUid.set(uid, obj);
+    }
+  };
   const errors: string[] = [];
-  for (const path of candidates) {
-    try {
-      const data = await cryoSmartJson<unknown>(session, path);
-      const arr = extractJobsArray(data);
-      if (arr && arr.length > 0) {
-        return { jobs: arr, source: path };
+
+  // Step 1: get_clear_job_list (only endpoint that server-side filters by project_uid).
+  // Returns "intermediate" jobs — for some projects (e.g. P259) this captures most/all jobs;
+  // for others (e.g. P52) it returns null and we need other endpoints.
+  try {
+    const data = await cryoSmartJson<unknown>(
+      session,
+      `api/job/get_clear_job_list?project_uid=${pid}`
+    );
+    const arr = extractJobsArray(data);
+    if (arr && arr.length > 0) recordJobs(arr);
+  } catch (err) {
+    errors.push(`get_clear_job_list: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Step 2: paginate global endpoints (get_current_jobs + get_job_history),
+  // client-side filter. /api/job/get_job_history is the only history endpoint and
+  // it doesn't honor project_uid for sort — different sort fields expose different
+  // jobs. We sweep a few pages per sort direction so we don't miss old jobs.
+  const globalSweeps: Array<{ name: string; path: string; sortField: string; desc: boolean; pages: number }> = [
+    { name: "get_current_jobs page=0", path: "api/job/get_current_jobs", sortField: "created_at", desc: false, pages: 3 },
+    { name: "get_job_history (completed_at asc)", path: "api/job/get_job_history", sortField: "completed_at", desc: false, pages: 3 },
+    { name: "get_job_history (created_at asc)", path: "api/job/get_job_history", sortField: "created_at", desc: false, pages: 3 },
+    { name: "get_job_history (uid asc)", path: "api/job/get_job_history", sortField: "uid", desc: false, pages: 3 },
+  ];
+  for (const sweep of globalSweeps) {
+    for (let page = 0; page < sweep.pages; page++) {
+      try {
+        const data = await cryoSmartJson<unknown>(
+          session,
+          `${sweep.path}?project_uid=${pid}&page=${page}&limit=100&sort_field=${sweep.sortField}&desc=${sweep.desc}`
+        );
+        const arr = extractJobsArray(data);
+        if (!arr || arr.length === 0) break;
+        recordJobs(arr);
+        if (arr.length < 100) break;
+      } catch (err) {
+        errors.push(`${sweep.name} p${page}: ${err instanceof Error ? err.message : String(err)}`);
+        break;
       }
-    } catch (err) {
-      errors.push(`${path}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  // Step 3: get_compound_time_project returns a CSV with EVERY job UID for this project
+  // (212 for P52, 48 for P259) — even ones the JSON endpoints don't surface. We use the CSV
+  // as the authoritative UID list, and merge it with the jobs we already have. UIDs in the
+  // CSV that aren't in jobsByUid get a minimal placeholder so they still appear in the UI.
+  try {
+    const csvText = await cryoSmartText(session, `api/project/get_compound_time_project?project_id=${pid}`);
+    const csvUids = parseProjectCsv(csvText, projectId);
+    let addedFromCsv = 0;
+    for (const uid of csvUids) {
+      if (jobsByUid.has(uid)) continue;
+      // Placeholder — lineage tracer can still walk edges from these UIDs even without metadata.
+      jobsByUid.set(uid, {
+        uid,
+        project_uid: projectId,
+        job_type: "unknown",
+        status: "unknown",
+        _from_csv: true,
+      });
+      addedFromCsv += 1;
+    }
+    if (addedFromCsv > 0) {
+      errors.length = 0; // clear errors since CSV was authoritative
+    }
+  } catch (err) {
+    errors.push(`get_compound_time_project: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  if (jobsByUid.size > 0) {
+    return {
+      jobs: Array.from(jobsByUid.values()),
+      source: `get_clear_job_list + paginated global endpoints + CSV UID merge (${jobsByUid.size} jobs)`,
+    };
+  }
+
   throw new Error(
     `Could not list jobs for project ${projectId} on ${session.baseUrl}.\n\n` +
-    `Tried ${candidates.length} candidate endpoints, all failed:\n` +
-    errors.map((e) => `  ${e}`).join("\n") +
-    `\n\nHow to fix: open CryoSmart in your browser, press F12 → Network tab, ` +
-    `refresh the page, and find the XHR request that returns the job list ` +
-    `(look for a JSON response containing job objects). Copy the URL path ` +
-    `(e.g. /api/custom/projects/P222/jobs) and report it so we can add it.`
+      `Tried get_clear_job_list + paginated get_current_jobs/get_job_history + get_compound_time_project CSV, all returned 0 matching jobs.\n` +
+      `Errors:\n` +
+      errors.map((e) => `  ${e}`).join("\n") +
+      `\n\nThis usually means your session cookie is invalid/expired or you don't have access to project ${projectId}.`
   );
+}
+
+/**
+ * Parse the CSV returned by /api/project/get_compound_time_project into a set of job UIDs.
+ * CSV columns: Project,Job,Type,Status,Create By,Started Time,Completed Time,Killed Time,Failed Time,State,Total Time
+ * Only rows whose Project column equals projectId are kept.
+ */
+function parseProjectCsv(csv: string, projectId: string): Set<string> {
+  const uids = new Set<string>();
+  if (!csv) return uids;
+  const lines = csv.split(/\r?\n/).filter((l) => l.length > 0);
+  if (lines.length < 2) return uids;
+  const header = lines[0].split(",");
+  const projectCol = header.indexOf("Project");
+  const jobCol = header.indexOf("Job");
+  if (projectCol < 0 || jobCol < 0) return uids;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    if (cols[projectCol] === projectId && cols[jobCol]) {
+      uids.add(cols[jobCol]);
+    }
+  }
+  return uids;
+}
+
+/** Like cryoSmartJson but returns the raw text (for non-JSON responses like CSV). */
+async function cryoSmartText(
+  session: CryoSmartSession,
+  cryosmartPath: string
+): Promise<string> {
+  const resp = await cryoSmartFetch(session, cryosmartPath);
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`CryoSmart ${resp.status} for ${cryosmartPath}: ${text.slice(0, 200)}`);
+  }
+  return resp.text();
 }
 
 function extractJobsArray(data: unknown): unknown[] | null {
@@ -166,6 +263,9 @@ function extractJobsArray(data: unknown): unknown[] | null {
     // Standard wrappers
     if (Array.isArray(obj.jobs)) return obj.jobs;
     if (Array.isArray(obj.items)) return obj.items;
+    // CryoSmart wrapper: { data: [...], msg: "..." }
+    if (Array.isArray(obj.data)) return obj.data;
+    // CryoSmart wrapper: { data: {...}, pagination: {...} } where data is array
     if (Array.isArray(obj.data)) {
       // data might itself be an object wrapping a jobs array
       if (Array.isArray(obj.data)) return obj.data;
@@ -175,6 +275,21 @@ function extractJobsArray(data: unknown): unknown[] | null {
         if (Array.isArray(inner.items)) return inner.items;
         if (Array.isArray(inner.job_list)) return inner.job_list;
         if (Array.isArray(inner.jobList)) return inner.jobList;
+        // get_clear_job_list returns {"data": {"class_2D": [...], "class_3D": [...], ...}}
+        // — flatten all dict-of-array values into a single jobs array.
+        const flattened: unknown[] = [];
+        let anyFlattened = false;
+        for (const key of Object.keys(inner)) {
+          const v = inner[key];
+          if (Array.isArray(v) && v.length > 0) {
+            const first = v[0] as Record<string, unknown> | undefined;
+            if (first && typeof first === "object" && (first.uid || first.job_type || first.job_uid || first.project_uid)) {
+              flattened.push(...v);
+              anyFlattened = true;
+            }
+          }
+        }
+        if (anyFlattened) return flattened;
       }
     }
     // CryoSmart-specific wrappers (get_clear_job_list, get_compound_time_project)

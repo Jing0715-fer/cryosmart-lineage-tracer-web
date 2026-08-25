@@ -1,27 +1,22 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { putPending } from "@/lib/cryosmart/pending-store";
 
 /**
  * POST /api/cryosmart/import
  *
- * Receives metadata captured by the bookmarklet (which runs inside the
- * CryoSmart tab, same-origin, so cookies are auto-attached).
+ * Receives metadata captured from CryoSmart Vue store or bookmarklet.
+ * Accepts session info for map/image downloading.
  *
  * Request body shape:
  *   {
  *     project_uid: "P52",
  *     experiment_uid: "EXP1",
- *     source_url: "http://192.168.4.3:8080/#/projects/P52",
- *     jobs: [...]  // raw CryoSmart job metadata array
+ *     jobs: [...],
+ *     source: "CryoSmart Console Capture v5",
+ *     captured_at: "2026-08-25T...",
+ *     cryosmart_origin: "http://192.168.202.11:8080",
+ *     cryosmart_auth: "Bearer eyJ..."
  *   }
- *
- * OR the request body can be the raw array directly:
- *   [ {...}, {...}, ... ]
- *
- * Returns:
- *   { ok: true, token: "12-a1b2c3d4", count: 47, expires_in: 600 }
- *
- * The token is single-use and expires in 10 minutes.
  */
 export async function POST(req: NextRequest) {
   let body: unknown;
@@ -34,60 +29,65 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let projectUid: string | undefined;
-  let experimentUid: string | undefined;
-  let jobs: unknown[] | undefined;
-  let raw: unknown = body;
-  let sourceUrl: string | undefined;
+  const obj = body as Record<string, unknown>;
+  const jobs = Array.isArray(obj.jobs) ? obj.jobs : Array.isArray(obj) ? obj : undefined;
+  const projectUid = typeof obj.project_uid === "string" ? obj.project_uid : undefined;
+  const experimentUid = typeof obj.experiment_uid === "string" ? obj.experiment_uid : undefined;
+  const sourceUrl = typeof obj.source_url === "string" ? obj.source_url : undefined;
+  
+  // CryoSmart session info for map/image downloads
+  const cryosmartOrigin = typeof obj.cryosmart_origin === "string" ? obj.cryosmart_origin : undefined;
+  const cryosmartAuth = typeof obj.cryosmart_auth === "string" ? obj.cryosmart_auth : undefined;
+  const cryosmartCookie = typeof obj.cryosmart_cookie === "string" ? obj.cryosmart_cookie : undefined;
 
-  if (Array.isArray(body)) {
-    jobs = body;
-  } else if (body && typeof body === "object") {
-    const obj = body as Record<string, unknown>;
-    if (Array.isArray(obj.jobs)) jobs = obj.jobs;
-    if (typeof obj.project_uid === "string") projectUid = obj.project_uid;
-    if (typeof obj.experiment_uid === "string") experimentUid = obj.experiment_uid;
-    if (typeof obj.source_url === "string") sourceUrl = obj.source_url;
-    // If the body is the export wrapper, jobs may already be inside.
-    if (jobs === undefined && Array.isArray((obj as { jobs?: unknown[] }).jobs)) {
-      jobs = (obj as { jobs: unknown[] }).jobs;
-    }
-  }
-
-  if (!jobs || !Array.isArray(jobs) || jobs.length === 0) {
+  if (!jobs || jobs.length === 0) {
     return NextResponse.json(
       { ok: false, error: "No jobs array found in the imported payload." },
       { status: 400 }
     );
   }
 
-  // Try to infer project_uid from the source URL hash if missing.
-  if (!projectUid && sourceUrl) {
+  // Infer project_uid from source URL if missing
+  let inferredPid = projectUid;
+  if (!inferredPid && sourceUrl) {
     const m = sourceUrl.match(/#\/projects\/([^/?#]+)/i);
-    if (m) projectUid = m[1];
+    if (m) inferredPid = m[1];
   }
-  if (!projectUid && jobs.length > 0) {
-    const first = jobs[0] as Record<string, unknown> | undefined;
-    if (first && typeof first.project_uid === "string") projectUid = first.project_uid;
+  if (!inferredPid && jobs.length > 0) {
+    const first = jobs[0] as Record<string, unknown>;
+    if (typeof first.project_uid === "string") inferredPid = first.project_uid;
   }
 
   const token = putPending({
-    project_uid: projectUid,
+    project_uid: inferredPid,
     experiment_uid: experimentUid,
     jobs,
-    raw,
+    raw: body,
     source_url: sourceUrl,
-    captured_at: new Date().toISOString(),
+    captured_at: typeof obj.captured_at === "string" ? obj.captured_at : new Date().toISOString(),
     discovered_job_count: jobs.length,
+    cryosmart_origin: cryosmartOrigin,
+    cryosmart_auth: cryosmartAuth,
+    cryosmart_cookie: cryosmartCookie,
   });
 
-  return NextResponse.json({
-    ok: true,
-    token,
-    count: jobs.length,
-    project_uid: projectUid || null,
-    expires_in: 600,
-  });
+  return NextResponse.json(
+    {
+      ok: true,
+      token,
+      count: jobs.length,
+      project_uid: inferredPid || null,
+      has_session: Boolean(cryosmartOrigin),
+      expires_in: 600,
+    },
+    {
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, X-Cryosmart-Capture",
+      },
+    }
+  );
 }
 
 export async function OPTIONS() {

@@ -4,53 +4,47 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
-import { Download, BookOpen, FlaskConical, Terminal, FileCode2, ArrowRight, Info, Share2 } from "lucide-react";
+import { Download, BookOpen, FlaskConical, Terminal, FileCode2, ArrowRight, Info, Share2, Zap } from "lucide-react";
 
-/**
- * Helper scripts shipped in every download bundle + individually downloadable.
- *
- * NOTE (updated to current project situation): the ChimeraX pipeline now has
- * a SINGLE end-to-end method — `CryoSmart_auto_align_export_ppt.py` (internal
- * name `CryoSmart_align_optimize_export.py`, docstring "一键完成"). It runs
- * alignment → view optimisation → export → PPTX substitution in one go.
- * The two individual scripts (`..._align_maps_check_view.py` and
- * `..._export_current_view_ppt.py`) are the two halves that the one-shot
- * script combines; they remain available as *advanced* components for users
- * who want to inspect / manually adjust the camera between alignment and
- * export, but they are no longer a separate recommended workflow.
- */
+// After the master-branch consolidation, the data-source flow has been
+// collapsed from 4 modes (Bookmarklet / Upload JSON / Live Connect /
+// Try Sample) into ONE single method: Smart Capture (the console snippet
+// shipped inside <SmartCapturePanel />). This Help card reflects that —
+// the "how to get metadata" accordion now presents just one method.
+//
+// The ChimeraX desktop helpers are still 4 files, but the recommended
+// workflow is the one-shot `CryoSmart_auto_align_export_ppt.py`; the
+// two individual scripts are kept as advanced components for users who
+// want manual control.
+
 const HELPER_FILES = [
   {
     name: "CryoSmart_auto_align_export_ppt.py",
-    desc: "THE single end-to-end script. One-click: auto-aligns all maps (candidate test → pick best → inherit transform), optimises the view (tests base + Y±90 + X±90), exports high-res snapshots, crops white margins, and substitutes them into the PPTX by matching the name=\"CryoSmartImage:<key>\" marker. This is the only ChimeraX script most users need to run.",
-    badge: "Recommended · one-shot",
+    desc: "Recommended one-shot pipeline: opens all lineage maps in ChimeraX, tests 5 alignment hypotheses per terminal map (original + 3 axis flips + z-flip), picks the best by correlation, optimises the 90° view by thumbnail coverage, exports PNGs, white-balances & uniformly crops them, then substitutes them into the PPTX by matching the `name=\"CryoSmartImage:<key>\"` marker.",
     size: "42 KB",
     url: "/helpers/CryoSmart_auto_align_export_ppt.py",
-    primary: true,
+    recommended: true,
   },
   {
     name: "CryoSmart_align_maps_check_view.py",
-    desc: "Advanced component — alignment + view-optimisation only (does NOT export images or touch the PPTX). Use this if you want to inspect the aligned maps in ChimeraX and manually adjust the camera before exporting. Outputs chimerax_rendered_maps/alignment_debug.log + a manifest. Pair it with the script below to finish the export.",
-    badge: "Advanced · step 1 of manual",
+    desc: "Advanced component (Step 1 of the manual workflow): the align + optimise half of the one-shot script — runs the 5-hypothesis alignment + 90° view optimisation, writes `chimerax_rendered_maps/alignment_debug.log` + a manifest, but does NOT export. Use this when you want to inspect intermediate state before exporting.",
     size: "32 KB",
     url: "/helpers/CryoSmart_align_maps_check_view.py",
-    primary: false,
+    recommended: false,
   },
   {
     name: "CryoSmart_export_current_view_ppt.py",
-    desc: "Advanced component — export + PPTX substitution only, keeping the current ChimeraX camera view unchanged. Requires that alignment already ran (i.e. a chimerax_rendered_maps/rendered_map_manifest.json exists). Use it after you have manually rotated to your preferred view.",
-    badge: "Advanced · step 2 of manual",
+    desc: "Advanced component (Step 2 of the manual workflow): the export half of the one-shot script — assumes alignment is already done. After you manually adjust the camera in ChimeraX, runs `save` for each volume, white-balances & uniformly crops all PNGs, then substitutes them into the PPTX.",
     size: "14 KB",
     url: "/helpers/CryoSmart_export_current_view_ppt.py",
-    primary: false,
+    recommended: false,
   },
   {
     name: "rebuild_picture_flow_pptx.mjs",
-    desc: "Standalone Node ESM script that rebuilds the Picture Flow PPTX from the lineage JSON (no pptxgenjs — hand-rolled OOXML + ZIP). Useful if you edited the JSON and want to regenerate the PPTX without re-tracing. Run with: node rebuild_picture_flow_pptx.mjs path/to/*_lineage.json",
-    badge: "Node · PPTX rebuild",
+    desc: "Standalone Node ESM script that rebuilds the Picture Flow PPTX from the lineage JSON (no pptxgenjs — hand-rolled OOXML + ZIP). Run with `node rebuild_picture_flow_pptx.mjs path/to/*_lineage.json`.",
     size: "27 KB",
     url: "/helpers/rebuild_picture_flow_pptx.mjs",
-    primary: false,
+    recommended: false,
   },
 ];
 
@@ -65,29 +59,59 @@ export function HelpCard() {
           <CardTitle className="text-lg">Help & ChimeraX Helper Scripts</CardTitle>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          The browser-portability verdict, the single recommended way to pull CryoSmart metadata into the web app, and the downloadable ChimeraX helper scripts (one end-to-end method).
+          How to capture CryoSmart metadata with the in-page Smart Capture console snippet, the browser-portability verdict, and the downloadable ChimeraX desktop helper scripts.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <Accordion type="single" collapsible defaultValue="feasibility" className="w-full">
-          <AccordionItem value="feasibility" className="border-slate-200">
+        <Accordion type="single" collapsible defaultValue="how-to-capture" className="w-full">
+          <AccordionItem value="how-to-capture" className="border-slate-200 dark:border-slate-700">
+            <AccordionTrigger className="text-[13px] hover:no-underline">
+              <span className="flex items-center gap-2">
+                <Zap className="h-3.5 w-3.5 text-teal-600" />
+                How do I get CryoSmart metadata into the web app?
+              </span>
+            </AccordionTrigger>
+            <AccordionContent className="space-y-2 text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-300">
+              <div className="rounded-md border border-emerald-200 bg-emerald-50/60 p-2.5 dark:border-emerald-800 dark:bg-emerald-950/30">
+                <p className="mb-1">
+                  <strong className="text-emerald-800 dark:text-emerald-300">Smart Capture — the only method you need</strong>
+                </p>
+                <p className="mb-2">
+                  The web app now ships a single, reliable capture method that runs a script directly inside the CryoSmart page to read the Vue Pinia store. It returns full job metadata (input slot groups, params spec, output group images, UI tile images) <em>and</em> the session info needed to download maps and images later — no extension, no manual cookie paste, no JSON file export.
+                </p>
+                <ol className="ml-4 list-decimal space-y-0.5">
+                  <li>In the <strong>Smart Capture</strong> card above, click <span className="font-medium">Open CryoSmart</span> and log in.</li>
+                  <li>Navigate to your project page (URL like <code className="rounded bg-emerald-100 px-1 font-mono text-[10.5px] dark:bg-emerald-900/40">http://192.168.202.11:8080/#/projects/P259</code>) and wait for the jobs to render.</li>
+                  <li>Press <kbd className="rounded border border-slate-300 bg-white px-1 py-0.5 font-mono text-[10px] dark:border-slate-600 dark:bg-slate-800">F12</kbd> → open the <strong>Console</strong> tab.</li>
+                  <li>Click <span className="font-medium">Copy Capture Script</span> in the Smart Capture card, paste into the console (Ctrl/Cmd+V), press Enter.</li>
+                  <li>The script extracts every job with full metadata + the CryoSmart session token, POSTs to <code className="rounded bg-slate-100 px-1 font-mono text-[10.5px] dark:bg-slate-800">/api/cryosmart/import</code>, and a new tab opens here at <code className="rounded bg-slate-100 px-1 font-mono text-[10.5px] dark:bg-slate-800">/?imported=…</code> with everything loaded.</li>
+                </ol>
+                <p className="mt-2 text-[11px] text-emerald-700 dark:text-emerald-400">
+                  <strong>Why this is the only method:</strong> it runs in the exact page context (never <code className="font-mono">about:blank</code>), no bookmark installation, no URL length limits, cookies + bearer token auto-attached (same-origin), and captures full Pinia-store metadata that the legacy bookmarklet could not. Works in Chrome / Firefox / Safari / Edge.
+                </p>
+              </div>
+              <div className="rounded-md border border-slate-200 bg-slate-50/60 p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+                <strong>Fallbacks (rarely needed):</strong> if you already have a metadata JSON file from a previous capture, you can still load it — open the Smart Capture card, paste the JSON into a <code className="font-mono">.json</code> file, and drag-drop it onto the page (the import endpoint accepts either form). For programmatic use, POST the JSON to <code className="font-mono">/api/cryosmart/import</code> directly.
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+
+          <AccordionItem value="feasibility" className="border-slate-200 dark:border-slate-700">
             <AccordionTrigger className="text-[13px] hover:no-underline">
               <span className="flex items-center gap-2">
                 <Info className="h-3.5 w-3.5 text-teal-600" />
                 Can a web app fully replicate the Chrome extension?
               </span>
             </AccordionTrigger>
-            <AccordionContent className="text-[12.5px] leading-relaxed text-slate-600">
+            <AccordionContent className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-300">
               <p className="mb-2">
-                <strong className="text-slate-800">Yes, with one necessary design change.</strong> The original extension relied on injecting a content script into the CryoSmart tab to scrape job metadata out of the DOM and to reuse the user&apos;s same-origin session cookie. A web app on a different origin cannot do this (CORS + HttpOnly cookies).
+                <strong className="text-slate-800 dark:text-slate-200">Yes, with one necessary design change.</strong> The original extension relied on injecting a content script into the CryoSmart tab to scrape job metadata out of the DOM and to reuse the user&apos;s same-origin session cookie. A web app on a different origin cannot do this (CORS + HttpOnly cookies).
               </p>
-              <p className="mb-2">
-                So we split the extension into three parts:
-              </p>
+              <p className="mb-2">So we split the extension into three parts:</p>
               <ul className="mb-2 ml-5 list-disc space-y-1">
-                <li><strong className="text-emerald-700">Pure JS logic (~6500 lines)</strong> — verbatim port. All the lineage tracing, BFS walk, HTML/SVG/PPTX report generation, and the hand-rolled ZIP writer run client-side.</li>
-                <li><strong className="text-amber-700">DOM scraper (1575 lines)</strong> — replaced. The web app now offers a single recommended capture path — the <em>Bookmarklet / Console Snippet</em> — that runs same-origin inside your CryoSmart tab with cookies auto-attached, then hands the metadata to the app. (Upload JSON and Live Connect remain as advanced fallbacks in the Data Source card.)</li>
-                <li><strong className="text-rose-700">ChimeraX Python scripts (~2300 lines)</strong> — kept as downloadable desktop helpers. They require ChimeraX (UCSF molecular visualization software) which cannot run in a browser.</li>
+                <li><strong className="text-emerald-700 dark:text-emerald-400">Pure JS logic (~6500 lines)</strong> — verbatim port. All the lineage tracing, BFS walk, HTML/SVG/PPTX report generation, and the hand-rolled ZIP writer run client-side.</li>
+                <li><strong className="text-amber-700 dark:text-amber-400">DOM scraper (1575 lines)</strong> — replaced by <strong>Smart Capture</strong>: a console snippet you paste into the CryoSmart page&apos;s DevTools console. It runs same-origin with your cookie + bearer token auto-attached, reads the Vue Pinia store directly (so it captures full metadata the legacy DOM scraper could not), uploads it to this web app, and opens a new tab with everything loaded.</li>
+                <li><strong className="text-rose-700 dark:text-rose-400">ChimeraX Python scripts (~2300 lines)</strong> — kept as downloadable desktop helpers. They require ChimeraX (UCSF molecular visualization software) which cannot run in a browser.</li>
               </ul>
               <p>
                 The result is a web app that works in <strong>Chrome, Firefox, Safari, Edge</strong> — any browser that supports ES2020 — without installing any extension.
@@ -95,45 +119,7 @@ export function HelpCard() {
             </AccordionContent>
           </AccordionItem>
 
-          <AccordionItem value="how-to-export" className="border-slate-200">
-            <AccordionTrigger className="text-[13px] hover:no-underline">
-              <span className="flex items-center gap-2">
-                <FileCode2 className="h-3.5 w-3.5 text-teal-600" />
-                How do I get CryoSmart metadata into the web app?
-              </span>
-            </AccordionTrigger>
-            <AccordionContent className="space-y-2 text-[12.5px] leading-relaxed text-slate-600">
-              <p>
-                <strong className="text-slate-800">There is now one recommended method:</strong> the Console Snippet in the <em>Bookmarklet</em> tab. It runs inside your logged-in CryoSmart project page, so your session cookie is auto-attached (same-origin), and it opens this web app in a new tab with everything loaded — no file juggling, no cookie pasting, no URL length limits.
-              </p>
-              <div className="rounded-md border border-emerald-200 bg-emerald-50/60 p-2.5">
-                <p className="mb-1"><strong className="text-emerald-800">The single method — Console Snippet</strong></p>
-                <ol className="ml-4 list-decimal space-y-0.5">
-                  <li>Go to the <em>Bookmarklet</em> tab in the Data Source card above.</li>
-                  <li>Open your CryoSmart project page (URL like <code className="rounded bg-emerald-100 px-1 font-mono text-[10.5px]">http://192.168.202.11:8080/#/projects/P259</code>).</li>
-                  <li>Press <kbd className="rounded border border-slate-300 bg-white px-1 py-0.5 font-mono text-[10px]">F12</kbd> → open the <strong>Console</strong> tab.</li>
-                  <li>Click the <span className="font-medium">Copy</span> button next to the Console Snippet, paste into the Console (Ctrl/Cmd+V), press Enter.</li>
-                  <li>Watch the Console — it fetches the project&apos;s jobs and opens this web app in a new tab with everything loaded. Pick a start job in the Configure step and trace.</li>
-                </ol>
-                <p className="mt-1.5 text-[11px] text-emerald-700">
-                  <strong>Why this is the one recommended way:</strong> it runs in the exact page context (never <code className="font-mono">about:blank</code>), no bookmark installation, no URL length limits, cookies auto-attached (same-origin). Works in Chrome / Firefox / Safari / Edge.
-                </p>
-                <div className="mt-2 rounded-md border border-slate-200 bg-slate-50/60 p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
-                  <strong>Prefer a draggable bookmark?</strong> The Bookmarklet tab also offers a green bookmark button you can drag to your bookmarks bar and click on the CryoSmart page. <strong>Note:</strong> a few browsers run <code className="font-mono">javascript:</code> bookmarks in a blank <code className="font-mono">about:blank</code> tab instead of the current page — if that happens, use the Console Snippet above instead.
-                </div>
-              </div>
-              <p className="mt-2 text-[11.5px] text-slate-500">
-                <strong className="text-slate-600">Advanced fallbacks</strong> (available as separate tabs in the Data Source card, for cases where you cannot open the CryoSmart page in a browser):
-              </p>
-              <ul className="ml-5 list-disc space-y-0.5 text-[11.5px] text-slate-500">
-                <li><strong>Upload JSON</strong> — if you already have an exported metadata JSON (from the original extension, a REST call, or a DevTools <em>Copy response</em> of <code className="rounded bg-slate-100 px-1 font-mono text-[10.5px] dark:bg-slate-800">/api/projects/&lt;pid&gt;/jobs</code>), drop the file in this tab.</li>
-                <li><strong>Live Connect</strong> — paste your CryoSmart base URL + session cookie; the app&apos;s backend proxy (<code className="rounded bg-slate-100 px-1 font-mono text-[10.5px] dark:bg-slate-800">/api/cryosmart/[...path]</code>) fetches the metadata server-side with your cookie. Useful for headless / scripted runs.</li>
-                <li><strong>Try Sample</strong> — synthetic 10-job cryo-EM pipeline, no real CryoSmart needed (great for exploring the UI).</li>
-              </ul>
-            </AccordionContent>
-          </AccordionItem>
-
-          <AccordionItem value="chimerax" className="border-slate-200">
+          <AccordionItem value="chimerax" className="border-slate-200 dark:border-slate-700">
             <AccordionTrigger className="text-[13px] hover:no-underline">
               <span className="flex items-center gap-2">
                 <Terminal className="h-3.5 w-3.5 text-teal-600" />
@@ -141,34 +127,29 @@ export function HelpCard() {
               </span>
             </AccordionTrigger>
             <AccordionContent className="space-y-3">
-              <p className="text-[12.5px] leading-relaxed text-slate-600">
-                <strong className="text-slate-800">There is now a single end-to-end method:</strong> the one-shot <code className="rounded bg-slate-100 px-1 font-mono text-[11px] dark:bg-slate-800">CryoSmart_auto_align_export_ppt.py</code> script. It runs the entire pipeline — map alignment, view optimisation, high-res snapshot export, and PPTX image substitution — in one ChimeraX session. The two individual scripts below are the two halves that this one-shot combines; they remain available as <em>advanced</em> components for users who want to inspect the aligned maps or manually adjust the camera between alignment and export.
+              <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-300">
+                These four scripts ship inside every download bundle. They are <strong>not browser-portable</strong> — they require ChimeraX installed locally. Download them individually here if you only need the helpers.
               </p>
               <div className="grid grid-cols-1 gap-2">
                 {HELPER_FILES.map((f) => (
                   <div
                     key={f.name}
-                    className={`flex items-start gap-2 rounded-lg border bg-white p-2.5 dark:bg-slate-900 ${
-                      f.primary
-                        ? "border-teal-300 bg-teal-50/40 dark:border-teal-700 dark:bg-teal-950/30"
-                        : "border-slate-200 dark:border-slate-700"
+                    className={`flex items-start gap-2 rounded-lg border p-2.5 ${
+                      f.recommended
+                        ? "border-teal-300 bg-teal-50/40 dark:border-teal-700 dark:bg-teal-950/20"
+                        : "border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
                     }`}
                   >
-                    <FileCode2 className={`mt-0.5 h-4 w-4 shrink-0 ${f.primary ? "text-teal-600" : "text-slate-500"}`} />
+                    <FileCode2 className="mt-0.5 h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400" />
                     <div className="flex-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-mono text-[12px] font-medium text-slate-800 dark:text-slate-100">{f.name}</span>
-                        <Badge
-                          variant="outline"
-                          className={`px-1.5 py-0 text-[9px] ${
-                            f.primary
-                              ? "border-teal-300 text-teal-700 dark:border-teal-600 dark:text-teal-300"
-                              : "text-slate-500 dark:text-slate-400"
-                          }`}
-                        >
-                          {f.badge}
-                        </Badge>
-                        <Badge variant="outline" className="px-1.5 py-0 text-[9px] text-slate-500">{f.size}</Badge>
+                        <span className="font-mono text-[12px] font-medium text-slate-800 dark:text-slate-200">{f.name}</span>
+                        <Badge variant="outline" className="px-1.5 py-0 text-[9px] text-slate-500 dark:text-slate-400">{f.size}</Badge>
+                        {f.recommended && (
+                          <Badge className="bg-teal-100 px-1.5 py-0 text-[9px] text-teal-700 hover:bg-teal-100 dark:bg-teal-900/40 dark:text-teal-300">
+                            recommended
+                          </Badge>
+                        )}
                       </div>
                       <p className="mt-0.5 text-[11px] leading-snug text-slate-500 dark:text-slate-400">{f.desc}</p>
                     </div>
@@ -180,29 +161,27 @@ export function HelpCard() {
                   </div>
                 ))}
               </div>
-              <div className="rounded-lg border border-teal-200 bg-teal-50 p-3 text-[11.5px] text-teal-900 dark:border-teal-700 dark:bg-teal-950/40 dark:text-teal-200">
-                <div className="mb-1 font-medium text-teal-800 dark:text-teal-300">The single recommended workflow:</div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11.5px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                <div className="mb-1 font-medium text-slate-700 dark:text-slate-200">Recommended ChimeraX workflow (one method):</div>
                 <ol className="ml-4 list-decimal space-y-0.5">
-                  <li>Download the lineage bundle (above) and unzip it — it contains <code className="rounded bg-teal-100 px-1 font-mono text-[10.5px] dark:bg-teal-900/50">*_lineage.json</code>, the HTML / SVG / Mermaid reports, <code className="rounded bg-teal-100 px-1 font-mono text-[10.5px] dark:bg-teal-900/50">*_picture_flow.pptx</code>, and the helper scripts.</li>
-                  <li>Open ChimeraX, then run <code className="rounded bg-teal-100 px-1 font-mono text-[10.5px] dark:bg-teal-900/50">open CryoSmart_auto_align_export_ppt.py</code> in the command line.</li>
-                  <li>The script aligns every map, tests 5 view hypotheses and picks the best by correlation, exports white-balanced uniformly-cropped PNGs, and substitutes them into the PPTX by matching the <code className="rounded bg-teal-100 px-1 font-mono text-[10.5px] dark:bg-teal-900/50">name="CryoSmartImage:&lt;key&gt;"</code> marker, producing <code className="rounded bg-teal-100 px-1 font-mono text-[10.5px] dark:bg-teal-900/50">*_chimerax.pptx</code>.</li>
-                  <li>Debug logs + a manifest are written to <code className="rounded bg-teal-100 px-1 font-mono text-[10.5px] dark:bg-teal-900/50">chimerax_rendered_maps/</code>.</li>
+                  <li>Download the lineage bundle (above) and unzip.</li>
+                  <li>Open ChimeraX, then run <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">open CryoSmart_auto_align_export_ppt.py</code> — this single script aligns all maps, optimises the 90° view, exports white-balanced cropped PNGs, and substitutes them into <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">{`*_picture_flow.pptx`}</code> as <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">{`*_chimerax.pptx`}</code>.</li>
                 </ol>
-                <div className="mt-2 rounded-md border border-slate-200 bg-white/70 p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
-                  <strong>Advanced (optional):</strong> if you want to inspect the aligned maps or manually rotate to a preferred view before exporting, run <code className="font-mono">CryoSmart_align_maps_check_view.py</code> first (aligns + optimises, no export), adjust the camera, then run <code className="font-mono">CryoSmart_export_current_view_ppt.py</code> to export at your view. This is the two-step manual path the one-shot script automates.
+                <div className="mt-2 rounded-md border border-slate-200 bg-white p-2 text-[11px] dark:border-slate-700 dark:bg-slate-900">
+                  <strong>Advanced (manual control):</strong> if you need to inspect intermediate state, run <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">CryoSmart_align_maps_check_view.py</code> first (writes <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">chimerax_rendered_maps/alignment_debug.log</code> + a manifest), inspect or manually rotate to your preferred view, then run <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">CryoSmart_export_current_view_ppt.py</code> to export. These are the two halves of the one-shot script, kept as individual components.
                 </div>
               </div>
             </AccordionContent>
           </AccordionItem>
 
-          <AccordionItem value="share" className="border-slate-200">
+          <AccordionItem value="share" className="border-slate-200 dark:border-slate-700">
             <AccordionTrigger className="text-[13px] hover:no-underline">
               <span className="flex items-center gap-2">
                 <Share2 className="h-3.5 w-3.5 text-teal-600" />
                 How do I share a lineage with a colleague?
               </span>
             </AccordionTrigger>
-            <AccordionContent className="space-y-2 text-[12.5px] leading-relaxed text-slate-600">
+            <AccordionContent className="space-y-2 text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-300">
               <p>After tracing lineage, click the green <strong>Share</strong> button in the top-right of the Lineage Preview card.</p>
               <p>The web app compresses the full lineage summary (project IDs, job types, particle counts, edges) into a URL-safe base64url string appended to the page URL as <code className="rounded bg-slate-100 px-1 font-mono text-[11px] dark:bg-slate-800">#s=...</code>.</p>
               <p>Your colleague opens the link → the web app decodes the hash automatically → the same graph, stats, and report render without them needing to load any data source.</p>
@@ -215,17 +194,17 @@ export function HelpCard() {
             </AccordionContent>
           </AccordionItem>
 
-          <AccordionItem value="port" className="border-slate-200">
+          <AccordionItem value="port" className="border-slate-200 dark:border-slate-700">
             <AccordionTrigger className="text-[13px] hover:no-underline">
               <span className="flex items-center gap-2">
                 <FlaskConical className="h-3.5 w-3.5 text-teal-600" />
                 What was ported vs. replaced?
               </span>
             </AccordionTrigger>
-            <AccordionContent className="text-[12.5px] leading-relaxed text-slate-600">
+            <AccordionContent className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-300">
               <div className="overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
                 <table className="w-full text-[11.5px]">
-                  <thead className="bg-slate-50 text-left text-[10.5px] uppercase tracking-wide text-slate-500 dark:bg-slate-800/60 dark:text-slate-400">
+                  <thead className="bg-slate-50 text-left text-[10.5px] uppercase tracking-wide text-slate-500 dark:bg-slate-900 dark:text-slate-400">
                     <tr>
                       <th className="px-2.5 py-1.5">Component</th>
                       <th className="px-2.5 py-1.5">Lines</th>
@@ -235,10 +214,10 @@ export function HelpCard() {
                   <tbody className="divide-y divide-slate-200 bg-white dark:divide-slate-700 dark:bg-slate-900">
                     <Row c="popup.js pure functions (lineage, HTML, SVG, PPTX, ZIP)" l="~6500" s="Ported verbatim to TS" tone="emerald" />
                     <Row c="popup.js chrome.* glue (tabs, downloads, scripting)" l="~600" s="Replaced with fetch + Blob + &lt;a download&gt;" tone="amber" />
-                    <Row c="content.js DOM scraper" l="1575" s="Replaced — bookmarklet console snippet (Upload JSON / Live Connect as advanced fallbacks)" tone="amber" />
+                    <Row c="content.js DOM scraper" l="1575" s="Replaced with Smart Capture console snippet" tone="amber" />
                     <Row c="background.js (service worker)" l="37" s="Dropped (Blob download)" tone="rose" />
                     <Row c="rebuild_picture_flow_pptx.mjs (Node)" l="454" s="Ported to TS + kept as downloadable helper" tone="emerald" />
-                    <Row c="ChimeraX Python scripts" l="~2300" s="Kept as downloadable desktop helpers — one end-to-end one-shot script + 2 advanced components" tone="rose" />
+                    <Row c="3 ChimeraX Python scripts" l="~2300" s="Kept as downloadable desktop helpers" tone="rose" />
                   </tbody>
                 </table>
               </div>
@@ -246,12 +225,11 @@ export function HelpCard() {
           </AccordionItem>
         </Accordion>
 
-        <div className="rounded-lg border border-teal-200 bg-gradient-to-br from-teal-50 to-emerald-50 p-3 dark:border-teal-800 dark:from-teal-950/40 dark:to-emerald-950/40">
+        <div className="rounded-lg border border-teal-200 bg-gradient-to-br from-teal-50 to-emerald-50 p-3 dark:border-teal-800 dark:from-teal-950/30 dark:to-emerald-950/20">
           <div className="flex items-start gap-2.5">
-            <ArrowRight className="mt-0.5 h-4 w-4 shrink-0 text-teal-600 dark:text-teal-400" />
+            <ArrowRight className="mt-0.5 h-4 w-4 shrink-0 text-teal-600" />
             <div className="text-[12px] text-teal-900 dark:text-teal-200">
-              <strong>Quick start (no CryoSmart):</strong> Click <em>Try Sample</em> in the Data Source card above, then <em>Trace Lineage</em> (Ctrl+Enter), then <em>Build &amp; download ZIP</em>.<br />
-              <strong>With real CryoSmart:</strong> Go to the <em>Bookmarklet</em> tab, copy the Console Snippet, paste it into your CryoSmart project page&apos;s DevTools Console — the web app opens with everything auto-loaded. Then trace, download the bundle, and run the one-shot ChimeraX script.
+              <strong>Quick start:</strong> Click <em>Open CryoSmart</em> in the Smart Capture card above, log in, navigate to your project, press <kbd className="rounded border border-teal-300 bg-white px-1 font-mono text-[10px] dark:border-teal-700 dark:bg-slate-800">F12</kbd> → Console, click <em>Copy Capture Script</em>, paste into the console, press Enter — a new tab opens here with everything auto-loaded (project, jobs, session for maps/images).
             </div>
           </div>
         </div>
@@ -264,7 +242,7 @@ function Row({ c, l, s, tone }: { c: string; l: string; s: string; tone: "emeral
   const cls = tone === "emerald" ? "text-emerald-700 dark:text-emerald-400" : tone === "amber" ? "text-amber-700 dark:text-amber-400" : "text-rose-700 dark:text-rose-400";
   return (
     <tr>
-      <td className="px-2.5 py-1.5 text-slate-700 dark:text-slate-300">{c}</td>
+      <td className="px-2.5 py-1.5 text-slate-700 dark:text-slate-200">{c}</td>
       <td className="px-2.5 py-1.5 font-mono text-slate-500 dark:text-slate-400">{l}</td>
       <td className={`px-2.5 py-1.5 ${cls}`}>{s}</td>
     </tr>

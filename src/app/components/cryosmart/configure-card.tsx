@@ -39,7 +39,7 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
     includePptx: true,
     includeImages: true,
     includeMaps: false,
-    includeFinalResults: false,
+    includeFinalResults: true,
   });
 
   const updateOptions = useCallback((patch: Partial<TraceOptions>) => {
@@ -160,24 +160,24 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
               onChecked={(v) => updateOptions({ includeImages: v })}
               icon={<FileBox className="h-3.5 w-3.5" />}
               title="Preview images"
-              desc="Micrograph / select-2D / class / map preview PNGs (requires Live Connect)"
-              tag={loaded?.source === "live" ? "live" : "needs live"}
+              desc="Micrograph / select-2D / class / map preview PNGs (requires session)"
+              tag={loaded?.session ? "session" : "no session"}
             />
             <OptionCheckbox
               checked={options.includeMaps}
               onChecked={(v) => updateOptions({ includeMaps: v })}
               icon={<Boxes className="h-3.5 w-3.5" />}
               title="Map / MRC files"
-              desc="Normal volume.map for every traced job (requires Live Connect)"
-              tag={loaded?.source === "live" ? "live" : "needs live"}
+              desc="Normal volume.map for every traced job (requires session)"
+              tag={loaded?.session ? "session" : "no session"}
             />
             <OptionCheckbox
               checked={options.includeFinalResults}
               onChecked={(v) => updateOptions({ includeFinalResults: v })}
               icon={<FileCheck2 className="h-3.5 w-3.5" />}
               title="Final results package"
-              desc="FSC / Guinier / Direction plots + 6 final maps from the start job (Live Connect)"
-              tag={loaded?.source === "live" ? "live" : "needs live"}
+              desc="FSC / Guinier / Direction plots + final maps from the start job (requires session)"
+              tag={loaded?.session ? "session" : "no session"}
             />
           </div>
         </div>

@@ -35,7 +35,11 @@ export function useSharedSummary(onLoaded?: (s: LineageSummary) => void) {
     const hash = window.location.hash;
     if (!hash || !hash.startsWith("#s=")) return;
 
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- set "decoding" status synchronously before starting the async decode so the UI shows a spinner immediately.
+    // Synchronous setState here is intentional: we're transitioning from
+    // "idle" (initial mount state) to "decoding" once we detect a #s= share
+    // hash. This is a one-time mount-time transition driven by an external
+    // value (URL hash), not a cascading render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setState({ status: "decoding", message: "Decoding shared lineage…", summary: null });
 
     let cancelled = false;

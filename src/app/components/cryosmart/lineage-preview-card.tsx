@@ -1,16 +1,18 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTheme } from "next-themes";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2 } from "lucide-react";
+import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2, ImageIcon, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import type { LineageSummary } from "@/lib/cryosmart/types";
-import { buildLineageHtmlV2 } from "@/lib/cryosmart/report-html";
+import { buildLineageHtmlV2, type ReportHtmlOptions } from "@/lib/cryosmart/report-html";
+import { prefetchImagesForReport } from "@/lib/cryosmart/image-embed";
+import type { CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 import { makePreview } from "@/lib/cryosmart/lineage";
 import { LineageGraph } from "./lineage-graph";
 import { ShareLineageButton } from "./share-lineage-button";
@@ -18,20 +20,73 @@ import { FscPlotViewer } from "./fsc-plot-viewer";
 
 interface Props {
   summary: LineageSummary | null;
+  /** Optional CryoSmart live session — when present, the preview iframe
+   *  pre-fetches all referenced images as base64 data URLs so the report
+   *  is fully self-contained (no remote/CORS/referrer issues). */
+  session?: CryoSmartSession | null;
 }
 
-export function LineagePreviewCard({ summary }: Props) {
+export function LineagePreviewCard({ summary, session }: Props) {
   const [reportTab, setReportTab] = useState("stats");
   const { resolvedTheme } = useTheme();
+
+  // Pre-fetch referenced images as base64 data URLs when a live session is
+  // available. The resulting map is passed to buildLineageHtmlV2 so <img src>
+  // becomes a data: URL — eliminating the iframe-referrer/CORS failure that
+  // previously made images appear broken even though the URL was valid.
+  const [embeddedImages, setEmbeddedImages] = useState<Record<string, string> | null>(null);
+  const [embeddingProgress, setEmbeddingProgress] = useState<string>("");
+  const [embedFailed, setEmbedFailed] = useState(false);
+
+  useEffect(() => {
+    if (!summary || !session) {
+      // Synchronous reset of local UI state when the summary or session goes
+      // away. This is a mount/dep-change transition, not a cascading render.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setEmbeddedImages(null);
+      setEmbeddingProgress("");
+      setEmbedFailed(false);
+      return;
+    }
+    let cancelled = false;
+    // Synchronous reset before kicking off the async prefetch — same as
+    // above, a dep-change transition.
+    setEmbeddedImages(null);
+    setEmbedFailed(false);
+    setEmbeddingProgress("Prefetching images for report preview…");
+    prefetchImagesForReport(session, summary, (msg) => {
+      if (!cancelled) setEmbeddingProgress(msg);
+    })
+      .then((map) => {
+        if (cancelled) return;
+        const count = Object.keys(map).length;
+        setEmbeddedImages(map);
+        setEmbeddingProgress(count ? `${count} images embedded` : "No images could be embedded");
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setEmbedFailed(true);
+          setEmbeddingProgress("Image prefetch failed — falling back to remote URLs");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [summary, session]);
 
   const reportHtml = useMemo(() => {
     if (!summary) return "";
     try {
-      return buildLineageHtmlV2(summary);
+      const opts: ReportHtmlOptions | undefined = embeddedImages
+        ? { embeddedImages, session: session ?? undefined }
+        : session
+          ? { session }
+          : undefined;
+      return buildLineageHtmlV2(summary, opts);
     } catch (err) {
       return `<!doctype html><body style="font-family:monospace;padding:2rem;color:#b91c1c;">Failed to build report: ${(err as Error).message}</body>`;
     }
-  }, [summary]);
+  }, [summary, embeddedImages, session]);
 
   const previewText = useMemo(() => {
     if (!summary) return "";
@@ -155,7 +210,7 @@ export function LineagePreviewCard({ summary }: Props) {
 
           <TabsContent value="report" className="mt-3">
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <div className="text-[11px] text-slate-500">
                   Standalone HTML report rendered in an iframe — the same file you&apos;ll download as <code className="font-mono text-[10px]">{summary.project_uid}_{summary.start_uid}_lineage_report.html</code>
                 </div>
@@ -189,8 +244,36 @@ export function LineagePreviewCard({ summary }: Props) {
                   </Button>
                 </div>
               </div>
+              {/* Image embedding status indicator */}
+              {session && (
+                <div className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] ${
+                  embedFailed
+                    ? "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
+                    : embeddedImages
+                      ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
+                      : "border-slate-300 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                }`}>
+                  {embedFailed ? (
+                    <ImageIcon className="h-3 w-3 shrink-0" />
+                  ) : embeddedImages ? (
+                    <ImageIcon className="h-3 w-3 shrink-0" />
+                  ) : (
+                    <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                  )}
+                  <span className="truncate">{embeddingProgress || "Preparing report images…"}</span>
+                  {embeddedImages && Object.keys(embeddedImages).length > 0 && (
+                    <span className="ml-auto shrink-0 font-mono text-[10px] opacity-70">self-contained</span>
+                  )}
+                </div>
+              )}
+              {!session && (
+                <div className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
+                  <ImageIcon className="h-3 w-3 shrink-0" />
+                  <span>Images load directly from CryoSmart (no live session). If images appear broken, right-click → open in new tab, or use the &ldquo;Smart Capture&rdquo; mode to embed them.</span>
+                </div>
+              )}
               <iframe
-                key={`report-${resolvedTheme || "light"}`}
+                key={`report-${resolvedTheme || "light"}-${embeddedImages ? "embedded" : "remote"}`}
                 srcDoc={reportSrcDoc}
                 title="Lineage Report"
                 className="h-[600px] w-full rounded-lg border border-slate-300 bg-white dark:border-slate-700"
