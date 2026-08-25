@@ -1,0 +1,1694 @@
+     1→/**
+     2→ * CryoSmart lineage-tracing core.
+     3→ *
+     4→ * Verbatim port of the pure helper functions from
+     5→ * `CryoSmartLineageTracer_3.0/popup.js` (Manifest V3 Chrome extension)
+     6→ * into a TypeScript module. No `chrome.*`, no `document` / `window` —
+     7→ * every function here is a pure utility that runs both server- and
+     8→ * client-side.
+     9→ *
+    10→ * String literals (including the Chinese UI strings) are preserved
+    11→ * byte-for-byte from the original source so that downstream renderers
+    12→ * (HTML / SVG / PPTX / preview) produce identical output.
+    13→ */
+    14→
+    15→import {
+    16→  MAP_SUFFIXES,
+    17→  MAJOR_JOB_TYPES,
+    18→  PICKING_JOB_TYPES,
+    19→  PARTICLE_AUX_JOB_TYPES,
+    20→  REPICK_PARTICLE_PRODUCER_TYPES,
+    21→  REPICK_SETUP_JOB_TYPES,
+    22→  SMALL_JOB_TYPES,
+    23→} from "./constants";
+    24→import type {
+    25→  ClassMap,
+    26→  ClassSplit,
+    27→  ClassSplitJob,
+    28→  DateValue,
+    29→  EdgeFamily,
+    30→  ExtractionParams,
+    31→  ImageAsset,
+    32→  IncomingByTargetMap,
+    33→  InputSlotGroup,
+    34→  JobMetadata,
+    35→  LineageEdge,
+    36→  LineageEdgeSlot,
+    37→  LineageNode,
+    38→  LineageReportState,
+    39→  LineageSummary,
+    40→  MapAsset,
+    41→  NormalizedLineageEdge,
+    42→  OutputGroupIndex,
+    43→  OutputGroupIndexItem,
+    44→  OutputResultGroup,
+    45→  ParamSpecEntry,
+    46→  ParamsSpec,
+    47→  Select2DSummary,
+    48→  Slot,
+    49→  UiTileImage,
+    50→} from "./types";
+    51→
+    52→/* ------------------------------------------------------------------ */
+    53→/* Module-level caches                                                */
+    54→/* ------------------------------------------------------------------ */
+    55→
+    56→/**
+    57→ * WeakMap cache for `reportNormalizedEdges` — keyed on the summary
+    58→ * object so that two consecutive calls with the same summary return
+    59→ * the same memoized edge array.
+    60→ */
+    61→const REPORT_NORMALIZED_EDGES_CACHE = new WeakMap<
+    62→  LineageSummary,
+    63→  NormalizedLineageEdge[]
+    64→>();
+    65→
+    66→/* ------------------------------------------------------------------ */
+    67→/* URL / route helpers                                                */
+    68→/* ------------------------------------------------------------------ */
+    69→
+    70→/**
+    71→ * Normalize a user-typed job uid into the canonical `J<number>` form
+    72→ * used throughout the lineage graph. Throws a Chinese error message
+    73→ * when the value is empty (matches the original popup.js UX).
+    74→ */
+    75→export function normalizeJobUid(value: unknown): string {
+    76→  const text = String(value || "").trim();
+    77→  if (!text) throw new Error("请输入起始 Job，例如 427 或 J427。");
+    78→  return /^J/i.test(text) ? text.toUpperCase() : `J${text}`;
+    79→}
+    80→
+    81→/** Parse a CryoSmart SPA hash-route into its three path components. */
+    82→export function parseRoute(url: unknown): {
+    83→  projectId: string;
+    84→  experimentId: string;
+    85→  jobId: string;
+    86→} {
+    87→  const match = String(url || "").match(
+    88→    /#\/projects\/([^/]+)(?:\/([^/]+))?(?:\/([^/?#]+))?/i
+    89→  );
+    90→  return {
+    91→    projectId: match ? match[1] : "",
+    92→    experimentId: match && match[2] ? match[2] : "",
+    93→    jobId: match && match[3] ? match[3] : "",
+    94→  };
+    95→}
+    96→
+    97→/** Unwrap a CryoSmart `{ $date: ... }` timestamp wrapper if present. */
+    98→export function plainDate(value: unknown): unknown {
+    99→  return value && typeof value === "object" && "$date" in (value as object)
+   100→    ? (value as { $date: unknown }).$date
+   101→    : value;
+   102→}
+   103→
+   104→/* ------------------------------------------------------------------ */
+   105→/* Output-group / params-spec helpers                                */
+   106→/* ------------------------------------------------------------------ */
+   107→
+   108→/** Return all `output_result_groups` on a job, optionally filtered by `type`. */
+   109→export function outputGroups(
+   110→  job: JobMetadata,
+   111→  type?: string
+   112→): OutputResultGroup[] {
+   113→  const groups = Array.isArray(job.output_result_groups)
+   114→    ? job.output_result_groups
+   115→    : [];
+   116→  return type ? groups.filter((group) => group.type === type) : groups;
+   117→}
+   118→
+   119→/** Largest `num_items` across groups of the given `type`, or `null`. */
+   120→export function maxGroupNumItems(
+   121→  job: JobMetadata,
+   122→  type?: string
+   123→): number | null {
+   124→  const values = outputGroups(job, type)
+   125→    .map((group) => group.num_items)
+   126→    .filter((value): value is number => Number.isInteger(value));
+   127→  return values.length ? Math.max(...values) : null;
+   128→}
+   129→
+   130→/**
+   131→ * Read a numeric value out of `params_spec`, trying each candidate key
+   132→ * in order. The first finite value wins; otherwise `null`.
+   133→ */
+   134→export function paramSpecNumber(
+   135→  job: JobMetadata | null | undefined,
+   136→  names: string[]
+   137→): number | null {
+   138→  const params: ParamsSpec = (job && job.params_spec) || {};
+   139→  for (const name of names) {
+   140→    const entry: ParamSpecEntry | undefined = params[name];
+   141→    const value =
+   142→      entry !== null && typeof entry === "object" && "value" in (entry as object)
+   143→        ? (entry as { value?: unknown }).value
+   144→        : entry;
+   145→    const number = Number(value);
+   146→    if (Number.isFinite(number)) return number;
+   147→  }
+   148→  return null;
+   149→}
+   150→
+   151→/**
+   152→ * Scan `output_result_groups[].summary` for a key matching any of the
+   153→ * given regexes and return the first finite numeric value found.
+   154→ */
+   155→export function outputSummaryNumber(
+   156→  job: JobMetadata,
+   157→  patterns: RegExp[]
+   158→): number | null {
+   159→  for (const group of outputGroups(job)) {
+   160→    const summary =
+   161→      group && group.summary && typeof group.summary === "object"
+   162→        ? group.summary
+   163→        : ({} as Record<string, unknown>);
+   164→    for (const [key, value] of Object.entries(summary)) {
+   165→      if (!patterns.some((pattern) => pattern.test(key))) continue;
+   166→      const number = Number(value);
+   167→      if (Number.isFinite(number)) return number;
+   168→    }
+   169→  }
+   170→  return null;
+   171→}
+   172→
+   173→/* ------------------------------------------------------------------ */
+   174→/* Pixel-size helpers                                                 */
+   175→/* ------------------------------------------------------------------ */
+   176→
+   177→/** Round a pixel size (Å/px) to 4 decimals, rejecting implausible values. */
+   178→export function pixelSizeNumber(value: unknown): number | null {
+   179→  const number = Number(value);
+   180→  return Number.isFinite(number) && number > 0 && number < 100
+   181→    ? Math.round(number * 10000) / 10000
+   182→    : null;
+   183→}
+   184→
+   185→/** Resolve the pixel size (Å/px) for a job from summary and params. */
+   186→export function pixelSizeFromJob(job: JobMetadata): number | null {
+   187→  return (
+   188→    pixelSizeNumber(
+   189→      outputSummaryNumber(job, [/psize[_-]?A$/i, /pixel[^a-z0-9]*size/i])
+   190→    ) ||
+   191→    pixelSizeNumber(
+   192→      paramSpecNumber(job, [
+   193→        "psize_A",
+   194→        "pixel_size_A",
+   195→        "pixel_size",
+   196→        "micrograph_pixel_size_A",
+   197→      ])
+   198→    )
+   199→  );
+   200→}
+   201→
+   202→/** Format a pixel size as a short human-readable string (no unit suffix). */
+   203→export function formatPixelSize(value: unknown): string {
+   204→  const number = pixelSizeNumber(value);
+   205→  if (!number) return "";
+   206→  return Number.isInteger(number)
+   207→    ? String(number)
+   208→    : number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+   209→}
+   210→
+   211→/** Format a node's pixel size as `"<n> Å/px"`, or `""` when unknown. */
+   212→export function pixelSizeText(node: {
+   213→  pixel_size_A?: number | null;
+   214→}): string {
+   215→  const text = formatPixelSize(node && node.pixel_size_A);
+   216→  return text ? `${text} Å/px` : "";
+   217→}
+   218→
+   219→/* ------------------------------------------------------------------ */
+   220→/* Extraction helpers                                                  */
+   221→/* ------------------------------------------------------------------ */
+   222→
+   223→/** Returns `true` for `extract_micrographs*` job types. */
+   224→export function isExtractMicrographsJob(
+   225→  jobOrNode: { job_type?: string } | null | undefined
+   226→): boolean {
+   227→  return /extract_micrographs/i.test((jobOrNode && jobOrNode.job_type) || "");
+   228→}
+   229→
+   230→/** Pull the (raw box, extracted box, bin factor) triple out of `params_spec`. */
+   231→export function extractionParams(job: JobMetadata): ExtractionParams {
+   232→  const rawBox = paramSpecNumber(job, [
+   233→    "box_size_pix",
+   234→    "box_size",
+   235→    "extraction_box_size_pix",
+   236→    "extraction_box_size",
+   237→  ]);
+   238→  const extractedBox = paramSpecNumber(job, [
+   239→    "bin_size_pix",
+   240→    "downsample_box_size_pix",
+   241→    "crop_size_pix",
+   242→  ]);
+   243→  const inferredExtractedBox =
+   244→    rawBox && !extractedBox && isExtractMicrographsJob(job) ? rawBox : extractedBox;
+   245→  const bin =
+   246→    rawBox && inferredExtractedBox ? rawBox / inferredExtractedBox : null;
+   247→  return {
+   248→    box_size_pix: rawBox,
+   249→    extracted_box_size_pix: inferredExtractedBox,
+   250→    bin_factor: Number.isFinite(bin) ? bin : null,
+   251→    bin_inferred: Boolean(rawBox && !extractedBox && isExtractMicrographsJob(job)),
+   252→  };
+   253→}
+   254→
+   255→/** Format a bin factor: integer → no decimal, otherwise `toFixed(2)` trimmed. */
+   256→export function formatBinFactor(value: number | null | undefined): string {
+   257→  if (!Number.isFinite(value as number)) return "";
+   258→  const v = value as number;
+   259→  const rounded = Math.round(v);
+   260→  return Math.abs(v - rounded) < 0.01
+   261→    ? String(rounded)
+   262→    : v.toFixed(2).replace(/\.?0+$/, "");
+   263→}
+   264→
+   265→/**
+   266→ * Format the extraction-params triple for a node as a Chinese-text
+   267→ * summary string (e.g. `原始 pixel 256 px · 提取 box 128 px · bin 2`).
+   268→ */
+   269→export function extractionParamText(node: {
+   270→  extraction_params?: ExtractionParams | null;
+   271→}): string {
+   272→  const p = node && node.extraction_params;
+   273→  if (!p) return "";
+   274→  const parts: string[] = [];
+   275→  if (p.box_size_pix) parts.push(`原始 pixel ${formatBinFactor(p.box_size_pix)} px`);
+   276→  if (p.extracted_box_size_pix)
+   277→    parts.push(`提取 box ${formatBinFactor(p.extracted_box_size_pix)} px`);
+   278→  if (p.bin_factor)
+   279→    parts.push(
+   280→      `bin ${formatBinFactor(p.bin_factor)}${p.bin_inferred ? " (推断)" : ""}`
+   281→    );
+   282→  return parts.join(" · ");
+   283→}
+   284→
+   285→/** Short `bin <n>` summary for a node, or `""` when unknown. */
+   286→export function extractionBinText(node: {
+   287→  extraction_params?: ExtractionParams | null;
+   288→}): string {
+   289→  const p = node && node.extraction_params;
+   290→  if (!p || !p.bin_factor) return "";
+   291→  return `bin ${formatBinFactor(p.bin_factor)}`;
+   292→}
+   293→
+   294→/** Backfill `bin_factor = 1` for `extract_micrographs*` nodes missing it. */
+   295→export function normalizeExtractionParamsForNode(node: {
+   296→  job_type?: string;
+   297→  extraction_params?: ExtractionParams | null;
+   298→} | null): void {
+   299→  if (!node || !node.extraction_params) return;
+   300→  const p = node.extraction_params;
+   301→  if (p.bin_factor) return;
+   302→  if (
+   303→    p.box_size_pix &&
+   304→    !p.extracted_box_size_pix &&
+   305→    isExtractMicrographsJob(node)
+   306→  ) {
+   307→    p.extracted_box_size_pix = p.box_size_pix;
+   308→    p.bin_factor = 1;
+   309→    p.bin_inferred = true;
+   310→  }
+   311→}
+   312→
+   313→/* ------------------------------------------------------------------ */
+   314→/* Resolution helpers                                                 */
+   315→/* ------------------------------------------------------------------ */
+   316→
+   317→/** Round a resolution (Å) to 2 decimals, rejecting implausible values. */
+   318→export function resolutionNumber(value: unknown): number | null {
+   319→  const number = Number(value);
+   320→  return Number.isFinite(number) && number >= 1 && number <= 20
+   321→    ? Math.round(number * 100) / 100
+   322→    : null;
+   323→}
+   324→
+   325→/** Parse a free-text resolution string like `"FSC 3.2 Å"`. */
+   326→export function parseResolutionText(value: unknown): number | null {
+   327→  const text = String(value || "").replace(/\s+/g, " ");
+   328→  const patterns = [
+   329→    /(?:resolution|res|FSC[^:]{0,40})[^0-9]{0,30}([0-9]+(?:\.[0-9]+)?)\s*(?:Å|A\b|angstrom)/i,
+   330→    /([0-9]+(?:\.[0-9]+)?)\s*(?:Å|A\b|angstrom)[^.;]{0,60}(?:resolution|FSC|res)/i,
+   331→  ];
+   332→  for (const pattern of patterns) {
+   333→    const match = text.match(pattern);
+   334→    const number = match && resolutionNumber(match[1]);
+   335→    if (number) return number;
+   336→  }
+   337→  return null;
+   338→}
+   339→
+   340→/** Recursively walk an object looking for a plausible resolution number. */
+   341→export function resolutionFromObject(
+   342→  value: unknown,
+   343→  keyPath = "",
+   344→  depth = 0,
+   345→  seen: Set<unknown> = new Set()
+   346→): number | null {
+   347→  if (value === null || value === undefined || depth > 7) return null;
+   348→  if (typeof value === "number") {
+   349→    return /resolution|fsc|res[_-]?a/i.test(keyPath) &&
+   350→      !/threshold|cutoff/i.test(keyPath)
+   351→      ? resolutionNumber(value)
+   352→      : null;
+   353→  }
+   354→  if (typeof value === "string") {
+   355→    if (/resolution|FSC|angstrom|Å|\bA\b/i.test(value) || /resolution|fsc/i.test(keyPath)) {
+   356→      return (
+   357→        parseResolutionText(value) ||
+   358→        (/resolution|fsc/i.test(keyPath) ? resolutionNumber(value) : null)
+   359→      );
+   360→    }
+   361→    return null;
+   362→  }
+   363→  if (typeof value !== "object" || seen.has(value)) return null;
+   364→  seen.add(value);
+   365→  if (Array.isArray(value)) {
+   366→    for (const item of value) {
+   367→      const found = resolutionFromObject(item, keyPath, depth + 1, seen);
+   368→      if (found) return found;
+   369→    }
+   370→    return null;
+   371→  }
+   372→  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+   373→    const path = keyPath ? `${keyPath}.${key}` : key;
+   374→    const found = resolutionFromObject(item, path, depth + 1, seen);
+   375→    if (found) return found;
+   376→  }
+   377→  return null;
+   378→}
+   379→
+   380→/** Resolve the final resolution (Å) for a job, or `null` if N/A. */
+   381→export function resolutionFromJob(job: JobMetadata | null | undefined): number | null {
+   382→  if (
+   383→    !/nonuniform|homo_refine|local_refine|local_resolution|fsc3D|sharpen|reslog/i.test(
+   384→      (job && job.job_type) || ""
+   385→    )
+   386→  ) {
+   387→    return null;
+   388→  }
+   389→  return (
+   390→    resolutionNumber(job && job.radwn_final_A) ||
+   391→    resolutionNumber(job && job.final_resolution_A) ||
+   392→    resolutionNumber(job && job.resolution_A) ||
+   393→    resolutionNumber(job && job.fsc_resolution_A) ||
+   394→    resolutionNumber(job && job.gold_standard_fsc_resolution_A) ||
+   395→    resolutionFromObject(
+   396→      job && job.overview_assets && (job.overview_assets as Record<string, unknown>).resolution_A,
+   397→      "overview_assets.resolution_A"
+   398→    ) ||
+   399→    resolutionFromObject(job && job.overview_assets, "overview_assets", 0) ||
+   400→    resolutionFromObject(job && job.output_result_groups, "output_result_groups", 0)
+   401→  );
+   402→}
+   403→
+   404→/** Format a node's resolution as `"<n> Å"`, or `""` when unknown. */
+   405→export function resolutionText(node: { resolution_A?: number | null }): string {
+   406→  const value = node && resolutionNumber(node.resolution_A);
+   407→  return value ? `${formatBinFactor(value)} Å` : "";
+   408→}
+   409→
+   410→/**
+   411→ * `popup.js` does not define a dedicated `formatResolution` helper — it
+   412→ * reuses `formatBinFactor` for resolution values (see `resolutionText`).
+   413→ * Alias kept here so downstream modules can import a single source of
+   414→ * truth for resolution formatting.
+   415→ *
+   416→ * TODO: verify — original `resolutionText` calls `formatBinFactor(value)`.
+   417→ */
+   418→export const formatResolution = formatBinFactor;
+   419→
+   420→/* ------------------------------------------------------------------ */
+   421→/* URL builders                                                       */
+   422→/* ------------------------------------------------------------------ */
+   423→
+   424→/** Build a `/api/log_image/<fileid>` preview URL. */
+   425→export function logImageUrl(
+   426→  baseUrl: string | null | undefined,
+   427→  fileid: string | null | undefined
+   428→): string | null {
+   429→  if (!fileid) return null;
+   430→  return `${String(baseUrl || "").replace(/\/$/, "")}/api/log_image/${fileid}`;
+   431→}
+   432→
+   433→/** Build a `/api/log_image/download_result_file/<projectId>/<jobId>.<group>.<result>` URL. */
+   434→export function resultFileUrl(
+   435→  baseUrl: string | null | undefined,
+   436→  projectId: string,
+   437→  jobId: string,
+   438→  groupName: string,
+   439→  resultName: string
+   440→): string {
+   441→  return `${String(baseUrl || "").replace(/\/$/, "")}/api/log_image/download_result_file/${projectId}/${jobId}.${groupName}.${resultName}`;
+   442→}
+   443→
+   444→/** Build a `/api/log_image/download_result_file/<projectId>/<jobId>.<name>.png` URL. */
+   445→export function resultPreviewImageUrl(
+   446→  baseUrl: string | null | undefined,
+   447→  projectId: string,
+   448→  jobId: string,
+   449→  name: string
+   450→): string | null {
+   451→  if (!baseUrl || !projectId || !jobId || !name) return null;
+   452→  return `${String(baseUrl || "").replace(/\/$/, "")}/api/log_image/download_result_file/${projectId}/${jobId}.${name}.png`;
+   453→}
+   454→
+   455→/** Build the `<suffix> -> url` map for downloadable `.map` files of a job. */
+   456→export function mapDownloadUrls(
+   457→  baseUrl: string,
+   458→  projectId: string,
+   459→  jobId: string
+   460→): Record<string, string> {
+   461→  const root = String(baseUrl || "http://192.168.4.3:8080").replace(/\/$/, "");
+   462→  return Object.fromEntries(
+   463→    MAP_SUFFIXES.map((suffix) => [
+   464→      suffix,
+   465→      `${root}/api/log_image/download_result_file/${projectId}/${jobId}.${suffix}`,
+   466→    ])
+   467→  );
+   468→}
+   469→
+   470→/* ------------------------------------------------------------------ */
+   471→/* Output-group index / class split                                    */
+   472→/* ------------------------------------------------------------------ */
+   473→
+   474→/** Index a job's output groups by name. */
+   475→export function outputGroupsByName(
+   476→  job: JobMetadata
+   477→): Map<string, OutputResultGroup> {
+   478→  const index = new Map<string, OutputResultGroup>();
+   479→  for (const group of outputGroups(job)) {
+   480→    if (group && group.name) index.set(group.name, group);
+   481→  }
+   482→  return index;
+   483→}
+   484→
+   485→/** Parse the integer class index out of a group name like `particles_class_3`. */
+   486→export function parseClassIndex(name: unknown): number | null {
+   487→  const match = String(name || "").match(/class[_-](\d+)/);
+   488→  return match ? Number(match[1]) : null;
+   489→}
+   490→
+   491→/** Build the indexed `output_groups` dictionary stored on a `LineageNode`. */
+   492→export function outputGroupIndex(job: JobMetadata): OutputGroupIndex {
+   493→  const byName = outputGroupsByName(job);
+   494→  const totalEntry = byName.get("particles_all_classes");
+   495→  const total =
+   496→    totalEntry && Number.isInteger(totalEntry.num_items) ? totalEntry.num_items : null;
+   497→  const index: OutputGroupIndex = {};
+   498→
+   499→  for (const group of outputGroups(job)) {
+   500→    if (!group || !group.name) continue;
+   501→    const idx = parseClassIndex(group.name);
+   502→    const count = group.num_items ?? null;
+   503→    const item: OutputGroupIndexItem = {
+   504→      name: group.name,
+   505→      type: group.type ?? null,
+   506→      title: group.title || group.name,
+   507→      count: Number.isInteger(count) ? count : null,
+   508→      class_index: idx,
+   509→      percent: null,
+   510→      paired_particle_count: null,
+   511→      paired_particle_percent: null,
+   512→    };
+   513→
+   514→    if (
+   515→      group.name.startsWith("particles_class_") &&
+   516→      Number.isInteger(count) &&
+   517→      Number.isInteger(total) &&
+   518→      total
+   519→    ) {
+   520→      item.percent = Math.round(((count as number) / (total as number)) * 10000) / 100;
+   521→    }
+   522→
+   523→    if (group.name.startsWith("volume_class_") && idx !== null) {
+   524→      const paired = byName.get(`particles_class_${idx}`);
+   525→      const pairedCount = paired ? paired.num_items ?? null : null;
+   526→      if (Number.isInteger(pairedCount)) {
+   527→        item.paired_particle_count = pairedCount;
+   528→        if (Number.isInteger(total) && total) {
+   529→          item.paired_particle_percent =
+   530→            Math.round(((pairedCount as number) / (total as number)) * 10000) / 100;
+   531→        }
+   532→      }
+   533→    }
+   534→
+   535→    index[group.name] = item;
+   536→  }
+   537→
+   538→  return index;
+   539→}
+   540→
+   541→/** Compute the per-class particle/volume split for `abinit` / `hetero` / `class_3D` jobs. */
+   542→export function classSplits(
+   543→  job: JobMetadata,
+   544→  baseUrl: string
+   545→): ClassSplit[] {
+   546→  const type = job.job_type || "";
+   547→  if (
+   548→    !type.includes("abinit") &&
+   549→    !type.includes("hetero") &&
+   550→    !type.includes("class_3D")
+   551→  )
+   552→    return [];
+   553→
+   554→  let total: number | null = null;
+   555→  const classes = new Map<
+   556→    number,
+   557→    {
+   558→      particle_count?: number;
+   559→      volume_group?: string;
+   560→      mrc_preview_url?: string | null;
+   561→      mrc_preview_src?: string | null;
+   562→      mrc_preview_original_url?: string | null;
+   563→      maps?: ClassMap[];
+   564→    }
+   565→  >();
+   566→  const outputImages = job.output_group_images || {};
+   567→
+   568→  for (const group of outputGroups(job, "particle")) {
+   569→    if (group.name === "particles_all_classes") {
+   570→      total = group.num_items ?? null;
+   571→      continue;
+   572→    }
+   573→    const idx = parseClassIndex(group.name);
+   574→    if (idx === null) continue;
+   575→    if (!classes.has(idx)) classes.set(idx, {});
+   576→    classes.get(idx)!.particle_count = group.num_items ?? undefined;
+   577→  }
+   578→
+   579→  for (const group of outputGroups(job, "volume")) {
+   580→    const idx = parseClassIndex(group.name);
+   581→    if (idx === null) continue;
+   582→    if (!classes.has(idx)) classes.set(idx, {});
+   583→    const entry = classes.get(idx)!;
+   584→    entry.volume_group = group.name;
+   585→    entry.mrc_preview_url = logImageUrl(baseUrl, outputImages[group.name || ""]);
+   586→    entry.mrc_preview_src = entry.mrc_preview_url;
+   587→    entry.mrc_preview_original_url = resultPreviewImageUrl(
+   588→      baseUrl,
+   589→      job.project_uid || "",
+   590→      job.uid || "",
+   591→      group.name || ""
+   592→    );
+   593→    entry.maps = (group.contains || [])
+   594→      .filter(
+   595→        (item) => item.type === "volume.blob" && item.name === "map"
+   596→      )
+   597→      .map((item) => ({
+   598→        result_name: item.name || "",
+   599→        download_url: `${baseUrl.replace(/\/$/, "")}/api/log_image/download_result_file/${job.project_uid}/${job.uid}.${group.name}.${item.name}`,
+   600→      }));
+   601→  }
+   602→
+   603→  return Array.from(classes.entries())
+   604→    .sort((a, b) => a[0] - b[0])
+   605→    .map(([idx, entry]) => ({
+   606→      class_index: idx,
+   607→      particle_count: Number.isInteger(entry.particle_count)
+   608→        ? (entry.particle_count as number)
+   609→        : null,
+   610→      particle_percent:
+   611→        Number.isInteger(entry.particle_count) &&
+   612→        Number.isInteger(total) &&
+   613→        total
+   614→          ? Math.round(((entry.particle_count as number) / total) * 10000) / 100
+   615→          : null,
+   616→      total_particles: total,
+   617→      volume_group: entry.volume_group || null,
+   618→      mrc_preview_url: entry.mrc_preview_url || null,
+   619→      mrc_preview_src: entry.mrc_preview_src || null,
+   620→      mrc_preview_original_url: entry.mrc_preview_original_url || null,
+   621→      maps: entry.maps || [],
+   622→    }));
+   623→}
+   624→
+   625→/* ------------------------------------------------------------------ */
+   626→/* Image / map assets                                                  */
+   627→/* ------------------------------------------------------------------ */
+   628→
+   629→/** Collect preview image assets (ui_tile + output_group) for a job. */
+   630→export function imageAssets(
+   631→  job: JobMetadata,
+   632→  baseUrl: string,
+   633→  projectId = ""
+   634→): ImageAsset[] {
+   635→  const assets: ImageAsset[] = [];
+   636→  const pid = projectId || job.project_uid || "";
+   637→  for (const item of job.ui_tile_images || []) {
+   638→    const tile: UiTileImage = item;
+   639→    const fileid = tile.fileid;
+   640→    const url = logImageUrl(baseUrl, fileid);
+   641→    if (!url) continue;
+   642→    assets.push({
+   643→      kind: "ui_tile",
+   644→      name: tile.name || "image",
+   645→      url,
+   646→      src: url,
+   647→      original_url:
+   648→        resultPreviewImageUrl(baseUrl, pid, job.uid || "", tile.name || "image") ||
+   649→        "",
+   650→      num_cols: tile.num_cols ?? null,
+   651→      num_rows: tile.num_rows ?? null,
+   652→    });
+   653→  }
+   654→
+   655→  const outputImages = job.output_group_images || {};
+   656→  for (const [name, fileid] of Object.entries(outputImages)) {
+   657→    const url = logImageUrl(baseUrl, fileid);
+   658→    if (!url) continue;
+   659→    assets.push({
+   660→      kind: "output_group",
+   661→      name,
+   662→      url,
+   663→      src: url,
+   664→      original_url:
+   665→        resultPreviewImageUrl(baseUrl, pid, job.uid || "", name) || "",
+   666→    });
+   667→  }
+   668→
+   669→  return assets;
+   670→}
+   671→
+   672→/** Collect downloadable map assets (volume + mask groups) for a job. */
+   673→export function mapAssets(
+   674→  job: JobMetadata,
+   675→  baseUrl: string,
+   676→  projectId: string
+   677→): MapAsset[] {
+   678→  const assets: MapAsset[] = [];
+   679→  const outputImages = job.output_group_images || {};
+   680→  for (const group of outputGroups(job)) {
+   681→    if (!["volume", "mask"].includes(group.type || "") || !group.name) continue;
+   682→    const previewUrl = logImageUrl(baseUrl, outputImages[group.name]);
+   683→    for (const item of group.contains || []) {
+   684→      if (item.type !== "volume.blob" || !item.name) continue;
+   685→      assets.push({
+   686→        group: group.name,
+   687→        group_title: group.title || group.name,
+   688→        group_type: group.type || "",
+   689→        result_name: item.name,
+   690→        download_url: resultFileUrl(
+   691→          baseUrl,
+   692→          projectId,
+   693→          job.uid || "",
+   694→          group.name,
+   695→          item.name
+   696→        ),
+   697→        preview_url: previewUrl,
+   698→        preview_src: previewUrl,
+   699→        preview_original_url: resultPreviewImageUrl(
+   700→          baseUrl,
+   701→          projectId || job.project_uid || "",
+   702→          job.uid || "",
+   703→          group.name
+   704→        ),
+   705→      });
+   706→    }
+   707→  }
+   708→  return assets;
+   709→}
+   710→
+   711→/**
+   712→ * Map a volume-group name to a friendly preview image label
+   713→ * (e.g. `volume_class_3` → `volume_class_3`, `volume.map` → `volume`).
+   714→ */
+   715→export function mapPreviewImageName(group: unknown): string {
+   716→  const value = String(group || "volume");
+   717→  if (/^(volume|map)$/i.test(value)) return "volume";
+   718→  return value.replace(/\.map$/i, "");
+   719→}
+   720→
+   721→/** Filter a node's map assets down to the "normal" (non-mask) `.map` files. */
+   722→export function normalMapAssets(node: {
+   723→  maps?: MapAsset[];
+   724→}): MapAsset[] {
+   725→  return (node.maps || []).filter((item) => {
+   726→    const group = String(item.group || "");
+   727→    const volumeGroup = item.group_type
+   728→      ? item.group_type === "volume"
+   729→      : !/mask/i.test(group);
+   730→    return (
+   731→      volumeGroup &&
+   732→      (item.result_name === "map" || item.download_url.endsWith(".map"))
+   733→    );
+   734→  });
+   735→}
+   736→
+   737→/* ------------------------------------------------------------------ */
+   738→/* Select-2D summary                                                   */
+   739→/* ------------------------------------------------------------------ */
+   740→
+   741→/** Build the `select_2d` summary for a `select_2D` job (or `null`). */
+   742→export function selected2dSummary(
+   743→  job: JobMetadata,
+   744→  baseUrl: string
+   745→): Select2DSummary | null {
+   746→  if (job.job_type !== "select_2D") return null;
+   747→  const byName = outputGroupsByName(job);
+   748→  const images = new Map(
+   749→    imageAssets(job, baseUrl, job.project_uid || "").map((item) => [item.name, item])
+   750→  );
+   751→  const overviewSelected =
+   752→    job.overview_assets &&
+   753→    (job.overview_assets as Record<string, unknown>).select_2d as
+   754→      | Record<string, unknown>
+   755→      | undefined;
+   756→
+   757→  const selectedClassesImageSource =
+   758→    overviewSelected &&
+   759→    (overviewSelected as Record<string, unknown>).selected_classes_image;
+   760→  const selectedClassesImage = selectedClassesImageSource
+   761→    ? {
+   762→        url: String(selectedClassesImageSource),
+   763→        src:
+   764→          (overviewSelected &&
+   765→            String((overviewSelected as Record<string, unknown>).selected_classes_src || "")) ||
+   766→          String(selectedClassesImageSource),
+   767→        original_url:
+   768→          (overviewSelected &&
+   769→            String(
+   770→              (overviewSelected as Record<string, unknown>)
+   771→                .selected_classes_original_url || ""
+   772→            )) ||
+   773→          String(selectedClassesImageSource),
+   774→      }
+   775→    : images.get("templates_selected");
+   776→  const selectedParticlesImage = images.get("particles_selected");
+   777→  const excludedClassesImage = images.get("templates_excluded");
+   778→
+   779→  const safe = (uid: string | undefined): number | null => {
+   780→    const g = uid ? byName.get(uid) : undefined;
+   781→    if (g && Number.isInteger(g.num_items)) return g.num_items as number;
+   782→    return null;
+   783→  };
+   784→
+   785→  const classesSelectedRaw =
+   786→    overviewSelected && (overviewSelected as Record<string, unknown>).classes_selected;
+   787→  const classesSelected =
+   788→    overviewSelected && Number.isInteger(classesSelectedRaw)
+   789→      ? (classesSelectedRaw as number)
+   790→      : safe("templates_selected");
+   791→
+   792→  return {
+   793→    particles_selected: safe("particles_selected"),
+   794→    particles_excluded: safe("particles_excluded"),
+   795→    classes_selected: classesSelected,
+   796→    classes_excluded: safe("templates_excluded"),
+   797→    selected_classes_image: selectedClassesImage ? selectedClassesImage.url : null,
+   798→    selected_classes_src: selectedClassesImage ? selectedClassesImage.src : null,
+   799→    selected_classes_original_url: selectedClassesImage
+   800→      ? selectedClassesImage.original_url
+   801→      : null,
+   802→    selected_classes_source:
+   803→      overviewSelected && (overviewSelected as Record<string, unknown>).source
+   804→        ? String((overviewSelected as Record<string, unknown>).source)
+   805→        : selectedClassesImage
+   806→          ? "metadata_templates_selected"
+   807→          : null,
+   808→    selected_classes_log_text:
+   809→      overviewSelected && (overviewSelected as Record<string, unknown>).log_text
+   810→        ? String((overviewSelected as Record<string, unknown>).log_text)
+   811→        : null,
+   812→    selected_classes_log_timestamp:
+   813→      overviewSelected && (overviewSelected as Record<string, unknown>).log_timestamp
+   814→        ? String((overviewSelected as Record<string, unknown>).log_timestamp)
+   815→        : null,
+   816→    selected_particles_image: selectedParticlesImage
+   817→      ? selectedParticlesImage.url
+   818→      : null,
+   819→    selected_particles_src: selectedParticlesImage
+   820→      ? selectedParticlesImage.src
+   821→      : null,
+   822→    selected_particles_original_url: selectedParticlesImage
+   823→      ? selectedParticlesImage.original_url
+   824→      : null,
+   825→    excluded_classes_image: excludedClassesImage ? excludedClassesImage.url : null,
+   826→    excluded_classes_src: excludedClassesImage ? excludedClassesImage.src : null,
+   827→    excluded_classes_original_url: excludedClassesImage
+   828→      ? excludedClassesImage.original_url
+   829→      : null,
+   830→  };
+   831→}
+   832→
+   833→/* ------------------------------------------------------------------ */
+   834→/* Job -> node                                                         */
+   835→/* ------------------------------------------------------------------ */
+   836→
+   837→/** Build a fully-normalized `LineageNode` from a raw `JobMetadata`. */
+   838→export function jobNode(
+   839→  job: JobMetadata,
+   840→  baseUrl = "",
+   841→  projectId = ""
+   842→): LineageNode {
+   843→  const images = baseUrl
+   844→    ? imageAssets(job, baseUrl, projectId || job.project_uid || "")
+   845→    : [];
+   846→  const classes = baseUrl ? classSplits(job, baseUrl) : [];
+   847→  const node: LineageNode = {
+   848→    uid: job.uid || "",
+   849→    uid_num: job.uid_num ?? null,
+   850→    project_uid: job.project_uid || "",
+   851→    job_type: job.job_type || "",
+   852→    title: job.title || "",
+   853→    status: job.status || "",
+   854→    created_at: (plainDate(job.created_at) as DateValue | null) ?? null,
+   855→    completed_at: (plainDate(job.completed_at) as DateValue | null) ?? null,
+   856→    parents: job.parents || [],
+   857→    children: job.children || [],
+   858→    particle_count: maxGroupNumItems(job, "particle"),
+   859→    micrograph_count: maxGroupNumItems(job, "exposure"),
+   860→    pixel_size_A: pixelSizeFromJob(job),
+   861→    volume_count: maxGroupNumItems(job, "volume"),
+   862→    class_count: classes.length || null,
+   863→    resolution_A: resolutionFromJob(job),
+   864→    extraction_params: extractionParams(job),
+   865→    output_groups: baseUrl ? outputGroupIndex(job) : {},
+   866→    images,
+   867→    maps: baseUrl
+   868→      ? mapAssets(job, baseUrl, projectId || job.project_uid || "")
+   869→      : [],
+   870→    classes,
+   871→    select_2d: baseUrl ? selected2dSummary(job, baseUrl) : null,
+   872→  };
+   873→  if (job.job_type === "import_micrographs") {
+   874→    node.representative_micrograph_images = images
+   875→      .filter((item) => item.kind === "ui_tile")
+   876→      .slice(0, 3);
+   877→  }
+   878→  return node;
+   879→}
+   880→
+   881→/* ------------------------------------------------------------------ */
+   882→/* Edges                                                               */
+   883→/* ------------------------------------------------------------------ */
+   884→
+   885→/** Convert an input-slot-group connection into a `LineageEdge`. */
+   886→export function connectionEdges(job: JobMetadata): LineageEdge[] {
+   887→  const edges: LineageEdge[] = [];
+   888→  for (const inputGroup of job.input_slot_groups || []) {
+   889→    const group: InputSlotGroup = inputGroup;
+   890→    for (const connection of group.connections || []) {
+   891→      if (!connection.job_uid) continue;
+   892→      edges.push({
+   893→        source: connection.job_uid,
+   894→        target: job.uid || "",
+   895→        input_type: group.type || "",
+   896→        input_name: group.name || "",
+   897→        input_title: group.title ?? null,
+   898→        source_group: connection.group_name ?? null,
+   899→        slots: (connection.slots || []).map((slot: Slot) => ({
+   900→          slot_name: slot.slot_name ?? null,
+   901→          source_group: slot.group_name ?? null,
+   902→          result_name: slot.result_name ?? null,
+   903→          result_type: slot.result_type ?? null,
+   904→          version: slot.version ?? null,
+   905→        })) as LineageEdgeSlot[],
+   906→      });
+   907→    }
+   908→  }
+   909→  return edges;
+   910→}
+   911→
+   912→/** Build synthetic `parent` edges for jobs whose parents weren't covered by explicit edges. */
+   913→export function fallbackParentEdges(
+   914→  job: JobMetadata,
+   915→  explicitSources: Set<string>
+   916→): LineageEdge[] {
+   917→  return (job.parents || [])
+   918→    .filter((uid) => !explicitSources.has(uid))
+   919→    .map((uid) => ({
+   920→      source: uid,
+   921→      target: job.uid || "",
+   922→      input_type: "parent",
+   923→      input_name: "parent",
+   924→      input_title: "Parent job",
+   925→      source_group: null,
+   926→      slots: [],
+   927→    }));
+   928→}
+   929→
+   930→/** Classify an edge into one of `particle | volume | mask | template | exposure | <input_type>`. */
+   931→export function edgeKind(edge: {
+   932→  input_type?: string;
+   933→  slots?: { result_type?: string | null }[];
+   934→}): string {
+   935→  if (
+   936→    edge.input_type &&
+   937→    ["particle", "volume", "mask", "template", "exposure"].includes(edge.input_type)
+   938→  ) {
+   939→    return edge.input_type;
+   940→  }
+   941→  const types = (edge.slots || [])
+   942→    .map((slot) => slot.result_type || "")
+   943→    .join(" ");
+   944→  for (const kind of ["particle", "volume", "mask", "template", "exposure"]) {
+   945→    if (types.includes(kind)) return kind;
+   946→  }
+   947→  return edge.input_type || "parent";
+   948→}
+   949→
+   950→/* ------------------------------------------------------------------ */
+   951→/* Upstream BFS                                                        */
+   952→/* ------------------------------------------------------------------ */
+   953→
+   954→/** BFS-collect every upstream job + edge starting from `startUid`. */
+   955→export function collectUpstream(
+   956→  projectJobs: Map<string, JobMetadata>,
+   957→  startUid: string
+   958→): { nodes: Map<string, JobMetadata>; edges: LineageEdge[] } {
+   959→  const seen = new Map<string, JobMetadata>();
+   960→  const edges: LineageEdge[] = [];
+   961→  const queue: string[] = [startUid];
+   962→
+   963→  while (queue.length) {
+   964→    const uid = queue.shift() as string;
+   965→    if (seen.has(uid)) continue;
+   966→    const job = projectJobs.get(uid);
+   967→    if (!job) continue;
+   968→    seen.set(uid, job);
+   969→
+   970→    const explicit = connectionEdges(job);
+   971→    const sources = new Set(explicit.map((edge) => edge.source));
+   972→    const jobEdges = explicit.concat(fallbackParentEdges(job, sources));
+   973→    edges.push(...jobEdges);
+   974→
+   975→    for (const edge of jobEdges) {
+   976→      if (!seen.has(edge.source)) queue.push(edge.source);
+   977→    }
+   978→  }
+   979→
+   980→  return { nodes: seen, edges };
+   981→}
+   982→
+   983→/* ------------------------------------------------------------------ */
+   984→/* Summary                                                             */
+   985→/* ------------------------------------------------------------------ */
+   986→
+   987→/** Build a full `LineageSummary` for a project + start uid. */
+   988→export function buildSummary(
+   989→  data: JobMetadata[],
+   990→  projectId: string,
+   991→  startUid: string,
+   992→  baseUrl: string
+   993→): LineageSummary {
+   994→  const projectJobs = new Map(
+   995→    data
+   996→      .filter((job) => job.project_uid === projectId && job.uid)
+   997→      .map((job) => [job.uid as string, job])
+   998→  );
+   999→  if (!projectJobs.has(startUid)) {
+  1000→    const latest = Array.from(projectJobs.values())
+  1001→      .filter((job) => Number.isInteger(job.uid_num))
+  1002→      .sort((a, b) => (a.uid_num ?? 0) - (b.uid_num ?? 0))
+  1003→      .slice(-20)
+  1004→      .map((job) => [job.uid_num ?? null, job.uid, job.job_type]);
+  1005→    const lastEntry = latest.length ? latest[latest.length - 1] : null;
+  1006→    throw new Error(
+  1007→      `${projectId}/${startUid} 不在当前 metadata 中。项目内 jobs=${projectJobs.size}，最新=${JSON.stringify(lastEntry)}`
+  1008→    );
+  1009→  }
+  1010→
+  1011→  const { nodes, edges } = collectUpstream(projectJobs, startUid);
+  1012→  const startJob = projectJobs.get(startUid) as JobMetadata;
+  1013→  const nodeList: LineageNode[] = Array.from(nodes.values())
+  1014→    .sort((a, b) => (a.uid_num || 0) - (b.uid_num || 0))
+  1015→    .map((job) => jobNode(job, baseUrl, projectId));
+  1016→  const classJobs: ClassSplitJob[] = nodeList
+  1017→    .filter((node) => Array.isArray(node.classes) && node.classes.length)
+  1018→    .map((node) => ({ uid: node.uid, job_type: node.job_type, classes: node.classes }));
+  1019→  const importJobs: LineageNode[] = Array.from(nodes.values())
+  1020→    .filter(
+  1021→      (job) => (job.job_type || "").startsWith("import_") || !(job.parents || []).length
+  1022→    )
+  1023→    .map((job) => jobNode(job, baseUrl, projectId));
+  1024→
+  1025→  return normalizeLineageSummary({
+  1026→    ok: true,
+  1027→    project_uid: projectId,
+  1028→    base_url: baseUrl,
+  1029→    start_uid: startUid,
+  1030→    start_job: jobNode(startJob, baseUrl, projectId),
+  1031→    final_particle_count: maxGroupNumItems(startJob, "particle"),
+  1032→    final_micrograph_count: maxGroupNumItems(startJob, "exposure"),
+  1033→    final_resolution_A: resolutionFromJob(startJob),
+  1034→    resolution_note:
+  1035→      "需要从 CryoSmart metadata/log/FSC 结果补充；jobs metadata 通常没有最终分辨率。",
+  1036→    map_download_urls: mapDownloadUrls(baseUrl, projectId, startUid),
+  1037→    nodes: nodeList,
+  1038→    edges,
+  1039→    import_or_leaf_jobs: importJobs,
+  1040→    class_split_jobs: classJobs,
+  1041→    focused_mermaid: focusedMermaid(nodes, edges, startUid),
+  1042→  });
+  1043→}
+  1044→
+  1045→/** Backfill `bin_factor`, `final_resolution_A`, `micrograph_pixel_size_A` etc. on a summary. */
+  1046→export function normalizeLineageSummary<T extends LineageSummary>(
+  1047→  summary: T
+  1048→): T {
+  1049→  if (!summary || !Array.isArray(summary.nodes)) return summary;
+  1050→  for (const node of summary.nodes) normalizeExtractionParamsForNode(node);
+  1051→  if (summary.start_job) normalizeExtractionParamsForNode(summary.start_job);
+  1052→  if (Array.isArray(summary.import_or_leaf_jobs)) {
+  1053→    for (const node of summary.import_or_leaf_jobs)
+  1054→      normalizeExtractionParamsForNode(node);
+  1055→  }
+  1056→  const startNode =
+  1057→    summary.nodes.find((node) => node.uid === summary.start_uid) ||
+  1058→    summary.start_job;
+  1059→  const finalResolution =
+  1060→    resolutionNumber(summary.final_resolution_A) ||
+  1061→    resolutionNumber(startNode && startNode.resolution_A) ||
+  1062→    resolutionFromObject(startNode, "", 0);
+  1063→  summary.final_resolution_A = finalResolution || null;
+  1064→  summary.micrograph_pixel_size_A =
+  1065→    pixelSizeNumber(summary.micrograph_pixel_size_A) ||
+  1066→    pixelSizeNumber(
+  1067→      (summary.nodes || []).find(
+  1068→        (node) => pixelSizeNumber(node.pixel_size_A)
+  1069→      )?.pixel_size_A
+  1070→    ) ||
+  1071→    pixelSizeNumber(
+  1072→      (summary.import_or_leaf_jobs || []).find(
+  1073→        (node) => pixelSizeNumber(node.pixel_size_A)
+  1074→      )?.pixel_size_A
+  1075→    ) ||
+  1076→    null;
+  1077→  summary.resolution_note = finalResolution
+  1078→    ? "从 metadata/Overview 文本中解析得到。"
+  1079→    : (summary.resolution_note ||
+  1080→      "未在 metadata/Overview 中找到分辨率；可从 FSC txt/xml 继续补充。");
+  1081→  return summary;
+  1082→}
+  1083→
+  1084→/* ------------------------------------------------------------------ */
+  1085→/* Importance / Mermaid                                                */
+  1086→/* ------------------------------------------------------------------ */
+  1087→
+  1088→/** Bucket a job into `final | major | small` based on its type and outputs. */
+  1089→export function importance(
+  1090→  job: { uid?: string; job_type?: string } | null | undefined,
+  1091→  startUid: string
+  1092→): "final" | "major" | "small" {
+  1093→  if (
+  1094→    job &&
+  1095→    job.uid === startUid &&
+  1096→    !/nonuniform_refine/i.test(job.job_type || "")
+  1097→  ) {
+  1098→    return "final";
+  1099→  }
+  1100→  if (job && MAJOR_JOB_TYPES.has(job.job_type || "")) return "major";
+  1101→  if (job && SMALL_JOB_TYPES.has(job.job_type || "")) return "small";
+  1102→  const proxy = job as Pick<JobMetadata, "output_result_groups"> | null;
+  1103→  if (
+  1104→    proxy &&
+  1105→    (maxGroupNumItems(proxy as JobMetadata, "particle") ||
+  1106→      maxGroupNumItems(proxy as JobMetadata, "volume"))
+  1107→  ) {
+  1108→    return "major";
+  1109→  }
+  1110→  return "small";
+  1111→}
+  1112→
+  1113→/** Build a compact HTML label for a Mermaid node (uid + job_type + counts). */
+  1114→export function nodeLabel(job: JobMetadata): string {
+  1115→  const node = jobNode(job);
+  1116→  const parts: string[] = [node.uid, node.job_type || ""];
+  1117→  if (node.particle_count !== null) parts.push(`${node.particle_count} particles`);
+  1118→  if (node.micrograph_count !== null) parts.push(`${node.micrograph_count} micrographs`);
+  1119→  return parts.join("<br/>").replace(/"/g, "'");
+  1120→}
+  1121→
+  1122→/** Pretty label for a set of edge kinds, joined by ` + `. */
+  1123→export function focusedEdgeLabel(kinds: Set<string>): string {
+  1124→  const order = ["particle", "volume", "mask", "template", "exposure", "parent"];
+  1125→  const labels: Record<string, string> = {
+  1126→    particle: "particles",
+  1127→    volume: "map",
+  1128→    mask: "mask",
+  1129→    template: "template",
+  1130→    exposure: "micrographs",
+  1131→    parent: "parent",
+  1132→  };
+  1133→  return order
+  1134→    .filter((kind) => kinds.has(kind))
+  1135→    .map((kind) => labels[kind])
+  1136→    .join(" + ");
+  1137→}
+  1138→
+  1139→/** Build a Mermaid `flowchart LR` definition for a lineage subgraph. */
+  1140→export function focusedMermaid(
+  1141→  nodes: Map<string, JobMetadata>,
+  1142→  edges: LineageEdge[],
+  1143→  startUid: string
+  1144→): string {
+  1145→  const lines = ["flowchart LR"];
+  1146→  const sortedNodes = Array.from(nodes.values()).sort(
+  1147→    (a, b) => (a.uid_num || 0) - (b.uid_num || 0)
+  1148→  );
+  1149→
+  1150→  for (const job of sortedNodes) {
+  1151→    const cls = importance(job, startUid);
+  1152→    lines.push(
+  1153→      cls === "final"
+  1154→        ? `  ${job.uid}[["${nodeLabel(job)}"]]`
+  1155→        : `  ${job.uid}["${nodeLabel(job)}"]`
+  1156→    );
+  1157→    lines.push(`  class ${job.uid} ${cls};`);
+  1158→  }
+  1159→
+  1160→  const merged = new Map<string, { source: string; target: string; kinds: Set<string> }>();
+  1161→  for (const edge of edges) {
+  1162→    if (!nodes.has(edge.source) || !nodes.has(edge.target)) continue;
+  1163→    const key = `${edge.source}->${edge.target}`;
+  1164→    if (!merged.has(key))
+  1165→      merged.set(key, { source: edge.source, target: edge.target, kinds: new Set() });
+  1166→    merged.get(key)!.kinds.add(edgeKind(edge));
+  1167→  }
+  1168→
+  1169→  for (const item of Array.from(merged.values())) {
+  1170→    lines.push(`  ${item.source} -- "${focusedEdgeLabel(item.kinds)}" --> ${item.target}`);
+  1171→  }
+  1172→
+  1173→  lines.push(
+  1174→    "  classDef final fill:#fee2e2,stroke:#b91c1c,stroke-width:3px,color:#111827;"
+  1175→  );
+  1176→  lines.push(
+  1177→    "  classDef major fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#111827;"
+  1178→  );
+  1179→  lines.push(
+  1180→    "  classDef small fill:#f3f4f6,stroke:#9ca3af,stroke-width:1px,color:#4b5563,font-size:11px;"
+  1181→  );
+  1182→  return `${lines.join("\n")}\n`;
+  1183→}
+  1184→
+  1185→/* ------------------------------------------------------------------ */
+  1186→/* HTML / report helpers shared with the HTML/SVG/PPTX renderers     */
+  1187→/* ------------------------------------------------------------------ */
+  1188→
+  1189→/** Pick a "kind" string for an HTML/SVG/PPTX card based on a node's metadata. */
+  1190→export function htmlNodeKind(node: {
+  1191→  job_type?: string;
+  1192→  volume_count?: number | null;
+  1193→  particle_count?: number | null;
+  1194→  micrograph_count?: number | null;
+  1195→}): "volume" | "particle" | "exposure" | "other" {
+  1196→  const type = node.job_type || "";
+  1197→  if (node.volume_count !== null && node.volume_count !== undefined) return "volume";
+  1198→  if (/refine|abinit|volume|class_3D/i.test(type)) return "volume";
+  1199→  if (node.particle_count !== null && node.particle_count !== undefined) return "particle";
+  1200→  if (/particle|picker|topaz/i.test(type)) return "particle";
+  1201→  if (node.micrograph_count !== null && node.micrograph_count !== undefined)
+  1202→    return "exposure";
+  1203→  if (/micrograph|ctf|exposure/i.test(type)) return "exposure";
+  1204→  return "other";
+  1205→}
+  1206→
+  1207→/** Resolve the display "group" label of an edge (`source_group` > `input_name`). */
+  1208→export function htmlGroupLabel(edge: LineageEdge): string {
+  1209→  return edge.source_group || edge.input_name || "";
+  1210→}
+  1211→
+  1212→/** Resolve the "kind" of an edge, preferring a precomputed `kind` field. */
+  1213→export function summaryKind(edge: {
+  1214→  kind?: string;
+  1215→  input_type?: string;
+  1216→  slots?: { result_type?: string | null }[];
+  1217→  kinds?: string[];
+  1218→}): string {
+  1219→  if (edge.kind) return edge.kind;
+  1220→  if (edge.input_type)
+  1221→    return edgeKind({ input_type: edge.input_type, slots: edge.slots || [] });
+  1222→  if (Array.isArray(edge.kinds) && edge.kinds.length) return edge.kinds[0];
+  1223→  return "parent";
+  1224→}
+  1225→
+  1226→/** Map a node list into a `uid -> node` lookup Map. */
+  1227→export function summaryNodeMap(summary: {
+  1228→  nodes?: LineageNode[];
+  1229→}): Map<string, LineageNode> {
+  1230→  return new Map((summary.nodes || []).map((node) => [node.uid, node]));
+  1231→}
+  1232→
+  1233→/* ------------------------------------------------------------------ */
+  1234→/* Report layer (round detection, outline visibility, repick seeds)   */
+  1235→/* ------------------------------------------------------------------ */
+  1236→
+  1237→/** Extract the numeric portion of a `J123`-style job uid. */
+  1238→export function reportJobNum(uid: unknown): number {
+  1239→  const match = String(uid || "").match(/J(\d+)/i);
+  1240→  return match ? Number(match[1]) : 0;
+  1241→}
+  1242→
+  1243→/** Edge "kind" used by the report layer (delegates to `summaryKind`). */
+  1244→export function reportEdgeKind(edge: LineageEdge): string {
+  1245→  return summaryKind(edge);
+  1246→}
+  1247→
+  1248→/** Map an edge kind to its "family" bucket (mask → volume, etc.). */
+  1249→export function reportKindFamily(kind: string): EdgeFamily {
+  1250→  if (kind === "mask") return "volume";
+  1251→  if (kind === "exposure") return "exposure";
+  1252→  if (kind === "particle") return "particle";
+  1253→  if (kind === "volume") return "volume";
+  1254→  if (kind === "template" || kind === "ml_model" || kind === "model")
+  1255→    return "template";
+  1256→  return (kind || "other") as EdgeFamily;
+  1257→}
+  1258→
+  1259→/** Is this node a particle picker? */
+  1260→export function reportIsPickingNode(node: { job_type?: string } | null | undefined): boolean {
+  1261→  return PICKING_JOB_TYPES.has((node && node.job_type) || "");
+  1262→}
+  1263→
+  1264→/** Is this node a "repick" particle producer (picker with particle output)? */
+  1265→export function reportIsRepickParticleProducer(
+  1266→  node: { job_type?: string; particle_count?: number | null } | null | undefined
+  1267→): boolean {
+  1268→  return Boolean(
+  1269→    node &&
+  1270→      REPICK_PARTICLE_PRODUCER_TYPES.has(node.job_type || "") &&
+  1271→      node.particle_count !== null &&
+  1272→      node.particle_count !== undefined
+  1273→  );
+  1274→}
+  1275→
+  1276→/** Is this node a "repick seed" setup job (topaz_train, deep_picker_train, ...)? */
+  1277→export function reportIsRepickSetupNode(
+  1278→  node: { job_type?: string } | null | undefined
+  1279→): boolean {
+  1280→  return REPICK_SETUP_JOB_TYPES.has((node && node.job_type) || "");
+  1281→}
+  1282→
+  1283→/** Is this node a particle-auxiliary job (extract, particle_sets, ...)? */
+  1284→export function reportIsParticleAuxNode(
+  1285→  node: { job_type?: string } | null | undefined
+  1286→): boolean {
+  1287→  return PARTICLE_AUX_JOB_TYPES.has((node && node.job_type) || "");
+  1288→}
+  1289→
+  1290→/** Is this node a "volume source" (refine / class_3D / volume_tools / ...)? */
+  1291→export function reportIsVolumeSourceNode(
+  1292→  node: { job_type?: string; volume_count?: number | null } | null | undefined
+  1293→): boolean {
+  1294→  const type = (node && node.job_type) || "";
+  1295→  return Boolean(
+  1296→    node &&
+  1297→      ((node.volume_count !== null && node.volume_count !== undefined) ||
+  1298→        /homo_abinit|hetero|nonuniform|homo_refine|local_refine|class_3D|var_3D|volume|map|align_3D|homo_reconstruct|sym_expand|particle_subtract/i.test(
+  1299→          type
+  1300→        ))
+  1301→  );
+  1302→}
+  1303→
+  1304→/**
+  1305→ * Does this branch of the lineage contain a "repick seed" (volume
+  1306→ * source upstream of a particle producer)?
+  1307→ */
+  1308→export function reportHasRepickSeed(
+  1309→  uid: string,
+  1310→  state: LineageReportState,
+  1311→  visited: Set<string> = new Set(),
+  1312→  depth = 0
+  1313→): boolean {
+  1314→  if (!uid || visited.has(uid) || depth > 8) return false;
+  1315→  if (state.repickSeedMemo && state.repickSeedMemo.has(uid))
+  1316→    return state.repickSeedMemo.get(uid) as boolean;
+  1317→  visited.add(uid);
+  1318→  const node = state.nodeMap.get(uid);
+  1319→  if (!node) return false;
+  1320→  const finish = (value: boolean) => {
+  1321→    if (state.repickSeedMemo) state.repickSeedMemo.set(uid, value);
+  1322→    return value;
+  1323→  };
+  1324→  if (reportIsVolumeSourceNode(node)) return finish(true);
+  1325→  if (reportIsRepickParticleProducer(node)) return finish(false);
+  1326→
+  1327→  const incoming = state.incomingByTarget.get(uid) || [];
+  1328→  for (const edge of incoming) {
+  1329→    const source = state.nodeMap.get(edge.source);
+  1330→    if (edge.family === "volume" || edge.kind === "mask") return finish(true);
+  1331→    if (edge.family === "particle" && reportIsVolumeSourceNode(source))
+  1332→      return finish(true);
+  1333→    if (
+  1334→      reportIsRepickSetupNode(node) ||
+  1335→      reportIsRepickSetupNode(source) ||
+  1336→      edge.family === "particle"
+  1337→    ) {
+  1338→      if (reportHasRepickSeed(edge.source, state, new Set(visited), depth + 1))
+  1339→        return finish(true);
+  1340→    }
+  1341→  }
+  1342→  return finish(false);
+  1343→}
+  1344→
+  1345→/** Does this branch of the lineage eventually feed a volume-source mainline? */
+  1346→export function reportFeedsVolumeMainline(
+  1347→  uid: string,
+  1348→  state: LineageReportState,
+  1349→  visited: Set<string> = new Set(),
+  1350→  depth = 0
+  1351→): boolean {
+  1352→  if (!uid || visited.has(uid) || depth > 10) return false;
+  1353→  visited.add(uid);
+  1354→  const node = state.nodeMap.get(uid);
+  1355→  if (!node) return false;
+  1356→  if (depth > 0 && reportIsVolumeSourceNode(node)) return true;
+  1357→  const outgoing = state.outgoingBySource ? state.outgoingBySource.get(uid) || [] : [];
+  1358→  for (const edge of outgoing) {
+  1359→    const target = state.nodeMap.get(edge.target);
+  1360→    if (!target) continue;
+  1361→    if (
+  1362→      edge.family === "particle" ||
+  1363→      edge.family === "volume" ||
+  1364→      edge.family === "template" ||
+  1365→      /model/i.test(edge.kind || "")
+  1366→    ) {
+  1367→      if (reportFeedsVolumeMainline(edge.target, state, new Set(visited), depth + 1))
+  1368→        return true;
+  1369→    }
+  1370→  }
+  1371→  return false;
+  1372→}
+  1373→
+  1374→/** For each incoming edge, run `reportLineageRound` over its repick-seed sources. */
+  1375→export function reportRepickSeedSourceRounds(
+  1376→  incoming: NormalizedLineageEdge[],
+  1377→  state: LineageReportState,
+  1378→  visited: Set<string> = new Set()
+  1379→): number[] {
+  1380→  return incoming
+  1381→    .map((edge) => {
+  1382→      const sourceNode = state.nodeMap.get(edge.source);
+  1383→      const directSeed =
+  1384→        edge.family === "volume" ||
+  1385→        edge.kind === "mask" ||
+  1386→        (edge.family === "particle" && reportIsVolumeSourceNode(sourceNode));
+  1387→      const inheritedSeed =
+  1388→        reportIsRepickSetupNode(sourceNode) && reportHasRepickSeed(edge.source, state);
+  1389→      if (!directSeed && !inheritedSeed) return null;
+  1390→      return reportLineageRound(edge.source, state, new Set(visited));
+  1391→    })
+  1392→    .filter((value): value is number => Number.isInteger(value));
+  1393→}
+  1394→
+  1395→/** Max `reportLineageRound` over a list of incoming edges. */
+  1396→export function reportMaxRoundFromEdges(
+  1397→  edges: NormalizedLineageEdge[],
+  1398→  state: LineageReportState,
+  1399→  visited: Set<string>
+  1400→): number {
+  1401→  const rounds = edges.map((edge) =>
+  1402→    reportLineageRound(edge.source, state, new Set(visited))
+  1403→  );
+  1404→  return rounds.length ? Math.max(...rounds) : 0;
+  1405→}
+  1406→
+  1407→/** `reportLineageRound` over just the particle-family incoming edges. */
+  1408→export function reportParticleSourceRound(
+  1409→  incoming: NormalizedLineageEdge[],
+  1410→  state: LineageReportState,
+  1411→  visited: Set<string>
+  1412→): number | null {
+  1413→  const particleIncoming = incoming.filter((edge) => edge.family === "particle");
+  1414→  return particleIncoming.length
+  1415→    ? reportMaxRoundFromEdges(particleIncoming, state, visited)
+  1416→    : null;
+  1417→}
+  1418→
+  1419→/** Compute the "repick round" of a job (1 = first pick, 2 = first repick, ...). */
+  1420→export function reportLineageRound(
+  1421→  uid: string,
+  1422→  state: LineageReportState,
+  1423→  visited: Set<string> = new Set()
+  1424→): number {
+  1425→  if (!uid || visited.has(uid)) return 0;
+  1426→  if (state.roundMemo && state.roundMemo.has(uid))
+  1427→    return state.roundMemo.get(uid) as number;
+  1428→  visited.add(uid);
+  1429→  const node = state.nodeMap.get(uid);
+  1430→  if (!node) return 0;
+  1431→  const type = node.job_type || "";
+  1432→  const finish = (value: number) => {
+  1433→    if (state.roundMemo) state.roundMemo.set(uid, value);
+  1434→    return value;
+  1435→  };
+  1436→
+  1437→  if (/import_(movies|micrographs)/i.test(type)) return finish(0);
+  1438→  if (/import_particles/i.test(type)) return finish(1);
+  1439→
+  1440→  const incoming = state.incomingByTarget.get(uid) || [];
+  1441→  const maxSourceRound = reportMaxRoundFromEdges(incoming, state, visited);
+  1442→  const particleSourceRound = reportParticleSourceRound(incoming, state, visited);
+  1443→  const seedSourceRounds = reportRepickSeedSourceRounds(incoming, state, visited);
+  1444→  const seedRound = seedSourceRounds.length ? Math.max(...seedSourceRounds) : null;
+  1445→
+  1446→  if (reportIsRepickSetupNode(node)) {
+  1447→    if (seedRound !== null && reportFeedsVolumeMainline(uid, state)) {
+  1448→      return finish(Math.max(2, seedRound + 1));
+  1449→    }
+  1450→    return finish(Math.max(1, (particleSourceRound ?? maxSourceRound) || seedRound || 1));
+  1451→  }
+  1452→
+  1453→  if (reportIsRepickParticleProducer(node)) {
+  1454→    const setupSourceRounds = incoming
+  1455→      .filter((edge) => reportIsRepickSetupNode(state.nodeMap.get(edge.source)))
+  1456→      .map((edge) => reportLineageRound(edge.source, state, new Set(visited)));
+  1457→    if (setupSourceRounds.length) {
+  1458→      return finish(Math.max(1, ...setupSourceRounds));
+  1459→    }
+  1460→    if (seedRound !== null && reportFeedsVolumeMainline(uid, state)) {
+  1461→      return finish(Math.max(2, seedRound + 1));
+  1462→    }
+  1463→    return finish(Math.max(1, (particleSourceRound ?? maxSourceRound) || seedRound || 1));
+  1464→  }
+  1465→
+  1466→  if (reportIsPickingNode(node)) {
+  1467→    return finish(Math.max(1, (particleSourceRound ?? maxSourceRound) || 1));
+  1468→  }
+  1469→
+  1470→  if (reportIsParticleAuxNode(node)) {
+  1471→    return finish(particleSourceRound ?? maxSourceRound);
+  1472→  }
+  1473→
+  1474→  if (/class_2D|select_2D|rebalance_classes_2D|class_probability_filter/i.test(type)) {
+  1475→    return finish(Math.max(1, particleSourceRound ?? maxSourceRound));
+  1476→  }
+  1477→
+  1478→  if (
+  1479→    /homo_abinit|import_volumes|import_templates|create_templates|hetero|nonuniform|homo_refine|local_refine|class_3D|var_3D|align_3D|homo_reconstruct|sym_expand|particle_subtract|volume_tools|volume_alignment|local_resolution|sharpen|fsc3D|cryodrgn|relion|helix|auto3Dre/i.test(
+  1480→      type
+  1481→    )
+  1482→  ) {
+  1483→    return finish(particleSourceRound ?? maxSourceRound);
+  1484→  }
+  1485→
+  1486→  return finish(particleSourceRound ?? maxSourceRound);
+  1487→}
+  1488→
+  1489→/** Is this node "major" (worth showing in the report outline)? */
+  1490→export function reportNodeIsMajor(
+  1491→  node: LineageNode,
+  1492→  summary: { start_uid?: string }
+  1493→): boolean {
+  1494→  const type = node.job_type || "";
+  1495→  if (node.uid === summary.start_uid) return true;
+  1496→  if (MAJOR_JOB_TYPES.has(type)) return true;
+  1497→  if (/local_refine|topaz_train|topaz_extract/i.test(type)) return true;
+  1498→  if (node.particle_count !== null && node.particle_count !== undefined) return true;
+  1499→  if (node.volume_count !== null && node.volume_count !== undefined) return true;
+  1500→  return false;
+  1501→}
+  1502→
+  1503→/** Visible outline nodes = major nodes sorted by numeric uid. */
+  1504→export function reportVisibleOutlineNodes(
+  1505→  summary: LineageSummary,
+  1506→  _nodeMap: Map<string, LineageNode>
+  1507→): LineageNode[] {
+  1508→  const nodes = (summary.nodes || []).filter((node) => {
+  1509→    if (reportNodeIsMajor(node, summary)) return true;
+  1510→    return false;
+  1511→  });
+  1512→  return nodes.sort(
+  1513→    (a, b) =>
+  1514→      (a.uid_num || reportJobNum(a.uid)) - (b.uid_num || reportJobNum(b.uid))
+  1515→  );
+  1516→}
+  1517→
+  1518→/** Memoized `NormalizedLineageEdge[]` view of a summary's edges. */
+  1519→export function reportNormalizedEdges(
+  1520→  summary: LineageSummary
+  1521→): NormalizedLineageEdge[] {
+  1522→  if (summary && REPORT_NORMALIZED_EDGES_CACHE.has(summary))
+  1523→    return REPORT_NORMALIZED_EDGES_CACHE.get(summary) as NormalizedLineageEdge[];
+  1524→  const edges: NormalizedLineageEdge[] = (summary.edges || []).map((edge) => {
+  1525→    const kind = reportEdgeKind(edge);
+  1526→    return {
+  1527→      ...edge,
+  1528→      kind,
+  1529→      family: reportKindFamily(kind),
+  1530→      group: htmlGroupLabel(edge),
+  1531→    };
+  1532→  });
+  1533→  if (summary) REPORT_NORMALIZED_EDGES_CACHE.set(summary, edges);
+  1534→  return edges;
+  1535→}
+  1536→
+  1537→/** Build the per-summary `LineageReportState` used by the report helpers. */
+  1538→export function reportBuildLineageState(
+  1539→  summary: LineageSummary
+  1540→): LineageReportState {
+  1541→  const nodeMap = summaryNodeMap(summary);
+  1542→  const edges = reportNormalizedEdges(summary);
+  1543→  const incomingByTarget: IncomingByTargetMap = new Map<string, NormalizedLineageEdge[]>();
+  1544→  const outgoingBySource = new Map<string, NormalizedLineageEdge[]>();
+  1545→  for (const edge of edges) {
+  1546→    if (!incomingByTarget.has(edge.target))
+  1547→      incomingByTarget.set(edge.target, []);
+  1548→    incomingByTarget.get(edge.target)!.push(edge);
+  1549→    if (!outgoingBySource.has(edge.source))
+  1550→      outgoingBySource.set(edge.source, []);
+  1551→    outgoingBySource.get(edge.source)!.push(edge);
+  1552→  }
+  1553→  incomingByTarget.__traceVisibleMemo = new Map<string, string[]>();
+  1554→  const outlineNodes = reportVisibleOutlineNodes(summary, nodeMap);
+  1555→  const visible = new Set(outlineNodes.map((node) => node.uid));
+  1556→  return {
+  1557→    nodeMap,
+  1558→    edges,
+  1559→    incomingByTarget,
+  1560→    outgoingBySource,
+  1561→    outlineNodes,
+  1562→    visible,
+  1563→    roundMemo: new Map<string, number>(),
+  1564→    repickSeedMemo: new Map<string, boolean>(),
+  1565→  };
+  1566→}
+  1567→
+  1568→/**
+  1569→ * Trace a `sourceUid` upstream until it hits a `visible` node, returning
+  1570→ * the list of visible ancestors of the given `family`.
+  1571→ */
+  1572→export function reportTraceVisibleSources(
+  1573→  sourceUid: string,
+  1574→  family: EdgeFamily,
+  1575→  visible: Set<string>,
+  1576→  incomingByTarget: IncomingByTargetMap,
+  1577→  visited: Set<string> = new Set(),
+  1578→  depth = 0
+  1579→): string[] {
+  1580→  const memo = incomingByTarget.__traceVisibleMemo;
+  1581→  const memoKey = `${sourceUid}\t${family}`;
+  1582→  const useMemo = visited.size === 0 && memo;
+  1583→  if (useMemo && memo!.has(memoKey)) return memo!.get(memoKey) as string[];
+  1584→  if (!sourceUid || visited.has(sourceUid) || depth > 8) return [];
+  1585→  visited.add(sourceUid);
+  1586→  if (visible.has(sourceUid)) {
+  1587→    const result: string[] = [sourceUid];
+  1588→    if (useMemo) memo!.set(memoKey, result);
+  1589→    return result;
+  1590→  }
+  1591→  const allIncoming = incomingByTarget.get(sourceUid) || [];
+  1592→  let incoming = allIncoming.filter((edge) => edge.family === family);
+  1593→  if (!incoming.length) incoming = allIncoming;
+  1594→  if (!incoming.length) return [];
+  1595→  const results: string[] = [];
+  1596→  for (const edge of incoming) {
+  1597→    results.push(
+  1598→      ...reportTraceVisibleSources(
+  1599→        edge.source,
+  1600→        family,
+  1601→        visible,
+  1602→        incomingByTarget,
+  1603→        new Set(visited),
+  1604→        depth + 1
+  1605→      )
+  1606→    );
+  1607→  }
+  1608→  const result = Array.from(new Set(results)).sort(
+  1609→    (a, b) => reportJobNum(a) - reportJobNum(b)
+  1610→  );
+  1611→  if (useMemo) memo!.set(memoKey, result);
+  1612→  return result;
+  1613→}
+  1614→
+  1615→/** For each incoming edge of `uid`, collect (sourceUid, family) outline refs. */
+  1616→export function reportOutlineRefs(
+  1617→  uid: string,
+  1618→  state: LineageReportState
+  1619→): Array<[string, EdgeFamily]> {
+  1620→  const refs = new Map<string, [string, EdgeFamily]>();
+  1621→  for (const edge of state.incomingByTarget.get(uid) || []) {
+  1622→    for (const source of reportTraceVisibleSources(
+  1623→      edge.source,
+  1624→      edge.family,
+  1625→      state.visible,
+  1626→      state.incomingByTarget
+  1627→    )) {
+  1628→      if (!state.visible.has(source) || source === uid) continue;
+  1629→      const key = `${source}\t${edge.family}`;
+  1630→      if (!refs.has(key)) refs.set(key, [source, edge.family]);
+  1631→    }
+  1632→  }
+  1633→  const familyOrder: Record<string, number> = {
+  1634→    exposure: 1,
+  1635→    micrograph: 1,
+  1636→    particle: 2,
+  1637→    volume: 3,
+  1638→    template: 4,
+  1639→    other: 5,
+  1640→  };
+  1641→  return Array.from(refs.values()).sort((a, b) => {
+  1642→    const byJob = reportJobNum(a[0]) - reportJobNum(b[0]);
+  1643→    if (byJob) return byJob;
+  1644→    return (familyOrder[a[1]] || 9) - (familyOrder[b[1]] || 9);
+  1645→  });
+  1646→}
+  1647→
+  1648→/* ------------------------------------------------------------------ */
+  1649→/* Text preview                                                       */
+  1650→/* ------------------------------------------------------------------ */
+  1651→
+  1652→/** Build the plain-text preview of a `LineageSummary`. */
+  1653→export function makePreview(summary: LineageSummary): string {
+  1654→  if (summary.preview) return summary.preview;
+  1655→  const lines: string[] = [];
+  1656→  lines.push(`${summary.project_uid}/${summary.start_uid}`);
+  1657→  lines.push(`类型: ${summary.start_job.job_type}`);
+  1658→  lines.push(`最终颗粒数: ${summary.final_particle_count ?? "未知"}`);
+  1659→  lines.push(
+  1660→    `最终分辨率: ${
+  1661→      summary.final_resolution_A
+  1662→        ? `${formatBinFactor(summary.final_resolution_A)} Å`
+  1663→        : "待从 FSC/metadata 补充"
+  1664→    }`
+  1665→  );
+  1666→  lines.push("");
+  1667→  lines.push("Map 下载:");
+  1668→  for (const [name, url] of Object.entries(summary.map_download_urls)) {
+  1669→    lines.push(`- ${name}: ${url}`);
+  1670→  }
+  1671→  lines.push("");
+  1672→  lines.push("Ab initio / hetero class:");
+  1673→  for (const item of summary.class_split_jobs) {
+  1674→    lines.push(`- ${item.uid} ${item.job_type}`);
+  1675→    for (const cls of item.classes) {
+  1676→      lines.push(
+  1677→        `  class ${cls.class_index}: ${cls.particle_count} particles (${cls.particle_percent}%) maps=${cls.maps
+  1678→          .map((m) => m.result_name)
+  1679→          .join(", ")}`
+  1680→      );
+  1681→    }
+  1682→  }
+  1683→  lines.push("");
+  1684→  lines.push("Micrograph 源头:");
+  1685→  for (const job of summary.import_or_leaf_jobs) {
+  1686→    lines.push(
+  1687→      `- ${job.uid} ${job.job_type}: ${job.micrograph_count ?? "?"} micrographs${
+  1688→        pixelSizeText(job) ? `, pixel ${pixelSizeText(job)}` : ""
+  1689→      }`
+  1690→    );
+  1691→  }
+  1692→  return lines.join("\n");
+  1693→}
+  1694→

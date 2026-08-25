@@ -1,0 +1,1886 @@
+     1→/**
+     2→ * report-html.ts — V2 HTML report builder for CryoSmart lineage.
+     3→ *
+     4→ * Ported verbatim (logic-wise) from `popup.js` of the original Chrome
+     5→ * extension `CryoSmartLineageTracer_3.0`. The main export
+     6→ * `buildLineageHtmlV2(summary)` returns a complete standalone HTML string
+     7→ * (single `<html>` document with inline `<style>` and `<script>`) that can
+     8→ * be opened in any browser without external dependencies.
+     9→ *
+    10→ * Layout (matches popup.js):
+    11→ *   - sticky header with project / start-job title
+    12→ *   - two-pane grid: left = outline + picture-flow, right = chain cards
+    13→ *   - per-job card shows source table, media block, class table, map
+    14→ *     downloads, outgoing box
+    15→ *   - `.download-all` buttons trigger staggered `window.open` (160 ms)
+    16→ *
+    17→ * This module is safe to import from both server and client components —
+    18→ * it contains no `'use server'` / `'use client'` directive and performs no
+    19→ * I/O.
+    20→ *
+    21→ * NOTE: At the time of this port, `lineage.ts` (Task 2-a) has not yet been
+    22→ * written. Per the task's fallback rule, every lineage helper that would
+    23→ * naturally live in `lineage.ts` is defined locally with a
+    24→ * `// duplicated from lineage.ts to avoid circular import` comment. When
+    25→ * `lineage.ts` is finalised, the duplicated locals can be replaced by
+    26→ * imports.
+    27→ */
+    28→import type {
+    29→  ClassSplit,
+    30→  ClassSplitJob,
+    31→  EdgeFamily,
+    32→  ImageAsset,
+    33→  IncomingByTargetMap,
+    34→  LineageEdge,
+    35→  LineageNode,
+    36→  LineageReportState,
+    37→  LineageSummary,
+    38→  MapAsset,
+    39→  NormalizedLineageEdge,
+    40→  Select2DSummary,
+    41→} from "./types";
+    42→import {
+    43→  MAJOR_JOB_TYPES,
+    44→  PARTICLE_AUX_JOB_TYPES,
+    45→  PICKING_JOB_TYPES,
+    46→  REPICK_PARTICLE_PRODUCER_TYPES,
+    47→  REPICK_SETUP_JOB_TYPES,
+    48→  SMALL_JOB_TYPES,
+    49→} from "./constants";
+    50→
+    51→/* ================================================================== */
+    52→/*  Small helpers (HTML / formatting)                                 */
+    53→/* ================================================================== */
+    54→
+    55→/** HTML-escape a string for safe interpolation into HTML. */
+    56→export function htmlEscape(value: unknown): string {
+    57→  return String(value ?? "")
+    58→    .replace(/&/g, "&amp;")
+    59→    .replace(/</g, "&lt;")
+    60→    .replace(/>/g, "&gt;")
+    61→    .replace(/"/g, "&quot;")
+    62→    .replace(/'/g, "&#39;");
+    63→}
+    64→
+    65→// `escHtml` is the historical name used throughout the ported code; alias
+    66→// to `htmlEscape` so every reference below can stay verbatim with popup.js.
+    67→const escHtml = htmlEscape;
+    68→
+    69→/** Format a numeric or string value for display. */
+    70→export function fmt(value: unknown): string {
+    71→  return Number.isInteger(value)
+    72→    ? (value as number).toLocaleString("en-US")
+    73→    : escHtml(value);
+    74→}
+    75→
+    76→/** Build a uid -> node lookup map. */
+    77→// duplicated from lineage.ts to avoid circular import
+    78→export function summaryNodeMap(summary: LineageSummary): Map<string, LineageNode> {
+    79→  return new Map((summary.nodes || []).map((node) => [node.uid, node]));
+    80→}
+    81→
+    82→/** Sort key for "J123" style uids — returns the numeric portion, or 0. */
+    83→// duplicated from lineage.ts to avoid circular import
+    84→export function reportJobNum(uid: string): number {
+    85→  const match = String(uid || "").match(/J(\d+)/i);
+    86→  return match ? Number(match[1]) : 0;
+    87→}
+    88→
+    89→/** Sort nodes by their numeric uid. */
+    90→// duplicated from lineage.ts to avoid circular import
+    91→export function uidOrder(node: LineageNode): number {
+    92→  return node.uid_num ?? reportJobNum(node.uid);
+    93→}
+    94→
+    95→/** Infer the lineage kind ("particle" / "volume" / ...) of an edge. */
+    96→// duplicated from lineage.ts to avoid circular import
+    97→export function edgeKind(edge: LineageEdge): string {
+    98→  if (["particle", "volume", "mask", "template", "exposure"].includes(edge.input_type)) {
+    99→    return edge.input_type;
+   100→  }
+   101→  const types = (edge.slots || []).map((slot) => slot.result_type || "").join(" ");
+   102→  for (const kind of ["particle", "volume", "mask", "template", "exposure"]) {
+   103→    if (types.includes(kind)) return kind;
+   104→  }
+   105→  return edge.input_type || "parent";
+   106→}
+   107→
+   108→/** Resolve a stable kind string for an edge (kind, input_type, or "parent"). */
+   109→// duplicated from lineage.ts to avoid circular import
+   110→export function summaryKind(edge: LineageEdge): string {
+   111→  if (edge.kind) return edge.kind;
+   112→  if (edge.input_type) return edgeKind({ ...edge, slots: edge.slots || [] } as LineageEdge);
+   113→  if (Array.isArray(edge.kinds) && edge.kinds.length) return edge.kinds[0];
+   114→  return "parent";
+   115→}
+   116→
+   117→/** Bucket a kind into one of the 5 visual families (mask → volume). */
+   118→// duplicated from lineage.ts to avoid circular import
+   119→export function reportKindFamily(kind: string): EdgeFamily | string {
+   120→  if (kind === "mask") return "volume";
+   121→  if (kind === "exposure") return "exposure";
+   122→  if (kind === "particle") return "particle";
+   123→  if (kind === "volume") return "volume";
+   124→  if (kind === "template" || kind === "ml_model" || kind === "model") return "template";
+   125→  return kind || "other";
+   126→}
+   127→
+   128→/** Human-readable label for a kind (used in pills). */
+   129→// duplicated from lineage.ts to avoid circular import
+   130→export function reportKindLabel(kind: string): string {
+   131→  return (
+   132→    ({
+   133→      particle: "颗粒",
+   134→      volume: "map",
+   135→      mask: "mask",
+   136→      exposure: "照片",
+   137→      template: "template",
+   138→      ml_model: "model",
+   139→      model: "model",
+   140→      parent: "parent",
+   141→    } as Record<string, string>)[kind] || kind || ""
+   142→  );
+   143→}
+   144→
+   145→/** The CSS class suffix for an edge kind (mask → "volume", etc.). */
+   146→export function htmlKindClass(kind: string): string {
+   147→  return (
+   148→    ({
+   149→      particle: "particle",
+   150→      volume: "volume",
+   151→      mask: "volume",
+   152→      exposure: "exposure",
+   153→      template: "template",
+   154→    } as Record<string, string>)[kind] || "other"
+   155→  );
+   156→}
+   157→
+   158→/** Friendly label for an edge kind on the edge pills. */
+   159→export function htmlKindLabel(kind: string): string {
+   160→  return (
+   161→    ({
+   162→      particle: "particles",
+   163→      volume: "map",
+   164→      mask: "mask",
+   165→      exposure: "micrographs",
+   166→      template: "2D classes/templates",
+   167→      parent: "parent",
+   168→    } as Record<string, string>)[kind] || kind || ""
+   169→  );
+   170→}
+   171→
+   172→/** Coarse visual family for a node (micrograph / particle / volume / other). */
+   173→// duplicated from lineage.ts to avoid circular import
+   174→export function htmlNodeKind(node: LineageNode): string {
+   175→  const type = node.job_type || "";
+   176→  if (node.volume_count !== null && node.volume_count !== undefined) return "volume";
+   177→  if (/refine|abinit|volume|class_3D/i.test(type)) return "volume";
+   178→  if (node.particle_count !== null && node.particle_count !== undefined) return "particle";
+   179→  if (/particle|picker|topaz/i.test(type)) return "particle";
+   180→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) return "exposure";
+   181→  if (/micrograph|ctf|exposure/i.test(type)) return "exposure";
+   182→  return "other";
+   183→}
+   184→
+   185→/* ================================================================== */
+   186→/*  Domain helpers (pixel size / resolution / extraction)              */
+   187→/* ================================================================== */
+   188→
+   189→function pixelSizeNumber(value: unknown): number | null {
+   190→  const number = Number(value);
+   191→  return Number.isFinite(number) && number > 0 && number < 100
+   192→    ? Math.round(number * 10000) / 10000
+   193→    : null;
+   194→}
+   195→
+   196→function formatPixelSize(value: unknown): string {
+   197→  const number = pixelSizeNumber(value);
+   198→  if (!number) return "";
+   199→  return Number.isInteger(number)
+   200→    ? String(number)
+   201→    : number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+   202→}
+   203→
+   204→/** "1.24 Å/px" or empty string. */
+   205→// duplicated from lineage.ts to avoid circular import
+   206→export function pixelSizeText(node: LineageNode | null | undefined): string {
+   207→  const text = formatPixelSize(node && node.pixel_size_A);
+   208→  return text ? `${text} Å/px` : "";
+   209→}
+   210→
+   211→function resolutionNumber(value: unknown): number | null {
+   212→  const number = Number(value);
+   213→  return Number.isFinite(number) && number >= 1 && number <= 20
+   214→    ? Math.round(number * 100) / 100
+   215→    : null;
+   216→}
+   217→
+   218→function formatBinFactor(value: number): string {
+   219→  if (!Number.isFinite(value)) return "";
+   220→  const rounded = Math.round(value);
+   221→  return Math.abs(value - rounded) < 0.01
+   222→    ? String(rounded)
+   223→    : value.toFixed(2).replace(/\.?0+$/, "");
+   224→}
+   225→
+   226→/** "3.2 Å" or empty string. */
+   227→// duplicated from lineage.ts to avoid circular import
+   228→export function resolutionText(node: LineageNode | null | undefined): string {
+   229→  const value = node && resolutionNumber(node.resolution_A);
+   230→  return value ? `${formatBinFactor(value)} Å` : "";
+   231→}
+   232→
+   233→/** Extraction bin text "bin 2" or empty string. */
+   234→// duplicated from lineage.ts to avoid circular import
+   235→export function extractionBinText(node: LineageNode | null | undefined): string {
+   236→  const p = node && node.extraction_params;
+   237→  if (!p || !p.bin_factor) return "";
+   238→  return `bin ${formatBinFactor(p.bin_factor)}`;
+   239→}
+   240→
+   241→/** "原始 pixel 256 px · 提取 box 128 px · bin 2" or empty. */
+   242→// duplicated from lineage.ts to avoid circular import
+   243→export function extractionParamText(node: LineageNode | null | undefined): string {
+   244→  const p = node && node.extraction_params;
+   245→  if (!p) return "";
+   246→  const parts: string[] = [];
+   247→  if (p.box_size_pix) parts.push(`原始 pixel ${formatBinFactor(p.box_size_pix)} px`);
+   248→  if (p.extracted_box_size_pix) parts.push(`提取 box ${formatBinFactor(p.extracted_box_size_pix)} px`);
+   249→  if (p.bin_factor) parts.push(`bin ${formatBinFactor(p.bin_factor)}${p.bin_inferred ? " (推断)" : ""}`);
+   250→  return parts.join(" · ");
+   251→}
+   252→
+   253→/** Parse "class_12" → 12 (or null). */
+   254→// duplicated from lineage.ts to avoid circular import
+   255→export function parseClassIndex(name: unknown): number | null {
+   256→  const match = String(name || "").match(/class[_-](\d+)/);
+   257→  return match ? Number(match[1]) : null;
+   258→}
+   259→
+   260→/** Sanitize a string for use as a path component. */
+   261→// duplicated from lineage.ts to avoid circular import
+   262→function safePart(value: unknown): string {
+   263→  return String(value || "item")
+   264→    .replace(/[\\/:*?"<>|#%&{}$!'@+`=]/g, "_")
+   265→    .replace(/\s+/g, "_")
+   266→    .slice(0, 100);
+   267→}
+   268→
+   269→/** Local image path inside the report bundle: `images/<uid>/<name>.png`. */
+   270→// duplicated from lineage.ts to avoid circular import
+   271→function localImageFilename(nodeUid: string, name: string): string {
+   272→  return `images/${safePart(nodeUid)}/${safePart(name)}.png`;
+   273→}
+   274→
+   275→/** Map preview image name for a volume group ("volume.map" → "volume"). */
+   276→// duplicated from lineage.ts to avoid circular import
+   277→function mapPreviewImageName(group: unknown): string {
+   278→  const value = String(group || "volume");
+   279→  if (/^(volume|map)$/i.test(value)) return "volume";
+   280→  return value.replace(/\.map$/i, "");
+   281→}
+   282→
+   283→/* ================================================================== */
+   284→/*  Importance / classification helpers (duplicated from lineage.ts)   */
+   285→/* ================================================================== */
+   286→
+   287→// duplicated from lineage.ts to avoid circular import
+   288→export function importance(node: LineageNode, startUid: string): "final" | "major" | "small" {
+   289→  if (node.uid === startUid && !/nonuniform_refine/i.test(node.job_type || "")) return "final";
+   290→  if (MAJOR_JOB_TYPES.has(node.job_type)) return "major";
+   291→  if (SMALL_JOB_TYPES.has(node.job_type)) return "small";
+   292→  // Best-effort "major" detection — popup.js checked `maxGroupNumItems`
+   293→  // against `output_result_groups`, which isn't available on a normalized
+   294→  // `LineageNode`. Fall back to counts.
+   295→  if (node.particle_count || node.volume_count || node.micrograph_count) return "major";
+   296→  return "small";
+   297→}
+   298→
+   299→// duplicated from lineage.ts to avoid circular import
+   300→export function reportIsPickingNode(node: LineageNode | null | undefined): boolean {
+   301→  return Boolean(node && PICKING_JOB_TYPES.has(node.job_type));
+   302→}
+   303→
+   304→// duplicated from lineage.ts to avoid circular import
+   305→export function reportIsRepickParticleProducer(node: LineageNode | null | undefined): boolean {
+   306→  return Boolean(
+   307→    node &&
+   308→      REPICK_PARTICLE_PRODUCER_TYPES.has(node.job_type) &&
+   309→      node.particle_count !== null &&
+   310→      node.particle_count !== undefined,
+   311→  );
+   312→}
+   313→
+   314→// duplicated from lineage.ts to avoid circular import
+   315→export function reportIsRepickSetupNode(node: LineageNode | null | undefined): boolean {
+   316→  return Boolean(node && REPICK_SETUP_JOB_TYPES.has(node.job_type));
+   317→}
+   318→
+   319→// duplicated from lineage.ts to avoid circular import
+   320→export function reportIsParticleAuxNode(node: LineageNode | null | undefined): boolean {
+   321→  return Boolean(node && PARTICLE_AUX_JOB_TYPES.has(node.job_type));
+   322→}
+   323→
+   324→// duplicated from lineage.ts to avoid circular import
+   325→export function reportIsVolumeSourceNode(node: LineageNode | null | undefined): boolean {
+   326→  const type = (node && node.job_type) || "";
+   327→  return Boolean(
+   328→    node &&
+   329→      ((node.volume_count !== null && node.volume_count !== undefined) ||
+   330→        /homo_abinit|hetero|nonuniform|homo_refine|local_refine|class_3D|var_3D|volume|map|align_3D|homo_reconstruct|sym_expand|particle_subtract/i.test(
+   331→          type,
+   332→        )),
+   333→  );
+   334→}
+   335→
+   336→// duplicated from lineage.ts to avoid circular import
+   337→export function reportIsParticlePipelineNode(node: LineageNode | null | undefined): boolean {
+   338→  const type = (node && node.job_type) || "";
+   339→  return /import_particles|picker|topaz|extract_micrographs|remove_duplicate|particle_sets|downsample|standardize_particle|check_corrupt|reassign_particles/i.test(
+   340→    type,
+   341→  );
+   342→}
+   343→
+   344→// duplicated from lineage.ts to avoid circular import
+   345→export function reportIsSelect2DNode(node: LineageNode | null | undefined): boolean {
+   346→  return Boolean(node && (node.select_2d || /select_2D/i.test(node.job_type || "")));
+   347→}
+   348→
+   349→/* ================================================================== */
+   350→/*  reportLineageRound + dependencies                                 */
+   351→/*  (the central "round number" computation — duplicated from         */
+   352→/*  lineage.ts to avoid circular import)                              */
+   353→/* ================================================================== */
+   354→
+   355→// duplicated from lineage.ts to avoid circular import
+   356→export function reportHasRepickSeed(
+   357→  uid: string,
+   358→  state: LineageReportState,
+   359→  visited: Set<string> = new Set(),
+   360→  depth = 0,
+   361→): boolean {
+   362→  if (!uid || visited.has(uid) || depth > 8) return false;
+   363→  if (state.repickSeedMemo && state.repickSeedMemo.has(uid)) return state.repickSeedMemo.get(uid)!;
+   364→  visited.add(uid);
+   365→  const node = state.nodeMap.get(uid);
+   366→  if (!node) return false;
+   367→  const finish = (value: boolean): boolean => {
+   368→    if (state.repickSeedMemo) state.repickSeedMemo.set(uid, value);
+   369→    return value;
+   370→  };
+   371→  if (reportIsVolumeSourceNode(node)) return finish(true);
+   372→  if (reportIsRepickParticleProducer(node)) return finish(false);
+   373→
+   374→  const incoming = state.incomingByTarget.get(uid) || [];
+   375→  for (const edge of incoming) {
+   376→    const source = state.nodeMap.get(edge.source);
+   377→    if (edge.family === "volume" || edge.kind === "mask") return finish(true);
+   378→    if (edge.family === "particle" && reportIsVolumeSourceNode(source)) return finish(true);
+   379→    if (
+   380→      reportIsRepickSetupNode(node) ||
+   381→      reportIsRepickSetupNode(source) ||
+   382→      edge.family === "particle"
+   383→    ) {
+   384→      if (reportHasRepickSeed(edge.source, state, new Set(visited), depth + 1)) return finish(true);
+   385→    }
+   386→  }
+   387→  return finish(false);
+   388→}
+   389→
+   390→// duplicated from lineage.ts to avoid circular import
+   391→export function reportFeedsVolumeMainline(
+   392→  uid: string,
+   393→  state: LineageReportState,
+   394→  visited: Set<string> = new Set(),
+   395→  depth = 0,
+   396→): boolean {
+   397→  if (!uid || visited.has(uid) || depth > 10) return false;
+   398→  visited.add(uid);
+   399→  const node = state.nodeMap.get(uid);
+   400→  if (!node) return false;
+   401→  if (depth > 0 && reportIsVolumeSourceNode(node)) return true;
+   402→  const outgoing = state.outgoingBySource ? state.outgoingBySource.get(uid) || [] : [];
+   403→  for (const edge of outgoing) {
+   404→    const target = state.nodeMap.get(edge.target);
+   405→    if (!target) continue;
+   406→    if (
+   407→      edge.family === "particle" ||
+   408→      edge.family === "volume" ||
+   409→      edge.family === "template" ||
+   410→      /model/i.test(edge.kind || "")
+   411→    ) {
+   412→      if (reportFeedsVolumeMainline(edge.target, state, new Set(visited), depth + 1)) return true;
+   413→    }
+   414→  }
+   415→  return false;
+   416→}
+   417→
+   418→// duplicated from lineage.ts to avoid circular import
+   419→function reportRepickSeedSourceRounds(
+   420→  incoming: NormalizedLineageEdge[],
+   421→  state: LineageReportState,
+   422→  visited: Set<string> = new Set(),
+   423→): number[] {
+   424→  return incoming
+   425→    .map((edge) => {
+   426→      const sourceNode = state.nodeMap.get(edge.source);
+   427→      const directSeed =
+   428→        edge.family === "volume" ||
+   429→        edge.kind === "mask" ||
+   430→        (edge.family === "particle" && reportIsVolumeSourceNode(sourceNode));
+   431→      const inheritedSeed = reportIsRepickSetupNode(sourceNode) && reportHasRepickSeed(edge.source, state);
+   432→      if (!directSeed && !inheritedSeed) return null;
+   433→      return reportLineageRound(edge.source, state, new Set(visited));
+   434→    })
+   435→    .filter((value): value is number => Number.isInteger(value));
+   436→}
+   437→
+   438→// duplicated from lineage.ts to avoid circular import
+   439→function reportMaxRoundFromEdges(
+   440→  edges: NormalizedLineageEdge[],
+   441→  state: LineageReportState,
+   442→  visited: Set<string>,
+   443→): number {
+   444→  const rounds = edges.map((edge) => reportLineageRound(edge.source, state, new Set(visited)));
+   445→  return rounds.length ? Math.max(...rounds) : 0;
+   446→}
+   447→
+   448→function reportParticleSourceRound(
+   449→  incoming: NormalizedLineageEdge[],
+   450→  state: LineageReportState,
+   451→  visited: Set<string>,
+   452→): number | null {
+   453→  const particleIncoming = incoming.filter((edge) => edge.family === "particle");
+   454→  return particleIncoming.length
+   455→    ? reportMaxRoundFromEdges(particleIncoming, state, visited)
+   456→    : null;
+   457→}
+   458→
+   459→/**
+   460→ * The "round" of a job — 0 for imports, 1 for first picking round, 2 for a
+   461→ * repick after volume mainline, etc.
+   462→ *
+   463→ * `reportLineageRound` is the single most important function in the
+   464→ * report layer: it dictates which round column a node appears in on the
+   465→ * picture-flow diagram and the outline. Memoised via `state.roundMemo`.
+   466→ */
+   467→// duplicated from lineage.ts to avoid circular import
+   468→export function reportLineageRound(
+   469→  uid: string,
+   470→  state: LineageReportState,
+   471→  visited: Set<string> = new Set(),
+   472→): number {
+   473→  if (!uid || visited.has(uid)) return 0;
+   474→  if (state.roundMemo && state.roundMemo.has(uid)) return state.roundMemo.get(uid)!;
+   475→  visited.add(uid);
+   476→  const node = state.nodeMap.get(uid);
+   477→  if (!node) return 0;
+   478→  const type = node.job_type || "";
+   479→  const finish = (value: number): number => {
+   480→    if (state.roundMemo) state.roundMemo.set(uid, value);
+   481→    return value;
+   482→  };
+   483→
+   484→  if (/import_(movies|micrographs)/i.test(type)) return finish(0);
+   485→  if (/import_particles/i.test(type)) return finish(1);
+   486→
+   487→  const incoming = state.incomingByTarget.get(uid) || [];
+   488→  const maxSourceRound = reportMaxRoundFromEdges(incoming, state, visited);
+   489→  const particleSourceRound = reportParticleSourceRound(incoming, state, visited);
+   490→  const seedSourceRounds = reportRepickSeedSourceRounds(incoming, state, visited);
+   491→  const seedRound = seedSourceRounds.length ? Math.max(...seedSourceRounds) : null;
+   492→
+   493→  if (reportIsRepickSetupNode(node)) {
+   494→    if (seedRound !== null && reportFeedsVolumeMainline(uid, state)) {
+   495→      return finish(Math.max(2, seedRound + 1));
+   496→    }
+   497→    return finish(Math.max(1, (particleSourceRound ?? maxSourceRound) || seedRound || 1));
+   498→  }
+   499→
+   500→  if (reportIsRepickParticleProducer(node)) {
+   501→    const setupSourceRounds = incoming
+   502→      .filter((edge) => reportIsRepickSetupNode(state.nodeMap.get(edge.source)))
+   503→      .map((edge) => reportLineageRound(edge.source, state, new Set(visited)));
+   504→    if (setupSourceRounds.length) {
+   505→      return finish(Math.max(1, ...setupSourceRounds));
+   506→    }
+   507→    if (seedRound !== null && reportFeedsVolumeMainline(uid, state)) {
+   508→      return finish(Math.max(2, seedRound + 1));
+   509→    }
+   510→    return finish(Math.max(1, (particleSourceRound ?? maxSourceRound) || seedRound || 1));
+   511→  }
+   512→
+   513→  if (reportIsPickingNode(node)) {
+   514→    return finish(Math.max(1, (particleSourceRound ?? maxSourceRound) || 1));
+   515→  }
+   516→
+   517→  if (reportIsParticleAuxNode(node)) {
+   518→    return finish(particleSourceRound ?? maxSourceRound);
+   519→  }
+   520→
+   521→  if (/class_2D|select_2D|rebalance_classes_2D|class_probability_filter/i.test(type)) {
+   522→    return finish(Math.max(1, particleSourceRound ?? maxSourceRound));
+   523→  }
+   524→
+   525→  if (
+   526→    /homo_abinit|import_volumes|import_templates|create_templates|hetero|nonuniform|homo_refine|local_refine|class_3D|var_3D|align_3D|homo_reconstruct|sym_expand|particle_subtract|volume_tools|volume_alignment|local_resolution|sharpen|fsc3D|cryodrgn|relion|helix|auto3Dre/i.test(
+   527→      type,
+   528→    )
+   529→  ) {
+   530→    return finish(particleSourceRound ?? maxSourceRound);
+   531→  }
+   532→
+   533→  return finish(particleSourceRound ?? maxSourceRound);
+   534→}
+   535→
+   536→/* ================================================================== */
+   537→/*  Node classification helpers                                       */
+   538→/* ================================================================== */
+   539→
+   540→// duplicated from lineage.ts to avoid circular import
+   541→export function reportNodeIsMajor(node: LineageNode, summary: LineageSummary): boolean {
+   542→  const type = node.job_type || "";
+   543→  if (node.uid === summary.start_uid) return true;
+   544→  if (MAJOR_JOB_TYPES.has(type)) return true;
+   545→  if (/local_refine|topaz_train|topaz_extract/i.test(type)) return true;
+   546→  if (node.particle_count !== null && node.particle_count !== undefined) return true;
+   547→  if (node.volume_count !== null && node.volume_count !== undefined) return true;
+   548→  return false;
+   549→}
+   550→
+   551→// duplicated from lineage.ts to avoid circular import
+   552→export function reportNodeCardKind(node: LineageNode): string {
+   553→  const kind = htmlNodeKind(node);
+   554→  return kind === "exposure" ? "micrograph" : kind;
+   555→}
+   556→
+   557→/** "Micrographs" / "Round N" / "Auxiliary" — the outline stage label. */
+   558→// duplicated from lineage.ts to avoid circular import
+   559→export function reportStageName(
+   560→  node: LineageNode,
+   561→  summary: LineageSummary,
+   562→  state: LineageReportState | null,
+   563→): string {
+   564→  const type = node.job_type || "";
+   565→  if (/import_(movies|micrographs)/i.test(type)) return "Micrographs";
+   566→  const round = state ? reportLineageRound(node.uid, state) : 0;
+   567→  if (round > 0) {
+   568→    return `Round ${round}`;
+   569→  }
+   570→  return "Auxiliary";
+   571→}
+   572→
+   573→// duplicated from lineage.ts to avoid circular import
+   574→export function reportIsPostMapExtraction(
+   575→  node: LineageNode | null | undefined,
+   576→  state: LineageReportState | null,
+   577→): boolean {
+   578→  if (!node || !state || !/extract_micrographs/i.test(node.job_type || "")) return false;
+   579→  const incoming = state.incomingByTarget.get(node.uid) || [];
+   580→  return incoming.some((edge) => {
+   581→    const source = state.nodeMap.get(edge.source);
+   582→    return /class_\d+/i.test(edge.group || "") || edge.family === "volume" || reportIsVolumeSourceNode(source);
+   583→  });
+   584→}
+   585→
+   586→// duplicated from lineage.ts to avoid circular import
+   587→export function reportHasUpstreamSelectInSameRound(
+   588→  uid: string,
+   589→  state: LineageReportState,
+   590→  round: number,
+   591→  visited: Set<string> = new Set(),
+   592→  depth = 0,
+   593→): boolean {
+   594→  if (!uid || visited.has(uid) || depth > 10) return false;
+   595→  visited.add(uid);
+   596→  for (const edge of state.incomingByTarget.get(uid) || []) {
+   597→    const source = state.nodeMap.get(edge.source);
+   598→    if (!source || reportLineageRound(source.uid, state) !== round) continue;
+   599→    if (reportIsSelect2DNode(source)) return true;
+   600→    if (
+   601→      reportIsParticlePipelineNode(source) ||
+   602→      reportIsPickingNode(source) ||
+   603→      reportIsParticleAuxNode(source) ||
+   604→      reportIsRepickSetupNode(source)
+   605→    ) {
+   606→      if (reportHasUpstreamSelectInSameRound(source.uid, state, round, new Set(visited), depth + 1)) {
+   607→        return true;
+   608→      }
+   609→    }
+   610→  }
+   611→  return false;
+   612→}
+   613→
+   614→/** Phase label inside a stage ("导入 / 预处理", "2D", "refine / final", ...). */
+   615→// duplicated from lineage.ts to avoid circular import
+   616→export function reportPhaseName(
+   617→  node: LineageNode,
+   618→  summary: LineageSummary,
+   619→  state: LineageReportState | null,
+   620→): string {
+   621→  const type = node.job_type || "";
+   622→  if (/import_(movies|micrographs)/i.test(type)) return "导入 / 预处理";
+   623→  if (/class_2D|select_2D|rebalance_classes_2D|class_probability_filter/i.test(type)) return "2D";
+   624→  if (/homo_abinit|import_volumes|import_templates|create_templates/i.test(type)) return "初始建模";
+   625→  if (
+   626→    /hetero|nonuniform|homo_refine|local_refine|class_3D|var_3D|align_3D|homo_reconstruct|sym_expand|particle_subtract|volume_tools|volume_alignment|local_resolution|sharpen|fsc3D|cryodrgn|relion|helix|auto3Dre/i.test(
+   627→      type,
+   628→    )
+   629→  ) {
+   630→    return "refine / final";
+   631→  }
+   632→  if (reportIsPostMapExtraction(node, state)) return "refine / final";
+   633→  if (reportIsParticlePipelineNode(node)) {
+   634→    const round = state ? reportLineageRound(node.uid, state) : 0;
+   635→    if (round > 0 && state && reportHasUpstreamSelectInSameRound(node.uid, state, round)) {
+   636→      return "再挑颗粒 / 提取";
+   637→    }
+   638→    return "挑颗粒 / 提取";
+   639→  }
+   640→  return "附属";
+   641→}
+   642→
+   643→/** "颗粒 12345 · 照片 678 · 3.2 Å" — one-line metric string for a node. */
+   644→// duplicated from lineage.ts to avoid circular import
+   645→export function reportMetricText(node: LineageNode | null | undefined, compact = false): string {
+   646→  if (!node) return "";
+   647→  const parts: string[] = [];
+   648→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) {
+   649→    parts.push(`照片 ${fmt(node.micrograph_count)}`);
+   650→  }
+   651→  if (pixelSizeText(node)) parts.push(`pixel ${pixelSizeText(node)}`);
+   652→  if (node.particle_count !== null && node.particle_count !== undefined) {
+   653→    parts.push(`颗粒 ${fmt(node.particle_count)}`);
+   654→  }
+   655→  if (node.class_count !== null && node.class_count !== undefined) {
+   656→    parts.push(`class ${fmt(node.class_count)}`);
+   657→  }
+   658→  if (node.volume_count !== null && node.volume_count !== undefined) {
+   659→    parts.push(`volume ${fmt(node.volume_count)}`);
+   660→  }
+   661→  const res = resolutionText(node);
+   662→  if (res) parts.push(res);
+   663→  const bin = extractionBinText(node);
+   664→  if (bin) parts.push(bin);
+   665→  // popup.js branches on `compact` but returns the same string either way;
+   666→  // keep the branch for verbatim parity.
+   667→  return compact ? parts.join(" · ") : parts.join(" · ");
+   668→}
+   669→
+   670→/** Variant of `reportMetricText` used by the picture-flow particle steps. */
+   671→// duplicated from lineage.ts to avoid circular import
+   672→export function reportPictureParticleMetricText(node: LineageNode): string {
+   673→  const parts: string[] = [];
+   674→  if (node.particle_count !== null && node.particle_count !== undefined) {
+   675→    parts.push(`颗粒 ${fmt(node.particle_count)}`);
+   676→  }
+   677→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) {
+   678→    parts.push(`照片 ${fmt(node.micrograph_count)}`);
+   679→  }
+   680→  const bin = extractionBinText(node);
+   681→  if (bin) parts.push(bin);
+   682→  return parts.join(" · ");
+   683→}
+   684→
+   685→/* ================================================================== */
+   686→/*  Edge normalisation + grouping helpers                             */
+   687→/* ================================================================== */
+   688→
+   689→const REPORT_NORMALIZED_EDGES_CACHE = new WeakMap<
+   690→  LineageSummary,
+   691→  NormalizedLineageEdge[]
+   692→>();
+   693→
+   694→// duplicated from lineage.ts to avoid circular import
+   695→export function reportEdgeKind(edge: LineageEdge): string {
+   696→  return summaryKind(edge);
+   697→}
+   698→
+   699→/** Normalised edges: every edge has `kind` / `family` / `group` filled. */
+   700→// duplicated from lineage.ts to avoid circular import
+   701→export function reportNormalizedEdges(summary: LineageSummary): NormalizedLineageEdge[] {
+   702→  if (summary && REPORT_NORMALIZED_EDGES_CACHE.has(summary)) {
+   703→    return REPORT_NORMALIZED_EDGES_CACHE.get(summary)!;
+   704→  }
+   705→  const edges = (summary.edges || []).map((edge) => {
+   706→    const kind = reportEdgeKind(edge);
+   707→    return {
+   708→      ...edge,
+   709→      kind,
+   710→      family: reportKindFamily(kind) as EdgeFamily,
+   711→      group: htmlGroupLabel(edge),
+   712→    } as NormalizedLineageEdge;
+   713→  });
+   714→  if (summary) REPORT_NORMALIZED_EDGES_CACHE.set(summary, edges);
+   715→  return edges;
+   716→}
+   717→
+   718→/** Group label used on edge pills (source_group → input_name → ""). */
+   719→export function htmlGroupLabel(edge: LineageEdge): string {
+   720→  return edge.source_group || edge.input_name || "";
+   721→}
+   722→
+   723→interface GroupedIncomingItem {
+   724→  source: string;
+   725→  kind: string;
+   726→  family: EdgeFamily;
+   727→  groups: string[];
+   728→}
+   729→
+   730→interface GroupedOutgoingItem {
+   731→  target: string;
+   732→  kind: string;
+   733→  family: EdgeFamily;
+   734→  groups: string[];
+   735→}
+   736→
+   737→// duplicated from lineage.ts to avoid circular import
+   738→export function reportGroupedIncoming(
+   739→  summary: LineageSummary,
+   740→  nodeUid: string,
+   741→): GroupedIncomingItem[] {
+   742→  const grouped = new Map<string, GroupedIncomingItem>();
+   743→  for (const edge of reportNormalizedEdges(summary).filter((item) => item.target === nodeUid)) {
+   744→    const key = `${edge.source}\t${edge.kind}`;
+   745→    if (!grouped.has(key)) {
+   746→      grouped.set(key, { source: edge.source, kind: edge.kind, family: edge.family, groups: [] });
+   747→    }
+   748→    const entry = grouped.get(key)!;
+   749→    if (edge.group && !entry.groups.includes(edge.group)) {
+   750→      entry.groups.push(edge.group);
+   751→    }
+   752→  }
+   753→  return Array.from(grouped.values()).sort(
+   754→    (a, b) => reportJobNum(a.source) - reportJobNum(b.source),
+   755→  );
+   756→}
+   757→
+   758→// duplicated from lineage.ts to avoid circular import
+   759→export function reportGroupedOutgoing(
+   760→  summary: LineageSummary,
+   761→  nodeUid: string,
+   762→): GroupedOutgoingItem[] {
+   763→  const grouped = new Map<string, GroupedOutgoingItem>();
+   764→  for (const edge of reportNormalizedEdges(summary).filter((item) => item.source === nodeUid)) {
+   765→    const key = `${edge.target}\t${edge.kind}`;
+   766→    if (!grouped.has(key)) {
+   767→      grouped.set(key, { target: edge.target, kind: edge.kind, family: edge.family, groups: [] });
+   768→    }
+   769→    const entry = grouped.get(key)!;
+   770→    if (edge.group && !entry.groups.includes(edge.group)) {
+   771→      entry.groups.push(edge.group);
+   772→    }
+   773→  }
+   774→  return Array.from(grouped.values()).sort(
+   775→    (a, b) => reportJobNum(a.target) - reportJobNum(b.target),
+   776→  );
+   777→}
+   778→
+   779→/* ================================================================== */
+   780→/*  Trace / outline helpers (visible-source chasing)                  */
+   781→/* ================================================================== */
+   782→
+   783→/**
+   784→ * Walk back from `sourceUid` through same-family edges until we hit a node
+   785→ * that is in `visible`. Memoised on the `incomingByTarget` map itself
+   786→ * (`__traceVisibleMemo`).
+   787→ */
+   788→// duplicated from lineage.ts to avoid circular import
+   789→export function reportTraceVisibleSources(
+   790→  sourceUid: string,
+   791→  family: EdgeFamily | string,
+   792→  visible: Set<string>,
+   793→  incomingByTarget: IncomingByTargetMap,
+   794→  visited: Set<string> = new Set(),
+   795→  depth = 0,
+   796→): string[] {
+   797→  const memo = incomingByTarget.__traceVisibleMemo;
+   798→  const memoKey = `${sourceUid}\t${family}`;
+   799→  const useMemo = visited.size === 0 && memo;
+   800→  if (useMemo && memo!.has(memoKey)) return memo!.get(memoKey)!;
+   801→  if (!sourceUid || visited.has(sourceUid) || depth > 8) return [];
+   802→  visited.add(sourceUid);
+   803→  if (visible.has(sourceUid)) {
+   804→    const result: string[] = [sourceUid];
+   805→    if (useMemo) memo!.set(memoKey, result);
+   806→    return result;
+   807→  }
+   808→  const allIncoming = incomingByTarget.get(sourceUid) || [];
+   809→  let incoming = allIncoming.filter((edge) => edge.family === family);
+   810→  if (!incoming.length) incoming = allIncoming;
+   811→  if (!incoming.length) return [];
+   812→  const results: string[] = [];
+   813→  for (const edge of incoming) {
+   814→    results.push(
+   815→      ...reportTraceVisibleSources(edge.source, family, visible, incomingByTarget, new Set(visited), depth + 1),
+   816→    );
+   817→  }
+   818→  const result = Array.from(new Set(results)).sort((a, b) => reportJobNum(a) - reportJobNum(b));
+   819→  if (useMemo) memo!.set(memoKey, result);
+   820→  return result;
+   821→}
+   822→
+   823→/** Outline = major nodes only, sorted by numeric uid. */
+   824→// duplicated from lineage.ts to avoid circular import
+   825→export function reportVisibleOutlineNodes(
+   826→  summary: LineageSummary,
+   827→  nodeMap: Map<string, LineageNode>,
+   828→): LineageNode[] {
+   829→  const nodes = (summary.nodes || []).filter((node) => {
+   830→    if (reportNodeIsMajor(node, summary)) return true;
+   831→    return false;
+   832→  });
+   833→  return nodes.sort((a, b) => uidOrder(a) - uidOrder(b));
+   834→}
+   835→
+   836→/** Build the mutable report state (nodeMap, edge maps, memos, ...). */
+   837→// duplicated from lineage.ts to avoid circular import
+   838→export function reportBuildLineageState(summary: LineageSummary): LineageReportState {
+   839→  const nodeMap = summaryNodeMap(summary);
+   840→  const edges = reportNormalizedEdges(summary);
+   841→  const incomingByTarget: IncomingByTargetMap = new Map() as IncomingByTargetMap;
+   842→  const outgoingBySource = new Map<string, NormalizedLineageEdge[]>();
+   843→  for (const edge of edges) {
+   844→    if (!incomingByTarget.has(edge.target)) incomingByTarget.set(edge.target, []);
+   845→    incomingByTarget.get(edge.target)!.push(edge);
+   846→    if (!outgoingBySource.has(edge.source)) outgoingBySource.set(edge.source, []);
+   847→    outgoingBySource.get(edge.source)!.push(edge);
+   848→  }
+   849→  incomingByTarget.__traceVisibleMemo = new Map();
+   850→  const outlineNodes = reportVisibleOutlineNodes(summary, nodeMap);
+   851→  const visible = new Set(outlineNodes.map((node) => node.uid));
+   852→  return {
+   853→    nodeMap,
+   854→    edges,
+   855→    incomingByTarget,
+   856→    outgoingBySource,
+   857→    outlineNodes,
+   858→    visible,
+   859→    roundMemo: new Map(),
+   860→    repickSeedMemo: new Map(),
+   861→  };
+   862→}
+   863→
+   864→/** Visible ancestor uids (one per family) for an outline mini-node. */
+   865→// duplicated from lineage.ts to avoid circular import
+   866→export function reportOutlineRefs(
+   867→  uid: string,
+   868→  state: LineageReportState,
+   869→): Array<[string, EdgeFamily | string]> {
+   870→  const refs = new Map<string, [string, EdgeFamily | string]>();
+   871→  for (const edge of state.incomingByTarget.get(uid) || []) {
+   872→    for (const source of reportTraceVisibleSources(
+   873→      edge.source,
+   874→      edge.family,
+   875→      state.visible,
+   876→      state.incomingByTarget,
+   877→    )) {
+   878→      if (!state.visible.has(source) || source === uid) continue;
+   879→      const key = `${source}\t${edge.family}`;
+   880→      if (!refs.has(key)) refs.set(key, [source, edge.family]);
+   881→    }
+   882→  }
+   883→  const familyOrder: Record<string, number> = {
+   884→    exposure: 1,
+   885→    micrograph: 1,
+   886→    particle: 2,
+   887→    volume: 3,
+   888→    template: 4,
+   889→    other: 5,
+   890→  };
+   891→  return Array.from(refs.values()).sort((a, b) => {
+   892→    const byJob = reportJobNum(a[0]) - reportJobNum(b[0]);
+   893→    if (byJob) return byJob;
+   894→    return (familyOrder[a[1] as string] || 9) - (familyOrder[b[1] as string] || 9);
+   895→  });
+   896→}
+   897→
+   898→/** Outline trace HTML for one (targetUid, sourceUid, family) triple. */
+   899→// duplicated from lineage.ts to avoid circular import
+   900→export function reportSourceTrace(
+   901→  targetUid: string,
+   902→  sourceUid: string,
+   903→  family: EdgeFamily | string,
+   904→  state: LineageReportState,
+   905→): string {
+   906→  if (state.visible.has(sourceUid)) return "";
+   907→  const refs: string[] = [];
+   908→  for (const edge of state.incomingByTarget.get(sourceUid) || []) {
+   909→    if (edge.family === family) {
+   910→      refs.push(
+   911→        ...reportTraceVisibleSources(edge.source, family, state.visible, state.incomingByTarget),
+   912→      );
+   913→    }
+   914→  }
+   915→  if (!refs.length) {
+   916→    for (const edge of state.incomingByTarget.get(sourceUid) || []) {
+   917→      refs.push(
+   918→        ...reportTraceVisibleSources(edge.source, family, state.visible, state.incomingByTarget),
+   919→      );
+   920→    }
+   921→  }
+   922→  const dedupedRefs = Array.from(new Set(refs))
+   923→    .filter((uid) => uid !== sourceUid && state.visible.has(uid))
+   924→    .sort((a, b) => reportJobNum(a) - reportJobNum(b));
+   925→  if (!dedupedRefs.length) return "";
+   926→  const route = `${escHtml(targetUid)} &larr; ${escHtml(sourceUid)} &larr; ${dedupedRefs
+   927→    .map(escHtml)
+   928→    .join(" / ")}`;
+   929→  const lines = dedupedRefs
+   930→    .map((uid) => {
+   931→      const node = state.nodeMap.get(uid);
+   932→      const metric = reportMetricText(node, true);
+   933→      return `<div class="up-line">${escHtml(uid)} ${escHtml(node ? node.job_type || "" : "")}${
+   934→        metric ? ` ${escHtml(metric)}` : ""
+   935→      }</div>`;
+   936→    })
+   937→    .join("");
+   938→  return `<div class="up-route">${route}</div><div class="up-list">${lines}</div>`;
+   939→}
+   940→
+   941→/** Round nodes filtered by `predicate`, sorted by numeric uid. */
+   942→// duplicated from lineage.ts to avoid circular import
+   943→export function reportRoundNodes(
+   944→  summary: LineageSummary,
+   945→  state: LineageReportState,
+   946→  round: number,
+   947→  predicate: (node: LineageNode) => boolean,
+   948→): LineageNode[] {
+   949→  return (summary.nodes || [])
+   950→    .filter((node) => reportLineageRound(node.uid, state) === round)
+   951→    .filter(predicate)
+   952→    .sort((a, b) => reportJobNum(a.uid) - reportJobNum(b.uid));
+   953→}
+   954→
+   955→/** Round particle nodes, optionally split by pre/post select_2D. */
+   956→// duplicated from lineage.ts to avoid circular import
+   957→export function reportRoundParticleNodes(
+   958→  summary: LineageSummary,
+   959→  state: LineageReportState,
+   960→  round: number,
+   961→  postSelect: boolean | null = null,
+   962→): LineageNode[] {
+   963→  return reportRoundNodes(summary, state, round, reportIsParticlePipelineNode).filter((node) => {
+   964→    if (postSelect === null) return true;
+   965→    return reportHasUpstreamSelectInSameRound(node.uid, state, round) === postSelect;
+   966→  });
+   967→}
+   968→
+   969→/* ================================================================== */
+   970→/*  html* helpers (HTML-string fragments)                              */
+   971→/* ================================================================== */
+   972→
+   973→export function htmlMetricChips(node: LineageNode): string {
+   974→  const chips: Array<[string, unknown]> = [];
+   975→  if (node.particle_count !== null && node.particle_count !== undefined) {
+   976→    chips.push(["颗粒数", node.particle_count]);
+   977→  }
+   978→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) {
+   979→    chips.push(["照片数", node.micrograph_count]);
+   980→  }
+   981→  if (pixelSizeText(node)) chips.push(["pixel size", pixelSizeText(node)]);
+   982→  if (node.volume_count !== null && node.volume_count !== undefined) {
+   983→    chips.push(["volume 数", node.volume_count]);
+   984→  }
+   985→  return chips
+   986→    .map(([label, value]) => `<span class="metric">${label}: ${fmt(value)}</span>`)
+   987→    .join("");
+   988→}
+   989→
+   990→export function htmlCompactMetric(node: LineageNode | null | undefined): string {
+   991→  if (!node) return "";
+   992→  const parts: string[] = [];
+   993→  if (node.particle_count !== null && node.particle_count !== undefined) {
+   994→    parts.push(`颗粒数 ${fmt(node.particle_count)}`);
+   995→  }
+   996→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) {
+   997→    parts.push(`照片数 ${fmt(node.micrograph_count)}`);
+   998→  }
+   999→  if (pixelSizeText(node)) parts.push(`pixel ${pixelSizeText(node)}`);
+  1000→  if (node.volume_count !== null && node.volume_count !== undefined) {
+  1001→    parts.push(`volume 数 ${fmt(node.volume_count)}`);
+  1002→  }
+  1003→  return parts.join("; ");
+  1004→}
+  1005→
+  1006→export function htmlJobRef(uid: string, nodeMap: Map<string, LineageNode>): string {
+  1007→  const node = nodeMap.get(uid);
+  1008→  return node
+  1009→    ? `<a href="#${escHtml(uid)}">${escHtml(uid)} ${escHtml(node.job_type || "")}</a>`
+  1010→    : escHtml(uid);
+  1011→}
+  1012→
+  1013→export function htmlRelationPills(edge: NormalizedLineageEdge): string {
+  1014→  const kind = summaryKind(edge);
+  1015→  const cls = htmlKindClass(kind);
+  1016→  const groups: string[] = [];
+  1017→  const group = htmlGroupLabel(edge);
+  1018→  if (group) groups.push(group);
+  1019→  return `<span class="edge-pills"><span class="kind-pill kind-${cls}">${escHtml(
+  1020→    htmlKindLabel(kind),
+  1021→  )}</span>${groups
+  1022→    .map((item) => `<span class="group-pill group-${cls}">${escHtml(item)}</span>`)
+  1023→    .join("")}</span>`;
+  1024→}
+  1025→
+  1026→/** Group edges by (peer, kind, group) to collapse duplicate edges. */
+  1027→export function groupedHtmlEdges(
+  1028→  edges: NormalizedLineageEdge[],
+  1029→  peerKey: "source" | "target",
+  1030→): NormalizedLineageEdge[] {
+  1031→  const grouped = new Map<string, NormalizedLineageEdge>();
+  1032→  for (const edge of edges) {
+  1033→    const peer = edge[peerKey];
+  1034→    if (!peer) continue;
+  1035→    const kind = summaryKind(edge);
+  1036→    const group = htmlGroupLabel(edge);
+  1037→    const key = `${peer}\t${kind}\t${group}`;
+  1038→    if (!grouped.has(key)) grouped.set(key, { ...edge, kind, peer } as NormalizedLineageEdge);
+  1039→  }
+  1040→  return Array.from(grouped.values());
+  1041→}
+  1042→
+  1043→/** Hop rows for small sources collapsed under a major source. */
+  1044→export function htmlSmallSourceHops(
+  1045→  peerUid: string,
+  1046→  kind: string,
+  1047→  edges: NormalizedLineageEdge[],
+  1048→  nodeMap: Map<string, LineageNode>,
+  1049→): string {
+  1050→  const peer = nodeMap.get(peerUid);
+  1051→  if (!peer || importance(peer, "") !== "small") return "";
+  1052→  const incoming = edges
+  1053→    .filter((edge) => edge.target === peerUid && summaryKind(edge) === kind)
+  1054→    .slice(0, 3);
+  1055→  if (!incoming.length) return "";
+  1056→  return `<div class="hop-stack">${incoming
+  1057→    .map((edge) => {
+  1058→      const source = nodeMap.get(edge.source);
+  1059→      const cls = htmlKindClass(summaryKind(edge));
+  1060→      const metric = htmlCompactMetric(source);
+  1061→      return `<div class="hop-row hop-${cls}"><span class="hop-label">上一层来源</span><span class="hop-main">${htmlJobRef(
+  1062→        edge.source,
+  1063→        nodeMap,
+  1064→      )} <span class="muted">-> ${escHtml(peerUid)}</span></span>${htmlRelationPills(
+  1065→        edge,
+  1066→      )}${
+  1067→        metric ? `<span class="hop-metric">${metric}</span>` : ""
+  1068→      }</div>`;
+  1069→    })
+  1070→    .join("")}</div>`;
+  1071→}
+  1072→
+  1073→/** The "来源 / 流向" grid for a single node card (V1 layout). */
+  1074→export function htmlSourceRows(
+  1075→  node: LineageNode,
+  1076→  summary: LineageSummary,
+  1077→  nodeMap: Map<string, LineageNode>,
+  1078→): string {
+  1079→  const edges = summary.edges || [];
+  1080→  const incoming = groupedHtmlEdges(
+  1081→    edges.filter((edge) => edge.target === node.uid) as NormalizedLineageEdge[],
+  1082→    "source",
+  1083→  );
+  1084→  const outgoing = groupedHtmlEdges(
+  1085→    edges.filter((edge) => edge.source === node.uid) as NormalizedLineageEdge[],
+  1086→    "target",
+  1087→  );
+  1088→  if (!incoming.length && !outgoing.length) return "";
+  1089→  const inHtml = incoming.length
+  1090→    ? `<div class="source-col"><b>来源</b>${incoming
+  1091→        .map(
+  1092→          (edge) =>
+  1093→            `<div class="source-row"><span>${htmlJobRef(edge.source, nodeMap)}</span>${htmlRelationPills(
+  1094→              edge,
+  1095→            )}</div>${htmlSmallSourceHops(edge.source, summaryKind(edge), edges as NormalizedLineageEdge[], nodeMap)}`,
+  1096→        )
+  1097→        .join("")}</div>`
+  1098→    : "";
+  1099→  const outHtml = outgoing.length
+  1100→    ? `<div class="source-col source-col-out"><b>流向</b>${outgoing
+  1101→        .slice(0, 10)
+  1102→        .map(
+  1103→          (edge) =>
+  1104→            `<div class="source-row source-row-out"><span>${htmlJobRef(
+  1105→              edge.target,
+  1106→              nodeMap,
+  1107→            )}</span>${htmlRelationPills(edge)}</div>`,
+  1108→        )
+  1109→        .join("")}</div>`
+  1110→    : "";
+  1111→  return `<div class="source-grid">${inHtml}${outHtml}</div>`;
+  1112→}
+  1113→
+  1114→/** Class table for the V1 layout (compact). */
+  1115→export function htmlClassTable(node: LineageNode, summary: LineageSummary): string {
+  1116→  const classJob = (summary.class_split_jobs || []).find((item) => item.uid === node.uid);
+  1117→  if (!classJob || !classJob.classes || !classJob.classes.length) return "";
+  1118→  const rows = classJob.classes
+  1119→    .map((cls) => {
+  1120→      const links = (cls.maps || [])
+  1121→        .map((map) => `<a href="${escHtml(map.download_url)}" target="_blank">${escHtml(map.result_name)}</a>`)
+  1122→        .join(" ");
+  1123→      return `<tr><td>${escHtml(cls.class_index)}</td><td>${
+  1124→        cls.particle_count === null || cls.particle_count === undefined
+  1125→          ? ""
+  1126→          : fmt(cls.particle_count)
+  1127→      }</td><td>${
+  1128→        cls.particle_percent === null || cls.particle_percent === undefined
+  1129→          ? ""
+  1130→          : escHtml(cls.particle_percent)
+  1131→      }</td><td>${links}</td></tr>`;
+  1132→    })
+  1133→    .join("");
+  1134→  return `<h3>Class / MRC 来源</h3><table><tr><th>Class</th><th>Particles</th><th>%</th><th>Map downloads</th></tr>${rows}</table>`;
+  1135→}
+  1136→
+  1137→/** Map download table for the start node (V1 layout). */
+  1138→export function htmlMapTable(node: LineageNode, summary: LineageSummary): string {
+  1139→  if (node.uid !== summary.start_uid || !summary.map_download_urls) return "";
+  1140→  const rows = Object.entries(summary.map_download_urls)
+  1141→    .map(
+  1142→      ([name, url]) =>
+  1143→        `<tr><td>${escHtml(name)}</td><td><a href="${escHtml(url)}" target="_blank">download</a></td></tr>`,
+  1144→    )
+  1145→    .join("");
+  1146→  return `<h3>MRC Maps</h3><table><tr><th>Result</th><th>Download</th></tr>${rows}</table>`;
+  1147→}
+  1148→
+  1149→/* ================================================================== */
+  1150→/*  V1 layout (kept for reference / backwards compatibility)           */
+  1151→/* ================================================================== */
+  1152→
+  1153→/** V1 HTML builder — older single-column flow layout. */
+  1154→export function buildLineageHtml(summary: LineageSummary): string {
+  1155→  const nodeMap = summaryNodeMap(summary);
+  1156→  const nodes = (summary.nodes || []).filter((node) => {
+  1157→    const cls = importance(node, summary.start_uid);
+  1158→    return cls === "major" || cls === "final";
+  1159→  });
+  1160→  const css = [
+  1161→    "body{font-family:'Times New Roman',Times,serif;margin:24px;color:#17202a;background:#f8fafc}",
+  1162→    "h1,h2,h3{margin:0 0 10px} h3{font-size:16px;margin-top:14px} a{color:#0b74de;text-decoration:none}",
+  1163→    ".muted{color:#64748b}.metric{display:inline-block;margin:0 8px 8px 0;padding:3px 8px;border:1px solid #cbd5e1;border-radius:999px;background:#f8fafc;font-size:12px}",
+  1164→    ".flow{position:relative;margin-left:12px}.flow::before{content:'';position:absolute;left:10px;top:0;bottom:0;width:3px;background:#cbd5e1}.flow-card{position:relative;background:white;border:1px solid #d8e0ea;border-left:5px solid #0284c7;border-radius:8px;margin:14px 0 14px 34px;padding:14px}.flow-card::before{content:'';position:absolute;left:-31px;top:24px;width:24px;height:3px;background:#38bdf8}.flow-card::after{content:'';position:absolute;left:-39px;top:18px;width:14px;height:14px;border-radius:50%;background:#0284c7;border:3px solid #e0f2fe}",
+  1165→    ".card-exposure{background:#f7fef9;border-left-color:#16a34a}.card-exposure::before{background:#16a34a}.card-exposure::after{background:#16a34a;border-color:#dcfce7}.card-particle{background:#fffdf4;border-left-color:#d97706}.card-particle::before{background:#d97706}.card-particle::after{background:#d97706;border-color:#fef3c7}.card-volume{background:#f8faff;border-left-color:#2563eb}.card-volume::before{background:#2563eb}.card-volume::after{background:#2563eb;border-color:#e0e7ff}",
+  1166→    ".source-grid{display:grid;grid-template-columns:1.15fr .85fr;gap:12px;margin:10px 0}.source-col-out{background:#f8fafc;border:1px solid #edf2f7;border-radius:8px;padding:8px}.source-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0;padding:6px 8px;background:#fff;border:1px solid #dbe5ee;border-radius:6px}.source-row-out{background:#fbfdff;border-color:#edf2f7}",
+  1167→    ".hop-stack{display:grid;gap:5px;margin:0 0 8px 18px;padding-left:12px;border-left:2px solid #dbe5ee}.hop-row{display:grid;grid-template-columns:auto minmax(210px,1fr) auto auto;align-items:center;gap:8px;padding:6px 8px;border:1px solid #dbe5ee;border-radius:6px;background:#fbfdff;font-size:12px}.hop-label{font-size:11px;color:#64748b;background:#eef2f7;border:1px solid #dbe5ee;border-radius:999px;padding:1px 7px}.hop-main{font-weight:600}.hop-metric{justify-self:end;color:#475569;white-space:nowrap}.hop-particle{background:#fffdf4;border-color:#fcd34d}.hop-volume{background:#f8faff;border-color:#a5b4fc}.hop-exposure{background:#f7fef9;border-color:#86efac}",
+  1168→    ".edge-pills{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.kind-pill,.group-pill{white-space:nowrap;border-radius:999px;padding:2px 7px;font-size:12px}.kind-pill{color:#475569;background:#eef2f7;border:1px solid #dbe5ee}.group-pill{color:#334155;background:#f8fafc;border:1px solid #cbd5e1}.kind-particle,.group-particle{background:#fef3c7;border-color:#fcd34d;color:#78350f}.kind-volume,.group-volume{background:#e0e7ff;border-color:#a5b4fc;color:#1e3a8a}.kind-exposure,.group-exposure{background:#dcfce7;border-color:#86efac;color:#14532d}.kind-template,.group-template{background:#f1f5f9;border-color:#cbd5e1;color:#334155}",
+  1169→    "table{border-collapse:collapse;width:100%;font-size:13px} th,td{border-bottom:1px solid #e5e7eb;padding:6px;text-align:left;vertical-align:top}",
+  1170→  ].join("\n");
+  1171→  const cards = nodes
+  1172→    .map(
+  1173→      (node) =>
+  1174→        `<article id="${escHtml(node.uid)}" class="flow-card card-${htmlNodeKind(node)}"><h2>${escHtml(
+  1175→          node.uid,
+  1176→        )} ${escHtml(node.job_type || "")}</h2><div>${htmlMetricChips(node)}</div>${htmlSourceRows(
+  1177→          node,
+  1178→          summary,
+  1179→          nodeMap,
+  1180→        )}${htmlClassTable(node, summary)}${htmlMapTable(node, summary)}</article>`,
+  1181→    )
+  1182→    .join("\n");
+  1183→  return `<!doctype html><html><head><meta charset="utf-8"><title>CryoSmart ${escHtml(
+  1184→    summary.project_uid,
+  1185→  )} ${escHtml(summary.start_uid)} Lineage</title><style>${css}</style></head><body><h1>CryoSmart Lineage Report: ${escHtml(
+  1186→    summary.project_uid,
+  1187→  )}/${escHtml(summary.start_uid)}</h1><p class="muted">Nodes: ${(summary.nodes || []).length} | data edges: ${
+  1188→    (summary.edges || []).length
+  1189→  }</p><h2>Main Data Chain</h2><div class="flow">${cards}</div></body></html>`;
+  1190→}
+  1191→
+  1192→/* ================================================================== */
+  1193→/*  V2 left outline (mini-nodes grouped by stage/phase)               */
+  1194→/* ================================================================== */
+  1195→
+  1196→/** A single outline mini-node card. */
+  1197→export function reportMiniNode(node: LineageNode, state: LineageReportState): string {
+  1198→  const kind = reportNodeCardKind(node);
+  1199→  const refs = reportOutlineRefs(node.uid, state)
+  1200→    .map(
+  1201→      ([uid, family]) =>
+  1202→        `<i class="ref-pill ${escHtml(family === "exposure" ? "micrograph" : family)}">${escHtml(
+  1203→          uid,
+  1204→        )}</i>`,
+  1205→    )
+  1206→    .join("");
+  1207→  const metric = reportMetricText(node, true);
+  1208→  return `<a class="mini-node ${escHtml(kind)}" href="#card-${escHtml(
+  1209→    node.uid,
+  1210→  )}"><b>${escHtml(node.uid)}</b><span>${escHtml(node.job_type || "")}</span>${
+  1211→    metric ? `<em>${escHtml(metric)}</em>` : ""
+  1212→  }<p class="mini-refs">${refs}</p></a>`;
+  1213→}
+  1214→
+  1215→/** The left outline panel — stages → phases → mini-node grid. */
+  1216→export function reportOutline(summary: LineageSummary, state: LineageReportState): string {
+  1217→  const byStage = new Map<string, LineageNode[]>();
+  1218→  for (const node of state.outlineNodes) {
+  1219→    const stage = reportStageName(node, summary, state);
+  1220→    if (!byStage.has(stage)) byStage.set(stage, []);
+  1221→    byStage.get(stage)!.push(node);
+  1222→  }
+  1223→  const roundStages = Array.from(byStage.keys())
+  1224→    .filter((stage) => /^Round \d+$/i.test(stage))
+  1225→    .sort((a, b) => Number(a.match(/\d+/)?.[0] || 0) - Number(b.match(/\d+/)?.[0] || 0));
+  1226→  const stageOrder = ["Micrographs", ...roundStages, "Auxiliary"];
+  1227→  const phaseOrder = [
+  1228→    "导入 / 预处理",
+  1229→    "挑颗粒 / 提取",
+  1230→    "2D",
+  1231→    "再挑颗粒 / 提取",
+  1232→    "初始建模",
+  1233→    "refine / final",
+  1234→    "附属",
+  1235→  ];
+  1236→  return stageOrder
+  1237→    .filter((stage) => (byStage.get(stage) || []).length)
+  1238→    .map((stage, idx, stages) => {
+  1239→      const nodes = byStage.get(stage) || [];
+  1240→      const byPhase = new Map<string, LineageNode[]>();
+  1241→      for (const node of nodes) {
+  1242→        const phase = reportPhaseName(node, summary, state);
+  1243→        if (!byPhase.has(phase)) byPhase.set(phase, []);
+  1244→        byPhase.get(phase)!.push(node);
+  1245→      }
+  1246→      const phaseHtml = phaseOrder
+  1247→        .filter((phase) => (byPhase.get(phase) || []).length)
+  1248→        .map((phase) => {
+  1249→          const phaseNodes = byPhase
+  1250→            .get(phase)!
+  1251→            .map((node) => reportMiniNode(node, state))
+  1252→            .join("");
+  1253→          return `<div class="phase"><div class="phase-label">${escHtml(
+  1254→            phase,
+  1255→          )}</div><div class="stage-grid">${phaseNodes}</div></div>`;
+  1256→        })
+  1257→        .join("");
+  1258→      const arrow = idx < stages.length - 1 ? `<div class="stage-arrow">&darr;</div>` : "";
+  1259→      return `<div class="stage"><h3>${escHtml(stage)}</h3>${phaseHtml}</div>${arrow}`;
+  1260→    })
+  1261→    .join("");
+  1262→}
+  1263→
+  1264→/* ================================================================== */
+  1265→/*  V2 right-pane card pieces                                          */
+  1266→/* ================================================================== */
+  1267→
+  1268→/** "来源" table for a single node — direct sources + collapsed upstreams. */
+  1269→export function reportSourceTable(
+  1270→  node: LineageNode,
+  1271→  summary: LineageSummary,
+  1272→  state: LineageReportState,
+  1273→): string {
+  1274→  const incoming = reportGroupedIncoming(summary, node.uid);
+  1275→  if (!incoming.length) return "";
+  1276→  const rows = incoming
+  1277→    .map((edge) => {
+  1278→      const source = state.nodeMap.get(edge.source);
+  1279→      const kindCls = htmlKindClass(edge.kind);
+  1280→      const groups = edge.groups.join(", ");
+  1281→      const metric = reportMetricText(source, true);
+  1282→      return `<tr><td class="kind-cell ${escHtml(kindCls)}"><i></i>${escHtml(
+  1283→        reportKindLabel(edge.kind),
+  1284→      )}</td><td><a href="#card-${escHtml(edge.source)}">${escHtml(edge.source)} ${escHtml(
+  1285→        source ? source.job_type || "" : "",
+  1286→      )}</a>${metric ? `<em>${escHtml(metric)}</em>` : ""}</td><td>${escHtml(
+  1287→        groups,
+  1288→      )}</td><td class="up-cell">${reportSourceTrace(
+  1289→        node.uid,
+  1290→        edge.source,
+  1291→        edge.family,
+  1292→        state,
+  1293→      )}</td></tr>`;
+  1294→    })
+  1295→    .join("");
+  1296→  return `<div class="source-block"><h3>来源</h3><table class="source-table"><thead><tr><th>类型</th><th>直接来源</th><th>引用</th><th>合并上游</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  1297→}
+  1298→
+  1299→/** "输出到" side panel for a single node. */
+  1300→export function reportOutgoingBox(
+  1301→  node: LineageNode,
+  1302→  summary: LineageSummary,
+  1303→  state: LineageReportState,
+  1304→): string {
+  1305→  const outgoing = reportGroupedOutgoing(summary, node.uid);
+  1306→  if (!outgoing.length) {
+  1307→    return `<aside class="job-out"><h3>输出到</h3><span class="quiet">最终节点</span></aside>`;
+  1308→  }
+  1309→  const rows = outgoing
+  1310→    .slice(0, 8)
+  1311→    .map((edge) => {
+  1312→      const target = state.nodeMap.get(edge.target);
+  1313→      return `<div><b>${escHtml(reportKindLabel(edge.kind))}</b> -> ${escHtml(
+  1314→        edge.target,
+  1315→      )} ${escHtml(target ? target.job_type || "" : "")}</div>`;
+  1316→    })
+  1317→    .join("");
+  1318→  return `<aside class="job-out"><h3>输出到</h3>${rows}</aside>`;
+  1319→}
+  1320→
+  1321→/** Filter a node's `maps` to those that look like normal (non-mask) maps. */
+  1322→export function normalMapAssets(node: LineageNode): MapAsset[] {
+  1323→  return (node.maps || []).filter((item) => {
+  1324→    const group = String(item.group || "");
+  1325→    const volumeGroup = item.group_type ? item.group_type === "volume" : !/mask/i.test(group);
+  1326→    return volumeGroup && (item.result_name === "map" || item.download_url.endsWith(".map"));
+  1327→  });
+  1328→}
+  1329→
+  1330→/** `<img>` tag with local src + onerror fallback to remote URL. */
+  1331→export function reportImgTag(
+  1332→  nodeUid: string,
+  1333→  name: string,
+  1334→  remoteSrc: string | null | undefined,
+  1335→  className = "",
+  1336→  alt = "image",
+  1337→): string {
+  1338→  if (!remoteSrc) return "";
+  1339→  const localSrc = localImageFilename(nodeUid, name);
+  1340→  const cls = className ? ` class="${escHtml(className)}"` : "";
+  1341→  return `<img${cls} src="${escHtml(localSrc)}" data-remote-src="${escHtml(
+  1342→    remoteSrc,
+  1343→  )}" onerror="this.onerror=null;this.src=this.dataset.remoteSrc" alt="${escHtml(alt)}">`;
+  1344→}
+  1345→
+  1346→/** Grid of image boxes (used by media block). */
+  1347→export function reportImageBoxes(
+  1348→  nodeUid: string,
+  1349→  images: Array<ImageAsset | null | undefined> | null | undefined,
+  1350→  limit = 4,
+  1351→): string {
+  1352→  const good = (images || [])
+  1353→    .filter((item): item is ImageAsset => Boolean(item && item.url && (item as ImageAsset).src))
+  1354→    .slice(0, limit);
+  1355→  if (!good.length) return "";
+  1356→  return `<div class="imgs">${good
+  1357→    .map((item) => {
+  1358→      const localName = (item as ImageAsset & { local_name?: string }).local_name || item.name || "image";
+  1359→      const originalUrl = item.original_url || item.url;
+  1360→      return `<figure class="imgbox"><a href="${escHtml(originalUrl)}" target="_blank">${reportImgTag(
+  1361→        nodeUid,
+  1362→        localName,
+  1363→        item.src,
+  1364→        "",
+  1365→        item.name || "image",
+  1366→      )}</a><figcaption>${escHtml(item.name || "image")} <a href="${escHtml(
+  1367→        originalUrl,
+  1368→      )}" target="_blank">打开</a></figcaption></figure>`;
+  1369→    })
+  1370→    .join("")}</div>`;
+  1371→}
+  1372→
+  1373→/** Micrograph preview + Select 2D media block. */
+  1374→export function reportMediaBlock(node: LineageNode): string {
+  1375→  const chunks: string[] = [];
+  1376→  if (
+  1377→    node.job_type === "import_micrographs" &&
+  1378→    Array.isArray(node.representative_micrograph_images)
+  1379→  ) {
+  1380→    const html = reportImageBoxes(node.uid, node.representative_micrograph_images, 3);
+  1381→    if (html) {
+  1382→      chunks.push(`<div class="media-block"><h3>原始 micrographs 预览</h3>${html}</div>`);
+  1383→    }
+  1384→  }
+  1385→
+  1386→  if (node.select_2d) {
+  1387→    const s = node.select_2d;
+  1388→    const chips: string[] = [];
+  1389→    if (s.particles_selected !== null && s.particles_selected !== undefined) {
+  1390→      chips.push(`<span class="chip particle">保留颗粒: ${fmt(s.particles_selected)}</span>`);
+  1391→    }
+  1392→    if (s.particles_excluded !== null && s.particles_excluded !== undefined) {
+  1393→      chips.push(`<span class="chip particle">排除颗粒: ${fmt(s.particles_excluded)}</span>`);
+  1394→    }
+  1395→    if (s.classes_selected !== null && s.classes_selected !== undefined) {
+  1396→      chips.push(`<span class="chip">selected classes: ${fmt(s.classes_selected)}</span>`);
+  1397→    }
+  1398→    if (s.classes_excluded !== null && s.classes_excluded !== undefined) {
+  1399→      chips.push(`<span class="chip">excluded classes: ${fmt(s.classes_excluded)}</span>`);
+  1400→    }
+  1401→    const images: Array<ImageAsset | null> = [
+  1402→      s.selected_classes_image
+  1403→        ? {
+  1404→            kind: "ui_tile",
+  1405→            name: "templates_selected",
+  1406→            url: s.selected_classes_image,
+  1407→            src: s.selected_classes_src || s.selected_classes_image,
+  1408→            original_url: s.selected_classes_original_url || s.selected_classes_image,
+  1409→          }
+  1410→        : null,
+  1411→      s.excluded_classes_image
+  1412→        ? {
+  1413→            kind: "ui_tile",
+  1414→            name: "templates_excluded",
+  1415→            url: s.excluded_classes_image,
+  1416→            src: s.excluded_classes_src || s.excluded_classes_image,
+  1417→            original_url: s.excluded_classes_original_url || s.excluded_classes_image,
+  1418→          }
+  1419→        : null,
+  1420→      s.selected_particles_image
+  1421→        ? {
+  1422→            kind: "ui_tile",
+  1423→            name: "particles_selected",
+  1424→            url: s.selected_particles_image,
+  1425→            src: s.selected_particles_src || s.selected_particles_image,
+  1426→            original_url: s.selected_particles_original_url || s.selected_particles_image,
+  1427→          }
+  1428→        : null,
+  1429→    ].filter(Boolean) as Array<ImageAsset | null>;
+  1430→    chunks.push(
+  1431→      `<div class="media-block"><h3>Select 2D</h3><div class="metrics">${chips.join(
+  1432→        "",
+  1433→      )}</div>${reportImageBoxes(node.uid, images, 3)}</div>`,
+  1434→    );
+  1435→  }
+  1436→
+  1437→  return chunks.join("");
+  1438→}
+  1439→
+  1440→/** Map download table + "一键下载 map" button for a single node. */
+  1441→export function reportMapDownloads(node: LineageNode, summary: LineageSummary): string {
+  1442→  if (Array.isArray(node.classes) && node.classes.length) return "";
+  1443→  const maps = normalMapAssets(node);
+  1444→  if (!maps.length) return "";
+  1445→  const urls = maps.map((item) => item.download_url).join("|");
+  1446→  const rows = maps
+  1447→    .map((item) => {
+  1448→      const preview = item.preview_url
+  1449→        ? `<a href="${escHtml(item.preview_original_url || item.preview_url)}" target="_blank">${reportImgTag(
+  1450→            node.uid,
+  1451→            mapPreviewImageName(item.group),
+  1452→            item.preview_src || item.preview_url,
+  1453→            "map-preview",
+  1454→            `${item.group} preview`,
+  1455→          )}</a>`
+  1456→        : "";
+  1457→      return `<tr><td>${escHtml(item.group)}</td><td>${preview}</td><td><a href="${escHtml(
+  1458→        item.download_url,
+  1459→      )}" target="_blank">map</a></td></tr>`;
+  1460→    })
+  1461→    .join("");
+  1462→  return `<div class="map-block"><h3>Map / MRC</h3><div class="download-head"><b>普通 map: ${maps.length} 个</b><button type="button" class="download-all" data-urls="${escHtml(
+  1463→    urls,
+  1464→  )}">一键下载 map</button></div><table class="map-table"><thead><tr><th>Group</th><th>预览</th><th>下载</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  1465→}
+  1466→
+  1467→/** Class table (horizontal) + "一键下载 map" for class_3D / abinit / hetero. */
+  1468→export function reportClassTable(node: LineageNode, summary: LineageSummary): string {
+  1469→  const classJob = (summary.class_split_jobs || []).find(
+  1470→    (item: ClassSplitJob) => item.uid === node.uid,
+  1471→  );
+  1472→  if (!classJob || !Array.isArray(classJob.classes) || !classJob.classes.length) return "";
+  1473→  const headers = classJob.classes
+  1474→    .map((cls: ClassSplit) => `<th>class ${escHtml(cls.class_index)}</th>`)
+  1475→    .join("");
+  1476→  const counts = classJob.classes
+  1477→    .map(
+  1478→      (cls: ClassSplit) =>
+  1479→        `<td>${
+  1480→          cls.particle_count === null || cls.particle_count === undefined
+  1481→            ? ""
+  1482→            : fmt(cls.particle_count)
+  1483→        }</td>`,
+  1484→    )
+  1485→    .join("");
+  1486→  const percents = classJob.classes
+  1487→    .map(
+  1488→      (cls: ClassSplit) =>
+  1489→        `<td>${
+  1490→          cls.particle_percent === null || cls.particle_percent === undefined
+  1491→            ? ""
+  1492→            : `${escHtml(cls.particle_percent)}%`
+  1493→        }</td>`,
+  1494→    )
+  1495→    .join("");
+  1496→  const previews = classJob.classes
+  1497→    .map((cls: ClassSplit) => {
+  1498→      return `<td>${
+  1499→        cls.mrc_preview_url
+  1500→          ? `<a href="${escHtml(cls.mrc_preview_original_url || cls.mrc_preview_url)}" target="_blank">${reportImgTag(
+  1501→              node.uid,
+  1502→              cls.volume_group || `class_${cls.class_index}`,
+  1503→              cls.mrc_preview_src || cls.mrc_preview_url,
+  1504→              "class-preview",
+  1505→              `class ${cls.class_index} map preview`,
+  1506→            )}</a>`
+  1507→          : ""
+  1508→      }</td>`;
+  1509→    })
+  1510→    .join("");
+  1511→  const maps = classJob.classes
+  1512→    .map((cls: ClassSplit) => {
+  1513→      const link =
+  1514→        (cls.maps || []).find((item) => item.result_name === "map") || (cls.maps || [])[0];
+  1515→      return `<td>${link ? `<a href="${escHtml(link.download_url)}" target="_blank">map</a>` : ""}</td>`;
+  1516→    })
+  1517→    .join("");
+  1518→  const downloadUrls = classJob.classes
+  1519→    .flatMap((cls: ClassSplit) => cls.maps || [])
+  1520→    .filter((item: { result_name?: string; download_url: string }) => item.result_name === "map" || !item.result_name)
+  1521→    .map((item: { download_url: string }) => item.download_url)
+  1522→    .filter(Boolean);
+  1523→  const button = downloadUrls.length
+  1524→    ? `<button type="button" class="download-all" data-urls="${escHtml(downloadUrls.join("|"))}">一键下载 map</button>`
+  1525→    : "";
+  1526→  return `<div class="class-toolbar"><span>Class / Map</span></div><div class="classes horizontal-view"><div class="horizontal-table"><table><tbody><tr><th>Class</th>${headers}</tr><tr><th>颗粒</th>${counts}</tr><tr><th>%</th>${percents}</tr><tr><th>预览</th>${previews}</tr><tr><th>Map</th>${maps}</tr></tbody></table></div></div>${
+  1527→    downloadUrls.length
+  1528→      ? `<div class="download-head"><b>普通 map: ${downloadUrls.length} 个</b>${button}</div>`
+  1529→      : ""
+  1530→  }`;
+  1531→}
+  1532→
+  1533→/* ================================================================== */
+  1534→/*  V2 picture-flow helpers (the SVG-style mini-flow inside the left  */
+  1535→/*  pane, rendered as HTML)                                            */
+  1536→/* ================================================================== */
+  1537→
+  1538→function reportFirstMicrographNode(summary: LineageSummary): LineageNode | undefined {
+  1539→  return (
+  1540→    (summary.nodes || []).find(
+  1541→      (node) => node.job_type === "import_micrographs" && node.micrograph_count !== null,
+  1542→    ) || (summary.nodes || []).find((node) => /micrograph/i.test(node.job_type || ""))
+  1543→  );
+  1544→}
+  1545→
+  1546→function reportSelectedClassIndices(
+  1547→  nodeUid: string,
+  1548→  summary: LineageSummary,
+  1549→  state: LineageReportState,
+  1550→): Set<number> {
+  1551→  const selected = new Set<number>();
+  1552→  for (const edge of state.edges.filter((item) => item.source === nodeUid)) {
+  1553→    const group = edge.group || "";
+  1554→    const idx = parseClassIndex(group);
+  1555→    if (idx !== null && (edge.family === "particle" || edge.family === "volume")) {
+  1556→      selected.add(idx);
+  1557→    }
+  1558→  }
+  1559→  return selected;
+  1560→}
+  1561→
+  1562→function reportPictureImg(
+  1563→  nodeUid: string,
+  1564→  name: string,
+  1565→  remoteSrc: string | null | undefined,
+  1566→  className = "",
+  1567→  alt = "image",
+  1568→): string {
+  1569→  return reportImgTag(nodeUid, name, remoteSrc, className, alt);
+  1570→}
+  1571→
+  1572→function reportPictureMicrographs(summary: LineageSummary): string {
+  1573→  const node = reportFirstMicrographNode(summary);
+  1574→  if (!node) return "";
+  1575→  const imgs = (node.representative_micrograph_images || []).slice(0, 3);
+  1576→  const imgHtml = imgs.length
+  1577→    ? `<div class="pf-mic-imgs">${imgs
+  1578→        .map((item) =>
+  1579→          reportPictureImg(
+  1580→            node.uid,
+  1581→            (item as ImageAsset & { local_name?: string }).local_name || item.name || "image",
+  1582→            item.src,
+  1583→            "",
+  1584→            item.name || "micrograph",
+  1585→          ),
+  1586→        )
+  1587→        .join("")}</div>`
+  1588→    : "";
+  1589→  const preprocess = (summary.nodes || [])
+  1590→    .filter(
+  1591→      (item) =>
+  1592→        SMALL_JOB_TYPES.has(item.job_type) &&
+  1593→        /ctf|motion|curate|exposure/i.test(item.job_type || ""),
+  1594→    )
+  1595→    .slice(0, 4)
+  1596→    .map((item) => `${item.uid} ${item.job_type}`)
+  1597→    .join("; ");
+  1598→  return `<div class="pf-start"><a class="pf-link" href="#card-${escHtml(node.uid)}"><div class="pf-big">${fmt(
+  1599→    node.micrograph_count,
+  1600→  )} micrographs${pixelSizeText(node) ? ` · ${escHtml(pixelSizeText(node))}` : ""}</div>${imgHtml}<div class="pf-note">${escHtml(
+  1601→    node.uid,
+  1602→  )} ${escHtml(node.job_type || "")}${
+  1603→    preprocess ? ` · preprocessing: ${escHtml(preprocess)}` : ""
+  1604→  }</div></a></div>`;
+  1605→}
+  1606→
+  1607→function reportPictureSelect2D(node: LineageNode): string {
+  1608→  const s = node.select_2d;
+  1609→  if (!s) return "";
+  1610→  const input: number | null = node.particle_count || s.particles_selected || null;
+  1611→  const selected = s.particles_selected;
+  1612→  const ratio =
+  1613→    Number.isInteger(input) && Number.isInteger(selected as number) && input
+  1614→      ? `${Math.round(((selected as number) / input!) * 1000) / 10}%`
+  1615→      : "";
+  1616→  const img = s.selected_classes_image
+  1617→    ? `<div class="pf-select-img">${reportPictureImg(
+  1618→        node.uid,
+  1619→        "selected_classes",
+  1620→        s.selected_classes_src || s.selected_classes_image,
+  1621→        "",
+  1622→        "templates selected",
+  1623→      )}</div>`
+  1624→    : "";
+  1625→  return `<div class="pf-step pf-select"><a class="pf-link" href="#card-${escHtml(node.uid)}"><div class="pf-step-title">${escHtml(
+  1626→    node.uid,
+  1627→  )} select_2D</div><div class="pf-note">input: ${
+  1628→    input ? fmt(input) : "?"
+  1629→  } particles</div><div class="pf-note">selected classes: ${
+  1630→    s.classes_selected ?? "?"
+  1631→  }</div><div class="pf-note">output: ${
+  1632→    selected ? fmt(selected) : "?"
+  1633→  } particles${ratio ? `, ${ratio}` : ""}</div>${img}</a></div>`;
+  1634→}
+  1635→
+  1636→function reportPictureParticleSteps(
+  1637→  summary: LineageSummary,
+  1638→  state: LineageReportState,
+  1639→  round: number,
+  1640→  label = "挑颗粒 / 提取",
+  1641→  postSelect: boolean | null = null,
+  1642→): string {
+  1643→  const nodes = reportRoundParticleNodes(summary, state, round, postSelect);
+  1644→  if (!nodes.length) return "";
+  1645→  const items = nodes
+  1646→    .map((node) => {
+  1647→      const metric = reportPictureParticleMetricText(node);
+  1648→      return `<a class="pf-particle-step" href="#card-${escHtml(node.uid)}"><b>${escHtml(
+  1649→        node.uid,
+  1650→      )}</b><span>${escHtml(node.job_type || "")}</span>${
+  1651→        metric ? `<em>${escHtml(metric)}</em>` : ""
+  1652→      }</a>`;
+  1653→    })
+  1654→    .join("");
+  1655→  return `<div class="pf-particle-block"><div class="pf-subhead">${escHtml(
+  1656→    label,
+  1657→  )}</div><div class="pf-particle-steps">${items}</div></div>`;
+  1658→}
+  1659→
+  1660→function reportPictureClassJob(
+  1661→  node: LineageNode,
+  1662→  summary: LineageSummary,
+  1663→  state: LineageReportState,
+  1664→): string {
+  1665→  const classJob = (summary.class_split_jobs || []).find((item: ClassSplitJob) => item.uid === node.uid);
+  1666→  if (!classJob || !classJob.classes || !classJob.classes.length) return "";
+  1667→  const selected = reportSelectedClassIndices(node.uid, summary, state);
+  1668→  const total =
+  1669→    classJob.classes.find((item: ClassSplit) => Number.isInteger(item.total_particles))?.total_particles ||
+  1670→    node.particle_count;
+  1671→  const toGroups = state.edges
+  1672→    .filter((edge) => edge.source === node.uid && parseClassIndex(edge.group) !== null)
+  1673→    .map((edge) => `${edge.target} ${edge.group}`)
+  1674→    .filter(Boolean);
+  1675→  const tiles = classJob.classes
+  1676→    .map((cls: ClassSplit) => {
+  1677→      const isSelected = selected.has(cls.class_index);
+  1678→      const pct =
+  1679→        cls.particle_percent !== null && cls.particle_percent !== undefined
+  1680→          ? `${escHtml(cls.particle_percent)}%`
+  1681→          : "";
+  1682→      const count =
+  1683→        cls.particle_count !== null && cls.particle_count !== undefined
+  1684→          ? `${fmt(cls.particle_count)} particles`
+  1685→          : "";
+  1686→      const img = cls.mrc_preview_url
+  1687→        ? reportPictureImg(
+  1688→            node.uid,
+  1689→            cls.volume_group || `class_${cls.class_index}`,
+  1690→            cls.mrc_preview_src || cls.mrc_preview_url,
+  1691→            "",
+  1692→            `class ${cls.class_index}`,
+  1693→          )
+  1694→        : "";
+  1695→      return `<figure class="pf-class ${isSelected ? "selected" : ""}">${img}<figcaption>class ${escHtml(
+  1696→        cls.class_index,
+  1697→      )}</figcaption><b>${pct}</b><span>${count}</span></figure>`;
+  1698→    })
+  1699→    .join("");
+  1700→  return `<div class="pf-map-job"><a class="pf-link" href="#card-${escHtml(node.uid)}"><div class="pf-step-title">${escHtml(
+  1701→    node.uid,
+  1702→  )} ${escHtml(node.job_type || "")}</div><div class="pf-note">input: ${
+  1703→    total ? fmt(total) : "?"
+  1704→  } particles${
+  1705→    selected.size
+  1706→      ? ` · selected class ${Array.from(selected).sort((a, b) => a - b).join(", ")}`
+  1707→      : ""
+  1708→  }</div>${
+  1709→    toGroups.length
+  1710→      ? `<div class="pf-note">to: ${escHtml(toGroups.slice(0, 4).join("; "))}</div>`
+  1711→      : ""
+  1712→  }<div class="pf-classes">${tiles}</div></a></div>`;
+  1713→}
+  1714→
+  1715→function reportPictureNormalMap(node: LineageNode): string {
+  1716→  const maps = normalMapAssets(node);
+  1717→  if (!maps.length) return "";
+  1718→  const item = maps.find((map) => map.preview_url) || maps[0];
+  1719→  const preview = item.preview_url
+  1720→    ? reportPictureImg(
+  1721→        node.uid,
+  1722→        mapPreviewImageName(item.group),
+  1723→        item.preview_src || item.preview_url,
+  1724→        "",
+  1725→        `${item.group} preview`,
+  1726→      )
+  1727→    : "";
+  1728→  return `<div class="pf-final"><a class="pf-link" href="#card-${escHtml(node.uid)}"><div class="pf-step-title">${escHtml(
+  1729→    node.uid,
+  1730→  )} ${escHtml(node.job_type || "")}</div>${
+  1731→    preview ? `<div class="pf-final-img">${preview}</div>` : ""
+  1732→  }<div class="pf-big">${
+  1733→    node.particle_count !== null && node.particle_count !== undefined
+  1734→      ? `${fmt(node.particle_count)} particles`
+  1735→      : "final map"
+  1736→  }</div>${summaryResolutionLine(node)}</a></div>`;
+  1737→}
+  1738→
+  1739→function summaryResolutionLine(node: LineageNode): string {
+  1740→  const res = resolutionText(node);
+  1741→  return res ? `<div class="pf-note">${escHtml(res)}</div>` : "";
+  1742→}
+  1743→
+  1744→function reportPictureRound(
+  1745→  summary: LineageSummary,
+  1746→  state: LineageReportState,
+  1747→  round: number,
+  1748→): string {
+  1749→  const selectNodes = reportRoundNodes(summary, state, round, (node) => Boolean(node.select_2d));
+  1750→  const mapNodes = reportRoundNodes(summary, state, round, (node) => {
+  1751→    const hasClasses = (summary.class_split_jobs || []).some(
+  1752→      (item: ClassSplitJob) => item.uid === node.uid && Boolean(item.classes && item.classes.length),
+  1753→    );
+  1754→    return hasClasses || normalMapAssets(node).length > 0;
+  1755→  });
+  1756→  const preParticleSteps = reportPictureParticleSteps(
+  1757→    summary,
+  1758→    state,
+  1759→    round,
+  1760→    "挑颗粒 / 提取",
+  1761→    selectNodes.length ? false : null,
+  1762→  );
+  1763→  const postParticleSteps = selectNodes.length
+  1764→    ? reportPictureParticleSteps(summary, state, round, "再挑颗粒 / 提取", true)
+  1765→    : "";
+  1766→  if (!preParticleSteps && !selectNodes.length && !postParticleSteps && !mapNodes.length) {
+  1767→    return "";
+  1768→  }
+  1769→  const steps: string[] = [];
+  1770→  if (preParticleSteps) steps.push(preParticleSteps);
+  1771→  for (const node of selectNodes) steps.push(reportPictureSelect2D(node));
+  1772→  if (postParticleSteps) steps.push(postParticleSteps);
+  1773→  for (const node of mapNodes) {
+  1774→    const html = (summary.class_split_jobs || []).some((item: ClassSplitJob) => item.uid === node.uid)
+  1775→      ? reportPictureClassJob(node, summary, state)
+  1776→      : reportPictureNormalMap(node);
+  1777→    if (html) steps.push(html);
+  1778→  }
+  1779→  return `<div class="pf-round"><div class="pf-round-head"><h3>Round ${round}${
+  1780→    round > 1 ? " repicking" : ""
+  1781→  }</h3></div>${steps.join('<div class="pf-arrow">↓</div>')}</div>`;
+  1782→}
+  1783→
+  1784→/** The picture-flow diagram (HTML version of the SVG flow). */
+  1785→export function reportPictureFlow(summary: LineageSummary, state: LineageReportState): string {
+  1786→  const rounds = Array.from(
+  1787→    new Set(
+  1788→      (summary.nodes || [])
+  1789→        .map((node) => reportLineageRound(node.uid, state))
+  1790→        .filter((round) => round > 0),
+  1791→    ),
+  1792→  ).sort((a, b) => a - b);
+  1793→  const roundHtml = rounds
+  1794→    .map((round) => reportPictureRound(summary, state, round))
+  1795→    .filter(Boolean)
+  1796→    .join('<div class="pf-arrow">↓</div>');
+  1797→  if (!roundHtml) return "";
+  1798→  return `<div class="picture-flow"><div class="picture-head"><h2>Picture Flow</h2><span>SVG 会随报告单独导出</span></div>${reportPictureMicrographs(
+  1799→    summary,
+  1800→  )}<div class="pf-arrow">↓</div>${roundHtml}</div>`;
+  1801→}
+  1802→
+  1803→/* ================================================================== */
+  1804→/*  V2 right-pane per-job card                                         */
+  1805→/* ================================================================== */
+  1806→
+  1807→/** A single right-pane per-job card. */
+  1808→export function reportJobCard(
+  1809→  node: LineageNode,
+  1810→  summary: LineageSummary,
+  1811→  state: LineageReportState,
+  1812→): string {
+  1813→  const kind = reportNodeCardKind(node);
+  1814→  const chips: string[] = [];
+  1815→  if (node.micrograph_count !== null && node.micrograph_count !== undefined) {
+  1816→    chips.push(`<span class="chip micrograph">照片: ${fmt(node.micrograph_count)}</span>`);
+  1817→  }
+  1818→  if (node.particle_count !== null && node.particle_count !== undefined) {
+  1819→    chips.push(`<span class="chip particle">颗粒: ${fmt(node.particle_count)}</span>`);
+  1820→  }
+  1821→  if (node.volume_count !== null && node.volume_count !== undefined) {
+  1822→    chips.push(`<span class="chip volume">volume: ${fmt(node.volume_count)}</span>`);
+  1823→  }
+  1824→  const res = resolutionText(node);
+  1825→  if (res) chips.push(`<span class="chip volume">resolution: ${escHtml(res)}</span>`);
+  1826→  const extractParams = extractionParamText(node);
+  1827→  if (extractParams) chips.push(`<span class="chip aux">${escHtml(extractParams)}</span>`);
+  1828→  const main = `<div class="job-main"><div class="job-head"><h2>${escHtml(
+  1829→    node.uid,
+  1830→  )} ${escHtml(node.job_type || "")}</h2><div class="metrics">${chips.join(
+  1831→    "",
+  1832→  )}</div></div>${reportSourceTable(node, summary, state)}${reportMediaBlock(
+  1833→    node,
+  1834→  )}${reportClassTable(node, summary)}${reportMapDownloads(node, summary)}</div>`;
+  1835→  return `<section class="job-card ${escHtml(kind)}" id="card-${escHtml(
+  1836→    node.uid,
+  1837→  )}">${main}${reportOutgoingBox(node, summary, state)}</section>`;
+  1838→}
+  1839→
+  1840→/* ================================================================== */
+  1841→/*  V2 main entry point                                                */
+  1842→/* ================================================================== */
+  1843→
+  1844→/** Inline `<style>` block (verbatim from popup.js — single CSS string). */
+  1845→const REPORT_HTML_V2_CSS = `:root{--bg:#f8fafc;--bg-2:#f1f5f9;--panel:#ffffff;--panel-2:#f8fafc;--panel-3:#f1f5f9;--text:#0f172a;--text-2:#1e293b;--text-3:#475569;--muted:#64748b;--muted-2:#94a3b8;--line:#e2e8f0;--line-2:#cbd5e1;--line-3:#94a3b8;--micro:#0891b2;--micro-2:#06b6d4;--micro-bg:#ecfeff;--micro-border:#a5f3fc;--micro-glow:rgba(6,182,212,.12);--particle:#d97706;--particle-2:#f59e0b;--particle-bg:#fffbeb;--particle-border:#fde68a;--particle-glow:rgba(245,158,11,.12);--volume:#0d9488;--volume-2:#14b8a6;--volume-bg:#f0fdfa;--volume-border:#99f6e4;--volume-glow:rgba(13,148,136,.12);--brand:#0d9488;--brand-2:#14b8a6;--brand-emerald:#059669;--brand-cyan:#06b6d4;--small-bg:#f8fafc;--small-border:#cbd5e1;--shadow-sm:0 1px 2px 0 rgba(15,23,42,.04);--shadow:0 4px 12px -2px rgba(15,23,42,.06),0 2px 4px -1px rgba(15,23,42,.04);--shadow-lg:0 12px 32px -4px rgba(15,23,42,.08),0 4px 8px -2px rgba(15,23,42,.04);--shadow-xl:0 20px 40px -8px rgba(15,23,42,.1),0 8px 16px -4px rgba(15,23,42,.06);--radius:10px;--radius-sm:8px;--radius-lg:14px;--radius-xl:16px;--font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;--font-mono:"SF Mono","JetBrains Mono",Monaco,"Cascadia Code","Roboto Mono",Consolas,monospace}.dark{--bg:#0a0e1a;--bg-2:#0f1420;--panel:#141a2a;--panel-2:#1a2138;--panel-3:#222b45;--text:#e8edf7;--text-2:#c4cee0;--text-3:#9aa5bd;--muted:#6b7794;--muted-2:#4a5470;--line:#1e2740;--line-2:#283353;--line-3:#323d5e;--micro:#22d3ee;--micro-2:#06b6d4;--micro-bg:rgba(34,211,238,.08);--micro-border:rgba(34,211,238,.3);--micro-glow:rgba(34,211,238,.15);--particle:#fbbf24;--particle-2:#f59e0b;--particle-bg:rgba(251,191,36,.08);--particle-border:rgba(251,191,36,.3);--particle-glow:rgba(251,191,36,.15);--volume:#2dd4bf;--volume-2:#14b8a6;--volume-bg:rgba(45,212,191,.08);--volume-border:rgba(45,212,191,.3);--volume-glow:rgba(45,212,191,.15);--brand:#2dd4bf;--brand-2:#14b8a6;--brand-emerald:#34d399;--brand-cyan:#22d3ee;--small-bg:rgba(148,163,184,.06);--small-border:rgba(148,163,184,.2);--shadow-sm:0 1px 2px 0 rgba(0,0,0,.3);--shadow:0 4px 16px -2px rgba(0,0,0,.4),0 2px 6px -1px rgba(0,0,0,.2);--shadow-lg:0 16px 48px -4px rgba(0,0,0,.5),0 6px 12px -2px rgba(0,0,0,.3);--shadow-xl:0 24px 64px -8px rgba(0,0,0,.6),0 8px 16px -4px rgba(0,0,0,.3)}*{box-sizing:border-box;margin:0;padding:0}html{scroll-behavior:smooth;background:var(--bg)}body{background:var(--bg);background-image:radial-gradient(ellipse 600px 400px at 15% 0%,rgba(13,148,136,.06) 0%,transparent 60%),radial-gradient(ellipse 600px 400px at 85% 100%,rgba(6,182,212,.05) 0%,transparent 60%),linear-gradient(180deg,var(--bg) 0%,var(--bg-2) 100%);background-attachment:fixed;color:var(--text);font:14px/1.6 var(--font-ui);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;min-height:100vh;transition:background-color .3s ease,color .3s ease}.dark body{background-image:radial-gradient(ellipse 600px 400px at 15% 0%,rgba(45,212,191,.05) 0%,transparent 60%),radial-gradient(ellipse 600px 400px at 85% 100%,rgba(34,211,238,.04) 0%,transparent 60%),linear-gradient(180deg,var(--bg) 0%,var(--bg-2) 100%)}a{color:var(--brand);text-decoration:none;transition:color .15s ease}a:hover{color:var(--brand-2);text-decoration:underline}header{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.8);backdrop-filter:blur(16px) saturate(180%);-webkit-backdrop-filter:blur(16px) saturate(180%);border-bottom:1px solid var(--line);box-shadow:0 1px 0 0 rgba(13,148,136,.06)}.dark header{background:rgba(10,14,26,.8);border-bottom-color:var(--line-2);box-shadow:0 1px 0 0 rgba(45,212,191,.08),0 8px 32px -8px rgba(0,0,0,.5)}.top{min-height:72px;display:flex;align-items:center;gap:20px;padding:16px 24px;max-width:1280px;margin:0 auto}.title h1{margin:0;font-size:22px;font-weight:700;letter-spacing:-.02em;background:linear-gradient(135deg,var(--text) 0%,var(--brand) 60%,var(--brand-cyan) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}.title p{margin:6px 0 0;color:var(--text-3);font-size:13px;font-weight:500;letter-spacing:.01em}.title p b{color:var(--text-2);font-weight:600;font-variant-numeric:tabular-nums}.workspace{display:grid;grid-template-columns:minmax(420px,32vw) minmax(720px,1fr);gap:20px;padding:20px 24px;max-width:1280px;margin:0 auto;align-items:start}.pane{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-xl);box-shadow:var(--shadow);overflow:hidden;transition:border-color .2s ease,box-shadow .2s ease}.dark .pane{border-color:var(--line-2)}.flow-pane{position:sticky;top:88px;max-height:calc(100vh - 104px);overflow:auto;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}.flow-pane::-webkit-scrollbar{width:6px}.flow-pane::-webkit-scrollbar-track{background:transparent}.flow-pane::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:3px}.flow-pane::-webkit-scrollbar-thumb:hover{background:var(--muted-2)}.pane-head,.chain-head{display:flex;align-items:center;gap:12px;padding:18px 20px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,rgba(13,148,136,.03) 0%,transparent 100%)}.dark .pane-head,.dark .chain-head{border-bottom-color:var(--line-2);background:linear-gradient(180deg,rgba(45,212,191,.04) 0%,transparent 100%)}.pane-head h2,.chain-head h2{margin:0;font-size:15px;font-weight:600;letter-spacing:-.01em;color:var(--text)}.chain-head .hint{color:var(--text-3);margin-left:auto;font-size:12px}.legend{display:flex;gap:6px;margin-left:auto}.legend span{padding:4px 10px;border-radius:999px;font-size:10px;font-weight:600;border:1px solid;letter-spacing:.02em;text-transform:uppercase}.legend .micrograph{color:var(--micro);background:var(--micro-bg);border-color:var(--micro-border)}.legend .particle{color:var(--particle);background:var(--particle-bg);border-color:var(--particle-border)}.legend .volume{color:var(--volume);background:var(--volume-bg);border-color:var(--volume-border)}.outline{padding:16px}.stage{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel-2);padding:14px;margin-bottom:12px;transition:border-color .2s ease,box-shadow .2s ease}.dark .stage{border-color:var(--line-2);background:var(--panel-2)}.stage:hover{border-color:var(--line-2);box-shadow:var(--shadow-sm)}.dark .stage:hover{border-color:var(--line-3)}.stage h3{margin:0 0 10px;font-size:11px;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em}.phase{display:grid;grid-template-columns:88px minmax(0,1fr);gap:10px;align-items:start;border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.dark .phase{border-top-color:var(--line)}.phase:first-of-type{border-top:0;padding-top:0;margin-top:0}.phase-label{font-size:11px;font-weight:600;color:var(--text-3);line-height:1.3;padding-top:6px;letter-spacing:.02em;text-transform:uppercase}.stage-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:8px}.mini-node{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;align-items:start;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:10px;min-height:68px;color:var(--text);transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;cursor:default;position:relative;overflow:hidden}.dark .mini-node{border-color:var(--line-2)}.mini-node::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--muted-2);opacity:0;transition:opacity .2s ease}.mini-node:hover{transform:translateY(-2px);border-color:var(--line-2);box-shadow:var(--shadow)}.dark .mini-node:hover{border-color:var(--line-3)}.mini-node.micrograph{border-color:var(--micro-border);background:var(--micro-bg)}.mini-node.micrograph::before{background:var(--micro);opacity:1}.mini-node.micrograph:hover{border-color:var(--micro);box-shadow:0 4px 16px -2px var(--micro-glow)}.mini-node.particle{border-color:var(--particle-border);background:var(--particle-bg)}.mini-node.particle::before{background:var(--particle);opacity:1}.mini-node.particle:hover{border-color:var(--particle);box-shadow:0 4px 16px -2px var(--particle-glow)}.mini-node.volume{border-color:var(--volume-border);background:var(--volume-bg)}.mini-node.volume::before{background:var(--volume);opacity:1}.mini-node.volume:hover{border-color:var(--volume);box-shadow:0 4px 16px -2px var(--volume-glow)}.mini-node.small,.mini-node.other{border-color:var(--small-border);background:var(--small-bg)}.mini-node b{font-size:14px;font-weight:700;display:block;grid-column:1;color:var(--text);letter-spacing:-.01em;font-family:var(--font-mono)}.mini-node span{font-size:11px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;grid-column:1;color:var(--text-2);font-weight:500;margin-top:2px}.mini-node em{font-style:normal;font-size:10px;color:var(--muted);display:block;grid-column:1;margin-top:3px;line-height:1.3}.mini-node p{grid-column:2;grid-row:1 / span 3;margin:0;display:grid;grid-template-columns:repeat(2,max-content);justify-content:end;align-content:start;gap:2px 3px;min-width:54px}.ref-pill{display:block;border-radius:4px;padding:1px 4px;min-width:26px;text-align:center;font-size:9px;line-height:1.2;font-style:normal;font-weight:700;border:1px solid;white-space:nowrap;letter-spacing:.02em;font-family:var(--font-mono)}.ref-pill.exposure,.ref-pill.micrograph{color:var(--micro);background:var(--micro-bg);border-color:var(--micro-border)}.ref-pill.particle{color:var(--particle);background:var(--particle-bg);border-color:var(--particle-border)}.ref-pill.volume{color:var(--volume);background:var(--volume-bg);border-color:var(--volume-border)}.ref-pill.template,.ref-pill.other{color:var(--muted);background:var(--small-bg);border-color:var(--small-border)}.stage-arrow{text-align:center;color:var(--muted-2);font-weight:600;font-size:16px;margin:-2px 0 6px}.picture-flow{margin:16px;border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--panel);padding:14px;box-shadow:var(--shadow-sm)}.dark .picture-flow{border-color:var(--line-2)}.picture-head{display:flex;align-items:center;justify-content:space-between;gap:8px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:10px}.dark .picture-head{border-bottom-color:var(--line-2)}.picture-head h2{margin:0;font-size:14px;font-weight:600;color:var(--text)}.picture-head span{font-size:11px;color:var(--text-3);font-weight:500}.pf-start,.pf-round,.pf-step,.pf-map-job,.pf-final{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);padding:12px;margin:0 0 10px;transition:border-color .2s ease,box-shadow .2s ease}.dark .pf-start,.dark .pf-round,.dark .pf-step,.dark .pf-map-job,.dark .pf-final{border-color:var(--line-2)}.pf-start:hover,.pf-round:hover,.pf-step:hover,.pf-map-job:hover,.pf-final:hover{border-color:var(--line-2);box-shadow:var(--shadow-sm)}.dark .pf-start:hover,.dark .pf-round:hover,.dark .pf-step:hover,.dark .pf-map-job:hover,.dark .pf-final:hover{border-color:var(--line-3)}.pf-big{font-size:18px;font-weight:700;color:var(--text);text-align:center;letter-spacing:-.02em;font-family:var(--font-mono);background:linear-gradient(135deg,var(--text) 0%,var(--brand) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}.pf-note{font-size:12px;color:var(--text-3);line-height:1.5;text-align:center;margin-top:4px}.pf-mic-imgs{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0}.pf-mic-imgs img{width:100%;aspect-ratio:4/3;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2)}.dark .pf-mic-imgs img{border-color:var(--line-2)}.pf-arrow{text-align:center;font-size:18px;line-height:1;color:var(--muted-2);margin:4px 0 8px}.pf-round-head h3{margin:0 0 8px;font-size:15px;font-weight:600;color:var(--text);letter-spacing:-.01em}.pf-subhead{font-size:11px;font-weight:700;text-align:center;margin:0 0 6px;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em}.pf-particle-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:8px}.pf-particle-step{display:block;border:1px solid var(--line);border-left:3px solid var(--particle);border-radius:var(--radius);background:var(--panel);padding:10px;color:var(--text);transition:transform .15s ease,box-shadow .15s ease}.dark .pf-particle-step{border-color:var(--line-2)}.pf-particle-step:hover{transform:translateY(-2px);box-shadow:0 4px 16px -2px var(--particle-glow)}.pf-particle-step b{display:block;font-size:13px;font-weight:700;font-family:var(--font-mono);color:var(--particle)}.pf-particle-step span{display:block;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-2);margin-top:3px}.pf-particle-step em{display:block;font-style:normal;font-size:11px;color:var(--muted);margin-top:2px}.pf-step-title{font-weight:700;font-size:12px;text-align:center;margin-bottom:4px;color:var(--text-2);text-transform:uppercase;letter-spacing:.04em;font-family:var(--font-mono)}.pf-select-img img{display:block;width:100%;max-height:170px;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2);margin-top:6px}.dark .pf-select-img img{border-color:var(--line-2)}.pf-classes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px}.pf-class{margin:0;padding:8px;border:1px solid var(--line);background:var(--panel);border-radius:var(--radius-sm);text-align:center;min-height:130px;transition:transform .15s ease,border-color .15s ease}.dark .pf-class{border-color:var(--line-2)}.pf-class:hover{transform:translateY(-2px);border-color:var(--line-2)}.dark .pf-class:hover{border-color:var(--line-3)}.pf-class.selected{border-color:var(--particle);box-shadow:0 0 0 1px var(--particle),0 4px 16px -2px var(--particle-glow)}.pf-class img{display:block;width:100%;height:78px;object-fit:contain;background:var(--bg-2);border-radius:4px}.pf-class figcaption{font-size:10px;color:var(--muted);margin-top:4px}.pf-class b{display:block;font-size:14px;font-weight:700;color:var(--text);margin-top:2px;font-family:var(--font-mono)}.pf-class span{display:block;font-size:10px;color:var(--muted)}.pf-final-img img{display:block;width:180px;max-width:100%;height:150px;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2);margin:8px auto}.dark .pf-final-img img{border-color:var(--line-2)}.cards{padding:16px;display:grid;gap:16px}.job-card{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:12px;border:1px solid var(--line);border-left:4px solid;border-radius:var(--radius-lg);background:var(--panel);padding:16px;box-shadow:var(--shadow-sm);transition:box-shadow .2s ease,transform .2s ease;position:relative}.dark .job-card{border-color:var(--line-2)}.job-card:hover{box-shadow:var(--shadow);transform:translateY(-2px)}.job-card.micrograph{border-left-color:var(--micro)}.job-card.micrograph:hover{box-shadow:var(--shadow),0 0 24px -4px var(--micro-glow)}.job-card.particle{border-left-color:var(--particle)}.job-card.particle:hover{box-shadow:var(--shadow),0 0 24px -4px var(--particle-glow)}.job-card.volume{border-left-color:var(--volume)}.job-card.volume:hover{box-shadow:var(--shadow),0 0 24px -4px var(--volume-glow)}.job-card.other{border-left-color:var(--muted-2)}.job-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.job-head h2{margin:0;min-width:190px;font-size:16px;font-weight:700;line-height:1.2;color:var(--text);letter-spacing:-.01em;font-family:var(--font-mono)}.metrics{display:flex;flex-wrap:wrap;gap:6px}.chip{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;border:1px solid var(--line);background:var(--panel-2);font-size:11px;font-weight:600;white-space:nowrap;color:var(--text-2);transition:transform .1s ease;font-family:var(--font-mono);letter-spacing:.01em}.dark .chip{border-color:var(--line-2)}.chip:hover{transform:translateY(-1px)}.chip.micrograph{background:var(--micro-bg);border-color:var(--micro-border);color:var(--micro)}.chip.particle{background:var(--particle-bg);border-color:var(--particle-border);color:var(--particle)}.chip.volume,.chip.class{background:var(--volume-bg);border-color:var(--volume-border);color:var(--volume)}.chip.aux{background:var(--small-bg);border-color:var(--small-border);color:var(--muted)}.source-block,.media-block,.map-block{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}.dark .source-block,.dark .media-block,.dark .map-block{border-top-color:var(--line-2)}h3{margin:0 0 6px;font-size:11px;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em}.source-table{width:100%;border-collapse:collapse;font-size:12px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--line)}.dark .source-table{border-color:var(--line-2)}.source-table th,.source-table td{border-bottom:1px solid var(--line);padding:7px 9px;vertical-align:middle;text-align:left}.dark .source-table th,.dark .source-table td{border-bottom-color:var(--line)}.source-table tr:last-child td{border-bottom:0}.source-table th{background:var(--panel-3);color:var(--text-3);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--line-2)}.source-table tr:hover td{background:var(--panel-3)}.kind-cell{width:54px;text-align:center;font-weight:700}.kind-cell i{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:middle}.dark .kind-cell i{box-shadow:0 0 8px currentColor}.kind-cell.exposure i{background:var(--micro);color:var(--micro)}.kind-cell.particle i{background:var(--particle);color:var(--particle)}.kind-cell.volume i{background:var(--volume);color:var(--volume)}.kind-cell.template i,.kind-cell.other i{background:var(--muted-2);color:var(--muted-2)}.source-table em{font-style:normal;color:var(--muted);margin-left:6px;font-size:11px}.up-cell{color:var(--text-2);line-height:1.5}.up-route{display:block;font-weight:600;color:var(--text);border-bottom:1px solid var(--line-2);margin-bottom:4px;padding-bottom:3px;font-size:12px;font-family:var(--font-mono)}.up-list{display:grid;gap:3px}.up-line{display:block;font-size:12px;color:var(--text-3)}.job-out{border-left:2px solid var(--line);padding-left:12px;color:var(--text-2)}.dark .job-out{border-left-color:var(--line-2)}.job-out div{margin:0 0 6px;padding:7px 9px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius-sm);font-size:12px;transition:border-color .15s ease}.dark .job-out div{border-color:var(--line-2)}.job-out div:hover{border-color:var(--line-2);background:var(--panel-3)}.dark .job-out div:hover{border-color:var(--line-3)}.quiet{color:var(--muted);font-style:italic}.class-toolbar{margin-top:8px;display:flex;align-items:center;gap:6px}.class-toolbar span{font-weight:600;font-size:12px;color:var(--text-2);margin-right:auto}.classes{margin-top:6px;border:1px solid var(--line);border-radius:var(--radius-sm);overflow:auto}.dark .classes{border-color:var(--line-2)}table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:7px 9px;border-bottom:1px solid var(--line);text-align:left}.dark th,.dark td{border-bottom-color:var(--line)}th{background:var(--panel-3);color:var(--text-3);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.04em}tr:hover td{background:var(--panel-3)}.horizontal-table th:first-child{left:0;position:sticky;z-index:2;background:var(--panel-3)}.horizontal-table td,.horizontal-table th{min-width:74px;text-align:center}.download-head{display:flex;align-items:center;gap:8px;margin-top:8px}.download-all{border:1px solid var(--brand);background:var(--brand);color:#fff;border-radius:var(--radius-sm);padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;transition:all .2s ease;font-family:var(--font-mono);box-shadow:0 2px 8px -2px var(--volume-glow)}.dark .download-all{color:var(--bg)}.download-all:hover{background:var(--brand-2);border-color:var(--brand-2);box-shadow:0 4px 16px -2px var(--volume-glow);transform:translateY(-1px)}.download-links{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}.download-links a{padding:4px 10px;border:1px solid var(--volume-border);border-radius:var(--radius-sm);background:var(--volume-bg);font-size:11px;font-weight:500;color:var(--volume);transition:all .2s ease;font-family:var(--font-mono)}.download-links a:hover{background:var(--volume);color:#fff;box-shadow:0 2px 12px -2px var(--volume-glow);text-decoration:none;transform:translateY(-1px)}.dark .download-links a:hover{color:var(--bg)}.imgs{display:flex;gap:10px;flex-wrap:wrap}.imgbox{width:168px;margin:0;padding:8px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel-2);transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease}.dark .imgbox{border-color:var(--line-2)}.imgbox:hover{transform:translateY(-3px);border-color:var(--line-2);box-shadow:var(--shadow)}.dark .imgbox:hover{border-color:var(--line-3)}.imgbox img{display:block;width:100%;height:112px;object-fit:contain;background:var(--bg-2);border:1px solid var(--line);border-radius:var(--radius-sm)}.dark .imgbox img{border-color:var(--line-2)}.imgbox figcaption{margin-top:6px;font-size:11px;color:var(--muted);font-weight:500;font-family:var(--font-mono)}.class-preview,.map-preview{max-width:94px;max-height:70px;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2)}.dark .class-preview,.dark .map-preview{border-color:var(--line-2)}.map-table td{vertical-align:middle}@media(max-width:1180px){.workspace{grid-template-columns:1fr;max-width:900px}.flow-pane{position:relative;top:auto}.job-card{grid-template-columns:minmax(0,1fr)}}`;
+  1846→
+  1847→/**
+  1848→ * Inline `<script>` click handler — `.download-all` buttons stagger
+  1849→ * `window.open` per URL with 160ms delay. Embedded as a string so the
+  1850→ * final HTML page is fully standalone.
+  1851→ */
+  1852→const REPORT_HTML_V2_SCRIPT = `document.addEventListener("click",(event)=>{const button=event.target.closest(".download-all");if(!button)return;const urls=(button.dataset.urls||"").split("|").filter(Boolean);urls.forEach((url,index)=>setTimeout(()=>window.open(url,"_blank"),index*160));});`;
+  1853→
+  1854→/**
+  1855→ * Build the V2 lineage report — a standalone HTML page with a left outline
+  1856→ * (stages / phases / mini-nodes) + picture flow, and a right column of
+  1857→ * per-job cards.
+  1858→ *
+  1859→ * The returned string is a complete `<!doctype html>` document. It can be
+  1860→ * written to disk, opened directly in a browser, served from a Next.js
+  1861→ * route, or embedded in a Blob for download.
+  1862→ */
+  1863→export function buildLineageHtmlV2(summary: LineageSummary): string {
+  1864→  const state = reportBuildLineageState(summary);
+  1865→  const cards = (summary.nodes || [])
+  1866→    .slice()
+  1867→    .sort((a, b) => uidOrder(a) - uidOrder(b))
+  1868→    .map((node) => reportJobCard(node, summary, state))
+  1869→    .join("");
+  1870→  return `<!doctype html><html><head><meta charset="utf-8"><title>CryoSmart ${escHtml(
+  1871→    summary.project_uid,
+  1872→  )} ${escHtml(summary.start_uid)} Lineage</title><script>(function(){try{var t=localStorage.getItem('theme');var d=t==='dark'||(t==='system'||!t)&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;if(d)document.documentElement.classList.add('dark');else document.documentElement.classList.add('light')}catch(e){}})();</script><style>${REPORT_HTML_V2_CSS}</style></head><body><header><div class="top"><div class="title"><h1>CryoSmart Lineage: ${escHtml(
+  1873→    summary.project_uid,
+  1874→  )} / ${escHtml(summary.start_uid)}</h1><p>${(summary.nodes || []).length} nodes · ${
+  1875→    (summary.edges || []).length
+  1876→  } data links · visible main-node tracing</p></div></div></header><main class="workspace"><section class="pane flow-pane"><div class="pane-head"><h2>Lineage Outline</h2><div class="legend"><span class="micrograph">micrographs</span><span class="particle">particles</span><span class="volume">map</span></div></div><div class="outline">${reportOutline(
+  1877→    summary,
+  1878→    state,
+  1879→  )}</div>${reportPictureFlow(summary, state)}</section><section class="pane chain-pane"><div class="chain-head"><h2>Main Data Chain</h2><span class="hint">小节点会折叠到可见主节点；左侧标签只指向左侧已有节点。</span></div><div class="cards">${cards}</div></section></main><script>${REPORT_HTML_V2_SCRIPT}</script></body></html>`;
+  1880→}
+  1881→
+  1882→/** @internal Exported only for testing of the inline script string. */
+  1883→export const _REPORT_HTML_V2_CSS = REPORT_HTML_V2_CSS;
+  1884→/** @internal Exported only for testing of the inline script string. */
+  1885→export const _REPORT_HTML_V2_SCRIPT = REPORT_HTML_V2_SCRIPT;
+  1886→

@@ -1,0 +1,584 @@
+     1→"use client";
+     2→
+     3→import { useCallback, useRef, useState } from "react";
+     4→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+     5→import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+     6→import { Button } from "@/components/ui/button";
+     7→import { Input } from "@/components/ui/input";
+     8→import { Label } from "@/components/ui/label";
+     9→import { Badge } from "@/components/ui/badge";
+    10→import { Separator } from "@/components/ui/separator";
+    11→import { ScrollArea } from "@/components/ui/scroll-area";
+    12→import { toast } from "sonner";
+    13→import {
+    14→  UploadCloud,
+    15→  FileJson,
+    16→  Server,
+    17→  Plug,
+    18→  Bookmark,
+    19→  CheckCircle2,
+    20→  AlertCircle,
+    21→  Loader2,
+    22→  FlaskConical,
+    23→  ExternalLink,
+    24→  ChevronDown,
+    25→  ChevronRight,
+    26→} from "lucide-react";
+    27→import { loadSession, saveSession, fetchProjectJobs, type CryoSmartSession } from "@/lib/cryosmart/proxy-client";
+    28→import { buildSampleExportedMetadata } from "@/lib/cryosmart/sample-data";
+    29→import { BookmarkletPanel } from "./bookmarklet-panel";
+    30→
+    31→export interface LoadedMetadata {
+    32→  /** Either raw array of jobs or { jobs: [...] }. */
+    33→  raw: unknown;
+    34→  projectUid: string;
+    35→  jobCount: number;
+    36→  source: "upload" | "sample" | "live" | "bookmarklet";
+    37→  session?: CryoSmartSession | null;
+    38→  /** When source is "live", a list of job uids discovered. */
+    39→  liveJobUids?: string[];
+    40→  /** When source is "bookmarklet", the origin of the CryoSmart instance captured from. */
+    41→  cryosmartOrigin?: string;
+    42→}
+    43→
+    44→interface Props {
+    45→  loaded: LoadedMetadata | null;
+    46→  onLoad: (loaded: LoadedMetadata) => void;
+    47→}
+    48→
+    49→export function DataSourceCard({ loaded, onLoad }: Props) {
+    50→  return (
+    51→    <Card id="data-source" className="scroll-mt-20 overflow-hidden">
+    52→      <CardHeader className="bg-gradient-to-br from-slate-50 to-teal-50/40 pb-4">
+    53→        <div className="flex items-start justify-between gap-3">
+    54→          <div>
+    55→            <div className="flex items-center gap-2">
+    56→              <span className="flex h-7 w-7 items-center justify-center rounded-md bg-teal-600 text-[13px] font-bold text-white">1</span>
+    57→              <CardTitle className="text-lg">Choose a Data Source</CardTitle>
+    58→            </div>
+    59→            <CardDescription className="mt-1.5 pl-9 text-[13px]">
+    60→              The original Chrome extension scraped CryoSmart&apos;s DOM via an injected content script. A web app on a different origin cannot do that — so we offer three paths that work in every browser.
+    61→            </CardDescription>
+    62→          </div>
+    63→          {loaded && (
+    64→            <Badge variant="secondary" className="gap-1.5 bg-emerald-100 text-emerald-700 hover:bg-emerald-100">
+    65→              <CheckCircle2 className="h-3.5 w-3.5" />
+    66→              {loaded.source === "upload" ? "JSON loaded"
+    67→                : loaded.source === "sample" ? "Sample loaded"
+    68→                : loaded.source === "bookmarklet" ? "Captured"
+    69→                : "Live connected"}
+    70→            </Badge>
+    71→          )}
+    72→        </div>
+    73→      </CardHeader>
+    74→      <CardContent className="p-4 pt-4">
+    75→        <Tabs defaultValue="bookmarklet" className="w-full">
+    76→          <TabsList className="grid w-full grid-cols-4 bg-slate-100">
+    77→            <TabsTrigger value="bookmarklet" className="text-[12.5px] data-[state=active]:bg-white">
+    78→              <Bookmark className="mr-1 h-3.5 w-3.5" /> Bookmarklet
+    79→            </TabsTrigger>
+    80→            <TabsTrigger value="upload" className="text-[12.5px] data-[state=active]:bg-white">
+    81→              <FileJson className="mr-1 h-3.5 w-3.5" /> Upload JSON
+    82→            </TabsTrigger>
+    83→            <TabsTrigger value="live" className="text-[12.5px] data-[state=active]:bg-white">
+    84→              <Server className="mr-1 h-3.5 w-3.5" /> Live Connect
+    85→            </TabsTrigger>
+    86→            <TabsTrigger value="sample" className="text-[12.5px] data-[state=active]:bg-white">
+    87→              <FlaskConical className="mr-1 h-3.5 w-3.5" /> Try Sample
+    88→            </TabsTrigger>
+    89→          </TabsList>
+    90→
+    91→          <TabsContent value="bookmarklet" className="mt-4">
+    92→            <BookmarkletPanel loaded={loaded} onLoad={onLoad} />
+    93→          </TabsContent>
+    94→          <TabsContent value="upload" className="mt-4">
+    95→            <UploadJsonPanel loaded={loaded} onLoad={onLoad} />
+    96→          </TabsContent>
+    97→          <TabsContent value="live" className="mt-4">
+    98→            <LiveConnectPanel loaded={loaded} onLoad={onLoad} />
+    99→          </TabsContent>
+   100→          <TabsContent value="sample" className="mt-4">
+   101→            <SamplePanel loaded={loaded} onLoad={onLoad} />
+   102→          </TabsContent>
+   103→        </Tabs>
+   104→
+   105→        {loaded && (
+   106→          <>
+   107→            <Separator className="my-4" />
+   108→            <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 text-[12px]">
+   109→              <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+   110→                <span className="text-slate-500">Loaded:</span>
+   111→                <span className="font-mono text-slate-700">project = {loaded.projectUid}</span>
+   112→                <span className="font-mono text-slate-700">jobs = {loaded.jobCount}</span>
+   113→                <span className="font-mono text-slate-700">source = {loaded.source}</span>
+   114→              </div>
+   115→            </div>
+   116→          </>
+   117→        )}
+   118→      </CardContent>
+   119→    </Card>
+   120→  );
+   121→}
+   122→
+   123→function UploadJsonPanel({ loaded, onLoad }: Props) {
+   124→  const inputRef = useRef<HTMLInputElement>(null);
+   125→  const [dragOver, setDragOver] = useState(false);
+   126→  const [parsing, setParsing] = useState(false);
+   127→
+   128→  const handleFile = useCallback(async (file: File) => {
+   129→    setParsing(true);
+   130→    try {
+   131→      const text = await file.text();
+   132→      const json = JSON.parse(text);
+   133→      let jobs: unknown[] = [];
+   134→      let projectUid = "P";
+   135→      if (Array.isArray(json)) {
+   136→        jobs = json;
+   137→      } else if (json && typeof json === "object") {
+   138→        const obj = json as Record<string, unknown>;
+   139→        if (Array.isArray(obj.jobs)) jobs = obj.jobs;
+   140→        if (typeof obj.project_uid === "string") projectUid = obj.project_uid;
+   141→      }
+   142→      if (jobs.length === 0) {
+   143→        throw new Error("No jobs array found in JSON.");
+   144→      }
+   145→      onLoad({
+   146→        raw: json,
+   147→        projectUid,
+   148→        jobCount: jobs.length,
+   149→        source: "upload",
+   150→      });
+   151→      toast.success(`Loaded ${jobs.length} jobs from ${file.name}`);
+   152→    } catch (err) {
+   153→      const msg = err instanceof Error ? err.message : String(err);
+   154→      toast.error(`Failed to parse JSON: ${msg}`);
+   155→    } finally {
+   156→      setParsing(false);
+   157→    }
+   158→  }, [onLoad]);
+   159→
+   160→  const onDrop = useCallback((e: React.DragEvent) => {
+   161→    e.preventDefault();
+   162→    setDragOver(false);
+   163→    const file = e.dataTransfer.files?.[0];
+   164→    if (file) handleFile(file);
+   165→  }, [handleFile]);
+   166→
+   167→  return (
+   168→    <div className="space-y-3">
+   169→      <div
+   170→        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+   171→        onDragLeave={() => setDragOver(false)}
+   172→        onDrop={onDrop}
+   173→        onClick={() => inputRef.current?.click()}
+   174→        className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors ${
+   175→          dragOver ? "border-teal-400 bg-teal-50" : "border-slate-300 bg-slate-50/50 hover:border-teal-300 hover:bg-teal-50/40"
+   176→        }`}
+   177→      >
+   178→        <input
+   179→          ref={inputRef}
+   180→          type="file"
+   181→          accept=".json,application/json"
+   182→          className="hidden"
+   183→          onChange={(e) => {
+   184→            const file = e.target.files?.[0];
+   185→            if (file) handleFile(file);
+   186→            e.target.value = "";
+   187→          }}
+   188→        />
+   189→        <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-teal-100 text-teal-600">
+   190→          {parsing ? <Loader2 className="h-5 w-5 animate-spin" /> : <UploadCloud className="h-5 w-5" />}
+   191→        </div>
+   192→        <p className="text-[13px] font-medium text-slate-700">
+   193→          {parsing ? "Parsing…" : "Drop the CryoSmart metadata JSON here, or click to browse"}
+   194→        </p>
+   195→        <p className="mt-1 text-[11px] text-slate-500">
+   196→          Accepts a top-level array of jobs, or <code className="rounded bg-slate-200 px-1 py-0.5 text-[10px]">{"{ jobs: [...] }"}</code> wrapper
+   197→        </p>
+   198→      </div>
+   199→      <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-2.5 text-[11.5px] text-amber-800">
+   200→        <div className="flex items-start gap-2">
+   201→          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+   202→          <div>
+   203→            <span className="font-medium">How to get this JSON?</span> Use the original Chrome extension&apos;s
+   204→            <span className="mx-1 font-mono rounded bg-amber-100 px-1">可选：导出当前 Project 全部 metadata</span>
+   205→            button, OR fetch <code className="rounded bg-amber-100 px-1">/api/projects/&lt;pid&gt;/jobs</code> from CryoSmart directly. See the <a href="#help" className="underline">Help section</a> below.
+   206→          </div>
+   207→        </div>
+   208→      </div>
+   209→    </div>
+   210→  );
+   211→}
+   212→
+   213→function LiveConnectPanel({ loaded, onLoad }: Props) {
+   214→  const existing = loadSession();
+   215→  const [baseUrl, setBaseUrl] = useState(existing?.baseUrl || "http://192.168.4.3:8080");
+   216→  const [cookie, setCookie] = useState(existing?.cookie || "");
+   217→  const [auth, setAuth] = useState(existing?.auth || "");
+   218→  const [projectId, setProjectId] = useState("P52");
+   219→  const [testing, setTesting] = useState(false);
+   220→  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+   221→  const [loadingJobs, setLoadingJobs] = useState(false);
+   222→
+   223→  const testConnection = useCallback(async () => {
+   224→    setTesting(true);
+   225→    setTestResult(null);
+   226→    try {
+   227→      const session: CryoSmartSession = { baseUrl: baseUrl.replace(/\/+$/, ""), cookie: cookie || undefined, auth: auth || undefined };
+   228→      saveSession(session);
+   229→      const result = await fetchProjectJobs(session, projectId);
+   230→      setTestResult({ ok: true, msg: `OK — found ${result.jobs.length} jobs via ${result.source}` });
+   231→      toast.success(`Connected: ${result.jobs.length} jobs found`);
+   232→    } catch (err) {
+   233→      const msg = err instanceof Error ? err.message : String(err);
+   234→      setTestResult({ ok: false, msg });
+   235→      toast.error(`Connection failed: ${msg}`);
+   236→    } finally {
+   237→      setTesting(false);
+   238→    }
+   239→  }, [baseUrl, cookie, auth, projectId]);
+   240→
+   241→  const loadJobs = useCallback(async () => {
+   242→    setLoadingJobs(true);
+   243→    try {
+   244→      const session: CryoSmartSession = { baseUrl: baseUrl.replace(/\/+$/, ""), cookie: cookie || undefined, auth: auth || undefined };
+   245→      saveSession(session);
+   246→      const result = await fetchProjectJobs(session, projectId);
+   247→      const jobUids: string[] = [];
+   248→      for (const j of result.jobs as Array<Record<string, unknown>>) {
+   249→        if (typeof j.uid === "string") jobUids.push(j.uid);
+   250→        else if (typeof j.uid_num === "number") jobUids.push(`J${j.uid_num}`);
+   251→      }
+   252→      jobUids.sort();
+   253→      onLoad({
+   254→        raw: { jobs: result.jobs },
+   255→        projectUid: projectId,
+   256→        jobCount: result.jobs.length,
+   257→        source: "live",
+   258→        session,
+   259→        liveJobUids: jobUids,
+   260→      });
+   261→      toast.success(`Loaded ${result.jobs.length} jobs from ${session.baseUrl}`);
+   262→    } catch (err) {
+   263→      const msg = err instanceof Error ? err.message : String(err);
+   264→      toast.error(`Load jobs failed: ${msg}`);
+   265→    } finally {
+   266→      setLoadingJobs(false);
+   267→    }
+   268→  }, [baseUrl, cookie, auth, projectId, onLoad]);
+   269→
+   270→  return (
+   271→    <div className="space-y-3">
+   272→      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+   273→        <div className="space-y-1.5 sm:col-span-2">
+   274→          <Label htmlFor="cryosmart-base" className="text-[12px] text-slate-600">CryoSmart Base URL</Label>
+   275→          <Input
+   276→            id="cryosmart-base"
+   277→            value={baseUrl}
+   278→            onChange={(e) => setBaseUrl(e.target.value)}
+   279→            placeholder="http://192.168.4.3:8080"
+   280→            className="h-9 font-mono text-[13px]"
+   281→          />
+   282→        </div>
+   283→        <div className="space-y-1.5">
+   284→          <Label htmlFor="cryosmart-cookie" className="text-[12px] text-slate-600">Session Cookie <span className="text-slate-400">(optional)</span></Label>
+   285→          <Input
+   286→            id="cryosmart-cookie"
+   287→            value={cookie}
+   288→            onChange={(e) => setCookie(e.target.value)}
+   289→            placeholder="session=eyJ...; csrftoken=abc"
+   290→            className="h-9 font-mono text-[12px]"
+   291→          />
+   292→        </div>
+   293→        <div className="space-y-1.5">
+   294→          <Label htmlFor="cryosmart-auth" className="text-[12px] text-slate-600">Authorization <span className="text-slate-400">(optional)</span></Label>
+   295→          <Input
+   296→            id="cryosmart-auth"
+   297→            value={auth}
+   298→            onChange={(e) => setAuth(e.target.value)}
+   299→            placeholder="Bearer eyJ..."
+   300→            className="h-9 font-mono text-[12px]"
+   301→          />
+   302→        </div>
+   303→        <div className="space-y-1.5">
+   304→          <Label htmlFor="cryosmart-pid" className="text-[12px] text-slate-600">Project ID</Label>
+   305→          <Input
+   306→            id="cryosmart-pid"
+   307→            value={projectId}
+   308→            onChange={(e) => setProjectId(e.target.value)}
+   309→            placeholder="P52"
+   310→            className="h-9 font-mono text-[13px]"
+   311→          />
+   312→        </div>
+   313→      </div>
+   314→
+   315→      <div className="flex flex-wrap gap-2">
+   316→        <Button variant="outline" size="sm" onClick={testConnection} disabled={testing || !baseUrl} className="h-8 text-[12px]">
+   317→          {testing ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Plug className="mr-1.5 h-3.5 w-3.5" />}
+   318→          Test connection
+   319→        </Button>
+   320→        <Button size="sm" onClick={loadJobs} disabled={loadingJobs || !baseUrl || !projectId} className="h-8 text-[12px] bg-teal-600 hover:bg-teal-700">
+   321→          {loadingJobs ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Server className="mr-1.5 h-3.5 w-3.5" />}
+   322→          Load jobs
+   323→        </Button>
+   324→      </div>
+   325→
+   326→      {testResult && (
+   327→        <div className={`flex items-start gap-2 rounded-md border p-2.5 text-[12px] ${testResult.ok ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-rose-200 bg-rose-50 text-rose-800"}`}>
+   328→          {testResult.ok ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+   329→          <span className="font-mono">{testResult.msg}</span>
+   330→        </div>
+   331→      )}
+   332→
+   333→      {loaded?.source === "live" && loaded.liveJobUids && loaded.liveJobUids.length > 0 && (
+   334→        <div className="rounded-md border border-slate-200 bg-slate-50 p-2.5">
+   335→          <div className="mb-1.5 flex items-center justify-between text-[11px] text-slate-500">
+   336→            <span>{loaded.liveJobUids.length} jobs discovered</span>
+   337→            <span>pick one in the Configure step →</span>
+   338→          </div>
+   339→          <ScrollArea className="h-20 rounded border border-slate-200 bg-white p-1.5">
+   340→            <div className="flex flex-wrap gap-1">
+   341→              {loaded.liveJobUids.map((uid) => (
+   342→                <Badge key={uid} variant="outline" className="font-mono text-[10px]">{uid}</Badge>
+   343→              ))}
+   344→            </div>
+   345→          </ScrollArea>
+   346→        </div>
+   347→      )}
+   348→
+   349→      {/* How it works + tutorial */}
+   350→      <LiveConnectTutorial baseUrl={baseUrl} cryosmartOrigin={baseUrl.replace(/\/+$/, "")} />
+   351→    </div>
+   352→  );
+   353→}
+   354→
+   355→function LiveConnectTutorial({ baseUrl, cryosmartOrigin }: { baseUrl: string; cryosmartOrigin: string }) {
+   356→  const [showTutorial, setShowTutorial] = useState(false);
+   357→  const [showCookieHelp, setShowCookieHelp] = useState(false);
+   358→  const [showAuthHelp, setShowAuthHelp] = useState(false);
+   359→
+   360→  return (
+   361→    <>
+   362→      {/* Quick answer banner */}
+   363→      <div className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 text-[11.5px] text-teal-900 dark:border-teal-700 dark:bg-teal-950/30 dark:text-teal-200">
+   364→        <div className="flex items-start gap-2">
+   365→          <Plug className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+   366→          <div>
+   367→            <span className="font-medium">Quick answer:</span> Most users only need to fill{" "}
+   368→            <strong>Session Cookie</strong>. Authorization is only needed if your CryoSmart uses
+   369→            JWT/token auth (rare). The web app&apos;s backend proxy forwards whichever you provide.
+   370→            <button
+   371→              onClick={() => setShowTutorial(!showTutorial)}
+   372→              className="ml-1 font-semibold underline decoration-dotted underline-offset-2 hover:text-teal-700 dark:hover:text-teal-300"
+   373→            >
+   374→              {showTutorial ? "Hide tutorial" : "Show step-by-step tutorial →"}
+   375→            </button>
+   376→          </div>
+   377→        </div>
+   378→      </div>
+   379→
+   380→      {/* Expandable tutorial */}
+   381→      {showTutorial && (
+   382→        <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-700 dark:bg-slate-900/40">
+   383→          <div className="text-[12px] font-semibold text-slate-700 dark:text-slate-200">
+   384→            How to get your Session Cookie
+   385→          </div>
+   386→
+   387→          {/* Step 1 */}
+   388→          <div className="flex gap-3">
+   389→            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">1</span>
+   390→            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+   391→              <p>Open <strong>CryoSmart</strong> in your browser and log in normally.</p>
+   392→              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+   393→                URL looks like:{" "}
+   394→                <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px] dark:bg-slate-800">
+   395→                  {cryosmartOrigin || "http://192.168.4.3:8080"}
+   396→                </code>
+   397→              </p>
+   398→            </div>
+   399→          </div>
+   400→
+   401→          {/* Step 2 */}
+   402→          <div className="flex gap-3">
+   403→            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">2</span>
+   404→            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+   405→              <p>Press <kbd className="rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-[10px] dark:border-slate-600 dark:bg-slate-800">F12</kbd> to open DevTools, then click the <strong>Application</strong> tab.</p>
+   406→              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+   407→                (Chrome/Edge: Application → Storage → Cookies. Firefox: Storage → Cookies.
+   408→                Safari: Storage → Cookies.)
+   409→              </p>
+   410→            </div>
+   411→          </div>
+   412→
+   413→          {/* Step 3 */}
+   414→          <div className="flex gap-3">
+   415→            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">3</span>
+   416→            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+   417→              <p>In the left sidebar, expand <strong>Cookies</strong> → click your CryoSmart domain.</p>
+   418→              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+   419→                You&apos;ll see a table of cookie names and values.
+   420→              </p>
+   421→            </div>
+   422→          </div>
+   423→
+   424→          {/* Step 4 */}
+   425→          <div className="flex gap-3">
+   426→            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">4</span>
+   427→            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+   428→              <p>Find the session cookie. Common names: <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">session</code>, <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">connect.sid</code>, <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">sessionid</code>, or <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">csrftoken</code>.</p>
+   429→              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+   430→                Copy the <strong>Value</strong> column for that row.
+   431→              </p>
+   432→            </div>
+   433→          </div>
+   434→
+   435→          {/* Step 5 */}
+   436→          <div className="flex gap-3">
+   437→            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700 dark:bg-teal-900 dark:text-teal-300">5</span>
+   438→            <div className="flex-1 text-[12px] text-slate-600 dark:text-slate-300">
+   439→              <p>Paste it into the <strong>Session Cookie</strong> field above in this format:</p>
+   440→              <pre className="mt-1 overflow-x-auto rounded-md border border-slate-200 bg-slate-950 p-2 font-mono text-[10px] text-emerald-300 dark:border-slate-700">
+   441→                <code>session=eyJhbGciOi...; csrftoken=abc123</code>
+   442→              </pre>
+   443→              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+   444→                Format: <code className="font-mono text-[10px]">name=value</code>. Multiple cookies separated by <code className="font-mono text-[10px]">; </code> (semicolon + space).
+   445→              </p>
+   446→            </div>
+   447→          </div>
+   448→
+   449→          {/* Alternative: Network tab method */}
+   450→          <button
+   451→            onClick={() => setShowCookieHelp(!showCookieHelp)}
+   452→            className="flex items-center gap-1 text-[11.5px] font-medium text-teal-700 hover:underline dark:text-teal-400"
+   453→          >
+   454→            {showCookieHelp ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+   455→            Alternative: get cookie from the Network tab
+   456→          </button>
+   457→          {showCookieHelp && (
+   458→            <div className="ml-8 space-y-2 rounded-md border border-slate-200 bg-white p-3 text-[11.5px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+   459→              <p>If you can&apos;t find the Application tab, use this method:</p>
+   460→              <ol className="ml-4 list-decimal space-y-1">
+   461→                <li>Open CryoSmart, press <kbd className="rounded border border-slate-300 bg-white px-1 py-0.5 font-mono text-[10px] dark:border-slate-600 dark:bg-slate-800">F12</kbd> → <strong>Network</strong> tab.</li>
+   462→                <li>Refresh the page (F5).</li>
+   463→                <li>Click any request in the list (e.g. <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">/api/...</code>).</li>
+   464→                <li>In the right panel, scroll to <strong>Request Headers</strong> → find the <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">Cookie:</code> line.</li>
+   465→                <li>Copy everything after <code className="font-mono text-[10px]">Cookie: </code> — that&apos;s your full cookie string.</li>
+   466→              </ol>
+   467→            </div>
+   468→          )}
+   469→
+   470→          {/* Authorization help */}
+   471→          <button
+   472→            onClick={() => setShowAuthHelp(!showAuthHelp)}
+   473→            className="flex items-center gap-1 text-[11.5px] font-medium text-slate-600 hover:underline dark:text-slate-400"
+   474→          >
+   475→            {showAuthHelp ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+   476→            When do I need Authorization? (rare)
+   477→          </button>
+   478→          {showAuthHelp && (
+   479→            <div className="ml-8 space-y-2 rounded-md border border-slate-200 bg-white p-3 text-[11.5px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+   480→              <p>
+   481→                <strong>Most CryoSmart deployments don&apos;t need this.</strong> Skip it unless:
+   482→              </p>
+   483→              <ul className="ml-4 list-disc space-y-1">
+   484→                <li>Your CryoSmart is configured with JWT bearer token auth (check with your admin).</li>
+   485→                <li>You see an <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">Authorization: Bearer ...</code> header in DevTools → Network requests.</li>
+   486→              </ul>
+   487→              <p className="mt-1">If needed, copy the full value including <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-slate-800">Bearer </code> prefix:</p>
+   488→              <pre className="overflow-x-auto rounded-md border border-slate-200 bg-slate-950 p-2 font-mono text-[10px] text-emerald-300 dark:border-slate-700">
+   489→                <code>Bearer eyJhbGciOiJIUzI1NiIs...</code>
+   490→              </pre>
+   491→            </div>
+   492→          )}
+   493→
+   494→          <Separator className="my-2" />
+   495→
+   496→          {/* Privacy + how it works */}
+   497→          <div className="rounded-md border border-blue-200 bg-blue-50/40 p-2.5 text-[11px] text-blue-800 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-200">
+   498→            <div className="flex items-start gap-2">
+   499→              <Plug className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+   500→              <div>
+   501→                <span className="font-medium">How it works:</span> Your browser cannot call CryoSmart
+   502→                directly (CORS + HttpOnly cookies). Our Next.js API route{" "}
+   503→                <code className="mx-0.5 rounded bg-blue-100 px-1 font-mono text-[10px] dark:bg-blue-900">/api/cryosmart/[...path]</code>{" "}
+   504→                acts as a server-side proxy, forwarding each request with your cookie attached.
+   505→                Your cookie is stored only in <strong>localStorage</strong> in your browser — it is
+   506→                never written to disk, never logged, and never sent to any third party.
+   507→              </div>
+   508→            </div>
+   509→          </div>
+   510→
+   511→          {/* Which to fill summary */}
+   512→          <div className="rounded-md border border-amber-200 bg-amber-50/60 p-2.5 text-[11px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+   513→            <div className="flex items-start gap-2">
+   514→              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+   515→              <div>
+   516→                <strong>Summary — which fields to fill:</strong>
+   517→                <ul className="ml-4 mt-1 list-disc space-y-0.5">
+   518→                  <li><strong>Cookie only</strong> (95% of cases): fill <em>Session Cookie</em>, leave <em>Authorization</em> empty.</li>
+   519→                  <li><strong>Auth only</strong> (rare, JWT setups): fill <em>Authorization</em>, leave <em>Session Cookie</em> empty.</li>
+   520→                  <li><strong>Both</strong> (very rare): fill both — the proxy forwards both headers.</li>
+   521→                  <li><strong>Neither</strong>: only works if CryoSmart has no auth (public instance on your LAN).</li>
+   522→                </ul>
+   523→              </div>
+   524→            </div>
+   525→          </div>
+   526→        </div>
+   527→      )}
+   528→    </>
+   529→  );
+   530→}
+   531→
+   532→function SamplePanel({ onLoad }: Props) {
+   533→  const [startJob, setStartJob] = useState(10);
+   534→  const loadSample = useCallback(() => {
+   535→    const sample = buildSampleExportedMetadata({ startJob });
+   536→    onLoad({
+   537→      raw: sample,
+   538→      projectUid: sample.project_uid,
+   539→      jobCount: sample.jobs.length,
+   540→      source: "sample",
+   541→    });
+   542→    toast.success(`Loaded sample project (${sample.jobs.length} jobs, starting at J${startJob})`);
+   543→  }, [startJob, onLoad]);
+   544→
+   545→  return (
+   546→    <div className="space-y-3">
+   547→      <div className="rounded-lg border border-teal-200 bg-gradient-to-br from-teal-50 to-emerald-50 p-4">
+   548→        <div className="flex items-start gap-3">
+   549→          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-teal-600 text-white">
+   550→            <FlaskConical className="h-4 w-4" />
+   551→          </div>
+   552→          <div className="flex-1">
+   553→            <h4 className="text-[13px] font-semibold text-slate-800">Synthetic cryo-EM workflow</h4>
+   554→            <p className="mt-0.5 text-[12px] text-slate-600">
+   555→              A realistic 10-job single-particle pipeline: import movies → motion correction → CTF →
+   556→              blob picker → extract → 2D classification → select 2D → ab initio → homo refine →
+   557→              (optional) heterogeneous refine. Use this to explore the report and download formats
+   558→              without needing a real CryoSmart instance.
+   559→            </p>
+   560→          </div>
+   561→        </div>
+   562→      </div>
+   563→      <div className="flex flex-wrap items-end gap-3">
+   564→        <div className="space-y-1.5">
+   565→          <Label htmlFor="sample-start" className="text-[12px] text-slate-600">Start from Job</Label>
+   566→          <select
+   567→            id="sample-start"
+   568→            value={startJob}
+   569→            onChange={(e) => setStartJob(Number(e.target.value))}
+   570→            className="h-9 rounded-md border border-slate-300 bg-white px-2.5 text-[13px] font-mono"
+   571→          >
+   572→            <option value={10}>J10 — homo_refine_new (final)</option>
+   573→            <option value={11}>J11 — hetero_refine (4 classes)</option>
+   574→          </select>
+   575→        </div>
+   576→        <Button size="sm" onClick={loadSample} className="h-9 bg-teal-600 hover:bg-teal-700">
+   577→          <FlaskConical className="mr-1.5 h-3.5 w-3.5" />
+   578→          Load sample project
+   579→        </Button>
+   580→      </div>
+   581→    </div>
+   582→  );
+   583→}
+   584→

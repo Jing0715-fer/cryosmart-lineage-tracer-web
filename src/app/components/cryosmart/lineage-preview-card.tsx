@@ -1,0 +1,327 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import { useTheme } from "next-themes";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2 } from "lucide-react";
+import { toast } from "sonner";
+import type { LineageSummary } from "@/lib/cryosmart/types";
+import { buildLineageHtmlV2 } from "@/lib/cryosmart/report-html";
+import { makePreview } from "@/lib/cryosmart/lineage";
+import { LineageGraph } from "./lineage-graph";
+import { ShareLineageButton } from "./share-lineage-button";
+import { FscPlotViewer } from "./fsc-plot-viewer";
+
+interface Props {
+  summary: LineageSummary | null;
+}
+
+export function LineagePreviewCard({ summary }: Props) {
+  const [reportTab, setReportTab] = useState("stats");
+  const { resolvedTheme } = useTheme();
+
+  const reportHtml = useMemo(() => {
+    if (!summary) return "";
+    try {
+      return buildLineageHtmlV2(summary);
+    } catch (err) {
+      return `<!doctype html><body style="font-family:monospace;padding:2rem;color:#b91c1c;">Failed to build report: ${(err as Error).message}</body>`;
+    }
+  }, [summary]);
+
+  const previewText = useMemo(() => {
+    if (!summary) return "";
+    try { return makePreview(summary); } catch { return ""; }
+  }, [summary]);
+
+  const reportSrcDoc = useMemo(() => {
+    if (!reportHtml) return "";
+    // srcDoc renders the standalone HTML in an isolated iframe.
+    return reportHtml;
+  }, [reportHtml]);
+
+  if (!summary) {
+    return (
+      <Card id="preview" className="scroll-mt-20 opacity-90">
+        <CardHeader className="pb-4">
+          <div className="flex items-center gap-2">
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-slate-300 text-[13px] font-bold text-white dark:bg-slate-700">3</span>
+            <CardTitle className="text-lg text-slate-700 dark:text-slate-300">Lineage Preview</CardTitle>
+          </div>
+          <CardDescription className="mt-1.5 pl-9 text-[13px]">
+            Load data and trace lineage above — the lineage graph, stats, and full HTML report will appear here.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Skeleton stat cards */}
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="rounded-lg border border-slate-200 bg-white p-2.5 dark:border-slate-700 dark:bg-slate-900">
+                <div className="flex items-center gap-1">
+                  <div className="h-3 w-3 animate-pulse rounded bg-slate-200 dark:bg-slate-700" />
+                  <div className="h-2.5 w-16 animate-pulse rounded bg-slate-200 dark:bg-slate-700" />
+                </div>
+                <div className="mt-1.5 h-5 w-20 animate-pulse rounded bg-slate-200 dark:bg-slate-700" />
+                <div className="mt-0.5 h-2 w-12 animate-pulse rounded bg-slate-100 dark:bg-slate-800" />
+              </div>
+            ))}
+          </div>
+          {/* Skeleton tabs + content */}
+          <div className="flex gap-1">
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className="h-7 w-20 animate-pulse rounded bg-slate-100 dark:bg-slate-800" />
+            ))}
+          </div>
+          <div className="flex h-48 flex-col items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50/40 text-[12px] text-slate-400 dark:border-slate-600 dark:bg-slate-900/40">
+            <div className="flex flex-col items-center gap-2">
+              <Layers className="h-6 w-6 text-slate-300 dark:text-slate-600" />
+              <span>No lineage traced yet.</span>
+              <span className="text-[10.5px] text-slate-400 dark:text-slate-500">Load data above and click <strong className="text-teal-600 dark:text-teal-400">Trace Lineage</strong> (Ctrl+Enter).</span>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card id="preview" className="scroll-mt-20">
+      <CardHeader className="pb-4">
+        <div className="flex items-center gap-2">
+          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-teal-600 text-[13px] font-bold text-white">3</span>
+          <CardTitle className="text-lg">Lineage Preview</CardTitle>
+          <div className="ml-auto">
+            <ShareLineageButton summary={summary} />
+          </div>
+        </div>
+        <CardDescription className="mt-1.5 pl-9 text-[13px]">
+          Interactive view of the traced lineage — same data layout as the original extension&apos;s report: left outline + right chain cards. Use <strong>Share</strong> to generate a linkable URL.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Stats row */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <StatCard
+            icon={<Activity className="h-3.5 w-3.5" />}
+            label="Final Particles"
+            value={summary.final_particle_count?.toLocaleString() ?? "—"}
+            sub={summary.final_particle_count ? "particles" : "no particle output"}
+          />
+          <StatCard
+            icon={<Microscope className="h-3.5 w-3.5" />}
+            label="Micrographs"
+            value={summary.final_micrograph_count?.toLocaleString() ?? "—"}
+            sub={summary.final_micrograph_count ? "exposures" : "no exposure output"}
+          />
+          <StatCard
+            icon={<Box className="h-3.5 w-3.5" />}
+            label="Resolution"
+            value={summary.final_resolution_A ? `${summary.final_resolution_A} Å` : "—"}
+            sub={summary.final_resolution_A ? "FSC" : (summary.resolution_note?.slice(0, 22) || "FSC")}
+          />
+          <StatCard
+            icon={<Layers className="h-3.5 w-3.5" />}
+            label="Jobs Traced"
+            value={String(summary.nodes.length)}
+            sub={`${summary.class_split_jobs?.length || 0} class splits`}
+          />
+        </div>
+
+        <Tabs value={reportTab} onValueChange={setReportTab}>
+          <TabsList className="grid w-full grid-cols-6 bg-slate-100 sm:w-auto sm:grid-cols-6">
+            <TabsTrigger value="stats" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Overview</TabsTrigger>
+            <TabsTrigger value="graph" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Graph</TabsTrigger>
+            <TabsTrigger value="fsc" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">FSC</TabsTrigger>
+            <TabsTrigger value="report" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Report</TabsTrigger>
+            <TabsTrigger value="mermaid" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Mermaid</TabsTrigger>
+            <TabsTrigger value="preview" className="text-[11.5px] data-[state=active]:bg-white dark:data-[state=active]:bg-slate-800">Preview</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="stats" className="mt-3 space-y-3">
+            <OverviewPanel summary={summary} />
+          </TabsContent>
+
+          <TabsContent value="graph" className="mt-3">
+            <LineageGraph summary={summary} />
+          </TabsContent>
+
+          <TabsContent value="fsc" className="mt-3">
+            <FscPlotViewer />
+          </TabsContent>
+
+          <TabsContent value="report" className="mt-3">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] text-slate-500">
+                  Standalone HTML report rendered in an iframe — the same file you&apos;ll download as <code className="font-mono text-[10px]">{summary.project_uid}_{summary.start_uid}_lineage_report.html</code>
+                </div>
+                <div className="flex gap-1.5">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-[11px]"
+                    onClick={() => {
+                      const w = window.open();
+                      if (w) { w.document.write(reportHtml); w.document.close(); }
+                    }}
+                  >
+                    <Maximize2 className="mr-1 h-3 w-3" /> Open
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-[11px]"
+                    onClick={() => {
+                      const blob = new Blob([reportHtml], { type: "text/html" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_report.html`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                  >
+                    <Download className="mr-1 h-3 w-3" /> HTML
+                  </Button>
+                </div>
+              </div>
+              <iframe
+                key={`report-${resolvedTheme || "light"}`}
+                srcDoc={reportSrcDoc}
+                title="Lineage Report"
+                className="h-[600px] w-full rounded-lg border border-slate-300 bg-white dark:border-slate-700"
+                sandbox="allow-same-origin allow-scripts allow-popups"
+              />
+            </div>
+          </TabsContent>
+
+          <TabsContent value="mermaid" className="mt-3">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] text-slate-500">
+                  Mermaid <code className="font-mono text-[10px]">flowchart LR</code> source. Paste into <a href="https://mermaid.live" target="_blank" rel="noreferrer" className="text-teal-600 underline">mermaid.live</a> to render.
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-[11px]"
+                  onClick={() => {
+                    if (!summary.focused_mermaid) return;
+                    navigator.clipboard.writeText(summary.focused_mermaid);
+                    toast.success("Mermaid source copied");
+                  }}
+                >
+                  <Copy className="mr-1 h-3 w-3" /> Copy
+                </Button>
+              </div>
+              <ScrollArea className="h-[400px] rounded-lg border border-slate-200 bg-slate-950 p-3">
+                <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-emerald-300">
+                  {summary.focused_mermaid || "(no mermaid graph)"}
+                </pre>
+              </ScrollArea>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="preview" className="mt-3">
+            <ScrollArea className="h-[400px] rounded-lg border border-slate-200 bg-slate-950 p-3">
+              <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-slate-200">
+                {previewText || "(no preview text)"}
+              </pre>
+            </ScrollArea>
+          </TabsContent>
+        </Tabs>
+      </CardContent>
+    </Card>
+  );
+}
+
+function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub: string }) {
+  const isPlaceholder = value === "—" || value === "0";
+  return (
+    <div
+      className={`group relative overflow-hidden rounded-lg border bg-white p-2.5 transition-all hover:-translate-y-0.5 hover:shadow-md dark:bg-slate-900 ${
+        isPlaceholder
+          ? "border-slate-200/60 dark:border-slate-700/60"
+          : "border-slate-200 hover:border-teal-300 dark:border-slate-700 dark:hover:border-teal-700"
+      }`}
+    >
+      {/* Accent strip on hover */}
+      {!isPlaceholder && (
+        <div className="absolute inset-x-0 top-0 h-0.5 origin-left scale-x-0 bg-gradient-to-r from-teal-500 to-emerald-500 transition-transform duration-300 group-hover:scale-x-100" />
+      )}
+      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        <span className="text-teal-500 transition-transform group-hover:scale-110">{icon}</span>
+        {label}
+      </div>
+      <div
+        className={`mt-1 text-[18px] font-semibold leading-tight ${
+          isPlaceholder ? "text-slate-400 dark:text-slate-600" : "text-slate-900 dark:text-slate-100"
+        }`}
+      >
+        {value}
+      </div>
+      <div className="text-[10.5px] text-slate-400 dark:text-slate-500">{sub}</div>
+    </div>
+  );
+}
+
+function OverviewPanel({ summary }: { summary: LineageSummary }) {
+  const nodes = summary.nodes || [];
+  const importOrLeaf = summary.import_or_leaf_jobs || [];
+  const classSplits = summary.class_split_jobs || [];
+  const byType = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const n of nodes) {
+      const t = n.job_type || "unknown";
+      m.set(t, (m.get(t) || 0) + 1);
+    }
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+  }, [nodes]);
+
+  return (
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">Job type breakdown</div>
+        <div className="space-y-1.5">
+          {byType.slice(0, 8).map(([type, count]) => (
+            <div key={type} className="flex items-center justify-between text-[11.5px]">
+              <span className="font-mono text-slate-700">{type}</span>
+              <Badge variant="outline" className="font-mono text-[10px]">{count}</Badge>
+            </div>
+          ))}
+          {byType.length > 8 && <div className="text-[10.5px] text-slate-400">+ {byType.length - 8} more</div>}
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">Import / leaf jobs ({importOrLeaf.length})</div>
+        <div className="space-y-1.5">
+          {importOrLeaf.slice(0, 8).map((n) => (
+            <div key={n.uid} className="flex items-center justify-between text-[11.5px]">
+              <span className="font-mono text-slate-700">{n.uid}</span>
+              <span className="text-[10.5px] text-slate-500">{n.job_type}</span>
+            </div>
+          ))}
+          {importOrLeaf.length > 8 && <div className="text-[10.5px] text-slate-400">+ {importOrLeaf.length - 8} more</div>}
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">Class splits ({classSplits.length})</div>
+        <div className="space-y-1.5">
+          {classSplits.slice(0, 8).map((cs) => (
+            <div key={cs.uid} className="flex items-center justify-between text-[11.5px]">
+              <span className="font-mono text-slate-700">{cs.uid}</span>
+              <span className="text-[10.5px] text-slate-500">{cs.classes?.length || 0} classes</span>
+            </div>
+          ))}
+          {classSplits.length === 0 && <div className="text-[10.5px] text-slate-400">No class split jobs.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
