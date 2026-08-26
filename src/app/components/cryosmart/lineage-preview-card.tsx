@@ -226,7 +226,7 @@ export function LineagePreviewCard({ summary, session }: Props) {
           </TabsContent>
 
           <TabsContent value="graph" className="mt-3">
-            <LineageGraph summary={summary} />
+            <LineageGraph summary={summary} session={session ?? null} />
           </TabsContent>
 
           <TabsContent value="fsc" className="mt-3">
