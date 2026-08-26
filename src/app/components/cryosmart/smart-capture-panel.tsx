@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Smart Capture Panel - Web UI Component
  * 
  * Provides instructions for capturing CryoSmart metadata via browser console.
@@ -45,7 +45,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // Capture script that runs inside CryoSmart (via browser console)
   // This version captures complete job metadata AND session info for maps/images
   const captureScript = `
-(function() {
+(async function() {
   var APP = '${webAppUrl}';
   
   // Find CryoSmart Vue app
@@ -97,7 +97,39 @@ export function SmartCapturePanel({ onCapture }: Props) {
   }
   
   console.log('Extracting data for project:', projectId);
-  
+
+  var jobLogs = socketStore.jobLogs || {};
+
+  function getImageLogs(jobUid) {
+    var logs = (jobLogs[projectId + '-' + jobUid] || []);
+    return logs.filter(function(log) {
+      return log.type === 'image' || (log.imgfiles && log.imgfiles.length > 0);
+    }).map(function(log) {
+      return {
+        _id: log._id,
+        text: log.text,
+        imgfiles: log.imgfiles || [],
+        index: log.index,
+        created_at: log.created_at,
+        flags: log.flags || []
+      };
+    });
+  }
+
+  var allUids = [];
+  for (var exp of (project.experiments || [])) {
+    for (var job of (exp.jobs || [])) { allUids.push(job.uid); }
+  }
+  console.log('Found', allUids.length, 'jobs, pre-loading logs...');
+  if (socketStore.getLogsByJob) {
+    for (var i = 0; i < allUids.length; i++) {
+      try { socketStore.getLogsByJob(projectId, allUids[i]); } catch(e) {}
+    }
+  }
+  await new Promise(function(r) { setTimeout(r, 4000); });
+  jobLogs = socketStore.jobLogs || {};
+  console.log('jobLogs keys after load:', Object.keys(jobLogs).length);
+
   // Extract all jobs from all experiments
   var jobs = [];
   for (var exp of (project.experiments || [])) {
@@ -120,7 +152,8 @@ export function SmartCapturePanel({ onCapture }: Props) {
         output_group_images: job.output_group_images || {},
         ui_tile_images: (job.ui_tile_images || []).map(function(t) {
           return { name: t.name, fileid: t.fileid, num_cols: t.num_cols, num_rows: t.num_rows };
-        })
+        }),
+        image_logs: getImageLogs(job.uid)
       });
     }
   }
