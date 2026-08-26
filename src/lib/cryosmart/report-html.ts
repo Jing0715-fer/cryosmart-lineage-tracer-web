@@ -1974,15 +1974,24 @@ export interface ReportHtmlOptions {
 
   /**
    * Inline `<script>`:
-   *   1. `.download-all` buttons stagger `window.open` per URL with 160ms delay.
+   *   1. `.download-all` buttons stagger the downloads per URL with 200ms
+   *      delay (fetch → blob → <a download>, window.open fallback).
    *   2. Height reporter — posts the document scrollHeight to the parent
    *      window so the preview iframe can auto-resize to fit the report
    *      (no cramped fixed-height iframe, no double scrollbar). Uses
    *      ResizeObserver on <body> + window resize + image load events,
    *      debounced so it doesn't spam the parent.
    * Embedded as a string so the final HTML page is fully standalone.
+   *
+   * NOTE: this string is REAL JavaScript parsed by the browser — a single
+   * unbalanced brace silently kills the ENTIRE script (the renderer pasted
+   * it through `new Function()` during review and found exactly that: the
+   * click-listener arrow body was missing its closing `}`, so the IIFE below
+   * was swallowed into it and the whole script threw `Unexpected token ')'`
+   * — which broke BOTH the iframe auto-resize AND every 一键下载 button).
+   * Keep it balanced; prefer appending statements rather than editing tails.
    */
-  const REPORT_HTML_V2_SCRIPT = `document.addEventListener("click",(event)=>{const button=event.target.closest(".download-all");if(button){event.preventDefault();const urls=(button.dataset.urls||"").split("|").filter(Boolean);const names=(button.dataset.names||"").split("|").filter(Boolean);urls.forEach((url,index)=>{if(!url||url.startsWith("#"))return;const name=names[index]||url.split("/").pop()||"download";setTimeout(()=>{fetch(url).then(r=>{if(!r.ok){window.open(url,"_blank");return}return r.blob()}).then(blob=>{if(blob){const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}}).catch(()=>window.open(url,"_blank"))},index*200);});});(function(){function report(){try{var h=Math.max(document.documentElement&&document.documentElement.scrollHeight||0,document.body&&document.body.scrollHeight||0,document.documentElement&&document.documentElement.offsetHeight||0);if(window.parent&&window.parent!==window){window.parent.postMessage({type:"cryosmart-report-height",height:(h|0)},"*");}}catch(e){}}var t=null;function debounce(){if(t)clearTimeout(t);t=setTimeout(report,80);}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",report);}else{report();}window.addEventListener("load",report);window.addEventListener("resize",debounce);if(window.ResizeObserver&&document.body){try{new ResizeObserver(debounce).observe(document.body);}catch(e){}}document.addEventListener("load",function(e){if(e.target&&e.target.tagName==="IMG"){debounce();}},true);})();`;
+  const REPORT_HTML_V2_SCRIPT = `document.addEventListener("click",(event)=>{const button=event.target.closest(".download-all");if(button){event.preventDefault();const urls=(button.dataset.urls||"").split("|").filter(Boolean);const names=(button.dataset.names||"").split("|").filter(Boolean);urls.forEach((url,index)=>{if(!url||url.startsWith("#"))return;const name=names[index]||url.split("/").pop()||"download";setTimeout(()=>{fetch(url).then(r=>{if(!r.ok){window.open(url,"_blank");return}return r.blob()}).then(blob=>{if(blob){const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}}).catch(()=>window.open(url,"_blank"))},index*200);});}});(function(){function report(){try{var h=Math.max(document.documentElement&&document.documentElement.scrollHeight||0,document.body&&document.body.scrollHeight||0,document.documentElement&&document.documentElement.offsetHeight||0);if(window.parent&&window.parent!==window){window.parent.postMessage({type:"cryosmart-report-height",height:(h|0)},"*");}}catch(e){}}var t=null;function debounce(){if(t)clearTimeout(t);t=setTimeout(report,80);}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",report);}else{report();}window.addEventListener("load",report);window.addEventListener("resize",debounce);if(window.ResizeObserver&&document.body){try{new ResizeObserver(debounce).observe(document.body);}catch(e){}}document.addEventListener("load",function(e){if(e.target&&e.target.tagName==="IMG"){debounce();}},true);})();`;
 
   /**
    * Build the V2 lineage report — a standalone HTML page with a left outline
