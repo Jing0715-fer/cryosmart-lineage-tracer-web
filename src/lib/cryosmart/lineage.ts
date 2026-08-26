@@ -421,13 +421,45 @@ export const formatResolution = formatBinFactor;
 /* URL builders                                                       */
 /* ------------------------------------------------------------------ */
 
-/** Build a `/api/log_image/<fileid>` preview URL. */
+/** Build a `/api/log_image/<fileid>` preview URL.
+ *
+ *  Routes the image through the same-origin Next.js proxy at
+ *  `/api/proxy-image/<fileid>?base=<baseUrl>` instead of referencing
+ *  CryoSmart directly. This fixes the "right-click-open-works-but-inline-`<img>`-fails"
+ *  symptom: CryoSmart servers reject cross-origin `<img>` requests that
+ *  carry an external `Referer` header (the iframe's srcdoc origin), and
+ *  may also require an authenticated session cookie that the browser
+ *  won't send cross-origin. The proxy is same-origin (no Referer /
+ *  CORS issue) and forwards `cookie` / `auth` query params to the
+ *  upstream CryoSmart request.
+ *
+ *  Callers that need the canonical full URL (e.g. for `mrc_preview_url`
+ *  consumed by `image-embed.ts` base64 pre-fetch, or by `bundle.ts` for
+ *  ZIP downloads) get it via `canonicalLogImageUrl` below.
+ */
 export function logImageUrl(
   baseUrl: string | null | undefined,
   fileid: string | null | undefined
 ): string | null {
   if (!fileid) return null;
-  return `${String(baseUrl || "").replace(/\/$/, "")}/api/log_image/${fileid}`;
+  const base = String(baseUrl || "").replace(/\/$/, "");
+  if (!base) return null;
+  return `/api/proxy-image/${fileid}?base=${encodeURIComponent(base)}`;
+}
+
+/** Build the canonical full CryoSmart URL `http://host:port/api/log_image/<fileid>`.
+ *  Used by `image-embed.ts` (base64 pre-fetch via the existing
+ *  `/api/cryosmart/[...path]?base=&cookie=&auth=` proxy) and by `bundle.ts`
+ *  (ZIP binary downloads via `cryoSmartBytes`). The proxy URL produced by
+ *  `logImageUrl` is for inline browser rendering only. */
+export function canonicalLogImageUrl(
+  baseUrl: string | null | undefined,
+  fileid: string | null | undefined
+): string | null {
+  if (!fileid) return null;
+  const base = String(baseUrl || "").replace(/\/$/, "");
+  if (!base) return null;
+  return `${base}/api/log_image/${fileid}`;
 }
 
 /** Build a `/api/log_image/download_result_file/<projectId>/<jobId>.<group>.<result>` URL. */

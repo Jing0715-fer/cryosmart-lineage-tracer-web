@@ -43,18 +43,51 @@ export function saveSession(session: CryoSmartSession | null) {
 /**
  * Fetch a CryoSmart path via the proxy. Returns the raw Response.
  * The caller can use `.json()`, `.arrayBuffer()`, `.blob()`, or `.text()`.
+ *
+ * Two path shapes are supported:
+ *  (1) A CryoSmart relative path (e.g. "api/log_image/<fileid>" or
+ *      "api/job/get_clear_job_list?project_uid=P259") — the path is
+ *      forwarded through `/api/cryosmart/[...path]?base=&cookie=&auth=`.
+ *  (2) A `/api/proxy-image/<fileid>?base=...` URL produced by `logImageUrl`
+ *      in `lineage.ts` — already a same-origin Next.js proxy URL. We just
+ *      merge `cookie` / `auth` from the session into its query string and
+ *      fetch it directly. Without this branch, `imageToBase64` would
+ *      route proxy-image URLs through `/api/cryosmart/...` which would
+ *      then try to fetch CryoSmart at the non-existent path
+ *      `/api/proxy-image/<fileid>` → 404.
  */
 export async function cryoSmartFetch(
   session: CryoSmartSession,
   cryosmartPath: string,
   init?: { signal?: AbortSignal }
 ): Promise<Response> {
+  const cleanPath = cryosmartPath.replace(/^\/+/, "");
+
+  // Branch (2): proxy-image URL — fetch directly, just merge session.
+  if (cleanPath.startsWith("api/proxy-image/")) {
+    const [pathOnly, existingQuery] = cleanPath.split("?");
+    const params = new URLSearchParams(existingQuery || "");
+    // The proxy-image URL already carries `base` from `logImageUrl`. Don't
+    // overwrite it with `session.baseUrl` (they should match anyway, but
+    // if the URL was constructed before the session was loaded, the URL's
+    // base is what we want). Only add session credentials.
+    if (session.cookie) params.set("cookie", session.cookie);
+    if (session.auth) params.set("auth", session.auth);
+    const qs = params.toString();
+    const url = `/${pathOnly}${qs ? `?${qs}` : ""}`;
+    return fetch(url, {
+      method: "GET",
+      credentials: "same-origin",
+      signal: init?.signal,
+    });
+  }
+
+  // Branch (1): CryoSmart relative path — forward via /api/cryosmart/[...path].
   // Split the CryoSmart path into path + query, because some candidate
   // endpoints like "api/jobs?project_uid=P259" already contain a query
   // string. We must NOT just append "?base=..." (that would create two "?"
   // and break param parsing). Instead, merge the path's own query params
   // with the proxy's params (base, cookie, auth) into one URLSearchParams.
-  const cleanPath = cryosmartPath.replace(/^\/+/, "");
   const [pathOnly, existingQuery] = cleanPath.split("?");
   const params = new URLSearchParams(existingQuery || "");
   params.set("base", session.baseUrl);

@@ -69,6 +69,7 @@ import {
   ArrowRight,
   ArrowDown,
   Layers,
+  WrapText,
 } from "lucide-react";
 import type {
   ClassSplit,
@@ -103,6 +104,15 @@ const TOP_AXIS_H = 50;
 const TOP_LANE_H = 36; // "free lane" above cards for long-range orthogonal edges
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 3.0;
+// Wrap layout: max canvas width (the SVG width is capped so the layout
+// fits a typical desktop viewport without horizontal scrolling). When
+// the column count would exceed this width, columns wrap to a new row.
+const WRAP_MAX_WIDTH = 1280;
+// Vertical gap between wrap rows — leaves room for cross-row edge routing.
+const WRAP_ROW_GAP = 56;
+// Per-row axis header height in wrap mode (so each row can show its own
+// depth label band without overlapping the row above's edges).
+const WRAP_ROW_AXIS_H = 22;
 
 /* ── Node / edge families ──────────────────────────────────────────────── */
 type NodeFamily = "exposure" | "particle" | "volume" | "other";
@@ -325,6 +335,33 @@ function plainDateStr(v: unknown): string {
   return String(v);
 }
 
+/**
+ * Append session cookie / auth to a `/api/proxy-image/<fileid>?base=...`
+ * URL produced by `logImageUrl` in `lineage.ts`. The proxy-image route
+ * reads `cookie` and `auth` from its query string and forwards them as
+ * `Cookie` / `Authorization` headers to the upstream CryoSmart request
+ * — without this, authenticated CryoSmart deployments reject the
+ * inline `<img>`/`<image>` request with 401/403, and the user sees a
+ * broken-image icon. URLs that are NOT proxy-image URLs (e.g. base64
+ * data: URLs, or already-canonical full CryoSmart URLs) are returned
+ * unchanged. Runs only at render time so the underlying `node.images` /
+ * `node.classes` data stays canonical.
+ */
+function withSession(url: string | null | undefined, session: CryoSmartSession | null | undefined): string | null {
+  if (!url) return null;
+  if (typeof window === "undefined") return url;
+  if (!url.includes("/api/proxy-image/")) return url;
+  if (!session) return url;
+  try {
+    const u = new URL(url, window.location.origin);
+    if (session.cookie) u.searchParams.set("cookie", session.cookie);
+    if (session.auth) u.searchParams.set("auth", session.auth);
+    return u.pathname + u.search;
+  } catch {
+    return url;
+  }
+}
+
 /** Pick the best preview image for a node (used by detail-mode thumbnail). */
 function pickPreviewImage(node: LineageNode): ImageAsset | null {
   if (node.images && node.images.length > 0) return node.images[0];
@@ -486,6 +523,66 @@ function routeEdge(
   };
 }
 
+/**
+ * Wrap-mode edge routing.
+ *
+ * Layout in wrap mode is a grid: depth-ordered columns flow left → right
+ * within a row, then wrap to a new row below when the row's column count
+ * hits `maxColsPerRow`. Edges therefore split into two cases:
+ *
+ *  (a) Same wrap-row → the source and target are in the same horizontal
+ *      band, so we can use the same smooth bezier as the compact layout's
+ *      `deltaCols === 1` case (no top-lane Manhattan needed because within
+ *      a row the columns are always adjacent or close).
+ *
+ *  (b) Cross wrap-row (e.g. end of row 0 → start of row 1) → the edge
+ *      has to leave the source's right edge, drop into the gap between
+ *      the source's row and the row immediately below, travel
+ *      horizontally to the target's column, then drop down to the
+ *      target's row and enter its left edge.
+ *
+ *      For the common case (longest-path depths put consecutive depths
+ *      in adjacent rows), this gives a clean L-shaped path through the
+ *      between-rows lane. For non-adjacent rows, the path stays in the
+ *      single between-rows lane just below the source and then drops
+ *      straight down — visually it will cross intermediate row cards,
+ *      which is the accepted trade-off of the wrap layout (the user
+ *      explicitly asked for "wrap with lines coming over", so visible
+ *      cross-row lines are expected; the compact layout remains
+ *      available for users who want the strictly-non-overlapping view).
+ */
+function routeEdgeWrap(
+  x1: number, y1: number, x2: number, y2: number,
+  sourceWrapRow: number, targetWrapRow: number,
+  rowBottomY: (r: number) => number,
+  nextRowTopY: (r: number) => number,
+): EdgePath {
+  if (sourceWrapRow === targetWrapRow) {
+    // Same row → smooth bezier (no need for top-lane Manhattan).
+    const dx = Math.min(60, Math.abs(x2 - x1) * 0.5);
+    return {
+      d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`,
+      markerEnd: `${x2},${y2}`,
+    };
+  }
+  // Cross-row → Manhattan via the between-rows lane just below the source row.
+  // If target is in a row further down than source+1, the vertical segment
+  // from the lane down to target will pass through intermediate rows'
+  // cards — accepted trade-off (see docstring above).
+  const exitX = x1 + 20;
+  const enterX = x2 - 20;
+  const sBottom = rowBottomY(sourceWrapRow);
+  const nextTop = nextRowTopY(sourceWrapRow);
+  // Midpoint of the gap between source's row and the row immediately below.
+  // For target rows further down, the lane stays at this midpoint (the path
+  // then drops straight down to target, which is fine visually).
+  const laneY = sBottom + (nextTop - sBottom) / 2;
+  return {
+    d: `M${x1},${y1} L${exitX},${y1} L${exitX},${laneY} L${enterX},${laneY} L${enterX},${y2} L${x2},${y2}`,
+    markerEnd: `${x2},${y2}`,
+  };
+}
+
 /* ── Component ────────────────────────────────────────────────────────── */
 export function LineageGraph({ summary, session }: Props) {
   const { resolvedTheme } = useTheme();
@@ -513,11 +610,28 @@ export function LineageGraph({ summary, session }: Props) {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const [hoveredUid, setHoveredUid] = useState<string | null>(null);
+  // `hoveredEdge` is keyed by `${source}\u2192${target}` (using a Unicode
+  // arrow so it can't collide with any real UID). Set when the user hovers
+  // an edge's hit-area — drives both edge highlighting AND card highlighting
+  // (both endpoints of the hovered edge light up).
+  const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const [selectedUid, setSelectedUid] = useState<string | null>(null);
   const [modalUid, setModalUid] = useState<string | null>(null);
+  // Layout mode: "compact" (single horizontal strip, may require horizontal
+  // scroll for deep lineages) vs "wrap" (caps the canvas width at
+  // WRAP_MAX_WIDTH and wraps excess columns to a new row below, with edges
+  // routing through the between-rows gap). User-toggleable via toolbar.
+  const [layoutMode, setLayoutMode] = useState<"compact" | "wrap">("compact");
+
+  // Resolve the hovered edge's source/target UIDs (null when no edge hovered).
+  const hoveredEdgeEndpoints = useMemo(() => {
+    if (!hoveredEdge) return null;
+    const [src, tgt] = hoveredEdge.split("\u2192");
+    return { source: src, target: tgt };
+  }, [hoveredEdge]);
 
   /* Layout: longest-path depth columns, oldest upstream LEFT, TARGET RIGHT. */
-  const { nodes, edges, layout, bounds, columns, depthMap, leafSet } = useMemo(() => {
+  const { nodes, edges, layout, bounds, columns, depthMap, leafSet, wrapRowBounds } = useMemo(() => {
     const nodes = summary.nodes || [];
     const edges = summary.edges || [];
     const depthMap = computeLongestPathDepths(edges, summary.start_uid);
@@ -578,21 +692,53 @@ export function LineageGraph({ summary, session }: Props) {
     }
     cols.forEach((c, i) => { c.columnIndex = i; });
 
-    const layout = new Map<string, { x: number; y: number; columnIndex: number; depth: number; row: number }>();
+    // Wrap layout: cap canvas width so deep lineages wrap to a new row
+    // instead of growing horizontally without bound. maxColsPerRow is
+    // derived from WRAP_MAX_WIDTH and LAYER_X; we floor to at least 2 so
+    // tiny lineages still get a horizontal left→right strip in wrap mode.
+    const maxColsPerRow = Math.max(2, Math.floor((WRAP_MAX_WIDTH - PAD * 2) / LAYER_X));
+    const numWrapRows = Math.max(1, Math.ceil(cols.length / maxColsPerRow));
+
+    // Assign each column its (wrapRow, wrapCol) coordinates.
+    (cols as Array<Col & { wrapRow: number; wrapCol: number }>).forEach((c, i) => {
+      (c as Col & { wrapRow: number; wrapCol: number }).wrapRow = Math.floor(i / maxColsPerRow);
+      (c as Col & { wrapRow: number; wrapCol: number }).wrapCol = i % maxColsPerRow;
+    });
+
+    const layout = new Map<string, { x: number; y: number; columnIndex: number; depth: number; row: number; wrapRow?: number; wrapCol?: number }>();
     let maxRows = 0;
     for (const c of cols) if (c.nodes.length > maxRows) maxRows = c.nodes.length;
     const tallestColHeight = maxRows * LAYER_Y;
     const topOffset = TOP_AXIS_H + TOP_LANE_H + PAD;
+
+    // Per-wrap-row y bounds (top y + bottom y of each row's card area).
+    // Used by routeEdgeWrap to compute the cross-row between-rows lane Y.
+    const wrapRowBounds: Array<{ topY: number; bottomY: number }> = [];
+    for (let r = 0; r < numWrapRows; r++) {
+      const topY = topOffset + r * (tallestColHeight + WRAP_ROW_GAP);
+      wrapRowBounds.push({ topY, bottomY: topY + tallestColHeight });
+    }
+
     for (const c of cols) {
+      const cw = c as Col & { wrapRow: number; wrapCol: number };
       const colHeight = c.nodes.length * LAYER_Y;
-      const startY = topOffset + (tallestColHeight - colHeight) / 2;
+      // Center the column's nodes vertically within its row's band.
+      const startY =
+        layoutMode === "wrap"
+          ? wrapRowBounds[cw.wrapRow].topY + (tallestColHeight - colHeight) / 2
+          : topOffset + (tallestColHeight - colHeight) / 2;
       c.nodes.forEach((n, i) => {
         layout.set(n.uid, {
-          x: PAD + c.columnIndex * LAYER_X,
+          x:
+            layoutMode === "wrap"
+              ? PAD + cw.wrapCol * LAYER_X
+              : PAD + c.columnIndex * LAYER_X,
           y: startY + i * LAYER_Y,
           columnIndex: c.columnIndex,
           depth: c.depth,
           row: i,
+          wrapRow: layoutMode === "wrap" ? cw.wrapRow : undefined,
+          wrapCol: layoutMode === "wrap" ? cw.wrapCol : undefined,
         });
       });
     }
@@ -601,11 +747,24 @@ export function LineageGraph({ summary, session }: Props) {
     for (const pos of layout.values()) {
       if (pos.x + NODE_W > maxX) maxX = pos.x + NODE_W;
     }
-    const totalWidth = Math.max(maxX + PAD, cols.length * LAYER_X + PAD, PAD * 2);
-    const totalHeight = topOffset + tallestColHeight + NODE_H + PAD;
+    // In wrap mode the canvas width is capped at WRAP_MAX_WIDTH — the
+    // content is laid out in `numWrapRows` horizontal bands stacked
+    // vertically, so the SVG grows DOWN, not RIGHT. In compact mode
+    // the canvas grows horizontally to fit every column.
+    const totalWidth =
+      layoutMode === "wrap"
+        ? Math.min(WRAP_MAX_WIDTH, Math.max(maxColsPerRow, cols.length) * LAYER_X + PAD, cols.length * LAYER_X + PAD)
+        : Math.max(maxX + PAD, cols.length * LAYER_X + PAD, PAD * 2);
+    const totalHeight =
+      layoutMode === "wrap"
+        ? topOffset + numWrapRows * tallestColHeight + (numWrapRows - 1) * WRAP_ROW_GAP + NODE_H + PAD
+        : topOffset + tallestColHeight + NODE_H + PAD;
 
-    return { nodes, edges, layout, bounds: { w: totalWidth, h: totalHeight }, columns: cols, depthMap, leafSet };
-  }, [summary, detailMode]);
+    return {
+      nodes, edges, layout, bounds: { w: totalWidth, h: totalHeight },
+      columns: cols, depthMap, leafSet, wrapRowBounds,
+    };
+  }, [summary, detailMode, layoutMode]);
 
   /* Highlight set: full upstream→target path through the hovered/selected node. */
   const highlightUid = hoveredUid ?? selectedUid;
@@ -843,6 +1002,26 @@ export function LineageGraph({ summary, session }: Props) {
           {detailMode && <span className="ml-1 font-mono text-[9px] opacity-80">ON</span>}
         </Button>
 
+        {/* Layout mode toggle: "compact" (single horizontal strip, grows
+            right without bound — clean for shallow lineages) vs "wrap"
+            (caps canvas width at WRAP_MAX_WIDTH, wraps excess columns
+            to a new row below — fits a single page for deep lineages). */}
+        <Button
+          variant={layoutMode === "wrap" ? "default" : "outline"}
+          size="sm"
+          className="h-7 text-[11px]"
+          onClick={() => setLayoutMode((v) => (v === "compact" ? "wrap" : "compact"))}
+          title={
+            layoutMode === "wrap"
+              ? "Layout: wrap (fits one page width, excess wraps down). Click for compact."
+              : "Layout: compact (single horizontal strip). Click for wrap (fits page width)."
+          }
+          aria-pressed={layoutMode === "wrap"}
+        >
+          <WrapText className="mr-1 h-3 w-3" />
+          {layoutMode === "wrap" ? "Wrap" : "Compact"}
+        </Button>
+
         <div className="flex items-center gap-1">
           <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={exportPng}
             title="Export as raster PNG (2× retina)">
@@ -945,21 +1124,29 @@ export function LineageGraph({ summary, session }: Props) {
             {inCanvasCaption}
           </text>
 
-          {/* Free-lane indicator (a faint horizontal strip above cards). */}
-          <line
-            x1={0}
-            y1={topLaneY}
-            x2={bounds.w}
-            y2={topLaneY}
-            stroke={gridColor}
-            strokeWidth={0.5}
-            strokeDasharray="2 5"
-            strokeOpacity={0.5}
-          />
+          {/* Free-lane indicator removed — purely decorative and added
+              visual noise behind the cards without aiding comprehension. */}
 
-          {/* Axis labels + column guides */}
+          {/* Axis labels — column headers only, no vertical divider lines.
+              In compact mode, render once at `y = TOP_AXIS_H` (single
+              header strip at the top of the SVG). In wrap mode, render
+              the header at the TOP of each wrap row so users can read
+              the depth label of any column regardless of which row it's
+              in. The previous implementation also drew a dashed <line>
+              from `TOP_AXIS_H + 6` down to `bounds.h - PAD` for every
+              column — that produced a forest of faint vertical lines
+              the user called out as ugly. Removed in favor of header
+              text alone (cards themselves visually demarcate columns). */}
           {columns.map((col) => {
-            const cx = PAD + col.columnIndex * LAYER_X + NODE_W / 2;
+            const cw = col as typeof columns[number] & { wrapRow?: number; wrapCol?: number };
+            const cx =
+              layoutMode === "wrap"
+                ? PAD + (cw.wrapCol ?? 0) * LAYER_X + NODE_W / 2
+                : PAD + col.columnIndex * LAYER_X + NODE_W / 2;
+            const cy =
+              layoutMode === "wrap" && cw.wrapRow != null && wrapRowBounds[cw.wrapRow]
+                ? wrapRowBounds[cw.wrapRow].topY - 12
+                : TOP_AXIS_H;
             let label: string;
             let labelColor = mutedColor;
             if (col.kind === "target") {
@@ -974,28 +1161,17 @@ export function LineageGraph({ summary, session }: Props) {
               label = `${col.depth} hop${col.depth === 1 ? "" : "s"} to target / ${stageLabel(col.nodes[0])}`;
             }
             return (
-              <g key={`col-${col.columnIndex}`}>
-                <text
-                  x={cx}
-                  y={TOP_AXIS_H}
-                  textAnchor="middle"
-                  fontSize={10.5}
-                  fontWeight={col.kind === "target" || col.kind === "leaf" ? 700 : 500}
-                  fill={labelColor}
-                >
-                  {label}
-                </text>
-                <line
-                  x1={cx}
-                  y1={TOP_AXIS_H + 6}
-                  x2={cx}
-                  y2={bounds.h - PAD}
-                  stroke={col.kind === "target" ? targetColor : col.kind === "leaf" ? startColor : gridColor}
-                  strokeWidth={col.kind === "target" || col.kind === "leaf" ? 1.2 : 1}
-                  strokeDasharray={col.kind === "target" || col.kind === "leaf" ? undefined : "3 4"}
-                  strokeOpacity={col.kind === "target" || col.kind === "leaf" ? 0.7 : 0.5}
-                />
-              </g>
+              <text
+                key={`col-${col.columnIndex}`}
+                x={cx}
+                y={cy}
+                textAnchor="middle"
+                fontSize={10.5}
+                fontWeight={col.kind === "target" || col.kind === "leaf" ? 700 : 500}
+                fill={labelColor}
+              >
+                {label}
+              </text>
             );
           })}
 
@@ -1011,27 +1187,78 @@ export function LineageGraph({ summary, session }: Props) {
             const deltaCols = to.columnIndex - from.columnIndex;
             // Skip edges that would go backward (shouldn't happen with
             // longest-path depths, but defensive — keeps the graph clean).
-            if (deltaCols < 0) return null;
+            // In wrap mode, the deltaCols is the per-row column delta;
+            // cross-row edges have a positive wrapRow delta which we route
+            // through the between-rows lane instead.
+            const fromWrapRow = (from as { wrapRow?: number }).wrapRow;
+            const toWrapRow = (to as { wrapRow?: number }).wrapRow;
+            const isWrapCrossRow =
+              layoutMode === "wrap" && fromWrapRow != null && toWrapRow != null && fromWrapRow !== toWrapRow;
+            if (layoutMode !== "wrap" && deltaCols < 0) return null;
+            if (layoutMode === "wrap" && !isWrapCrossRow && deltaCols < 0) return null;
             const fam = edgeFamily(e);
             const color = EDGE_COLOR[fam];
-            const isHi = !!highlightUid && (e.source === highlightUid || e.target === highlightUid);
+            const edgeKey = `${e.source}\u2192${e.target}`;
+            // An edge is highlighted when: the user is hovering one of its
+            // endpoint cards (existing behavior), OR the user is hovering
+            // this edge itself (new — both endpoint cards also light up
+            // via the card-side `isHoveredEdgeEndpoint` check below).
+            const isEndpointHi =
+              !!highlightUid && (e.source === highlightUid || e.target === highlightUid);
+            const isEdgeHi = hoveredEdge === edgeKey;
+            const isHi = isEndpointHi || isEdgeHi;
+            // Dim an edge only when there's a node-level focus AND neither
+            // endpoint of THIS edge is in the focus's ancestor/descendant
+            // chain. Pure edge-hover never dims other edges (it's a
+            // gentle "look at this link" gesture, not a filter).
             const isDim = !!highlightSet && !(highlightSet.has(e.source) && highlightSet.has(e.target));
             const opacity = isDim ? 0.08 : isHi ? 1 : 0.55;
-            const strokeWidth = isHi ? 2.4 : 1.6;
-            const { d } = routeEdge(x1, y1, x2, y2, deltaCols, topLaneY);
+            const strokeWidth = isHi ? 2.6 : 1.6;
+            // Pick routing: wrap cross-row → routeEdgeWrap; otherwise →
+            // routeEdge (bezier for adjacent, Manhattan via top-lane for
+            // multi-column within the same row).
+            const d = isWrapCrossRow
+              ? routeEdgeWrap(
+                  x1, y1, x2, y2,
+                  fromWrapRow!, toWrapRow!,
+                  (r: number) => wrapRowBounds[r]?.bottomY ?? y1,
+                  (r: number) => wrapRowBounds[r + 1]?.topY ?? y2,
+                ).d
+              : routeEdge(x1, y1, x2, y2, layoutMode === "wrap" ? ((to as { wrapCol?: number }).wrapCol ?? 0) - ((from as { wrapCol?: number }).wrapCol ?? 0) : deltaCols, topLaneY).d;
             return (
-              <path
-                key={i}
-                d={d}
-                fill="none"
-                stroke={color}
-                strokeWidth={strokeWidth}
-                strokeOpacity={opacity}
-                strokeLinejoin="round"
-                strokeLinecap="round"
-                markerEnd={`url(#${EDGE_MARKER[fam]})`}
-                style={{ transition: "stroke-opacity 0.2s, stroke-width 0.2s" }}
-              />
+              <g key={i}>
+                {/* Visible colored path — no pointer events so the wide
+                    hit area below is the only thing the user interacts
+                    with (avoids 1.6px stroke being nearly impossible
+                    to mouse-over precisely). */}
+                <path
+                  d={d}
+                  fill="none"
+                  stroke={color}
+                  strokeWidth={strokeWidth}
+                  strokeOpacity={opacity}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  markerEnd={`url(#${EDGE_MARKER[fam]})`}
+                  style={{ transition: "stroke-opacity 0.2s, stroke-width 0.2s" }}
+                  pointerEvents="none"
+                />
+                {/* Invisible wide hit area for hover detection. 14px is
+                    wide enough to hit comfortably without being so wide
+                    that it overlaps adjacent cards' hit boxes (the path
+                    runs through the column gaps and the top free-lane). */}
+                <path
+                  d={d}
+                  fill="none"
+                  stroke="transparent"
+                  strokeWidth={14}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  style={{ cursor: "pointer" }}
+                  onMouseEnter={() => setHoveredEdge(edgeKey)}
+                  onMouseLeave={() => setHoveredEdge(null)}
+                />
+              </g>
             );
           })}
 
@@ -1044,7 +1271,20 @@ export function LineageGraph({ summary, session }: Props) {
             const isTarget = node.uid === summary.start_uid;
             const isLeaf = leafSet.has(node.uid);
             const isHovered = node.uid === hoveredUid;
+            // Light up this card when the user hovers an edge whose source
+            // OR target is this card. The user's request was: "悬停线时
+            // 也要高亮其连接的两个卡片" (when hovering a line, both
+            // connected cards should highlight). This is in ADDITION to
+            // the existing per-card hover ring.
+            const isHoveredEdgeEndpoint =
+              !!hoveredEdgeEndpoints &&
+              (hoveredEdgeEndpoints.source === node.uid ||
+                hoveredEdgeEndpoints.target === node.uid);
             const isSelected = node.uid === selectedUid;
+            // Dim a card only when there's a node-level focus AND it's not
+            // in the focus's ancestor/descendant chain. Pure edge-hover
+            // never dims other cards (matches the edge-side rule above —
+            // edge hover is a gentle highlight, not a filter).
             const isDim = !!highlightSet && !highlightSet.has(node.uid);
             const depth = depthMap.get(node.uid);
             const depthLabel = depth == null ? null : `${depth}h`;
@@ -1058,7 +1298,7 @@ export function LineageGraph({ summary, session }: Props) {
 
             const previewImg = detailMode ? pickPreviewImage(node) : null;
             const embeddedB64 = previewImg ? embeddedThumbs[node.uid] : undefined;
-            const imgSrc = embeddedB64 || previewImg?.src || previewImg?.original_url;
+            const imgSrc = embeddedB64 || withSession(previewImg?.src || previewImg?.original_url, session);
 
             return (
               <g
@@ -1105,26 +1345,58 @@ export function LineageGraph({ summary, session }: Props) {
                     filter="url(#start-glow)"
                   />
                 )}
-                {/* Selection ring. */}
+                {/* Selection ring.
+                    Tightened from (-3, -3, +6, +6, rx=11, strokeWidth=2)
+                    to (-1.5, -1.5, +3, +3, rx=9.5, strokeWidth=1.5) so the
+                    ring sits flush against the card body (card body is at
+                    (0,0,W,H,rx=8,strokeWidth=1) — old ring left a 2px gap
+                    between the inner stroke edge and the card body, which
+                    the user called out as "悬停的边框和卡片不贴合".
+                    `pointerEvents="none"` so the ring doesn't intercept
+                    card-body clicks. */}
                 {isSelected && (
                   <rect
-                    x={-3} y={-3}
-                    width={NODE_W + 6} height={NODE_H + 6}
-                    rx={11}
+                    x={-1.5} y={-1.5}
+                    width={NODE_W + 3} height={NODE_H + 3}
+                    rx={9.5}
                     fill="none"
                     stroke={selectionColor}
-                    strokeWidth={2}
+                    strokeWidth={1.5}
+                    pointerEvents="none"
                   />
                 )}
-                {/* Hover ring. */}
-                {isHovered && !isSelected && (
+                {/* Hover ring — shown for per-card hover AND when this
+                    card is an endpoint of the currently-hovered edge.
+                    Same tight geometry as the selection ring so the two
+                    states don't fight visually. For per-card hover we
+                    use the family color (subtle); for edge-hover endpoint
+                    we use the brighter selection color (sky-500) at a
+                    thicker stroke so the connection is unmistakable
+                    even when the card already has a SOURCE/TARGET
+                    inner ring of its own family color. */}
+                {(isHovered || isHoveredEdgeEndpoint) && !isSelected && (
                   <rect
-                    x={-3} y={-3}
-                    width={NODE_W + 6} height={NODE_H + 6}
-                    rx={11}
+                    x={-1.5} y={-1.5}
+                    width={NODE_W + 3} height={NODE_H + 3}
+                    rx={9.5}
                     fill="none"
-                    stroke={color}
-                    strokeWidth={2}
+                    stroke={isHoveredEdgeEndpoint ? selectionColor : color}
+                    strokeWidth={isHoveredEdgeEndpoint ? 2.5 : 1.5}
+                    pointerEvents="none"
+                  />
+                )}
+                {/* Edge-hover endpoint glow halo — a soft fill behind the
+                    card that pulses the connection visually. Mirrors the
+                    SOURCE/TARGET glow treatment so it feels native. */}
+                {isHoveredEdgeEndpoint && !isSelected && (
+                  <rect
+                    x={-6} y={-6}
+                    width={NODE_W + 12} height={NODE_H + 12}
+                    rx={12}
+                    fill={selectionColor}
+                    opacity={0.22}
+                    filter="url(#start-glow)"
+                    pointerEvents="none"
                   />
                 )}
                 {/* SOURCE inner ring. */}
@@ -1524,7 +1796,7 @@ function NodeDetailModal({
 
   const activeImage = allImages[activeIdx];
   const activeSrc = activeImage
-    ? embeddedGallery[activeImage.src] || activeImage.original_url || activeImage.url
+    ? embeddedGallery[activeImage.src] || withSession(activeImage.original_url || activeImage.url, session)
     : null;
 
   return (
@@ -1665,7 +1937,7 @@ function NodeDetailModal({
                     {allImages.length > 1 && (
                       <div className="flex gap-1.5 overflow-x-auto pb-1">
                         {allImages.map((img, idx) => {
-                          const src = embeddedGallery[img.src] || img.original_url || img.url;
+                          const src = embeddedGallery[img.src] || withSession(img.original_url || img.url, session);
                           const active = idx === activeIdx;
                           return (
                             <button
@@ -1891,7 +2163,7 @@ function ClassesTable({
           </thead>
           <tbody>
             {classes.map((c, idx) => {
-              const src = c.mrc_preview_src ? embedded[c.mrc_preview_src] || c.mrc_preview_url : null;
+              const src = c.mrc_preview_src ? embedded[c.mrc_preview_src] || withSession(c.mrc_preview_url, session) : null;
               return (
                 <tr key={idx} className="border-t" style={{ borderColor }}>
                   <td className="px-2 py-1">
@@ -1959,7 +2231,7 @@ function MapsList({
       </h4>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         {maps.map((m, idx) => {
-          const src = m.preview_src ? embedded[m.preview_src] || m.preview_url : null;
+          const src = m.preview_src ? embedded[m.preview_src] || withSession(m.preview_url, session) : null;
           return (
             <div key={idx} className="overflow-hidden rounded-md border" style={{ borderColor }}>
               <div className="flex h-20 items-center justify-center"
