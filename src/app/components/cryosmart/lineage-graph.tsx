@@ -109,6 +109,16 @@ const MAX_ZOOM = 3.0;
 // fits a typical desktop viewport without horizontal scrolling). When
 // the column count would exceed this width, columns wrap to a new row.
 const WRAP_MAX_WIDTH = 1280;
+// Wrap-mode LEFT routing gutter — a card-free vertical corridor between
+// the canvas's left edge and the first (wrap-col-0) column. Cross-row
+// edges that wrap into a row's FIRST card descend inside this corridor
+// before turning right into the card's left port. Without it, col-0
+// cards sit at x = PAD and their "left gap" is the canvas margin:
+// routeEdgeLane clamps the descent to x ≈ 16 and the corner radii
+// collapse to ~2px (portRoom = 2), producing the hard SQUARE left-side
+// turns the user reported. 56px restores a proper gap so every turn
+// keeps the full n8n-style r=24 quarter-ellipse used everywhere else.
+const WRAP_LEFT_GUTTER = 56;
 // Vertical gap between wrap rows — leaves room for cross-row edge routing.
 const WRAP_ROW_GAP = 56;
 // Per-row axis header height in wrap mode (so each row can show its own
@@ -515,6 +525,14 @@ interface EdgePath {
   markerEnd: string;
 }
 
+/** Wrap-mode x of a column's LEFT edge: PAD + routing gutter + wrapCol*LAYER_X.
+ *  Single source of truth — the node layout AND the per-row axis labels must
+ *  agree on it, or the headers drift off their cards (the label formula
+ *  previously missed the gutter and sat 56px left of its column). */
+function wrapColX(wrapCol: number): number {
+  return PAD + WRAP_LEFT_GUTTER + wrapCol * LAYER_X;
+}
+
 /**
  * Adjacent-column edge: smooth S-curve that lives ENTIRELY inside the
  * column gap. A cubic bezier is an affine combination of its control
@@ -583,13 +601,21 @@ function routeEdgeLane(
   const dy2 = Math.abs(y2 - laneY);  // vertical detour lane → target
 
   // Vertical-run x positions — inside the source's right gap / the
-  // target's left gap (both strips are card-free at every y). The
-  // target's run is clamped to the canvas margin (≥6) and to ≥12px
-  // before the target port; wrap-col-0 targets (whose left "gap" is the
-  // canvas margin) sink to the margin instead.
+  // target's left gap (both strips are card-free at every y). Wrap-col-0
+  // targets get their "left gap" from WRAP_LEFT_GUTTER (their card sits
+  // at PAD + gutter, so gx2 = x2 - LANE_SHOULDER_W lands ~36px inside the
+  // canvas with full room for the r=24 corners). The clamps below are
+  // defensive only — they keep the run inside the canvas (≥6) and ≥12px
+  // before the target port in case a future layout squeezes the gap again.
   const gx1 = x1 + LANE_SHOULDER_W;
-  const gx2Raw = Math.min(Math.max(x2 - LANE_SHOULDER_W, 6), x2 - 12);
-  const gx2 = Math.max(gx2Raw, Math.min(gx1 + 4, x2 - 12));
+  // NOTE: an earlier version floored gx2 with max(gx2Raw, min(gx1+4, x2-12))
+  // — that floor ONLY ever bound for backward (wrap-col-0) targets, where it
+  // pushed the descent to x2-12 and collapsed the corner radii to ~2px (the
+  // hard SQUARE left-side turns the user reported). The plain clamp keeps the
+  // vertical run centered in the target's left gap/gutter with full room for
+  // the r=24 quarter-ellipse corners; short lanes already degenerate safely
+  // via the laneRoom shrink below.
+  const gx2 = Math.min(Math.max(x2 - LANE_SHOULDER_W, 6), x2 - 12);
   // Lane direction: normally left→right, but a wrap-col-0 target sits
   // LEFT of the source, so the lane run goes right→left along the
   // card-free band (never under a card).
@@ -771,9 +797,13 @@ export function LineageGraph({ summary, session }: Props) {
 
     // Wrap layout: cap canvas width so deep lineages wrap to a new row
     // instead of growing horizontally without bound. maxColsPerRow is
-    // derived from WRAP_MAX_WIDTH and LAYER_X; we floor to at least 2 so
-    // tiny lineages still get a horizontal left→right strip in wrap mode.
-    const maxColsPerRow = Math.max(2, Math.floor((WRAP_MAX_WIDTH - PAD * 2) / LAYER_X));
+    // derived from WRAP_MAX_WIDTH, LAYER_X and the left routing gutter;
+    // we floor to at least 2 so tiny lineages still get a horizontal
+    // left→right strip in wrap mode.
+    const maxColsPerRow = Math.max(
+      2,
+      Math.floor((WRAP_MAX_WIDTH - PAD * 2 - WRAP_LEFT_GUTTER) / LAYER_X),
+    );
     const numWrapRows = Math.max(1, Math.ceil(cols.length / maxColsPerRow));
 
     // Assign each column its (wrapRow, wrapCol) coordinates.
@@ -808,7 +838,7 @@ export function LineageGraph({ summary, session }: Props) {
         layout.set(n.uid, {
           x:
             layoutMode === "wrap"
-              ? PAD + cw.wrapCol * LAYER_X
+              ? wrapColX(cw.wrapCol)
               : PAD + c.columnIndex * LAYER_X,
           y: startY + i * LAYER_Y,
           columnIndex: c.columnIndex,
@@ -826,11 +856,20 @@ export function LineageGraph({ summary, session }: Props) {
     }
     // In wrap mode the canvas width is capped at WRAP_MAX_WIDTH — the
     // content is laid out in `numWrapRows` horizontal bands stacked
-    // vertically, so the SVG grows DOWN, not RIGHT. In compact mode
-    // the canvas grows horizontally to fit every column.
+    // vertically, so the SVG grows DOWN, not RIGHT. The width covers the
+    // widest possible row (gutter + maxColsPerRow columns + margins, plus
+    // headroom so the last column's centered axis label isn't clipped)
+    // and the actual rightmost card. In compact mode the canvas grows
+    // horizontally to fit every column.
     const totalWidth =
       layoutMode === "wrap"
-        ? Math.min(WRAP_MAX_WIDTH, Math.max(maxColsPerRow, cols.length) * LAYER_X + PAD, cols.length * LAYER_X + PAD)
+        ? Math.min(
+            WRAP_MAX_WIDTH,
+            Math.max(
+              maxX + PAD + 60,
+              PAD + WRAP_LEFT_GUTTER + Math.min(cols.length, maxColsPerRow) * LAYER_X + PAD,
+            ),
+          )
         : Math.max(maxX + PAD, cols.length * LAYER_X + PAD, PAD * 2);
     const totalHeight =
       layoutMode === "wrap"
@@ -994,51 +1033,102 @@ export function LineageGraph({ summary, session }: Props) {
     window.addEventListener("mouseup", up);
   }, [pan.x, pan.y]);
 
-  /* Wheel zoom (non-passive so preventDefault stops page scroll). */
+  /* Wheel zoom (non-passive so preventDefault stops page scroll).
+   * Cursor-anchored (n8n/ReactFlow behavior): the content point under the
+   * mouse cursor stays fixed while the scale changes — pan is adjusted by
+   * pan' = cursor - (cursor - pan) * (z'/z). Previously zoom scaled around
+   * the ORIGIN (0,0), so zooming in while panned dragged the viewport
+   * sideways and felt broken. zoomRef mirrors the state so the handler
+   * can read the CURRENT zoom synchronously (setZoom's updater must stay
+   * pure — no side effects — so we don't compute pan inside it). */
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+
+  /* Shared zoom-about-a-point helper. `px, py` are container-relative
+   * anchor coordinates (mouse position for wheel, center for buttons). */
+  const zoomAt = useCallback((px: number, py: number, factor: number) => {
+    const z0 = zoomRef.current;
+    const z1 = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z0 * factor));
+    if (z1 === z0) return;
+    const k = z1 / z0;
+    zoomRef.current = z1;
+    setZoom(z1);
+    setPan((p) => ({ x: px - (px - p.x) * k, y: py - (py - p.y) * k }));
+  }, []);
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       if (Math.abs(e.deltaY) < Math.abs(e.deltaX)) return;
       e.preventDefault();
-      const delta = e.deltaY > 0 ? -0.15 : 0.15;
-      setZoom((z) => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z * (1 + delta))));
+      const rect = el.getBoundingClientRect();
+      zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY > 0 ? 0.87 : 1.15);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [zoomAt]);
 
-  /* Fit-to-view: zoom so the whole graph fits in the container. */
+  /* Fit-to-view: zoom so the whole graph fits in the container, and CENTER
+   * it — previously pan was reset to (0,0), so content smaller than the
+   * container hugged the top-left corner and wasted the surrounding
+   * space. Content larger than the container stays pinned at top-left
+   * (clamped ≥ 0) so nothing drifts out of view. */
   const fitToView = useCallback(() => {
     const container = containerRef.current;
     if (!container) return;
     const cw = container.clientWidth;
     const ch = container.clientHeight;
     if (cw === 0 || ch === 0 || bounds.w === 0 || bounds.h === 0) {
+      zoomRef.current = MIN_ZOOM;
       setZoom(MIN_ZOOM);
       setPan({ x: 0, y: 0 });
       return;
     }
     const z = Math.min(cw / bounds.w, ch / bounds.h);
     const safeZ = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, z));
+    zoomRef.current = safeZ;
     setZoom(safeZ);
-    setPan({ x: 0, y: 0 });
+    setPan({
+      x: Math.max(0, (cw - bounds.w * safeZ) / 2),
+      y: Math.max(0, (ch - bounds.h * safeZ) / 2),
+    });
   }, [bounds.w, bounds.h]);
 
   const resetView = useCallback(() => {
+    zoomRef.current = 1;
     setZoom(1);
     setPan({ x: 0, y: 0 });
   }, []);
+
+  /* Button zoom anchored at the canvas CENTER (same math as the wheel). */
+  const zoomBy = useCallback((factor: number) => {
+    const el = containerRef.current;
+    zoomAt(el ? el.clientWidth / 2 : 0, el ? el.clientHeight / 2 : 0, factor);
+  }, [zoomAt]);
 
   useEffect(() => {
     fitToView();
   }, [fitToView]);
 
-  /* PNG export — canvas-based, 2× retina, theme-colored background. */
+  /* PNG export — canvas-based, 2× retina, theme-colored background.
+   * Remote <image> thumbnails (http(s) hrefs) are STRIPPED from the
+   * serialized SVG before rasterizing: the blob-SVG loader either fails
+   * to fetch them or taints the canvas, and toBlob then returns null —
+   * the download silently did nothing in no-session mode. Data: URLs
+   * (embedded thumbnails) are kept. */
   const exportPng = useCallback(() => {
     const svg = svgRef.current;
     if (!svg) return;
-    const xml = new XMLSerializer().serializeToString(svg);
+    const clone = svg.cloneNode(true) as SVGSVGElement;
+    clone.querySelectorAll("image").forEach((im) => {
+      const href =
+        im.getAttribute("href") ??
+        im.getAttributeNS("http://www.w3.org/1999/xlink", "href") ??
+        "";
+      if (!href.startsWith("data:")) im.remove();
+    });
+    const xml = new XMLSerializer().serializeToString(clone);
     const svgBlob = new Blob([xml], { type: "image/svg+xml;charset=utf-8" });
     const url = URL.createObjectURL(svgBlob);
     const img = new Image();
@@ -1112,15 +1202,15 @@ export function LineageGraph({ summary, session }: Props) {
         >
           <Button
             variant="ghost" size="icon" className="h-7 w-7"
-            onClick={() => setZoom((z) => Math.min(MAX_ZOOM, z + 0.15))}
-            title="Zoom in (+15%)" aria-label="Zoom in"
+            onClick={() => zoomBy(1.15)}
+            title="Zoom in (+15%, centered)" aria-label="Zoom in"
           >
             <ZoomIn className="h-3.5 w-3.5" />
           </Button>
           <Button
             variant="ghost" size="icon" className="h-7 w-7"
-            onClick={() => setZoom((z) => Math.max(MIN_ZOOM, z - 0.15))}
-            title="Zoom out (-15%)" aria-label="Zoom out"
+            onClick={() => zoomBy(1 / 1.15)}
+            title="Zoom out (−15%, centered)" aria-label="Zoom out"
           >
             <ZoomOut className="h-3.5 w-3.5" />
           </Button>
@@ -1304,7 +1394,7 @@ export function LineageGraph({ summary, session }: Props) {
             const cw = col as typeof columns[number] & { wrapRow?: number; wrapCol?: number };
             const cx =
               layoutMode === "wrap"
-                ? PAD + (cw.wrapCol ?? 0) * LAYER_X + NODE_W / 2
+                ? wrapColX(cw.wrapCol ?? 0) + NODE_W / 2
                 : PAD + col.columnIndex * LAYER_X + NODE_W / 2;
             const cy =
               layoutMode === "wrap" && cw.wrapRow != null && wrapRowBounds[cw.wrapRow]
@@ -1390,7 +1480,11 @@ export function LineageGraph({ summary, session }: Props) {
               : routeEdgeGap(x1, y1, x2, y2)
             ).d;
             return (
-              <g key={i}>
+              // Same source→target pair CAN appear twice (e.g. a job feeds
+              // another with both particles and a volume — two colored
+              // paths, legitimately). Suffix the index so React keys stay
+              // unique while still being stable across re-renders.
+              <g key={`${edgeKey}#${i}`}>
                 {/* Visible colored path — no pointer events so the wide
                     hit area below is the only thing the user interacts
                     with (avoids 1.6px stroke being nearly impossible
