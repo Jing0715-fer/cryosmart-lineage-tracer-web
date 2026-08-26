@@ -356,3 +356,29 @@ Stage Summary:
 - **CORS-safe proxy route ADDED** at `/api/proxy-image/[fileid]`: same-origin Next.js server-side proxy that forwards `base`/`cookie`/`auth` to the upstream CryoSmart `/api/log_image/<fileid>` endpoint. Defaults `base` to `http://192.168.202.11:8080`. Returns the image bytes with proper `Content-Type` passthrough, 1-day browser+CDN cache for 2xx, `no-store` for errors, and `Access-Control-Allow-Origin: *` for any future same-origin fetch. Available as a fallback for users whose CryoSmart deployment rejects cross-origin `<img>` requests or requires authenticated session-cookie forwarding — the existing `/api/cryosmart/[...path]?base=&cookie=&auth=` proxy continues to handle the base64-embedding path for the report bundle/preview.
 - **No regressions**: `mrc_preview_url` / `url` / `preview_url` remain canonical full URLs, so `image-embed.ts` (base64 pre-fetch for embedding) and `bundle.ts` (binary map/image download for ZIP) continue to work unchanged. Lint clean (0 errors, 1 pre-existing eval warning). Dev server healthy on port 3000. Agent Browser + VLM verified: page loads cleanly, no console/runtime errors, lineage graph renders all 3 nodes correctly, report iframe shows the lineage outline with correctly-formatted image URLs.
 - Caveat: end-to-end image rendering (actual pixels in the browser) cannot be verified in this sandbox because `http://192.168.202.11:8080` is the user's private-network CryoSmart server and is unreachable from the sandbox. The URL-format fix and the proxy setup are both structurally correct (verified via dev.log request paths + iframe srcdoc inspection), and the image-embed.ts fetcher correctly invokes the proxy for all four fileids — in the user's environment with a live Smart Capture session, images will embed as base64 data URLs in the report and render in the lineage graph's Detail Mode + Node Detail Modal.
+
+---
+Task ID: push-to-github-v3
+Agent: main (Z.ai Code)
+Task: Push the image-url-fix changes (lineage.ts classSplits/imageAssets/mapAssets URL fix + new /api/proxy-image/[fileid] route) to GitHub master using the user-provided token.
+
+Work Log:
+- Verified git status: working tree clean. Local HEAD = `6c4fc98` "75fa86da-54f8-4cff-9bdc-e89b0126bd93" (automation hook auto-committed my image-url-fix changes on top of `2cdc060`).
+- Verified HEAD contains exactly the 3 expected file changes:
+  - `src/app/api/proxy-image/[fileid]/route.ts` (+135 lines, new file)
+  - `src/lib/cryosmart/lineage.ts` (+66 lines, -21 lines)
+  - `worklog.md` (+50 lines, image-url-fix entry)
+- Compared local vs remote: remote master HEAD was `2cdc060` (the previous push-to-github-v2 worklog entry commit). Local had 1 new commit `6c4fc98` on top. Clean fast-forward — no divergence, no force push required.
+- Updated remote URL with the new token (the existing remote URL had a redacted/old token): `git remote set-url origin https://<token>@github.com/Jing0715-fer/cryosmart-lineage-tracer-web.git`. The token lives only in `.git/config` (untracked), so it does not persist into any tracked file.
+- Safety check: grepped tracked tree for the new token string — zero matches.
+- Executed `git push origin main:master` — succeeded: remote master went from `2cdc060` to `6c4fc98` (fast-forward, no force).
+- Re-verified via GitHub API:
+  - Remote master HEAD now = `6c4fc98e738743a59e5016d48b70d2eb8df0c238`, commit message matches local HEAD exactly.
+  - Remote `src/app/api/proxy-image/[fileid]/route.ts` at the new commit is 4743 bytes (matches the local file with the CORS-safe proxy implementation).
+
+Stage Summary:
+- Remote master branch successfully updated with all image-url-fix work (tileImageMap lookup in classSplits, logImageUrl-based original_url/mrc_preview_original_url/preview_original_url, new /api/proxy-image/[fileid] proxy route with base/cookie/auth forwarding).
+- Public URL: https://github.com/Jing0715-fer/cryosmart-lineage-tracer-web/tree/master
+- The remote `main` branch (default) was NOT touched — only `master` was pushed, consistent with the user's prior instruction that master is the working branch.
+- Token-redacted remote URL remains in `.git/config`; if the user wants to remove the token from local git config, run: `git remote set-url origin https://github.com/Jing0715-fer/cryosmart-lineage-tracer-web.git` (will then prompt for auth on next push).
+- **SECURITY WARNING given to user**: the token was shared in plaintext in the IM chat — user was instructed to immediately revoke it at https://github.com/settings/tokens and regenerate a new one. The token was used ONLY for this push and was not written to any tracked file, the worklog, or any log.
