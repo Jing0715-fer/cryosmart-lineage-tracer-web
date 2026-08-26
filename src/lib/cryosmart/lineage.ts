@@ -565,6 +565,19 @@ export function classSplits(
   >();
   const outputImages = job.output_group_images || {};
 
+  // Build a name → fileid map from `ui_tile_images` so we can resolve a
+  // volume class's preview thumbnail by name (the Vue store on the CryoSmart
+  // side keeps class previews here, not in `output_group_images`). Falls
+  // back to `output_group_images` if the name isn't in the tile list.
+  const tileImageMap: Record<string, string> = {};
+  if (job.ui_tile_images) {
+    for (const tile of job.ui_tile_images) {
+      if (tile && tile.name && tile.fileid) {
+        tileImageMap[tile.name] = tile.fileid;
+      }
+    }
+  }
+
   for (const group of outputGroups(job, "particle")) {
     if (group.name === "particles_all_classes") {
       total = group.num_items ?? null;
@@ -582,14 +595,20 @@ export function classSplits(
     if (!classes.has(idx)) classes.set(idx, {});
     const entry = classes.get(idx)!;
     entry.volume_group = group.name;
-    entry.mrc_preview_url = logImageUrl(baseUrl, outputImages[group.name || ""]);
-    entry.mrc_preview_src = entry.mrc_preview_url;
-    entry.mrc_preview_original_url = resultPreviewImageUrl(
-      baseUrl,
-      job.project_uid || "",
-      job.uid || "",
-      group.name || ""
-    );
+    const groupName = group.name || "";
+    // Resolve the preview fileid: prefer `ui_tile_images` (keyed by name),
+    // fall back to `output_group_images`. Both point at the same
+    // `/api/log_image/<fileid>` endpoint on the CryoSmart server.
+    const previewFileId =
+      tileImageMap[groupName] || outputImages[groupName] || "";
+    const previewUrl = logImageUrl(baseUrl, previewFileId);
+    entry.mrc_preview_url = previewUrl;
+    entry.mrc_preview_src = previewUrl;
+    // The "open original" link used to point at `download_result_file/...`,
+    // which 404'd for many class volume previews. Point it at the same
+    // `/api/log_image/<fileid>` URL so click-to-open actually shows the
+    // image (matching what's rendered inline).
+    entry.mrc_preview_original_url = previewUrl;
     entry.maps = (group.contains || [])
       .filter(
         (item) => item.type === "volume.blob" && item.name === "map"
@@ -630,10 +649,13 @@ export function classSplits(
 export function imageAssets(
   job: JobMetadata,
   baseUrl: string,
-  projectId = ""
+  // `projectId` is kept for API stability — callers (selected2dSummary,
+  // jobNode) pass it through. It used to be needed for `resultPreviewImageUrl`
+  // (a `download_result_file/<projectId>/...` URL) but that fallback was
+  // removed because the URL it produced 404'd for many tiles.
+  _projectId = ""
 ): ImageAsset[] {
   const assets: ImageAsset[] = [];
-  const pid = projectId || job.project_uid || "";
   for (const item of job.ui_tile_images || []) {
     const tile: UiTileImage = item;
     const fileid = tile.fileid;
@@ -644,9 +666,11 @@ export function imageAssets(
       name: tile.name || "image",
       url,
       src: url,
-      original_url:
-        resultPreviewImageUrl(baseUrl, pid, job.uid || "", tile.name || "image") ||
-        "",
+      // The "open original" link used to point at a `download_result_file`
+      // URL which 404'd for many ui-tile previews. Point it at the same
+      // `/api/log_image/<fileid>` URL so click-to-open matches what's
+      // rendered inline (both go through the same CryoSmart endpoint).
+      original_url: url,
       num_cols: tile.num_cols ?? null,
       num_rows: tile.num_rows ?? null,
     });
@@ -661,8 +685,10 @@ export function imageAssets(
       name,
       url,
       src: url,
-      original_url:
-        resultPreviewImageUrl(baseUrl, pid, job.uid || "", name) || "",
+      // Same as above — use the `/api/log_image/<fileid>` URL for the
+      // click-to-open link instead of the broken `download_result_file`
+      // path.
+      original_url: url,
     });
   }
 
@@ -696,12 +722,10 @@ export function mapAssets(
         ),
         preview_url: previewUrl,
         preview_src: previewUrl,
-        preview_original_url: resultPreviewImageUrl(
-          baseUrl,
-          projectId || job.project_uid || "",
-          job.uid || "",
-          group.name
-        ),
+        // Point click-to-open at the same `/api/log_image/<fileid>` URL
+        // that's rendered inline — the previous `download_result_file`
+        // fallback 404'd for many volume/mask previews.
+        preview_original_url: previewUrl,
       });
     }
   }
