@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { SiteHeader, SiteFooter } from "./components/cryosmart/site-chrome";
 import { DataSourceCard, type LoadedMetadata } from "./components/cryosmart/data-source-card";
 import { ConfigureCard, type TraceOptions } from "./components/cryosmart/configure-card";
@@ -12,7 +12,11 @@ import { useImportedMetadata } from "./components/cryosmart/use-imported-metadat
 import { useSharedSummary } from "./components/cryosmart/use-shared-summary";
 import { useKeyboardShortcuts } from "./components/cryosmart/use-keyboard-shortcuts";
 import { recordSession } from "@/lib/cryosmart/recent-sessions";
-import type { LineageSummary } from "@/lib/cryosmart/types";
+import { buildSummary, normalizeLineageSummary } from "@/lib/cryosmart/lineage";
+import { buildSampleProjectMetadata } from "@/lib/cryosmart/sample-data";
+import { DEFAULT_BASE_URL } from "@/lib/cryosmart/constants";
+import type { JobMetadata, LineageSummary } from "@/lib/cryosmart/types";
+import { toast } from "sonner";
 import { ShieldCheck, Globe, Zap, FileCheck2, Loader2, CheckCircle2, AlertCircle, ArrowRight, Keyboard } from "lucide-react";
 
 export default function Home() {
@@ -53,6 +57,34 @@ export default function Home() {
       document.getElementById("download")?.scrollIntoView({ behavior: "smooth", block: "start" });
     },
   });
+
+  // One-click demo: load the bundled synthetic cryo-EM workflow (P52, J1..J10)
+  // AND immediately trace the upstream lineage from J10 so the user sees the
+  // full pipeline — stats, graph with images, HTML report — without a real
+  // CryoSmart instance. Demo images are bundled /demo/*.png assets.
+  const handleLoadDemo = useCallback(() => {
+    try {
+      const sample = buildSampleProjectMetadata({ projectId: "P52" });
+      const jobs = sample.jobs as JobMetadata[];
+      setLoaded({
+        raw: { jobs: sample.jobs },
+        projectUid: sample.project_uid,
+        jobCount: sample.jobs.length,
+        source: "sample",
+      });
+      const summary = buildSummary(jobs, sample.project_uid, "J10", DEFAULT_BASE_URL);
+      const normalized = normalizeLineageSummary(summary);
+      setSummary(normalized);
+      toast.success(`Demo loaded — traced ${normalized.nodes.length} jobs upstream from J10`);
+      // Wait a tick so the preview card renders before scrolling to it.
+      setTimeout(() => {
+        document.getElementById("preview")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 150);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Demo load failed: ${msg}`);
+    }
+  }, []);
 
   useEffect(() => {
     if (!summary || !loaded) return;
@@ -149,7 +181,7 @@ export default function Home() {
         <div className="space-y-6">
           <DataSourceCard loaded={loaded} onLoad={setLoaded} />
           <ConfigureCard loaded={loaded} summary={summary} onSummary={setSummary} onOptionsChange={setTraceOptions} initialOptions={traceOptions || undefined} />
-          <LineagePreviewCard summary={summary} session={loaded?.session ?? null} />
+          <LineagePreviewCard summary={summary} session={loaded?.session ?? null} onLoadDemo={handleLoadDemo} />
           <DownloadCard summary={summary} options={traceOptions} loaded={loaded} />
           <HelpCard />
         </div>

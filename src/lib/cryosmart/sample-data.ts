@@ -1,7 +1,13 @@
 /**
  * Sample CryoSmart project metadata — a synthetic but realistic cryo-EM
- * single-particle workflow. Used for demo / "try with sample data" button
- * so users can see the full pipeline without a real CryoSmart instance.
+ * single-particle workflow. Used for demo / "Load Demo" button so users
+ * can see the full pipeline (graph, report, images) without a real
+ * CryoSmart instance.
+ *
+ * Preview images reference the bundled `/demo/*.png` assets (generated
+ * AI illustrations of micrographs / 2D classes / 3D map slices / FSC).
+ * `logImageUrl` in lineage.ts passes `/...` paths through unchanged, so
+ * these render same-origin without a CryoSmart server.
  *
  * Shape matches what `normalizeJobsPayload` in lineage.ts accepts:
  * either a top-level array of jobs OR `{ jobs: [...] }`.
@@ -103,10 +109,10 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
       { name: "micrographs", type: "exposure", num_items: 240, summary: { psize_A: 0.83 }, contains: [] },
     ],
     output_group_images: {
-      imported: "fileid_imported_micrograph_thumb_001",
+      imported: "/demo/micrographs.png",
     },
     ui_tile_images: [
-      { name: "imported_small", fileid: "fileid_imported_micrograph_thumb_001", num_cols: 6, num_rows: 4 },
+      { name: "imported_small", fileid: "/demo/micrographs.png", num_cols: 6, num_rows: 4 },
     ],
   }));
 
@@ -132,6 +138,9 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
     output_result_groups: [
       { name: "particles", type: "particle", num_items: 156432, summary: {}, contains: [] },
     ],
+    ui_tile_images: [
+      { name: "picked_micrographs", fileid: "/demo/picked.png", num_cols: 4, num_rows: 2 },
+    ],
   }));
 
   // J6: extract_micrographs_multi
@@ -155,6 +164,9 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
     },
     output_result_groups: [
       { name: "particles", type: "particle", num_items: 156432, summary: { psize_A: 0.83 }, contains: [] },
+    ],
+    ui_tile_images: [
+      { name: "extracted_particles", fileid: "/demo/picked.png", num_cols: 4, num_rows: 2 },
     ],
   }));
 
@@ -180,6 +192,9 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
       { name: "particles_class_2", type: "particle", num_items: 15600, summary: {}, contains: [] },
       { name: "particles_class_3", type: "particle", num_items: 12400, summary: {}, contains: [] },
     ],
+    ui_tile_images: [
+      { name: "class_averages", fileid: "/demo/class2d.png", num_cols: 5, num_rows: 4 },
+    ],
   }));
 
   // J8: select_2D
@@ -201,10 +216,18 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
       { name: "particles_selected", type: "particle", num_items: 89400, summary: {}, contains: [] },
       { name: "particles_excluded", type: "particle", num_items: 67032, summary: {}, contains: [] },
     ],
+    ui_tile_images: [
+      { name: "templates_selected", fileid: "/demo/class2d.png", num_cols: 5, num_rows: 4 },
+      { name: "templates_excluded", fileid: "/demo/class2d.png", num_cols: 5, num_rows: 4 },
+      { name: "particles_selected", fileid: "/demo/picked.png", num_cols: 4, num_rows: 2 },
+    ],
     overview_assets: {
       select_2d: {
-        selected_classes_image_fileid: "fileid_select2d_selected_thumb",
-        excluded_classes_image_fileid: "fileid_select2d_excluded_thumb",
+        selected_classes_image: "/demo/class2d.png",
+        selected_classes_src: "/demo/class2d.png",
+        selected_classes_original_url: "/demo/class2d.png",
+        classes_selected: 12,
+        source: "overview_log_selected_classes",
       },
     },
   }));
@@ -232,6 +255,16 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
       { name: "volume_class_0", type: "volume", num_items: 1, summary: { psize_A: 0.83 }, contains: [{ type: "volume.blob", name: "map" }] },
       { name: "volume_class_1", type: "volume", num_items: 1, summary: { psize_A: 0.83 }, contains: [{ type: "volume.blob", name: "map" }] },
       { name: "volume_class_2", type: "volume", num_items: 1, summary: { psize_A: 0.83 }, contains: [{ type: "volume.blob", name: "map" }] },
+    ],
+    output_group_images: {
+      volume_class_0: "/demo/map3d.png",
+      volume_class_1: "/demo/map3d.png",
+      volume_class_2: "/demo/map3d.png",
+    },
+    ui_tile_images: [
+      { name: "volume_class_0", fileid: "/demo/map3d.png", num_cols: 3, num_rows: 3 },
+      { name: "volume_class_1", fileid: "/demo/map3d.png", num_cols: 3, num_rows: 3 },
+      { name: "volume_class_2", fileid: "/demo/map3d.png", num_cols: 3, num_rows: 3 },
     ],
   }));
 
@@ -261,6 +294,13 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
       output_result_groups: [
         { name: "volume", type: "volume", num_items: 1, summary: { psize_A: 0.83, fsc_resolution_A: 3.12 }, contains: [{ type: "volume.blob", name: "map" }] },
         { name: "particles", type: "particle", num_items: 42100, summary: { psize_A: 0.83 }, contains: [] },
+      ],
+      output_group_images: {
+        volume: "/demo/map3d.png",
+      },
+      ui_tile_images: [
+        { name: "final_volume", fileid: "/demo/map3d.png", num_cols: 3, num_rows: 3 },
+        { name: "fsc_curve", fileid: "/demo/fsc.png", num_cols: 1, num_rows: 1 },
       ],
       radwn_final_A: 3.12,
       final_resolution_A: 3.12,
@@ -300,6 +340,15 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
         { name: "volume_class_1", type: "volume", num_items: 1, summary: { psize_A: 0.83, fsc_resolution_A: 3.21 }, contains: [{ type: "volume.blob", name: "map" }] },
         { name: "volume_class_2", type: "volume", num_items: 1, summary: { psize_A: 0.83, fsc_resolution_A: 3.45 }, contains: [{ type: "volume.blob", name: "map" }] },
         { name: "volume_class_3", type: "volume", num_items: 1, summary: { psize_A: 0.83, fsc_resolution_A: 3.78 }, contains: [{ type: "volume.blob", name: "map" }] },
+      ],
+      output_group_images: {
+        volume_class_0: "/demo/map3d.png",
+        volume_class_1: "/demo/map3d.png",
+        volume_class_2: "/demo/map3d.png",
+        volume_class_3: "/demo/map3d.png",
+      },
+      ui_tile_images: [
+        { name: "volume_class_0", fileid: "/demo/map3d.png", num_cols: 3, num_rows: 3 },
       ],
       final_resolution_A: 3.05,
     }));

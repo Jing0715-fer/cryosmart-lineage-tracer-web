@@ -1,11 +1,11 @@
 ﻿/**
- * CryoSmart Capture - Injection Script v6
+ * CryoSmart Capture - Injection Script v7
  *
  * Run this in CryoSmart console (F12 > Console) to capture:
  * - Complete job metadata (input_slot_groups, params_spec, etc.)
  * - overview_assets scraped from each job's Overview tab (select_2D images, FSC resolution)
  * - ui_tile_images and output_group_images from Vue store
- * - CryoSmart session (origin + auth token) for map/image downloads
+ * - CryoSmart session (origin + auth token + browser cookie) for map/image downloads
  *
  * Ported DOM-scraping logic from CryoSmartLineageTracer_3.0 content.js.
  */
@@ -16,7 +16,7 @@ const AUTO_OPEN = true;
 const MAX_JOB_SCRAPE = 20;
 
 function log(...args) {
-  console.log('%c[CryoSmart Capture v6]', 'color: #0d9488; font-weight: bold', ...args);
+  console.log('%c[CryoSmart Capture v7]', 'color: #0d9488; font-weight: bold', ...args);
 }
 
 /* ------------------------------------------------------------------ */
@@ -232,8 +232,18 @@ function getSessionInfo() {
   const store = findSocketStore();
   let token = null;
   if (store?.socketManager?.token) { token = 'Bearer ' + store.socketManager.token; }
-  log('Session:', { origin, hasToken: !!token });
-  return { origin, auth: token };
+  // Capture the browser cookie too — CryoSmart authenticates /api/log_image
+  // with the session cookie (the WS token alone is NOT enough). document.cookie
+  // misses HttpOnly cookies, but it's the best a page script can do.
+  let cookie = null;
+  try { cookie = document.cookie || null; } catch (e) { cookie = null; }
+  log('Session:', {
+    origin,
+    hasToken: !!token,
+    hasCookie: !!(cookie && cookie.length),
+    cookieLength: cookie ? cookie.length : 0,
+  });
+  return { origin, auth: token, cookie };
 }
 
 async function waitForData(maxMs = 20000) {
@@ -357,14 +367,20 @@ async function scrapeImagesForJobs(jobs, projectId, experimentId) {
 
 async function upload(data, session) {
   log('Uploading', data.jobs.length, 'jobs...');
+  log('Session credentials:', {
+    origin: session.origin,
+    auth: session.auth ? 'Bearer [token]' : 'none',
+    cookie: session.cookie && session.cookie.length ? session.cookie.length + ' chars' : 'none',
+  });
   const payload = {
     project_uid: data.projectUid,
     experiment_uid: data.experimentUid,
     jobs: data.jobs,
-    source: 'CryoSmart Console Capture v6 (+ DOM overview scraping)',
+    source: 'CryoSmart Console Capture v7 (+ DOM overview scraping)',
     captured_at: data.capturedAt,
     cryosmart_origin: session.origin,
     cryosmart_auth: session.auth,
+    cryosmart_cookie: session.cookie,
   };
   const r = await fetch(WEB_APP_URL + '/api/cryosmart/import', {
     method: 'POST',
@@ -378,7 +394,7 @@ async function upload(data, session) {
 }
 
 async function capture(projectId) {
-  log('CryoSmart Capture v6 -- starting');
+  log('CryoSmart Capture v7 -- starting');
   const session = getSessionInfo();
   const store = await waitForData();
   const data = extractData(store, projectId);

@@ -221,11 +221,39 @@ function extractProjectData(projectId, store) {
 }
 
 /**
+ * Capture CryoSmart session info (origin + WS token + browser cookie).
+ * Content scripts share the page's DOM, so document.cookie is readable here
+ * (non-HttpOnly cookies only). The cookie is what CryoSmart checks on
+ * /api/log_image requests — the WS token alone is not enough.
+ */
+function captureSessionInfo() {
+  const origin = window.location.origin;
+  let auth = null;
+  try {
+    if (detectedStore?.socketManager?.token) {
+      auth = 'Bearer ' + detectedStore.socketManager.token;
+    }
+  } catch (e) {
+    // token access can throw if the store is a raw state object
+  }
+  let cookie = null;
+  try { cookie = document.cookie || null; } catch (e) { cookie = null; }
+  log('Session:', {
+    origin,
+    hasToken: !!auth,
+    hasCookie: !!(cookie && cookie.length),
+  });
+  return { origin, auth, cookie };
+}
+
+/**
  * Upload to web app
  */
 async function uploadToWebApp(data, webAppUrl) {
   log('Uploading to:', webAppUrl);
-  
+
+  const session = captureSessionInfo();
+
   const response = await fetch(webAppUrl + '/api/cryosmart/import', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -234,7 +262,10 @@ async function uploadToWebApp(data, webAppUrl) {
       experiment_uid: data.experimentUid,
       jobs: data.jobs,
       source: 'CryoSmart Chrome Extension v3',
-      captured_at: data.capturedAt
+      captured_at: data.capturedAt,
+      cryosmart_origin: session.origin,
+      cryosmart_auth: session.auth,
+      cryosmart_cookie: session.cookie
     })
   });
   
@@ -248,7 +279,7 @@ async function uploadToWebApp(data, webAppUrl) {
     throw new Error('Server error: ' + (result.error || 'unknown'));
   }
   
-  log('Success! Token:', result.token);
+  log('Success! Token:', result.token, '| Session:', result.has_session ? 'Available (auth + cookie forwarded)' : 'Not available');
   
   return {
     success: true,

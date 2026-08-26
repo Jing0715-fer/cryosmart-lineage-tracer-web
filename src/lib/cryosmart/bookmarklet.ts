@@ -37,7 +37,9 @@ export function buildBookmarkletSource(appOrigin: string): string {
     "try{H.push(document.referrer)}catch(e){}",
     "for(var i=0;i<H.length&&!M;i++){var h=H[i];if(!h||h==='about:blank')continue;M=h.match(/\\/projects\\/([^\\/?#]+)/i);if(M)S=h}",
     "if(!M){alert('No CryoSmart project ID found.\\n\\nLooked at:\\n'+H.filter(function(s){return s}).join(', ')+'\\n\\nExpected URL like http://your-cryosmart/#/projects/P259\\n\\nIf you ARE on such a page, your browser ran the bookmark in a blank tab. Try:\\n1. Re-install: delete the bookmark, drag the Capture CryoSmart button from the web app\\'s Bookmarklet tab again.\\n2. Click it from the bookmarks BAR (not a menu).');return}",
-    "var pid=M[1],origin='';",
+    "var pid=M[1],origin='',CK='';",
+    "try{CK=document.cookie||''}catch(e){}",
+    "try{if(!CK&&opener)CK=opener.document.cookie||''}catch(e){}",
     "try{if(opener)origin=opener.location.origin}catch(e){}",
     "if(!origin){var mm=S.match(/^(https?:\\/\\/[^\\/?#]+)/i);if(mm)origin=mm[1]}",
     "if(!origin)origin=location.origin;",
@@ -52,7 +54,7 @@ export function buildBookmarkletSource(appOrigin: string): string {
     "}",
     "function UP(){",
     "sh('Uploading '+J.length+' jobs...');",
-    "fetch(APP+'/api/cryosmart/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_uid:pid,source_url:S,jobs:J})}).then(function(r){return r.json()}).then(function(res){if(!res||!res.ok||!res.token)throw new Error((res&&res.error)||'upload failed');sh('Captured '+res.count+' jobs. Opening web app...','ok');var u=APP+'/?imported='+encodeURIComponent(res.token)+'&pid='+encodeURIComponent(pid);setTimeout(function(){window.open(u,'_blank');var s=document.getElementById('cs');if(s)s.remove()},800)}).catch(function(e){sh('Upload failed: '+e.message,'err')})",
+    "fetch(APP+'/api/cryosmart/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_uid:pid,source_url:S,jobs:J,cryosmart_origin:origin,cryosmart_cookie:CK||null})}).then(function(r){return r.json()}).then(function(res){if(!res||!res.ok||!res.token)throw new Error((res&&res.error)||'upload failed');sh('Captured '+res.count+' jobs. Opening web app...','ok');var u=APP+'/?imported='+encodeURIComponent(res.token)+'&pid='+encodeURIComponent(pid);setTimeout(function(){window.open(u,'_blank');var s=document.getElementById('cs');if(s)s.remove()},800)}).catch(function(e){sh('Upload failed: '+e.message,'err')})",
     "}",
     "TN()",
     "})()",
@@ -255,13 +257,40 @@ export function buildConsoleSnippet(appOrigin: string): string {
     return jobs;
   }
 
-  // --- 5. Upload to web app ---
+  // --- 5. Upload to web app (with session: origin + WS token + browser cookie) ---
+  // CryoSmart authenticates /api/log_image with the session cookie, not the
+  // WS token — so we capture document.cookie too (non-HttpOnly cookies only).
+  function captureSession() {
+    var origin = location.origin;
+    var auth = null;
+    var cookie = null;
+    try {
+      var store = document.querySelector('#q-app').__vue_app__.config.globalProperties.$pinia._s.get('socketStore');
+      if (store && store.socketManager && store.socketManager.token) {
+        auth = 'Bearer ' + store.socketManager.token;
+      }
+    } catch (e) {}
+    try { cookie = document.cookie || null; } catch (e) {}
+    console.log('[CryoSmart] Session: origin=' + origin
+      + ', auth=' + (auth ? 'Bearer [token]' : 'none')
+      + ', cookie=' + (cookie && cookie.length ? cookie.length + ' chars' : 'none'));
+    return { origin: origin, auth: auth, cookie: cookie };
+  }
+
   function upload(jobs) {
+    var session = captureSession();
     console.log('[CryoSmart] Uploading', jobs.length, 'jobs to', APP);
     return fetch(APP + '/api/cryosmart/import', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({project_uid: pid, source_url: href, jobs: jobs})
+      body: JSON.stringify({
+        project_uid: pid,
+        source_url: href,
+        jobs: jobs,
+        cryosmart_origin: session.origin,
+        cryosmart_auth: session.auth,
+        cryosmart_cookie: session.cookie
+      })
     })
     .then(function(r){
       if (!r.ok) throw new Error('HTTP ' + r.status);

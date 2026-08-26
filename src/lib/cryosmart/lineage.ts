@@ -445,6 +445,15 @@ export function logImageUrl(
   baseUrl: string | null | undefined,
   fileid: string | null | undefined
 ): string | null {
+  // Pass through values that are already full image sources rather than
+  // CryoSmart fileids: data: URLs, absolute http(s) URLs, and same-origin
+  // root-relative paths (e.g. the bundled /demo/*.png sample images used by
+  // the "Load Demo" button). Building `.../api/log_image/<data:...>` out of
+  // these would produce a garbage URL.
+  const raw = String(fileid ?? "");
+  if (/^(data:|https?:\/\/)/i.test(raw) || raw.startsWith("/")) {
+    return raw || null;
+  }
   return canonicalLogImageUrl(baseUrl, fileid);
 }
 

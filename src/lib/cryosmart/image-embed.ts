@@ -30,6 +30,21 @@ export async function imageToBase64(
     let pathOnly = cryosmartPath.trim();
     let existingQuery = "";
 
+    // Data URLs are already self-contained — nothing to fetch.
+    if (/^data:/i.test(pathOnly)) return pathOnly;
+
+    // Same-origin assets that are NOT CryoSmart API paths (e.g. the bundled
+    // /demo/*.png sample images) must not go through the CryoSmart proxy —
+    // fetch them directly from this origin instead.
+    if (/^\/(?!api\/)/i.test(pathOnly)) {
+      const resp = await fetch(pathOnly, { credentials: "same-origin" });
+      if (!resp.ok) return null;
+      const buf = await resp.arrayBuffer();
+      if (!buf || buf.byteLength === 0) return null;
+      const mime = resp.headers.get("content-type") || "image/png";
+      return `data:${mime};base64,${arrayBufferToBase64(buf)}`;
+    }
+
     // If it's a full URL, strip the origin so we're left with just the path
     // (+query). This is the critical fix: previously a full URL like
     // "http://192.168.4.3:8080/api/log_image/abc" was passed verbatim into
@@ -66,22 +81,24 @@ export async function imageToBase64(
     const buf = await resp.arrayBuffer();
     if (!buf || buf.byteLength === 0) return null;
     const mime = resp.headers.get("content-type") || "image/png";
-
-    // Convert bytes → base64. Use chunked String.fromCharCode to avoid the
-    // call-stack limit on large images (btoa on a single huge binary string
-    // throws RangeError "Maximum call stack size exceeded" above ~8MB).
-    const bytes = new Uint8Array(buf);
-    const CHUNK = 0x8000; // 32KB per chunk — safe across all engines.
-    let binary = "";
-    for (let i = 0; i < bytes.length; i += CHUNK) {
-      const slice = bytes.subarray(i, i + CHUNK);
-      binary += String.fromCharCode.apply(null, slice as unknown as number[]);
-    }
-    const base64 = btoa(binary);
-    return `data:${mime};base64,${base64}`;
+    return `data:${mime};base64,${arrayBufferToBase64(buf)}`;
   } catch {
     return null;
   }
+}
+
+/** Convert an ArrayBuffer to base64 without blowing the call stack on big
+ *  buffers (btoa on a single huge binary string throws RangeError above ~8MB,
+ *  so we chunk it at 32KB per String.fromCharCode call). */
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  const CHUNK = 0x8000; // 32KB per chunk — safe across all engines.
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const slice = bytes.subarray(i, i + CHUNK);
+    binary += String.fromCharCode.apply(null, slice as unknown as number[]);
+  }
+  return btoa(binary);
 }
 
 /**

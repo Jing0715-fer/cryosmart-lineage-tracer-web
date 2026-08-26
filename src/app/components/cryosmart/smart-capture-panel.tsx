@@ -65,10 +65,23 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // Get session info for map/image downloads
   var cryosmartOrigin = window.location.origin;
   var cryosmartAuth = null;
+  var cryosmartCookie = null;
   
   // Try to get WebSocket token from socketManager
   if (socketStore.socketManager && socketStore.socketManager.token) {
     cryosmartAuth = 'Bearer ' + socketStore.socketManager.token;
+  }
+  
+  // Capture the browser cookie for this CryoSmart origin. Many CryoSmart
+  // deployments authenticate /api/log_image requests via the session cookie
+  // (not the WS token), so without it the server-side proxy gets 401s.
+  // document.cookie only exposes non-HttpOnly cookies — the session cookie
+  // may be HttpOnly; in that case an empty string is sent and the proxy
+  // relies on the auth token instead.
+  try {
+    cryosmartCookie = document.cookie || null;
+  } catch (e) {
+    cryosmartCookie = null;
   }
   
   // Find the project
@@ -117,13 +130,11 @@ export function SmartCapturePanel({ onCapture }: Props) {
   }
   
   console.log('Extracted', jobs.length, 'jobs with full metadata');
-  if (cryosmartAuth) {
-    console.log('CryoSmart session: origin=' + cryosmartOrigin + ', auth=Bearer [token]');
-  } else {
-    console.log('CryoSmart origin: ' + cryosmartOrigin + ' (no auth token found)');
-  }
+  console.log('CryoSmart session: origin=' + cryosmartOrigin
+    + ', auth=' + (cryosmartAuth ? 'Bearer [token]' : 'none')
+    + ', cookie=' + (cryosmartCookie && cryosmartCookie.length ? cryosmartCookie.length + ' chars captured' : 'none'));
   
-  // Upload to web app with session info
+  // Upload to web app with session info (origin + WS token + browser cookie)
   fetch(APP + '/api/cryosmart/import', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -134,14 +145,15 @@ export function SmartCapturePanel({ onCapture }: Props) {
       source: 'CryoSmart SPA Vue Store',
       captured_at: new Date().toISOString(),
       cryosmart_origin: cryosmartOrigin,
-      cryosmart_auth: cryosmartAuth
+      cryosmart_auth: cryosmartAuth,
+      cryosmart_cookie: cryosmartCookie
     })
   }).then(function(r) { return r.json(); })
     .then(function(res) {
       if (res.ok && res.token) {
         console.log('Success! Opening web app...');
         if (res.has_session) {
-          console.log('Session available for map/image downloads.');
+          console.log('Session available for map/image downloads (auth + cookie forwarded to server-side proxy).');
         }
         window.open(APP + '/?imported=' + res.token + '&pid=' + projectId, '_blank');
       } else {
