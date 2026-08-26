@@ -1366,12 +1366,16 @@ export interface ReportHtmlOptions {
     return `<aside class="job-out"><h3>输出到</h3>${rows}</aside>`;
   }
 
-  /** Filter a node's `maps` to those that look like normal (non-mask) maps. */
+  /** Filter a node's `maps` to the normal (non-mask) map files. Includes
+   *  every non-mask volume blob — sharp maps and half maps included (see
+   *  the canonical copy in lineage.ts for the full rationale). */
   export function normalMapAssets(node: LineageNode): MapAsset[] {
     return (node.maps || []).filter((item) => {
       const group = String(item.group || "");
+      const result = String(item.result_name || "");
       const volumeGroup = item.group_type ? item.group_type === "volume" : !/mask/i.test(group);
-      return volumeGroup && (item.result_name === "map" || item.download_url.endsWith(".map"));
+      const isMask = /mask/i.test(group) || /mask/i.test(result);
+      return volumeGroup && !isMask;
     });
   }
 
@@ -1472,6 +1476,20 @@ export interface ReportHtmlOptions {
   }
   }
 
+    // Log images — captured from the SPA's lazy jobLogs state by the Smart
+    // Capture script (force-loaded via the store's log-loading action).
+    // Rendered whenever present so runtime log previews make it into the
+    // report alongside the tile/select-2D images.
+    const logImages = (node.images || []).filter((item) => item.kind === "log_image");
+    if (logImages.length > 0) {
+      const html = reportImageBoxes(node.uid, logImages, 6, opts);
+      if (html) {
+        chunks.push(
+          `<div class="media-block"><h3>Log images (${logImages.length})</h3>${html}</div>`,
+        );
+      }
+    }
+
     if (node.select_2d) {
       const s = node.select_2d;
       const chips: string[] = [];
@@ -1534,22 +1552,29 @@ export interface ReportHtmlOptions {
     const urls = maps.map((item) => item.download_url).join("|");
     const rows = maps
       .map((item) => {
+        // Show the result name when it's not the plain "map" — nu-refine
+        // and friends keep `map_sharp` / `map_half_A` / `map_half_B` inside
+        // the `volume` group; the table should say which row is which.
+        const label =
+          item.result_name && item.result_name !== "map"
+            ? `${item.group}.${item.result_name}`
+            : item.group;
         const preview = item.preview_url
           ? `<a href="${escHtml(item.preview_original_url || item.preview_url)}" target="_blank">${reportImgTag(
               node.uid,
-              mapPreviewImageName(item.group),
+              mapPreviewImageName(label),
               item.preview_src || item.preview_url,
               "map-preview",
-              `${item.group} preview`,
+              `${label} preview`,
               opts
             )}</a>`
           : "";
-        return `<tr><td>${escHtml(item.group)}</td><td>${preview}</td><td><a href="${escHtml(
+        return `<tr><td>${escHtml(label)}</td><td>${preview}</td><td><a href="${escHtml(
           item.download_url,
         )}" target="_blank">map</a></td></tr>`;
       })
       .join("");
-    return `<div class="map-block"><h3>Map / MRC</h3><div class="download-head"><b>普通 map: ${maps.length} 个</b><button type="button" class="download-all" data-urls="${escHtml(
+    return `<div class="map-block"><h3>Map / MRC</h3><div class="download-head"><b>map: ${maps.length} 个（含 sharp / half map）</b><button type="button" class="download-all" data-urls="${escHtml(
       urls,
     )}">一键下载 map</button></div><table class="map-table"><thead><tr><th>Group</th><th>预览</th><th>下载</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }

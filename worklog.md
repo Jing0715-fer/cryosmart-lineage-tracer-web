@@ -546,3 +546,74 @@ Stage Summary:
 - **Image auth root cause FIXED per user's diagnosis**: all 4 capture entry points (web panel script, extension injection, extension content-script, bookmarklet/console snippet) now capture `document.cookie` and POST it as `cryosmart_cookie`. The server-side chain was already cookie-aware (proxy-image + cryosmart proxy forward Cookie + Authorization headers), so once the capture sends the cookie, base64 embedding, the report <img> proxy fallback, and map downloads all authenticate. Note: HttpOnly session cookies are invisible to document.cookie — if the user's CryoSmart session cookie is HttpOnly, the WS Bearer token path remains the fallback.
 - **Load Demo**: one-click demo in Lineage Preview empty state loads a synthetic P52 workflow (J1→J10: import→motion→CTF→blob pick→extract→2D class→select2D→abinit→refine) with bundled /demo/*.png preview images and auto-traces from J10 — full pipeline testable with zero CryoSmart dependency.
 - No regressions: logImageUrl pass-through only affects non-fileid values; real fileids still build canonical /api/log_image URLs.
+
+---
+Task ID: 10
+Agent: main (Z.ai Code)
+Task: (1) Graph edges must COMPLETELY avoid cards (no segment ever covered) + fix left accent bar protruding outside the card frame; (2) capture script — user-provided projectsInMap version confirmed + solve the LAZY jobLogs problem and collect log images for every job; (3) wire job_log_images through the whole server/import/lineage chain.
+
+Work Log:
+- lineage-graph.tsx EDGE ROUTING REWRITTEN with two provably card-free routers:
+  - routeEdgeGap: adjacent-column S-curve. A cubic bezier's x stays within its control points' x-range; [x1,x2] IS the column gap, so the whole curve lives in the gap. Control offset clamped to GAP_W*0.45 (GAP_W = LAYER_X-NODE_W = 72) so it can never bulge into a card column (also covers the defensive same-column bow).
+  - routeEdgeLane: long-range 3-segment route — exit source right port → curve into a free lane (vertical transition entirely inside the source's right column gap) → straight lane run (card-free band) → curve into target's left port (transition inside the target's left gap). All C1-continuous (horizontal tangents at ports and lane joins), no right angles. Target shoulder clamped for wrap-col-0 targets (whose left gap is the canvas margin).
+- Lane assignment computed inside the layout useMemo (edgeLanes Map keyed "source→target"): compact mode splits long-range edges into TOP band (endpoints in upper half: band [TOP_AXIS_H+8, topOffset-8]) vs BOTTOM band (lower half: band starts LAYER_Y-NODE_H above the column-band bottom — cards provably end ≥ LAYER_Y-NODE_H above it — down to totalHeight-10); wrap mode uses the strip below the source's row (same proof) up to just above the next row's axis header, or the canvas bottom for the last row. Lanes evenly distributed + sorted by source column/row so parallel arcs fan out.
+- Old single-bezier "bow toward topLaneY" (which dipped through intermediate cards near endpoints) and routeEdgeWrap (whose cross-row bezier crossed row cards near endpoints) REMOVED. Fixed pre-existing wrap bug where same-row multi-col edges in rows >0 arced toward the GLOBAL top lane, crossing row 0's cards.
+- Left accent bar FIXED: was a square-corner rect (x=0,w=4,h=NODE_H,rx=2) whose corners protruded past the card's rx=8 rounded outline. Now inset (x=1.5, keeps the card's own border stroke fully visible) and clipped by a shared <clipPath id="card-clip"> (card-shaped rect, userSpaceOnUse → applies in each card's local coords). Verified in DOM: clip exists, 10/10 bars use it.
+- Smart capture panel (smart-capture-panel.tsx): kept the user-provided projectsInMap script (APP = dynamic window.location.origin) and appended the LAZY jobLogs solution: harvest already-loaded logs → find the store's log-loading action (own+proto props, name /(log|detail)/i, log-named sorted first) → CALIBRATE call shape on one pending job (uid / {job_uid} / {uid} / [uid], poll store.jobLogs[uid] 800ms) → replay the winning call for every remaining job (1.2s timeout each, per-job HTTP fallback, 60s total budget, progress logs) → extract {fileid,name} from log.imgfiles / type==='image' files → upload as job_log_images. Upload moved into an async IIFE; all failures non-fatal.
+- bookmarklet.ts buildConsoleSnippet: FIXED pre-existing bug — appOrigin param was ignored and 'http://localhost:3010' was hardcoded (twice); now interpolates ${appOrigin}. Added the same log-collection block; getSocketManager → getSocketStore + smOf(store) (store.ws || store.socketManager); upload(jobs, logImages, store); main rewritten as async IIFE. NOTE: had to strip backticks from an in-template comment (they terminated the TS template literal → eslint parse error).
+- Extension updated for consistency: injection.js v7→v8 (log collection before DOM scraping; WEB_APP_URL → current preview URL), content-script.js v3→v4 (collectLogImages before uploadToWebApp).
+- Server wiring: import/route.ts extracts job_log_images (object guard) → pending-store.ts new field → pending/route.ts returns it → use-imported-metadata.ts mergeLogImagesIntoRaw attaches log_images onto each job (handles {jobs:[...]} and bare-array raws) → types.ts LogImageRef + JobMetadata.log_images + ImageAsset kind "log_image" → lineage.ts imageAssets() appends log images via logImageUrl (same /api/log_image/<fileid> endpoint) → report-html.ts reportMediaBlock renders a "Log images (N)" section. Sample data: J4/J5 get demo log_images for end-to-end verification.
+- VERIFIED with agent-browser (demo): compact mode geometric check (200 samples/path vs all card rects, 2px margin) = 0 violations across 10 edges; wrap mode = 0 violations; VLM scores: compact 9/10 (accent bar + line visibility confirmed PASS on re-check), wrap 9/10 ("every line segment fully visible"), detail mode 9/10 (thumbnails render, lines still fully visible, bars inside frames). Report iframe: 16 imgs, 16 loaded, 0 broken, "Log images (1)" sections in J4+J5 cards. Graph modal J5 gallery: thumb strip shows picked_micrographs + log_pick_overlay; log image renders in main viewer (loaded=true). 390px mobile: no horizontal overflow; footer sticky/pushed correctly. API tests: /api/cryosmart/snippet?origin=X returns APP=X + collectLogImages; POST /api/cryosmart/import with job_log_images → GET pending returns it intact. Lint: 0 errors (1 pre-existing intentional eval warning). dev.log clean.
+
+Stage Summary:
+- **连线完全绕开卡片**: every edge route is now provably card-free (adjacent = in-gap S-curve; long-range = staggered free-lane route over/under the card field or through between-rows bands). DOM-verified numerically (0 violations in compact AND wrap mode) + VLM-verified visually. Removed the old "lines may cross cards" compromise entirely.
+- **左侧竖线在框外 FIXED**: accent bar inset 1.5px + clipped to the card's rounded outline — corners can no longer protrude outside the frame (VLM re-check PASS).
+- **jobLogs 懒加载 SOLVED** (all 4 capture entry points): harvest loaded logs → calibrate the store's own log-loading action (4 arg shapes × poll) → replay per job → HTTP endpoint fallback → upload job_log_images. Best-effort, time-boxed (60s), non-fatal.
+- **Log images end-to-end**: capture → import → pending → merge onto jobs → imageAssets(kind log_image) → graph gallery + detail thumbnails + report "Log images" section, all served by /api/log_image/<fileid> with cookie+auth forwarded.
+- Fixed bonus bugs: buildConsoleSnippet ignored appOrigin (hardcoded localhost:3010); wrap-mode same-row multi-col edges from rows >0 crossing upper rows' cards.
+- Caveat: actual CryoSmart-side log loading can't be tested from the sandbox (192.168.202.11 unreachable) — the action-calibration + HTTP-probe strategy is defensive and degrades gracefully (capture succeeds without log images, console tells the user to open one job detail view and re-run).
+
+---
+Task ID: 4
+Agent: main (Z.ai Code)
+Task: Fix edge-corner roundness (n8n style), fix color-bar/border gap, add sharp/half maps to the report, then merge the user's remote-master work and push.
+
+Work Log:
+- lineage-graph.tsx — rewrote routeEdgeLane as a true n8n "smoothstep" route: straight segments joined by quarter-ellipse rounded corners (cubic beziers with kappa=0.5523 controls, radius up to 24px, scaled down for short detours/lanes). The old single S-bezier had near-coincident control points so the vertical drop happened in a ~2px band and read as a hard 90° corner. New constants: LANE_SHOULDER_W=48 (vertical-run x inside the gap), LANE_CORNER_MAX=24. routeEdgeGap now uses half-gap control offset (fuller S). Card-free guarantee re-proven: every corner hull stays inside a column gap or the card-free lane band; verified geometrically in-browser (sampled every 3px along every edge vs every card rect): 0 violations in compact AND wrap modes.
+- lineage-graph.tsx — card left color bar now starts at strokeWidth/2 (the stroke's inner edge) so it is flush with the border at every border width (1/1.5/2/2.5/3). Previously fixed x=1.5 left a visible gap under selected/hovered cards. VLM-verified on normal + hovered states.
+- normalMapAssets (lineage.ts canonical + report-html.ts + report-svg.ts copies) — no longer filters result_name === "map": real CryoSmart refine jobs keep map_sharp / map_half_A / map_half_B inside the `volume` group (confirmed by bundle.ts suffix list volume.map_sharp / volume.map_half_A/B); masks still excluded by group AND result name (mask_refine lives inside the volume group). reportMapDownloads rows now labeled `group.result_name`; header "map: N 个（含 sharp / half map）". sample-data.ts J10 updated to the real refine structure so Load Demo exercises it.
+- Merged origin/master (user's own commits 6671c11 + fe4236c: raw image_logs pipeline, report download-all preventDefault fix, saveSession call, banner fix). Integrated BOTH log-image pipelines in lineage.ts imageAssets: job.log_images (flattened refs from Smart Capture/bookmarklet/extension scripts, now carrying text+flags) AND job.image_logs (raw entries), deduped by fileid, both categorized by flags (plots→plot, fsc→fsc, slice-*→slice) with text-derived names. types.ts ImageAsset kind = log_image|image_log + log_text/log_flags/category; LogImageRef + text/flags. All four capture scripts (smart-capture-panel.tsx, bookmarklet.ts, capture-extension content-script.js + injection.js) now carry text/flags. page.tsx saveSession made undefined-safe.
+- Verified end-to-end with agent-browser: Load Demo → Graph tab (SVG renders, 10 edges, 0 card violations, VLM confirms rounded corners + flush bars) → Report tab (J10 shows volume / volume.map_sharp / volume.map_half_A / volume.map_half_B, mask excluded). bun run lint: 0 errors. Console errors after clean reload: 0.
+
+Stage Summary:
+- All three user-reported bugs fixed and browser-verified.
+- User's remote-master image_logs work merged (no work lost); capture pipeline upgraded to carry log text/flags for categorization.
+- Local main contains remote master history → push is a clean fast-forward.
+
+---
+Task ID: 8
+Agent: main (Z.ai Code)
+Task: Fix square (non-rounded) left-side corners on the graph's wrap-row edges ("compact模式的换行的线左边是直角") + comprehensive code review of lineage-graph.tsx with fixes.
+
+Work Log:
+- Reproduced with Load Demo → Graph tab in agent-browser; dumped live SVG path data from the DOM.
+- Diagnosis: compact layout mode is fully smooth (all quarter-ellipse beziers, verified by DOM + zoomed VLM). The square corners are the WRAP-mode cross-row edges entering a row's FIRST (wrap-col-0) card. Two stacked causes:
+  1) Wrap layout put col-0 cards at x=PAD, so their "left gap" was the canvas margin.
+  2) routeEdgeLane's gx2 floor `Math.max(gx2Raw, Math.min(gx1 + 4, x2 - 12))` pushed the target-side vertical run to x2-12, making portRoom=2 and collapsing corner radii to ~2px (visible hard 90° turns at x≈16 on the left edge).
+- Fixes in src/app/components/cryosmart/lineage-graph.tsx:
+  - Added WRAP_LEFT_GUTTER=56: card-free left routing corridor in wrap mode; col-0 cards now sit at PAD+56 so their left gap is real. Cross-row descents run at x≈36 with FULL r=24 corners.
+  - Removed the wrong gx2 floor (only ever bound for backward wrap-col-0 targets, where it was exactly wrong).
+  - wrapColX() helper as single source of truth for wrap column x — layout AND axis labels use it (labels were 56px-drifted otherwise).
+  - maxColsPerRow now accounts for the gutter (still 4 cols/row at 1280px — no layout regression).
+  - Wrap canvas width = clamp(WRAP_MAX_WIDTH, max(rightmost card + PAD + 60 label headroom, gutter + widest row + margins)).
+  - Cursor-anchored wheel zoom + center-anchored +/- buttons via shared zoomAt() (was origin-anchored — content fled sideways when panned); zoomRef mirrors state so setZoom updaters stay pure.
+  - fitToView centers content when it fits (was pinned top-left).
+  - exportPng strips non-data: <image> hrefs from the serialized clone — remote thumbs tainted the canvas and the download silently did nothing.
+  - Edge group keys `${source}→${target}#${i}` — stable AND unique (duplicate pairs like J9→J10 with two input types previously triggered React duplicate-key warnings).
+- Verified: DOM paths show r=24 kappa-0.5523 quarter-ellipse corners at all four turns of cross-row edges (before: r=2 at left side); VLM confirms smooth arcs in both modes; axis labels centered over columns; zoom transform math checked; 0 console errors, 0 cold-load page errors; bun run lint clean (1 pre-existing unrelated warning).
+- Committed 77f6df2 and pushed main→master to GitHub.
+
+Stage Summary:
+- Root cause of 直角: wrap-col-0 targets lacked a left gap + a legacy gx2 floor collapsed corner radii to 2px. Fixed with left gutter + floor removal; every edge turn now uses the full n8n-style r=24 quarter-ellipse in BOTH compact and wrap modes.
+- Review also fixed: origin-anchored zoom (now cursor/center-anchored), top-left-pinned fit view (now centered), silent PNG export failure on remote images (now stripped), duplicate React edge keys (now unique).
+- Deferred (recommendations only): stagger parallel descents into the same wrap-col-0 target; SVG export keeps remote hrefs (renders only on the CryoSmart network — document or strip like PNG); top free-lane band in compact mode gets tight (>8 long-range top edges ≈ 5px spacing); guard<50 fixed-point cap in depth computation is fine for ≤50-deep chains.

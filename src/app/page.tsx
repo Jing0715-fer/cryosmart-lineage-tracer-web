@@ -36,7 +36,7 @@ export default function Home() {
         ...data,
         source: "bookmarklet",
       });
-      saveSession(data.session);
+      saveSession(data.session ?? null);
     },
   });
 

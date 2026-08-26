@@ -768,32 +768,67 @@ export function imageAssets(
     });
   }
 
-  // Add images from jobLogs (internal result images with titles)
-  const imageLogs = (job as any).image_logs || [];
+  // Log images — captured from the SPA's LAZY `jobLogs` state. Two shapes
+  // are supported (deduped by fileid):
+  //  1. `job.log_images` — flattened {fileid, name, text, flags} refs from
+  //     the Smart Capture script, which force-loads every job's logs via
+  //     the store's own log-loading action before extracting `imgfiles`.
+  //  2. `job.image_logs` — RAW jobLogs entries ({type:'image', text,
+  //     flags, imgfiles:[{fileid, filename}]}) pasted/merged directly.
+  // Both carry the log entry's text + flags so the assets can be
+  // categorized (plots → plot, fsc → fsc, slice-* → slice).
+  const logSeen = new Set<string>();
+  const logFlags = (flags: unknown): string[] | null =>
+    Array.isArray(flags) ? (flags as string[]) : null;
+  const logCategory = (flags: string[] | null): string => {
+    if (!flags) return "result";
+    if (flags.includes("plots")) return "plot";
+    if (flags.includes("fsc")) return "fsc";
+    if (flags.includes("slice-real") || flags.includes("slice-fourier")) return "slice";
+    return "result";
+  };
+  const logName = (text: string | null | undefined, fallback: string): string => {
+    if (text) {
+      const base = text.split("/").pop()?.replace(/\.mrc$/i, "").trim();
+      if (base) return base;
+    }
+    return fallback || "log_image";
+  };
+  for (const item of job.log_images || []) {
+    const fileid = item?.fileid || "";
+    const url = logImageUrl(baseUrl, fileid);
+    if (!url || logSeen.has(fileid)) continue;
+    logSeen.add(fileid);
+    const flags = logFlags(item.flags);
+    assets.push({
+      kind: "log_image",
+      name: logName(item.text, item.name || "log_image"),
+      url,
+      src: url,
+      original_url: url,
+      log_text: item.text || null,
+      log_flags: flags,
+      category: logCategory(flags),
+    });
+  }
+  const imageLogs = job.image_logs || [];
   for (const log of imageLogs) {
-    if (log.type !== 'image' || !log.imgfiles || log.imgfiles.length === 0) continue;
+    if (log.type !== "image" || !log.imgfiles || log.imgfiles.length === 0) continue;
     for (const imgFile of log.imgfiles) {
       if (!imgFile.fileid) continue;
       const url = logImageUrl(baseUrl, imgFile.fileid);
-      if (!url) continue;
-      const name = log.text
-        ? log.text.split('/').pop()?.replace(/\.mrc$/i, '').trim() || imgFile.filename || 'image'
-        : imgFile.filename || 'image';
-      let category = 'result';
-      if (log.flags) {
-        if (log.flags.includes('plots')) category = 'plot';
-        if (log.flags.includes('fsc')) category = 'fsc';
-        if (log.flags.includes('slice-real') || log.flags.includes('slice-fourier')) category = 'slice';
-      }
+      if (!url || logSeen.has(imgFile.fileid)) continue;
+      logSeen.add(imgFile.fileid);
+      const flags = logFlags(log.flags);
       assets.push({
-        kind: 'image_log' as const,
-        name,
+        kind: "image_log",
+        name: logName(log.text, imgFile.filename || "image"),
         url,
         src: url,
         original_url: url,
         log_text: log.text || null,
-        log_flags: log.flags || null,
-        category,
+        log_flags: flags,
+        category: logCategory(flags),
       });
     }
   }
@@ -848,19 +883,26 @@ export function mapPreviewImageName(group: unknown): string {
   return value.replace(/\.map$/i, "");
 }
 
-/** Filter a node's map assets down to the "normal" (non-mask) `.map` files. */
+/** Filter a node's map assets down to the "normal" (non-mask) map files.
+ *  Includes EVERY non-mask volume blob — not just `result_name === "map"`:
+ *  CryoSmart refine jobs (nu-refine, homo/hetero/local refine, …) keep
+ *  `map_sharp` + `map_half_A` + `map_half_B` (and CryoSPARC-style
+ *  `half_map_A`/`half_map_B` groups) alongside `map` inside the `volume`
+ *  output group; the old `result_name === "map"` filter silently dropped
+ *  the sharpened map and half maps from the report. Masks are excluded
+ *  BOTH by group type/name AND by result name (`mask_refine` lives inside
+ *  the `volume` group). */
 export function normalMapAssets(node: {
   maps?: MapAsset[];
 }): MapAsset[] {
   return (node.maps || []).filter((item) => {
     const group = String(item.group || "");
+    const result = String(item.result_name || "");
     const volumeGroup = item.group_type
       ? item.group_type === "volume"
       : !/mask/i.test(group);
-    return (
-      volumeGroup &&
-      (item.result_name === "map" || item.download_url.endsWith(".map"))
-    );
+    const isMask = /mask/i.test(group) || /mask/i.test(result);
+    return volumeGroup && !isMask;
   });
 }
 

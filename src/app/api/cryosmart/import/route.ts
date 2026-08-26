@@ -40,6 +40,17 @@ export async function POST(req: NextRequest) {
   const cryosmartAuth = typeof obj.cryosmart_auth === "string" ? obj.cryosmart_auth : undefined;
   const cryosmartCookie = typeof obj.cryosmart_cookie === "string" ? obj.cryosmart_cookie : undefined;
 
+  // Log images captured from the SPA's lazy jobLogs state:
+  // { [jobUid]: [{ fileid, name }, ...] }. Collected by the capture
+  // scripts (store-action calibration + HTTP probe fallback) and merged
+  // onto each job as `log_images` by the pending-import loader.
+  const jobLogImages =
+    obj.job_log_images &&
+    typeof obj.job_log_images === "object" &&
+    !Array.isArray(obj.job_log_images)
+      ? (obj.job_log_images as Record<string, unknown>)
+      : undefined;
+
   if (!jobs || jobs.length === 0) {
     return NextResponse.json(
       { ok: false, error: "No jobs array found in the imported payload." },
@@ -69,6 +80,7 @@ export async function POST(req: NextRequest) {
     cryosmart_origin: cryosmartOrigin,
     cryosmart_auth: cryosmartAuth,
     cryosmart_cookie: cryosmartCookie,
+    job_log_images: jobLogImages,
   });
 
   return NextResponse.json(

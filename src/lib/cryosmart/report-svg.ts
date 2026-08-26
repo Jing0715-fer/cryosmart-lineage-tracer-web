@@ -619,13 +619,16 @@ function reportSelectedClassIndices(
 /* Map / metric helpers                                               */
 /* ------------------------------------------------------------------ */
 
+/** Filter a node's `maps` to the normal (non-mask) map files. Includes
+ *  every non-mask volume blob — sharp maps and half maps included (see
+ *  the canonical copy in lineage.ts for the full rationale). */
 function normalMapAssets(node: LineageNode): MapAsset[] {
   return (node.maps || []).filter((item) => {
     const group = String(item.group || "");
+    const result = String(item.result_name || "");
     const volumeGroup = item.group_type ? item.group_type === "volume" : !/mask/i.test(group);
-    return (
-      volumeGroup && (item.result_name === "map" || item.download_url.endsWith(".map"))
-    );
+    const isMask = /mask/i.test(group) || /mask/i.test(result);
+    return volumeGroup && !isMask;
   });
 }
 
