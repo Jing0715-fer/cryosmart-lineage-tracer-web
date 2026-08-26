@@ -589,3 +589,31 @@ Stage Summary:
 - All three user-reported bugs fixed and browser-verified.
 - User's remote-master image_logs work merged (no work lost); capture pipeline upgraded to carry log text/flags for categorization.
 - Local main contains remote master history → push is a clean fast-forward.
+
+---
+Task ID: 8
+Agent: main (Z.ai Code)
+Task: Fix square (non-rounded) left-side corners on the graph's wrap-row edges ("compact模式的换行的线左边是直角") + comprehensive code review of lineage-graph.tsx with fixes.
+
+Work Log:
+- Reproduced with Load Demo → Graph tab in agent-browser; dumped live SVG path data from the DOM.
+- Diagnosis: compact layout mode is fully smooth (all quarter-ellipse beziers, verified by DOM + zoomed VLM). The square corners are the WRAP-mode cross-row edges entering a row's FIRST (wrap-col-0) card. Two stacked causes:
+  1) Wrap layout put col-0 cards at x=PAD, so their "left gap" was the canvas margin.
+  2) routeEdgeLane's gx2 floor `Math.max(gx2Raw, Math.min(gx1 + 4, x2 - 12))` pushed the target-side vertical run to x2-12, making portRoom=2 and collapsing corner radii to ~2px (visible hard 90° turns at x≈16 on the left edge).
+- Fixes in src/app/components/cryosmart/lineage-graph.tsx:
+  - Added WRAP_LEFT_GUTTER=56: card-free left routing corridor in wrap mode; col-0 cards now sit at PAD+56 so their left gap is real. Cross-row descents run at x≈36 with FULL r=24 corners.
+  - Removed the wrong gx2 floor (only ever bound for backward wrap-col-0 targets, where it was exactly wrong).
+  - wrapColX() helper as single source of truth for wrap column x — layout AND axis labels use it (labels were 56px-drifted otherwise).
+  - maxColsPerRow now accounts for the gutter (still 4 cols/row at 1280px — no layout regression).
+  - Wrap canvas width = clamp(WRAP_MAX_WIDTH, max(rightmost card + PAD + 60 label headroom, gutter + widest row + margins)).
+  - Cursor-anchored wheel zoom + center-anchored +/- buttons via shared zoomAt() (was origin-anchored — content fled sideways when panned); zoomRef mirrors state so setZoom updaters stay pure.
+  - fitToView centers content when it fits (was pinned top-left).
+  - exportPng strips non-data: <image> hrefs from the serialized clone — remote thumbs tainted the canvas and the download silently did nothing.
+  - Edge group keys `${source}→${target}#${i}` — stable AND unique (duplicate pairs like J9→J10 with two input types previously triggered React duplicate-key warnings).
+- Verified: DOM paths show r=24 kappa-0.5523 quarter-ellipse corners at all four turns of cross-row edges (before: r=2 at left side); VLM confirms smooth arcs in both modes; axis labels centered over columns; zoom transform math checked; 0 console errors, 0 cold-load page errors; bun run lint clean (1 pre-existing unrelated warning).
+- Committed 77f6df2 and pushed main→master to GitHub.
+
+Stage Summary:
+- Root cause of 直角: wrap-col-0 targets lacked a left gap + a legacy gx2 floor collapsed corner radii to 2px. Fixed with left gutter + floor removal; every edge turn now uses the full n8n-style r=24 quarter-ellipse in BOTH compact and wrap modes.
+- Review also fixed: origin-anchored zoom (now cursor/center-anchored), top-left-pinned fit view (now centered), silent PNG export failure on remote images (now stripped), duplicate React edge keys (now unique).
+- Deferred (recommendations only): stagger parallel descents into the same wrap-col-0 target; SVG export keeps remote hrefs (renders only on the CryoSmart network — document or strip like PNG); top free-lane band in compact mode gets tight (>8 long-range top edges ≈ 5px spacing); guard<50 fixed-point cap in depth computation is fine for ≤50-deep chains.
