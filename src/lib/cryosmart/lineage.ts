@@ -421,37 +421,36 @@ export const formatResolution = formatBinFactor;
 /* URL builders                                                       */
 /* ------------------------------------------------------------------ */
 
-/** Build a `/api/log_image/<fileid>` preview URL.
+/** Build the canonical full CryoSmart preview URL
+ *  `http://host:port/api/log_image/<fileid>`.
  *
- *  Routes the image through the same-origin Next.js proxy at
- *  `/api/proxy-image/<fileid>?base=<baseUrl>` instead of referencing
- *  CryoSmart directly. This fixes the "right-click-open-works-but-inline-`<img>`-fails"
- *  symptom: CryoSmart servers reject cross-origin `<img>` requests that
- *  carry an external `Referer` header (the iframe's srcdoc origin), and
- *  may also require an authenticated session cookie that the browser
- *  won't send cross-origin. The proxy is same-origin (no Referer /
- *  CORS issue) and forwards `cookie` / `auth` query params to the
- *  upstream CryoSmart request.
+ *  This is the URL that the browser loads DIRECTLY from CryoSmart —
+ *  it works when the user's browser is on the same network as the
+ *  CryoSmart server (the common case, proven by right-click → "open
+ *  in new tab" working). The `<img>`/`<image>` tag should carry
+ *  `referrerpolicy="no-referrer"` (set both on the element AND via the
+ *  report HTML's `<meta name="referrer" content="no-referrer">`) so
+ *  CryoSmart doesn't see an external Referer and reject the request.
  *
- *  Callers that need the canonical full URL (e.g. for `mrc_preview_url`
- *  consumed by `image-embed.ts` base64 pre-fetch, or by `bundle.ts` for
- *  ZIP downloads) get it via `canonicalLogImageUrl` below.
+ *  As an `onerror` fallback, callers can also build a same-origin
+ *  proxy URL via `proxyImageUrl()` — this helps when the browser
+ *  CAN'T reach CryoSmart directly (e.g. the app is served from a
+ *  different network) but the Next.js server CAN.
+ *
+ *  Callers that fetch bytes server-side (image-embed.ts base64 pre-fetch,
+ *  bundle.ts ZIP downloads) also use this URL — `cryoSmartFetch` strips
+ *  the origin and routes through the `/api/cryosmart/[...path]` proxy.
  */
 export function logImageUrl(
   baseUrl: string | null | undefined,
   fileid: string | null | undefined
 ): string | null {
-  if (!fileid) return null;
-  const base = String(baseUrl || "").replace(/\/$/, "");
-  if (!base) return null;
-  return `/api/proxy-image/${fileid}?base=${encodeURIComponent(base)}`;
+  return canonicalLogImageUrl(baseUrl, fileid);
 }
 
 /** Build the canonical full CryoSmart URL `http://host:port/api/log_image/<fileid>`.
- *  Used by `image-embed.ts` (base64 pre-fetch via the existing
- *  `/api/cryosmart/[...path]?base=&cookie=&auth=` proxy) and by `bundle.ts`
- *  (ZIP binary downloads via `cryoSmartBytes`). The proxy URL produced by
- *  `logImageUrl` is for inline browser rendering only. */
+ *  Used directly by `logImageUrl` above (inline `<img>` rendering),
+ *  and by `image-embed.ts` / `bundle.ts` (server-side fetch via proxy). */
 export function canonicalLogImageUrl(
   baseUrl: string | null | undefined,
   fileid: string | null | undefined
@@ -460,6 +459,42 @@ export function canonicalLogImageUrl(
   const base = String(baseUrl || "").replace(/\/$/, "");
   if (!base) return null;
   return `${base}/api/log_image/${fileid}`;
+}
+
+/** Build a same-origin proxy URL `/api/proxy-image/<fileid>?base=...&cookie=...&auth=...`
+ *  for use as an `onerror` fallback when the direct CryoSmart URL fails
+ *  (e.g. when the user's browser can't reach CryoSmart directly, but the
+ *  Next.js server can). Extracts the fileid from the full CryoSmart URL
+ *  produced by `logImageUrl` / `canonicalLogImageUrl`.
+ *
+ *  Pass the session's cookie/auth so the proxy can forward them to
+ *  CryoSmart for authenticated deployments. */
+export function proxyImageUrl(
+  cryosmartUrl: string | null | undefined,
+  baseUrl: string | null | undefined,
+  cookie?: string,
+  auth?: string
+): string | null {
+  if (!cryosmartUrl) return null;
+  // Extract fileid from the URL path `/api/log_image/<fileid>`.
+  const m = String(cryosmartUrl).match(/\/api\/log_image\/([^/?#]+)/);
+  if (!m) return null;
+  const fileid = m[1];
+  const base = String(baseUrl || "").replace(/\/$/, "");
+  if (!base) return null;
+  const params = new URLSearchParams();
+  params.set("base", base);
+  if (cookie) params.set("cookie", cookie);
+  if (auth) params.set("auth", auth);
+  return `/api/proxy-image/${fileid}?${params.toString()}`;
+}
+
+/** Extract the fileid from a CryoSmart log_image URL. Returns null if
+ *  the URL doesn't match the expected `/api/log_image/<fileid>` shape. */
+export function fileidFromUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const m = String(url).match(/\/api\/log_image\/([^/?#]+)/);
+  return m ? m[1] : null;
 }
 
 /** Build a `/api/log_image/download_result_file/<projectId>/<jobId>.<group>.<result>` URL. */

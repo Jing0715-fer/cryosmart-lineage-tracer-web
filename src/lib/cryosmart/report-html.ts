@@ -300,6 +300,26 @@ export interface ReportHtmlOptions {
     return `images/${safePart(nodeUid)}/${safePart(name)}.png`;
   }
 
+  /** Build a same-origin proxy URL `/api/proxy-image/<fileid>?base=...&cookie=...&auth=...`
+   *  from a full CryoSmart log_image URL. Used as the `onerror` fallback
+   *  for `<img>` tags in the report so images still load when the browser
+   *  can't reach CryoSmart directly but the Next.js server can.
+   *  Returns null if the URL isn't a `/api/log_image/<fileid>` URL. */
+  function buildProxyFallbackUrl(
+    remoteSrc: string,
+    session?: { baseUrl?: string; cookie?: string; auth?: string } | null
+  ): string | null {
+    const m = String(remoteSrc || "").match(/\/api\/log_image\/([^/?#]+)/);
+    if (!m) return null;
+    const fileid = m[1];
+    const base = String(session?.baseUrl || "").replace(/\/$/, "");
+    if (!base) return null;
+    const params: string[] = [`base=${encodeURIComponent(base)}`];
+    if (session?.cookie) params.push(`cookie=${encodeURIComponent(session.cookie)}`);
+    if (session?.auth) params.push(`auth=${encodeURIComponent(session.auth)}`);
+    return `/api/proxy-image/${fileid}?${params.join("&")}`;
+  }
+
   /** Map preview image name for a volume group ("volume.map" → "volume"). */
   // duplicated from lineage.ts to avoid circular import
   function mapPreviewImageName(group: unknown): string {
@@ -1357,7 +1377,16 @@ export interface ReportHtmlOptions {
 
   /** `<img>` tag. Embeds base64 when available; otherwise references the
    *  remote URL directly (preview/new-window) or a local filename with an
-   *  onerror fallback to the remote URL (bundle mode). */
+   *  onerror fallback to the remote URL (bundle mode).
+   *
+   *  When the direct remote URL fails (e.g. the user's browser can't reach
+   *  CryoSmart directly, or CryoSmart rejects the request), an `onerror`
+   *  handler swaps the `src` to a same-origin proxy URL that forwards
+   *  the session's cookie/auth to CryoSmart. This dual-strategy (direct
+   *  first, proxy fallback) maximizes the chance the image renders:
+   *    - Direct works when the browser is on the same network as CryoSmart.
+   *    - Proxy works when the Next.js server can reach CryoSmart but the
+   *      browser can't (e.g. app served from a different network). */
   export function reportImgTag(
     nodeUid: string,
     name: string,
@@ -1390,7 +1419,15 @@ export interface ReportHtmlOptions {
     // so that would 404 and flash a broken-image icon before the onerror
     // fallback fired — the direct-remote approach renders the image in one
     // hop or shows its alt text cleanly.
-    return `<img${cls} src="${escHtml(remoteSrc)}" referrerpolicy="no-referrer" loading="lazy" decoding="async" alt="${escHtml(alt)}">`;
+    //
+    // As a SECOND fallback, if the direct URL fails, try the same-origin
+    // proxy URL with the session's cookie/auth forwarded. This helps when
+    // the browser can't reach CryoSmart directly but the Next.js server can.
+    const proxyUrl = buildProxyFallbackUrl(remoteSrc, opts?.session);
+    const onerror = proxyUrl
+      ? `if(!this.dataset.tried){this.dataset.tried='1';this.onerror=null;this.src="${escHtml(proxyUrl)}";}`
+      : "";
+    return `<img${cls} src="${escHtml(remoteSrc)}" referrerpolicy="no-referrer" loading="lazy" decoding="async"${onerror ? ` onerror="${escHtml(onerror)}"` : ""} alt="${escHtml(alt)}">`;
   }
 
   /** Grid of image boxes (used by media block). */

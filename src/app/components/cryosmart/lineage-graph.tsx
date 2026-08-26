@@ -362,6 +362,32 @@ function withSession(url: string | null | undefined, session: CryoSmartSession |
   }
 }
 
+/**
+ * Build a same-origin proxy URL `/api/proxy-image/<fileid>?base=...&cookie=...&auth=...`
+ * from a direct CryoSmart log_image URL. Used as the `onError` fallback
+ * for inline `<img>`/`<image>` so images still render when the browser
+ * can't reach CryoSmart directly but the Next.js server can.
+ *
+ * Returns null if the URL isn't a `/api/log_image/<fileid>` URL or if
+ * the session is missing.
+ */
+function buildProxyFallback(
+  directUrl: string | null | undefined,
+  session: CryoSmartSession | null | undefined
+): string | null {
+  if (!directUrl || !session) return null;
+  const m = String(directUrl).match(/\/api\/log_image\/([^/?#]+)/);
+  if (!m) return null;
+  const fileid = m[1];
+  const base = String(session.baseUrl || "").replace(/\/$/, "");
+  if (!base) return null;
+  const params = new URLSearchParams();
+  params.set("base", base);
+  if (session.cookie) params.set("cookie", session.cookie);
+  if (session.auth) params.set("auth", session.auth);
+  return `/api/proxy-image/${fileid}?${params.toString()}`;
+}
+
 /** Pick the best preview image for a node (used by detail-mode thumbnail). */
 function pickPreviewImage(node: LineageNode): ImageAsset | null {
   if (node.images && node.images.length > 0) return node.images[0];
@@ -468,7 +494,7 @@ function collectAllImages(node: LineageNode): ImageAsset[] {
   return out;
 }
 
-/* ── Edge routing: n8n-style — never crosses any card. ───────────────── */
+/* ── Edge routing: n8n-style smooth bezier curves (no right-angle). ──── */
 
 interface EdgePath {
   d: string;
@@ -477,79 +503,82 @@ interface EdgePath {
 }
 
 /**
- * Build an SVG path for an edge from (x1,y1) on the source's right edge to
- * (x2,y2) on the target's left edge. The routing depends on the column
- * span (delta columns).
+ * Compute a horizontal control-point offset for a smooth bezier.
+ * Clamped so very short edges get a minimum visible curve and very
+ * long edges don't overshoot. This mirrors n8n's curve style where
+ * the control points are pulled horizontally from the endpoints.
+ */
+function bezierOffset(dx: number): number {
+  return Math.min(80, Math.max(24, Math.abs(dx) * 0.4));
+}
+
+/**
+ * Build an SVG path for an edge from (x1,y1) on the source's right edge
+ * to (x2,y2) on the target's left edge. Uses smooth cubic bezier curves
+ * for ALL cases (no right-angle Manhattan routing).
  *
- * - delta == 0 (same column): shouldn't happen with topological depths,
- *   but handle defensively with a side-bowed bezier.
- * - delta == 1 (adjacent): smooth bezier with control points pulled into
- *   the column-gap. Curve lives entirely in the gap, doesn't touch cards.
- * - delta >  1 (multi-column): orthogonal Manhattan route via the "free
- *   lane" above all cards (vertical segments live in column gaps; the
- *   horizontal segment lives in the lane above the cards).
+ * - delta == 0 (same column): defensive side-bowed bezier.
+ * - delta == 1 (adjacent): smooth S-curve in the column gap — curve
+ *   lives entirely in the gap, doesn't touch cards.
+ * - delta >  1 (multi-column): smooth bezier that bows UPWARD toward
+ *   the free lane above the cards. The control points sit at
+ *   topLaneY, pulling the curve up so it clears most intermediate
+ *   cards. Some intermediate cards may still be crossed (the user
+ *   explicitly accepted "连线跨过去" — lines crossing over), but
+ *   the curve is smooth (no right-angle bends) like n8n.
+ *
+ * The user's requirement: "graph部分尽量避免线的叠合，参考n8n，可以用
+ * 各种曲线，而不是直角折线" — avoid line overlap, reference n8n, use
+ * curves not right-angle. The smooth bezier achieves this: curves are
+ * continuous and organic, and by using topLaneY as the control-point Y,
+ * parallel multi-column edges naturally fan out into the top lane area
+ * rather than stacking on top of each other.
  */
 function routeEdge(
   x1: number, y1: number, x2: number, y2: number,
   deltaCols: number, topLaneY: number,
 ): EdgePath {
+  const dx = x2 - x1;
+  const offset = bezierOffset(dx);
+
   if (deltaCols <= 0) {
     // Same column (defensive). Bow to the right of the column.
-    const bow = 36;
     return {
-      d: `M${x1},${y1} C${x1 + bow},${y1} ${x1 + bow},${y2} ${x2},${y2}`,
+      d: `M${x1},${y1} C${x1 + offset},${y1} ${x1 + offset},${y2} ${x2},${y2}`,
       markerEnd: `${x2},${y2}`,
     };
   }
+
   if (deltaCols === 1) {
     // Adjacent column: smooth S-curve in the column gap.
-    const dx = Math.min(60, (x2 - x1) * 0.5);
     return {
-      d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`,
+      d: `M${x1},${y1} C${x1 + offset},${y1} ${x2 - offset},${y2} ${x2},${y2}`,
       markerEnd: `${x2},${y2}`,
     };
   }
-  // Multi-column: orthogonal route via the top free lane.
-  // 1. Right-out 20px
-  // 2. Up to topLaneY
-  // 3. Across to above target
-  // 4. Down to target row
-  // 5. Right-in 20px to target
-  const exitX = x1 + 20;
-  const enterX = x2 - 20;
+
+  // Multi-column: smooth bezier bowing UPWARD to the top lane.
+  // Control points at (x1+offset, topLaneY) and (x2-offset, topLaneY)
+  // pull the curve up so it arcs above intermediate cards. The actual
+  // peak of a cubic bezier with equal control-point Y is
+  // 0.25*max(y1,y2) + 0.75*topLaneY — enough to clear the top of
+  // most cards while staying smooth (no right-angle bends).
   return {
-    d: `M${x1},${y1} L${exitX},${y1} L${exitX},${topLaneY} L${enterX},${topLaneY} L${enterX},${y2} L${x2},${y2}`,
+    d: `M${x1},${y1} C${x1 + offset},${topLaneY} ${x2 - offset},${topLaneY} ${x2},${y2}`,
     markerEnd: `${x2},${y2}`,
   };
 }
 
 /**
- * Wrap-mode edge routing.
+ * Wrap-mode edge routing — also uses smooth bezier curves (no L-shaped
+ * Manhattan). Layout in wrap mode is a grid: columns flow left → right
+ * within a row, then wrap to a new row below.
  *
- * Layout in wrap mode is a grid: depth-ordered columns flow left → right
- * within a row, then wrap to a new row below when the row's column count
- * hits `maxColsPerRow`. Edges therefore split into two cases:
- *
- *  (a) Same wrap-row → the source and target are in the same horizontal
- *      band, so we can use the same smooth bezier as the compact layout's
- *      `deltaCols === 1` case (no top-lane Manhattan needed because within
- *      a row the columns are always adjacent or close).
- *
- *  (b) Cross wrap-row (e.g. end of row 0 → start of row 1) → the edge
- *      has to leave the source's right edge, drop into the gap between
- *      the source's row and the row immediately below, travel
- *      horizontally to the target's column, then drop down to the
- *      target's row and enter its left edge.
- *
- *      For the common case (longest-path depths put consecutive depths
- *      in adjacent rows), this gives a clean L-shaped path through the
- *      between-rows lane. For non-adjacent rows, the path stays in the
- *      single between-rows lane just below the source and then drops
- *      straight down — visually it will cross intermediate row cards,
- *      which is the accepted trade-off of the wrap layout (the user
- *      explicitly asked for "wrap with lines coming over", so visible
- *      cross-row lines are expected; the compact layout remains
- *      available for users who want the strictly-non-overlapping view).
+ *  (a) Same wrap-row: smooth S-curve (same as compact's adjacent case).
+ *  (b) Cross wrap-row: smooth bezier that dips DOWN through the
+ *      between-rows gap. Control points sit at the midpoint of the gap
+ *      between the source's row and the row immediately below, creating
+ *      a smooth curve that arcs through the gap. No right-angle bends.
  */
 function routeEdgeWrap(
   x1: number, y1: number, x2: number, y2: number,
@@ -557,31 +586,31 @@ function routeEdgeWrap(
   rowBottomY: (r: number) => number,
   nextRowTopY: (r: number) => number,
 ): EdgePath {
+  const dx = x2 - x1;
+  const offset = bezierOffset(dx);
+
   if (sourceWrapRow === targetWrapRow) {
-    // Same row → smooth bezier (no need for top-lane Manhattan).
-    const dx = Math.min(60, Math.abs(x2 - x1) * 0.5);
+    // Same row → smooth S-curve.
     return {
-      d: `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`,
+      d: `M${x1},${y1} C${x1 + offset},${y1} ${x2 - offset},${y2} ${x2},${y2}`,
       markerEnd: `${x2},${y2}`,
     };
   }
-  // Cross-row → Manhattan via the between-rows lane just below the source row.
-  // If target is in a row further down than source+1, the vertical segment
-  // from the lane down to target will pass through intermediate rows'
-  // cards — accepted trade-off (see docstring above).
-  const exitX = x1 + 20;
-  const enterX = x2 - 20;
+
+  // Cross-row → smooth bezier dipping through the between-rows gap.
   const sBottom = rowBottomY(sourceWrapRow);
   const nextTop = nextRowTopY(sourceWrapRow);
-  // Midpoint of the gap between source's row and the row immediately below.
-  // For target rows further down, the lane stays at this midpoint (the path
-  // then drops straight down to target, which is fine visually).
+  // Midpoint of the gap between source's row and the row below.
   const laneY = sBottom + (nextTop - sBottom) / 2;
+  // Control points at (x1+offset, laneY) and (x2-offset, laneY) — the
+  // curve arcs down into the gap and back up to the target. Smooth,
+  // no right-angle bends.
   return {
-    d: `M${x1},${y1} L${exitX},${y1} L${exitX},${laneY} L${enterX},${laneY} L${enterX},${y2} L${x2},${y2}`,
+    d: `M${x1},${y1} C${x1 + offset},${laneY} ${x2 - offset},${laneY} ${x2},${y2}`,
     markerEnd: `${x2},${y2}`,
   };
 }
+
 
 /* ── Component ────────────────────────────────────────────────────────── */
 export function LineageGraph({ summary, session }: Props) {
@@ -1299,6 +1328,10 @@ export function LineageGraph({ summary, session }: Props) {
             const previewImg = detailMode ? pickPreviewImage(node) : null;
             const embeddedB64 = previewImg ? embeddedThumbs[node.uid] : undefined;
             const imgSrc = embeddedB64 || withSession(previewImg?.src || previewImg?.original_url, session);
+            // Proxy fallback for when the browser can't reach CryoSmart directly.
+            const imgProxyFallback = !embeddedB64
+              ? buildProxyFallback(previewImg?.src || previewImg?.original_url, session)
+              : null;
 
             return (
               <g
@@ -1323,112 +1356,77 @@ export function LineageGraph({ summary, session }: Props) {
                 }}
                 onKeyDown={(ev) => onKeyDownNode(ev, node.uid)}
               >
-                {/* SOURCE glow halo (behind everything else). */}
+                {/* SOURCE glow halo (behind everything else).
+                    Tightened from x=-6/w+12 to x=-3/w+6 so the halo
+                    overlaps the card body — no visible gap between the
+                    glow and the card body. The blur filter extends the
+                    visible glow outward. */}
                 {isLeaf && (
                   <rect
-                    x={-6} y={-6}
-                    width={NODE_W + 12} height={NODE_H + 12}
-                    rx={12}
+                    x={-3} y={-3}
+                    width={NODE_W + 6} height={NODE_H + 6}
+                    rx={11}
                     fill={startColor}
                     opacity={0.3}
                     filter="url(#start-glow)"
                   />
                 )}
-                {/* TARGET glow halo. */}
+                {/* TARGET glow halo. Same tightening as SOURCE. */}
                 {isTarget && (
                   <rect
-                    x={-6} y={-6}
-                    width={NODE_W + 12} height={NODE_H + 12}
-                    rx={12}
+                    x={-3} y={-3}
+                    width={NODE_W + 6} height={NODE_H + 6}
+                    rx={11}
                     fill={targetColor}
                     opacity={0.32}
                     filter="url(#start-glow)"
                   />
                 )}
-                {/* Selection ring.
-                    Tightened from (-3, -3, +6, +6, rx=11, strokeWidth=2)
-                    to (-1.5, -1.5, +3, +3, rx=9.5, strokeWidth=1.5) so the
-                    ring sits flush against the card body (card body is at
-                    (0,0,W,H,rx=8,strokeWidth=1) — old ring left a 2px gap
-                    between the inner stroke edge and the card body, which
-                    the user called out as "悬停的边框和卡片不贴合".
-                    `pointerEvents="none"` so the ring doesn't intercept
-                    card-body clicks. */}
-                {isSelected && (
-                  <rect
-                    x={-1.5} y={-1.5}
-                    width={NODE_W + 3} height={NODE_H + 3}
-                    rx={9.5}
-                    fill="none"
-                    stroke={selectionColor}
-                    strokeWidth={1.5}
-                    pointerEvents="none"
-                  />
-                )}
-                {/* Hover ring — shown for per-card hover AND when this
-                    card is an endpoint of the currently-hovered edge.
-                    Same tight geometry as the selection ring so the two
-                    states don't fight visually. For per-card hover we
-                    use the family color (subtle); for edge-hover endpoint
-                    we use the brighter selection color (sky-500) at a
-                    thicker stroke so the connection is unmistakable
-                    even when the card already has a SOURCE/TARGET
-                    inner ring of its own family color. */}
-                {(isHovered || isHoveredEdgeEndpoint) && !isSelected && (
-                  <rect
-                    x={-1.5} y={-1.5}
-                    width={NODE_W + 3} height={NODE_H + 3}
-                    rx={9.5}
-                    fill="none"
-                    stroke={isHoveredEdgeEndpoint ? selectionColor : color}
-                    strokeWidth={isHoveredEdgeEndpoint ? 2.5 : 1.5}
-                    pointerEvents="none"
-                  />
-                )}
                 {/* Edge-hover endpoint glow halo — a soft fill behind the
                     card that pulses the connection visually. Mirrors the
-                    SOURCE/TARGET glow treatment so it feels native. */}
+                    SOURCE/TARGET glow treatment so it feels native.
+                    Drawn BEFORE the card body so the card sits on top.
+                    Tightened to x=-3 (matches SOURCE/TARGET halos) so
+                    there's no gap between the glow and the card body. */}
                 {isHoveredEdgeEndpoint && !isSelected && (
                   <rect
-                    x={-6} y={-6}
-                    width={NODE_W + 12} height={NODE_H + 12}
-                    rx={12}
+                    x={-3} y={-3}
+                    width={NODE_W + 6} height={NODE_H + 6}
+                    rx={11}
                     fill={selectionColor}
                     opacity={0.22}
                     filter="url(#start-glow)"
                     pointerEvents="none"
                   />
                 )}
-                {/* SOURCE inner ring. */}
-                {isLeaf && (
-                  <rect
-                    x={-1.5} y={-1.5}
-                    width={NODE_W + 3} height={NODE_H + 3}
-                    rx={10}
-                    fill="none"
-                    stroke={startColor}
-                    strokeWidth={1.5}
-                  />
-                )}
-                {/* TARGET inner ring. */}
-                {isTarget && (
-                  <rect
-                    x={-1.5} y={-1.5}
-                    width={NODE_W + 3} height={NODE_H + 3}
-                    rx={10}
-                    fill="none"
-                    stroke={targetColor}
-                    strokeWidth={1.5}
-                  />
-                )}
-                {/* Card body with gradient + drop shadow. */}
+                {/* Card body — the stroke IS the selection/hover/SOURCE/
+                    TARGET border. No separate ring `<rect>` elements → no
+                    gap between border and body (the old rings left a
+                    visible 0.25–2px gap because SVG strokes are centered
+                    on the path, so a ring at x=-1.5 with strokeWidth=1.5
+                    has its inner edge at -0.75 while the card body's outer
+                    edge is at -0.5). Priority:
+                      isSelected > isHoveredEdgeEndpoint > isHovered > isTarget/isLeaf. */}
                 <rect
                   width={NODE_W}
                   height={NODE_H}
                   rx={8}
                   fill="url(#card-grad)"
-                  stroke={isTarget ? targetColor : isLeaf ? startColor : borderColor}
-                  strokeWidth={isTarget || isLeaf ? 1.5 : 1}
+                  stroke={
+                    isSelected ? selectionColor
+                    : isHoveredEdgeEndpoint ? selectionColor
+                    : isHovered ? color
+                    : isTarget ? targetColor
+                    : isLeaf ? startColor
+                    : borderColor
+                  }
+                  strokeWidth={
+                    isSelected ? 3
+                    : isHoveredEdgeEndpoint ? 2.5
+                    : isHovered ? 2
+                    : (isTarget || isLeaf) ? 1.5
+                    : 1
+                  }
                   filter="url(#card-shadow)"
                 />
                 {/* Left color bar. */}
@@ -1502,7 +1500,16 @@ export function LineageGraph({ summary, session }: Props) {
                     height={NODE_H - 88}
                     preserveAspectRatio="xMidYMid meet"
                     referrerPolicy="no-referrer"
-                    crossOrigin="anonymous"
+                    onError={
+                      imgProxyFallback
+                        ? (e) => {
+                            const t = e.currentTarget;
+                            if (t.getAttribute("data-tried")) return;
+                            t.setAttribute("data-tried", "1");
+                            t.setAttribute("href", imgProxyFallback);
+                          }
+                        : undefined
+                    }
                   />
                 )}
                 {detailMode && previewImg && !imgSrc && (
@@ -1798,6 +1805,9 @@ function NodeDetailModal({
   const activeSrc = activeImage
     ? embeddedGallery[activeImage.src] || withSession(activeImage.original_url || activeImage.url, session)
     : null;
+  const activeFallback = activeImage && !embeddedGallery[activeImage.src]
+    ? buildProxyFallback(activeImage.original_url || activeImage.url, session)
+    : null;
 
   return (
     <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
@@ -1922,9 +1932,18 @@ function NodeDetailModal({
                           src={activeSrc}
                           alt={activeImage?.name || "preview"}
                           referrerPolicy="no-referrer"
-                          crossOrigin="anonymous"
                           loading="lazy"
                           decoding="async"
+                          onError={
+                            activeFallback
+                              ? (e) => {
+                                  const t = e.currentTarget;
+                                  if (t.dataset.tried) return;
+                                  t.dataset.tried = "1";
+                                  t.src = activeFallback;
+                                }
+                              : undefined
+                          }
                           style={{ maxWidth: "100%", maxHeight: 340, objectFit: "contain" }}
                         />
                       ) : (
@@ -1938,6 +1957,7 @@ function NodeDetailModal({
                       <div className="flex gap-1.5 overflow-x-auto pb-1">
                         {allImages.map((img, idx) => {
                           const src = embeddedGallery[img.src] || withSession(img.original_url || img.url, session);
+                          const fallback = !embeddedGallery[img.src] ? buildProxyFallback(img.original_url || img.url, session) : null;
                           const active = idx === activeIdx;
                           return (
                             <button
@@ -1958,8 +1978,17 @@ function NodeDetailModal({
                                   src={src}
                                   alt={img.name}
                                   referrerPolicy="no-referrer"
-                                  crossOrigin="anonymous"
                                   loading="lazy"
+                                  onError={
+                                    fallback
+                                      ? (e) => {
+                                          const t = e.currentTarget;
+                                          if (t.dataset.tried) return;
+                                          t.dataset.tried = "1";
+                                          t.src = fallback;
+                                        }
+                                      : undefined
+                                  }
                                   style={{ width: "100%", height: "100%", objectFit: "cover" }}
                                 />
                               ) : (
@@ -2164,12 +2193,23 @@ function ClassesTable({
           <tbody>
             {classes.map((c, idx) => {
               const src = c.mrc_preview_src ? embedded[c.mrc_preview_src] || withSession(c.mrc_preview_url, session) : null;
+              const fallback = c.mrc_preview_src && !embedded[c.mrc_preview_src] ? buildProxyFallback(c.mrc_preview_url, session) : null;
               return (
                 <tr key={idx} className="border-t" style={{ borderColor }}>
                   <td className="px-2 py-1">
                     {src ? (
                       <img src={src} alt={`class ${c.class_index}`}
-                        referrerPolicy="no-referrer" crossOrigin="anonymous"
+                        referrerPolicy="no-referrer"
+                        onError={
+                          fallback
+                            ? (e) => {
+                                const t = e.currentTarget;
+                                if (t.dataset.tried) return;
+                                t.dataset.tried = "1";
+                                t.src = fallback;
+                              }
+                            : undefined
+                        }
                         style={{ width: 48, height: 48, objectFit: "cover" }} />
                     ) : (
                       <div className="flex h-12 w-12 items-center justify-center rounded border text-[8px]"
@@ -2232,13 +2272,24 @@ function MapsList({
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         {maps.map((m, idx) => {
           const src = m.preview_src ? embedded[m.preview_src] || withSession(m.preview_url, session) : null;
+          const fallback = m.preview_src && !embedded[m.preview_src] ? buildProxyFallback(m.preview_url, session) : null;
           return (
             <div key={idx} className="overflow-hidden rounded-md border" style={{ borderColor }}>
               <div className="flex h-20 items-center justify-center"
                 style={{ background: "rgba(148,163,184,0.08)" }}>
                 {src ? (
                   <img src={src} alt={m.group_title || m.group}
-                    referrerPolicy="no-referrer" crossOrigin="anonymous"
+                    referrerPolicy="no-referrer"
+                    onError={
+                      fallback
+                        ? (e) => {
+                            const t = e.currentTarget;
+                            if (t.dataset.tried) return;
+                            t.dataset.tried = "1";
+                            t.src = fallback;
+                          }
+                        : undefined
+                    }
                     style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
                 ) : (
                   <div className="text-[10px]" style={{ color: mutedColor }}>no preview</div>

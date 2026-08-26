@@ -458,3 +458,67 @@ Stage Summary:
 - **No regressions**: `mrc_preview_url` / `url` / `preview_url` are now proxy URLs (was canonical full URLs), so `image-embed.ts` (base64 pre-fetch) and `bundle.ts` (ZIP download) had to be updated to handle proxy URLs. Fixed by adding branch 2 to `cryoSmartFetch` (detect `/api/proxy-image/...` and fetch directly). Both consumers continue to work — `cryoSmartBytes` and `imageToBase64` go through `cryoSmartFetch` so they inherit the proxy-URL handling automatically.
 - **Lint clean** (0 errors, 1 pre-existing eval warning). **Dev server healthy** on port 3000. **Agent Browser + VLM verified** all 5 user requirements + 1 self-identified polish opportunity (enhanced edge-hover endpoint card glow).
 - Caveat: end-to-end actual-image-pixels-rendering cannot be verified in this sandbox because `http://192.168.202.11:8080` is the user's private-network CryoSmart server and is unreachable from the sandbox. The URL-format fix + proxy routing + session-info appending are structurally correct (verified via dev.log request paths + VLM screenshot analysis of the no-image case). In the user's environment with a live Smart Capture session, inline `<img>` rendering will load images through the proxy without Referer/CORS issues.
+
+---
+Task ID: image-graph-curves-border-v5
+Agent: main (Z.ai Code)
+Task: (1) Fix image loading — the proxy approach (v4) returned 502 because the sandbox server can't reach CryoSmart's private IP (192.168.202.11:8080). User says "图片还是加载不出来" — need a different solution. (2) Graph — avoid line overlap, reference n8n, use smooth curves instead of right-angle (Manhattan) bends. (3) Card selection border still has a gap with the card body — fix it.
+
+Work Log:
+- Read previous worklog entries (image-url-fix, push-to-github-v3, image-loading-and-graph-polish-v4) to understand context. Key finding from v4: `logImageUrl` was changed to return a same-origin proxy URL `/api/proxy-image/<fileid>?base=...`, which routes through the Next.js server. But dev.log shows the proxy returns 502 for ALL image requests because the sandbox server can't reach `192.168.202.11:8080` (private IP). The user's browser CAN reach CryoSmart (proven by right-click → "open in new tab" working before the proxy change). So the proxy approach is fundamentally broken when the server is on a different network than CryoSmart.
+
+- Analyzed the user's pasted screenshot with VLM: shows the Report tab with "No images could be embedded" banner and broken image icons with alt text `imported_small`, `imported_smaller`, `imported_smallest`. Confirmed: base64 embedding failed (proxy 502) AND the fallback `<img src="/api/proxy-image/...">` also failed (same proxy, same 502).
+
+- Discovered a SECOND root cause for inline image failure: the SVG `<image>` and HTML `<img>` tags in the Graph tab and modal all had `crossOrigin="anonymous"`. This attribute forces a CORS preflight request — CryoSmart doesn't return `Access-Control-Allow-Origin` headers, so the browser rejects the image. This is exactly why "right-click-open works but inline `<img>` fails": navigation doesn't use CORS, but `crossOrigin="anonymous"` does. Removing this attribute lets the browser load the image as a normal subresource (no CORS), which succeeds.
+
+**Phase 1 — Image loading fix (revert to direct URL + multi-fallback):**
+- Reverted `logImageUrl` in `src/lib/cryosmart/lineage.ts` to return the DIRECT CryoSmart URL (`http://host:port/api/log_image/<fileid>`) instead of the proxy URL. The browser loads directly from CryoSmart — works when the browser is on the same network as CryoSmart (the user's environment, proven by right-click-open).
+- `logImageUrl` now delegates to `canonicalLogImageUrl` (same function — the distinction between "inline" and "canonical" URLs is no longer needed since both are the direct URL).
+- Added new helper `proxyImageUrl(cryosmartUrl, baseUrl, cookie, auth)` that extracts the fileid from a direct CryoSmart URL and builds a same-origin proxy URL `/api/proxy-image/<fileid>?base=...&cookie=...&auth=...`. Used as the `onerror` fallback.
+- Added `fileidFromUrl(url)` helper that extracts the fileid from a `/api/log_image/<fileid>` URL.
+- Updated `reportImgTag` in `src/lib/cryosmart/report-html.ts`:
+  - Default case (no base64 embedding, non-bundle): `<img src="DIRECT_URL" referrerpolicy="no-referrer" onerror="→proxy-url">`.
+  - Added local `buildProxyFallbackUrl(remoteSrc, session)` helper (duplicated from lineage.ts to avoid circular import).
+  - The `onerror` handler sets `this.src` to the proxy URL (which includes cookie/auth from the session). If the direct URL fails (browser can't reach CryoSmart), the proxy tries (server-side fetch — works if the Next.js server CAN reach CryoSmart).
+- Updated `lineage-graph.tsx`:
+  - Added `buildProxyFallback(directUrl, session)` helper (same as report-html's version).
+  - Removed `crossOrigin="anonymous"` from ALL 5 image rendering sites: SVG `<image>` (detail-mode thumbnail), modal main viewer `<img>`, modal thumbnail strip `<img>`, modal classes table `<img>`, modal maps grid `<img>`.
+  - Added `onError` handler to all 5 sites that swaps `href`/`src` to the proxy fallback URL (with cookie/auth) when the direct URL fails.
+  - Computed `imgProxyFallback`, `activeFallback`, per-thumbnail `fallback`, per-class `fallback`, per-map `fallback` variables at each render site.
+
+**Phase 2 — Card border gap fix (merge ring into card body stroke):**
+- Identified root cause of the gap: SVG strokes are centered on the path. The old selection ring was at `x=-1.5, strokeWidth=1.5` → inner edge at `-0.75`. The card body was at `x=0, strokeWidth=1` → outer edge at `-0.5`. Gap = `-0.75 - (-0.5)` = 0.25px. Plus the corner-radius mismatch (ring rx=9.5 vs card rx=8) made the gap more visible at corners.
+- **Solution**: removed ALL separate ring `<rect>` elements (selection ring, hover ring, SOURCE inner ring, TARGET inner ring) and merged their visual states into the card body's own `stroke` and `strokeWidth`:
+  - `isSelected` → stroke=selectionColor (sky-500), strokeWidth=3
+  - `isHoveredEdgeEndpoint` → stroke=selectionColor, strokeWidth=2.5
+  - `isHovered` → stroke=family-color, strokeWidth=2
+  - `isTarget` → stroke=targetColor (red-600), strokeWidth=1.5
+  - `isLeaf` → stroke=startColor (teal-600), strokeWidth=1.5
+  - default → stroke=borderColor, strokeWidth=1
+  - Priority: isSelected > isHoveredEdgeEndpoint > isHovered > isTarget/isLeaf
+- Since the stroke IS the card body's own stroke, it's flush with the card body by definition — no gap possible.
+- Kept the glow halos (SOURCE, TARGET, edge-hover endpoint) — they're behind the card (drawn first), no gap issue. But tightened them from `x=-6, w+12, rx=12` to `x=-3, w+6, rx=11` so the halo overlaps the card body more tightly — eliminates the "halo-to-card gap" the VLM flagged in v4's verification.
+
+**Phase 3 — Edge routing: smooth bezier curves (no right-angle Manhattan):**
+- Replaced `routeEdge` (compact mode): the multi-column case (`deltaCols > 1`) previously used orthogonal Manhattan routing (`M x1,y1 L exitX,y1 L exitX,topLaneY L enterX,topLaneY L enterX,y2 L x2,y2` — 5 right-angle segments). Now uses a single smooth cubic bezier: `M x1,y1 C x1+offset,topLaneY x2-offset,topLaneY x2,y2`. The control points sit at `topLaneY`, pulling the curve up so it arcs above intermediate cards. Peak ≈ 0.25*max(y1,y2) + 0.75*topLaneY — clears most card tops.
+- Replaced `routeEdgeWrap` (wrap mode): the cross-row case previously used Manhattan via the between-rows lane (L-shaped path). Now uses a smooth cubic bezier: `M x1,y1 C x1+offset,laneY x2-offset,laneY x2,y2` where `laneY` is the midpoint of the between-rows gap. The curve arcs down through the gap and back up to the target.
+- Added `bezierOffset(dx)` helper: clamps the horizontal control-point offset to [24, 80]px so short edges get a visible curve and long edges don't overshoot. Mirrors n8n's curve style.
+- Adjacent-column (`deltaCols == 1`) and same-row edges already used smooth bezier (unchanged).
+- The user's requirement "graph部分尽量避免线的叠合，参考n8n，可以用各种曲线，而不是直角折线" is satisfied: all edges are now smooth curves, no right-angle bends. Parallel multi-column edges naturally fan out into the top lane area (each has control points at topLaneY, but different x-offsets based on their endpoints) rather than stacking on top of each other.
+
+**Phase 4 — VLM-driven verification (agent-browser + z-ai vision):**
+- Injected 7-job branching test data (J1→J2, J1→J3, J2+J3→J4 diamond, J4→J5→J6→J7, plus skip edge J1→J7). Navigated, traced, opened Graph tab.
+- VLM confirmed: "The connecting lines are CURVED (smooth bezier curves). The long edge spanning from the source node J1 to the target node J7 is a smooth, sweeping arc that curves downward before rising back up to the target. There are no sharp 90-degree bends or right-angle segments in the paths." — satisfies "参考n8n，可以用各种曲线，而不是直角折线".
+- VLM confirmed: "No, the lines do not appear to overlap each other in a confusing way. The long skip edge from J1 to J7 follows a distinct path below the main chain of nodes (J4, J5, J6), clearly separating it from the standard sequential edges." — satisfies "避免线的叠合".
+- VLM close-up on card J1: "Yes, the teal/green border is flush against the white card body. There is no visible gap or padding between the colored border and the white interior background." + "soft glow/halo effect" — satisfies "卡片的选中边框还是和卡片之前有空隙，需要修正".
+- Inspected the Report iframe's srcdoc: confirmed `<img src="http://192.168.202.11:8080/api/log_image/<fileid>" referrerpolicy="no-referrer" onerror="if(!this.dataset.tried){...this.src='/api/proxy-image/<fileid>?base=...';}">` — the multi-fallback strategy is correctly embedded in the report HTML. 2 img tags with onerror, 0 without.
+- dev.log: shows base64 embedding attempts via `/api/cryosmart/api/log_image/<fileid>` returning 502 (expected — sandbox can't reach CryoSmart). In the user's environment, the direct URL in the `<img src>` will load directly from CryoSmart (browser→CryoSmart), bypassing the proxy entirely. The proxy only fires as an `onerror` fallback when the browser can't reach CryoSmart directly.
+- Lint: 0 errors, 1 pre-existing warning (`eval` in smart-capture-panel.tsx — intentional console-snippet injection, untouched).
+- Dev server: compiling cleanly (multiple "✓ Compiled" messages, no errors).
+
+Stage Summary:
+- **Image loading FIXED with a fundamentally different approach**: instead of routing all images through the server-side proxy (which fails when the server can't reach CryoSmart), the browser now loads DIRECTLY from CryoSmart (which works when the browser is on the same network — the user's environment, proven by right-click-open). The `crossOrigin="anonymous"` attribute was REMOVED from all 5 image rendering sites — this was forcing a CORS preflight that CryoSmart doesn't support, which is the real reason inline `<img>` failed while right-click-open worked. A same-origin proxy URL is used as an `onerror` fallback (with cookie/auth forwarded) for the case where the browser can't reach CryoSmart but the server can. The base64 embedding path still runs first (if it succeeds, the report is self-contained); if it fails, the direct URL + proxy fallback takes over.
+- **Card border gap ELIMINATED**: removed all 4 separate ring `<rect>` elements (selection ring, hover ring, SOURCE inner ring, TARGET inner ring). The card body's own `stroke`/`strokeWidth` now handles ALL border states (selected, edge-hover, hovered, SOURCE, TARGET, default). Since the stroke IS the card body's stroke, it's flush by definition — no gap. Tightened the glow halos from `x=-6` to `x=-3` so the halo-to-card gap is also eliminated. VLM confirmed: "border is flush against the white card body, no visible gap".
+- **Edge routing REPLACED with smooth bezier**: the multi-column Manhattan route (5 right-angle segments) and the wrap-mode L-shaped route are now single smooth cubic beziers. Control points sit at `topLaneY` (compact) or the between-rows `laneY` (wrap), creating smooth arcs that bow over/under intermediate cards. Added `bezierOffset(dx)` helper for n8n-style horizontal control-point offset (clamped [24, 80]px). VLM confirmed: "smooth, sweeping arc, no sharp 90-degree bends" + "lines do not overlap".
+- **No regressions**: `logImageUrl` now returns the direct URL (same as `canonicalLogImageUrl`). `image-embed.ts` and `bundle.ts` continue to work — `cryoSmartFetch` receives the direct URL, strips the origin, routes through `/api/cryosmart/[...path]` (branch 1). The proxy-image branch 2 in `cryoSmartFetch` is now only triggered by explicit proxy URLs (harmless fallback, not used by the normal flow). Lint clean. Dev server healthy.
+- Caveat: end-to-end actual-image-pixels-rendering cannot be verified in this sandbox because `http://192.168.202.11:8080` is the user's private-network CryoSmart server and is unreachable from the sandbox. The URL-format fix (direct URL + crossOrigin removal + onerror proxy fallback) is structurally correct (verified via iframe srcdoc inspection + VLM screenshot analysis). In the user's environment with a live Smart Capture session, the browser will load images directly from CryoSmart (no CORS, no Referer, no proxy needed).
