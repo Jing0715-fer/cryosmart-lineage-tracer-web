@@ -835,19 +835,26 @@ export function mapPreviewImageName(group: unknown): string {
   return value.replace(/\.map$/i, "");
 }
 
-/** Filter a node's map assets down to the "normal" (non-mask) `.map` files. */
+/** Filter a node's map assets down to the "normal" (non-mask) map files.
+ *  Includes EVERY non-mask volume blob — not just `result_name === "map"`:
+ *  CryoSmart refine jobs (nu-refine, homo/hetero/local refine, …) keep
+ *  `map_sharp` + `map_half_A` + `map_half_B` (and CryoSPARC-style
+ *  `half_map_A`/`half_map_B` groups) alongside `map` inside the `volume`
+ *  output group; the old `result_name === "map"` filter silently dropped
+ *  the sharpened map and half maps from the report. Masks are excluded
+ *  BOTH by group type/name AND by result name (`mask_refine` lives inside
+ *  the `volume` group). */
 export function normalMapAssets(node: {
   maps?: MapAsset[];
 }): MapAsset[] {
   return (node.maps || []).filter((item) => {
     const group = String(item.group || "");
+    const result = String(item.result_name || "");
     const volumeGroup = item.group_type
       ? item.group_type === "volume"
       : !/mask/i.test(group);
-    return (
-      volumeGroup &&
-      (item.result_name === "map" || item.download_url.endsWith(".map"))
-    );
+    const isMask = /mask/i.test(group) || /mask/i.test(result);
+    return volumeGroup && !isMask;
   });
 }
 

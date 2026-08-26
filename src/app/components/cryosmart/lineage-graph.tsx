@@ -500,8 +500,14 @@ function collectAllImages(node: LineageNode): ImageAsset[] {
 /** Width of the free vertical corridor between adjacent columns. */
 const GAP_W = LAYER_X - NODE_W; // 72px — no card ever lives inside a gap
 
-/** How far into a column gap the lane-route's vertical transitions live. */
-const LANE_SHOULDER = Math.min(32, GAP_W / 2);
+/** How far into a column gap the lane-route's vertical runs live.
+ *  Split so the gap's 72px width gives the vertical run ~48px and leaves
+ *  ~24px for the lane-side rounded corners — both strips are card-free
+ *  at ANY y, which is what keeps the whole route card-free. */
+const LANE_SHOULDER_W = Math.min(48, GAP_W * 0.67);
+
+/** Max corner radius for lane-route turns (n8n smoothstep style). */
+const LANE_CORNER_MAX = Math.min(24, GAP_W - LANE_SHOULDER_W, LANE_SHOULDER_W - 12);
 
 interface EdgePath {
   d: string;
@@ -525,7 +531,10 @@ function routeEdgeGap(
   x1: number, y1: number,
   x2: number, y2: number,
 ): EdgePath {
-  const offset = Math.min(GAP_W * 0.45, Math.max(16, Math.abs(x2 - x1) * 0.4));
+  // n8n-style: control offset = half the horizontal distance (the classic
+  // "smooth step" bezier) so the S-curve is as full as the gap allows —
+  // small offsets made the bend look like a hard right angle.
+  const offset = Math.max(20, Math.min(42, Math.abs(x2 - x1) * 0.5));
   return {
     d: `M${x1},${y1} C${x1 + offset},${y1} ${x2 - offset},${y2} ${x2},${y2}`,
     markerEnd: `${x2},${y2}`,
@@ -534,42 +543,119 @@ function routeEdgeGap(
 
 /**
  * Long-range edge (multi-column in compact mode; cross-row or
- * multi-column in wrap mode): a smooth 3-segment "lane route" that is
- * GUARANTEED to avoid every card — no segment is ever covered:
+ * multi-column in wrap mode): an n8n "smoothstep"-style lane route —
+ * straight segments joined by true quarter-ellipse rounded corners —
+ * that is GUARANTEED to avoid every card (no segment is ever covered):
  *
- *   1. Exit the source's right port horizontally, curving up/down to a
- *      free lane. The vertical transition lives entirely inside the
- *      source's right column gap (there are no cards at ANY y inside
- *      a column gap).
+ *   1. Exit the source's right port horizontally, round a corner into a
+ *      vertical run inside the source's right column gap (no cards at
+ *      ANY y inside a column gap), then round into the free lane.
  *   2. Run horizontally along the lane. The lane sits in a card-free
  *      band — above all cards (top band), below all cards (bottom
  *      band), or in the between-rows strip (wrap mode).
- *   3. Curve from the lane into the target's left port. The vertical
- *      transition lives entirely inside the target's left column gap.
+ *   3. Round out of the lane into a vertical run inside the target's
+ *      left column gap, then round into the target's left port.
  *
- * All three segments are cubic beziers with horizontal tangents at the
- * ports and at the lane joins, so the whole path is C1-continuous —
- * smooth organic curves, no right-angle corners — while provably never
- * passing under a card.
+ * Corner radii are as large as the geometry allows (up to
+ * LANE_CORNER_MAX, scaled down when the vertical detour or the lane run
+ * is short), and each corner is a cubic bezier approximating a quarter
+ * ellipse (kappa ≈ 0.5523) — the same construction n8n/xyflow use for
+ * smoothstep edges, so turns read as wide sweeping arcs rather than the
+ * tight near-right-angle fillets a single S-bezier produced here
+ * (its control points nearly coincide in x, so the vertical drop
+ * happened within a ~2px band and looked like a hard corner).
+ *
+ * Card-freeness proof: every corner's convex hull lies either inside a
+ * column gap ([x1, x1+GAP_W] / [x2-GAP_W, x2] — card-free at every y) or,
+ * for the lane-side corners, within LANE_CORNER_MAX of the lane itself
+ * (card-free bands). The straight segments run inside gaps, along the
+ * lane, or along the port rows in-gap. Hence no segment can ever pass
+ * under a card.
  */
 function routeEdgeLane(
   x1: number, y1: number,  // source right port
   x2: number, y2: number,  // target left port
   laneY: number,           // free-lane y (above or below the ports' rows)
 ): EdgePath {
-  // Horizontal lead-in/out at the ports (cosmetic — the x-ranges below
-  // are what keep the path geometrically card-free).
-  const lead = Math.max(16, Math.min(26, Math.abs(x2 - x1) * 0.08));
-  // Shoulder x positions: inside the source's right gap / the target's
-  // left gap. The target's shoulder is clamped so a wrap-col-0 target
-  // (whose left "gap" is partially the canvas margin) stays on-canvas.
-  const sr = x1 + LANE_SHOULDER;
-  const sl = Math.max(Math.max(6, x2 - GAP_W), x2 - LANE_SHOULDER);
+  const s1 = laneY >= y1 ? 1 : -1;   // vertical direction source → lane
+  const s2 = y2 >= laneY ? 1 : -1;   // vertical direction lane → target
+  const dy1 = Math.abs(laneY - y1);  // vertical detour source → lane
+  const dy2 = Math.abs(y2 - laneY);  // vertical detour lane → target
+
+  // Vertical-run x positions — inside the source's right gap / the
+  // target's left gap (both strips are card-free at every y). The
+  // target's run is clamped to the canvas margin (≥6) and to ≥12px
+  // before the target port; wrap-col-0 targets (whose left "gap" is the
+  // canvas margin) sink to the margin instead.
+  const gx1 = x1 + LANE_SHOULDER_W;
+  const gx2Raw = Math.min(Math.max(x2 - LANE_SHOULDER_W, 6), x2 - 12);
+  const gx2 = Math.max(gx2Raw, Math.min(gx1 + 4, x2 - 12));
+  // Lane direction: normally left→right, but a wrap-col-0 target sits
+  // LEFT of the source, so the lane run goes right→left along the
+  // card-free band (never under a card).
+  const laneDir = gx2 >= gx1 ? 1 : -1;
+
+  // Corner radii — as large as the room allows (n8n smoothstep style).
+  //  A: port stub → source vertical run      B: source vertical → lane
+  //  C: lane → target vertical run           D: target vertical → port
+  const lead = 10;
+  let rA = Math.min(LANE_CORNER_MAX, dy1 * 0.45, LANE_SHOULDER_W - lead);
+  let rB = Math.min(LANE_CORNER_MAX, dy1 * 0.45, GAP_W - LANE_SHOULDER_W);
+  let rC = Math.min(LANE_CORNER_MAX, dy2 * 0.45, GAP_W - LANE_SHOULDER_W);
+  let rD = Math.min(LANE_CORNER_MAX, dy2 * 0.45, LANE_SHOULDER_W - lead);
+  // Lane-side corners of a wrap-col-0 target extend toward the port —
+  // clamp them so they stay clear of the target card's left edge.
+  const portRoom = x2 - gx2 - lead;
+  if (laneDir < 0) { rC = Math.min(rC, Math.max(0, portRoom)); }
+  rD = Math.min(rD, Math.max(0, portRoom));
+  // Each corner pair shares one vertical run: shrink proportionally when
+  // the pair would overlap (small detours degenerate gracefully into a
+  // compact S — the two corners simply meet).
+  if (rA + rB > dy1) { const k = dy1 / (rA + rB || 1); rA *= k; rB *= k; }
+  if (rC + rD > dy2) { const k = dy2 / (rC + rD || 1); rC *= k; rD *= k; }
+  // The two lane-side corners share the lane run — shrink when short.
+  const laneLen = Math.abs(gx2 - gx1);
+  const laneRoom = Math.max(0, laneLen - 8);
+  if (rB + rC > laneRoom) {
+    if (laneRoom < 4) { rB = 0; rC = 0; }
+    else { const k = laneRoom / (rB + rC || 1); rB *= k; rC *= k; }
+  }
+
+  // Quarter-ellipse corner emitter: cubic bezier with kappa controls.
+  // `v→h` turns from a vertical run (direction sv) into a horizontal run
+  // (direction sh); `h→v` is the mirror. r=0 emits a plain line-to.
+  const K = 0.5523;
+  const cornerVtoH = (
+    x: number, y: number,      // corner start (on the vertical run)
+    sv: number, sh: number, r: number,
+  ) =>
+    r < 0.5
+      ? `L${x + sh * r},${y + sv * r}`
+      : `C${x},${y + sv * K * r} ${x + sh * (1 - K) * r},${y + sv * r} ${x + sh * r},${y + sv * r}`;
+  const cornerHtoV = (
+    x: number, y: number,      // corner start (on the horizontal run)
+    sh: number, sv: number, r: number,
+  ) =>
+    r < 0.5
+      ? `L${x + sh * r},${y + sv * r}`
+      : `C${x + sh * K * r},${y} ${x + sh * r},${y + sv * (1 - K) * r} ${x + sh * r},${y + sv * r}`;
+
   const d =
+    // Port stub (in-gap, along the source row).
     `M${x1},${y1}` +
-    ` C${x1 + lead},${y1} ${sr - 14},${laneY} ${sr},${laneY}` +
-    ` L${sl},${laneY}` +
-    ` C${sl + 14},${laneY} ${x2 - lead},${y2} ${x2},${y2}`;
+    `L${gx1 - rA},${y1}` +
+    // Corner A: → source vertical run.
+    cornerHtoV(gx1 - rA, y1, 1, s1, rA) +
+    `L${gx1},${laneY - s1 * rB}` +
+    // Corner B: → the lane.
+    cornerVtoH(gx1, laneY - s1 * rB, s1, laneDir, rB) +
+    `L${gx2 - laneDir * rC},${laneY}` +
+    // Corner C: → target vertical run.
+    cornerHtoV(gx2 - laneDir * rC, laneY, laneDir, s2, rC) +
+    `L${gx2},${y2 - s2 * rD}` +
+    // Corner D: → the target port row.
+    cornerVtoH(gx2, y2 - s2 * rD, s2, 1, rD) +
+    `L${x2},${y2}`;
   return { d, markerEnd: `${x2},${y2}` };
 }
 
@@ -1450,44 +1536,53 @@ export function LineageGraph({ summary, session }: Props) {
                 )}
                 {/* Card body — the stroke IS the selection/hover/SOURCE/
                     TARGET border. No separate ring `<rect>` elements → no
-                    gap between border and body (the old rings left a
-                    visible 0.25–2px gap because SVG strokes are centered
-                    on the path, so a ring at x=-1.5 with strokeWidth=1.5
-                    has its inner edge at -0.75 while the card body's outer
-                    edge is at -0.5). Priority:
-                      isSelected > isHoveredEdgeEndpoint > isHovered > isTarget/isLeaf. */}
-                <rect
-                  width={NODE_W}
-                  height={NODE_H}
-                  rx={8}
-                  fill="url(#card-grad)"
-                  stroke={
+                    gap between border and body. The LEFT ACCENT BAR below
+                    starts exactly at strokeWidth/2 (the stroke's inner
+                    edge), so it sits flush against the border at EVERY
+                    border width (1 / 1.5 / 2 / 2.5 / 3) — previously it
+                    was fixed at x=1.5, which left a visible sliver of
+                    card-gradient between the border and the bar whenever
+                    the card was selected/hovered (2–3px strokes).
+                    Priority: isSelected > isHoveredEdgeEndpoint > isHovered
+                    > isTarget/isLeaf. */}
+                {(() => {
+                  const borderCol =
                     isSelected ? selectionColor
                     : isHoveredEdgeEndpoint ? selectionColor
                     : isHovered ? color
                     : isTarget ? targetColor
                     : isLeaf ? startColor
-                    : borderColor
-                  }
-                  strokeWidth={
+                    : borderColor;
+                  const borderW =
                     isSelected ? 3
                     : isHoveredEdgeEndpoint ? 2.5
                     : isHovered ? 2
                     : (isTarget || isLeaf) ? 1.5
-                    : 1
-                  }
-                  filter="url(#card-shadow)"
-                />
-                {/* Left color bar. Inset 1.5px so the card's own border
-                    stroke stays fully visible, and clipped to the card's
-                    rounded outline so the bar never protrudes outside
-                    the card frame. */}
-                <rect
-                  x={1.5} y={0}
-                  width={4} height={NODE_H}
-                  fill={color}
-                  clipPath="url(#card-clip)"
-                />
+                    : 1;
+                  return (
+                    <>
+                      <rect
+                        width={NODE_W}
+                        height={NODE_H}
+                        rx={8}
+                        fill="url(#card-grad)"
+                        stroke={borderCol}
+                        strokeWidth={borderW}
+                        filter="url(#card-shadow)"
+                      />
+                      {/* Left color bar — x = borderW/2 = the stroke's inner
+                          edge → flush with the border, no gap, and clipped
+                          to the card's rounded outline so the bar never
+                          protrudes outside the card frame. */}
+                      <rect
+                        x={borderW / 2} y={0}
+                        width={4} height={NODE_H}
+                        fill={color}
+                        clipPath="url(#card-clip)"
+                      />
+                    </>
+                  );
+                })()}
                 {/* UID row. */}
                 <text
                   x={14}

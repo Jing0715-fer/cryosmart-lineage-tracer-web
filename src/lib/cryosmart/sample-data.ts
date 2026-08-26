@@ -303,7 +303,20 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
         },
       ],
       output_result_groups: [
-        { name: "volume", type: "volume", num_items: 1, summary: { psize_A: 0.83, fsc_resolution_A: 3.12 }, contains: [{ type: "volume.blob", name: "map" }] },
+        // Real-CryoSmart refine structure: the `volume` group carries the
+        // plain map PLUS `map_sharp` / `map_half_A` / `map_half_B` (and a
+        // `mask_refine` blob that must be excluded from "normal" maps).
+        {
+          name: "volume", type: "volume", num_items: 1,
+          summary: { psize_A: 0.83, fsc_resolution_A: 3.12 },
+          contains: [
+            { type: "volume.blob", name: "map" },
+            { type: "volume.blob", name: "map_sharp" },
+            { type: "volume.blob", name: "map_half_A" },
+            { type: "volume.blob", name: "map_half_B" },
+            { type: "volume.blob", name: "mask_refine" },
+          ],
+        },
         { name: "particles", type: "particle", num_items: 42100, summary: { psize_A: 0.83 }, contains: [] },
       ],
       output_group_images: {
