@@ -116,16 +116,23 @@ export async function prefetchImagesForReport(
   const out: Record<string, string> = {};
   const urls = new Set<string>();
 
-  // Collect all image URLs from the summary
+  // Collect all image URLs from the summary. Both the `.url` AND `.src`
+  // variants are collected: reportImgTag() looks images up by their SRC
+  // string, so every src that can differ from its url must be a key in the
+  // returned map (overview_assets capture data can carry distinct url/src).
+  // Fetches are deduped below, so adding both variants costs nothing extra
+  // when they're equal (the common lineage.ts case).
   for (const node of summary.nodes || []) {
     // From node.images
     for (const img of node.images || []) {
       if (img.url) urls.add(img.url);
+      if (img.src && img.src !== img.url) urls.add(img.src);
     }
 
     // From representative_micrograph_images
     for (const img of node.representative_micrograph_images || []) {
       if (img.url) urls.add(img.url);
+      if (img.src && img.src !== img.url) urls.add(img.src);
     }
 
     // From select_2d
@@ -134,7 +141,9 @@ export async function prefetchImagesForReport(
       if (s.selected_classes_image) urls.add(s.selected_classes_image);
       if (s.selected_classes_src) urls.add(s.selected_classes_src);
       if (s.selected_particles_image) urls.add(s.selected_particles_image);
+      if (s.selected_particles_src) urls.add(s.selected_particles_src);
       if (s.excluded_classes_image) urls.add(s.excluded_classes_image);
+      if (s.excluded_classes_src) urls.add(s.excluded_classes_src);
     }
 
     // From class splits (mrc preview)
@@ -155,11 +164,16 @@ export async function prefetchImagesForReport(
   if (sj) {
     for (const img of sj.images || []) {
       if (img.url) urls.add(img.url);
+      if (img.src && img.src !== img.url) urls.add(img.src);
     }
     if (sj.select_2d) {
       const s = sj.select_2d;
       if (s.selected_classes_image) urls.add(s.selected_classes_image);
       if (s.selected_classes_src) urls.add(s.selected_classes_src);
+      if (s.selected_particles_image) urls.add(s.selected_particles_image);
+      if (s.selected_particles_src) urls.add(s.selected_particles_src);
+      if (s.excluded_classes_image) urls.add(s.excluded_classes_image);
+      if (s.excluded_classes_src) urls.add(s.excluded_classes_src);
     }
   }
 
