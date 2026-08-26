@@ -11,15 +11,16 @@
  * are diamond dependencies or multi-path merges that BFS would have
  * collapsed into a single shortest path.
  *
- * Edges: n8n-style routing. Lines never pass through cards:
- *   - Same / adjacent column: smooth bezier whose control points are pulled
- *     horizontally into the column-gap, so the curve lives entirely inside
- *     the gap (it never overlaps any card in either column).
- *   - Multi-column (long-range): orthogonal Manhattan route that exits the
- *     source rightward, climbs into a "free lane" above all cards, runs
- *     horizontally across, drops down to the target row, and re-enters the
- *     target leftward. Vertical segments live in column gaps; the horizontal
- *     segment lives in the lane above the cards. No card is ever crossed.
+ * Edges: n8n-style smooth curves that NEVER pass under a card — no
+ *   segment of any edge is ever covered by a card:
+ *   - Adjacent column: a smooth S-curve whose control points all sit
+ *     inside the column gap, so the whole curve lives in the gap.
+ *   - Multi-column (compact) / cross-row or multi-column (wrap): a
+ *     smooth 3-segment "lane route" — curve into a free lane inside the
+ *     source's column gap, run horizontally along the lane (a card-free
+ *     band above the cards, below the cards, or between wrap rows),
+ *     curve into the target's left gap. Lanes are staggered per edge so
+ *     parallel long-range edges fan out instead of stacking.
  *
  * START badge: placed on the upstream-most node(s) — depth-0 leaves on the
  * FAR LEFT (i.e., the jobs where data flow BEGINS). The start_uid node on
@@ -494,7 +495,13 @@ function collectAllImages(node: LineageNode): ImageAsset[] {
   return out;
 }
 
-/* ── Edge routing: n8n-style smooth bezier curves (no right-angle). ──── */
+/* ── Edge routing: n8n-style smooth curves that NEVER cross a card. ── */
+
+/** Width of the free vertical corridor between adjacent columns. */
+const GAP_W = LAYER_X - NODE_W; // 72px — no card ever lives inside a gap
+
+/** How far into a column gap the lane-route's vertical transitions live. */
+const LANE_SHOULDER = Math.min(32, GAP_W / 2);
 
 interface EdgePath {
   d: string;
@@ -503,112 +510,67 @@ interface EdgePath {
 }
 
 /**
- * Compute a horizontal control-point offset for a smooth bezier.
- * Clamped so very short edges get a minimum visible curve and very
- * long edges don't overshoot. This mirrors n8n's curve style where
- * the control points are pulled horizontally from the endpoints.
- */
-function bezierOffset(dx: number): number {
-  return Math.min(80, Math.max(24, Math.abs(dx) * 0.4));
-}
-
-/**
- * Build an SVG path for an edge from (x1,y1) on the source's right edge
- * to (x2,y2) on the target's left edge. Uses smooth cubic bezier curves
- * for ALL cases (no right-angle Manhattan routing).
+ * Adjacent-column edge: smooth S-curve that lives ENTIRELY inside the
+ * column gap. A cubic bezier is an affine combination of its control
+ * points, so the curve's x stays within [x1, x2] whenever every control
+ * x is — and [x1, x2] IS the gap (source right edge → target left
+ * edge). Card-free by construction, in both layout modes.
  *
- * - delta == 0 (same column): defensive side-bowed bezier.
- * - delta == 1 (adjacent): smooth S-curve in the column gap — curve
- *   lives entirely in the gap, doesn't touch cards.
- * - delta >  1 (multi-column): smooth bezier that bows UPWARD toward
- *   the free lane above the cards. The control points sit at
- *   topLaneY, pulling the curve up so it clears most intermediate
- *   cards. Some intermediate cards may still be crossed (the user
- *   explicitly accepted "连线跨过去" — lines crossing over), but
- *   the curve is smooth (no right-angle bends) like n8n.
- *
- * The user's requirement: "graph部分尽量避免线的叠合，参考n8n，可以用
- * 各种曲线，而不是直角折线" — avoid line overlap, reference n8n, use
- * curves not right-angle. The smooth bezier achieves this: curves are
- * continuous and organic, and by using topLaneY as the control-point Y,
- * parallel multi-column edges naturally fan out into the top lane area
- * rather than stacking on top of each other.
+ * The control-point offset is clamped to the gap width so the curve can
+ * never bulge sideways into either column (this also covers the
+ * defensive same-column bow, which can't occur with longest-path
+ * depths but is kept for safety).
  */
-function routeEdge(
-  x1: number, y1: number, x2: number, y2: number,
-  deltaCols: number, topLaneY: number,
+function routeEdgeGap(
+  x1: number, y1: number,
+  x2: number, y2: number,
 ): EdgePath {
-  const dx = x2 - x1;
-  const offset = bezierOffset(dx);
-
-  if (deltaCols <= 0) {
-    // Same column (defensive). Bow to the right of the column.
-    return {
-      d: `M${x1},${y1} C${x1 + offset},${y1} ${x1 + offset},${y2} ${x2},${y2}`,
-      markerEnd: `${x2},${y2}`,
-    };
-  }
-
-  if (deltaCols === 1) {
-    // Adjacent column: smooth S-curve in the column gap.
-    return {
-      d: `M${x1},${y1} C${x1 + offset},${y1} ${x2 - offset},${y2} ${x2},${y2}`,
-      markerEnd: `${x2},${y2}`,
-    };
-  }
-
-  // Multi-column: smooth bezier bowing UPWARD to the top lane.
-  // Control points at (x1+offset, topLaneY) and (x2-offset, topLaneY)
-  // pull the curve up so it arcs above intermediate cards. The actual
-  // peak of a cubic bezier with equal control-point Y is
-  // 0.25*max(y1,y2) + 0.75*topLaneY — enough to clear the top of
-  // most cards while staying smooth (no right-angle bends).
+  const offset = Math.min(GAP_W * 0.45, Math.max(16, Math.abs(x2 - x1) * 0.4));
   return {
-    d: `M${x1},${y1} C${x1 + offset},${topLaneY} ${x2 - offset},${topLaneY} ${x2},${y2}`,
+    d: `M${x1},${y1} C${x1 + offset},${y1} ${x2 - offset},${y2} ${x2},${y2}`,
     markerEnd: `${x2},${y2}`,
   };
 }
 
 /**
- * Wrap-mode edge routing — also uses smooth bezier curves (no L-shaped
- * Manhattan). Layout in wrap mode is a grid: columns flow left → right
- * within a row, then wrap to a new row below.
+ * Long-range edge (multi-column in compact mode; cross-row or
+ * multi-column in wrap mode): a smooth 3-segment "lane route" that is
+ * GUARANTEED to avoid every card — no segment is ever covered:
  *
- *  (a) Same wrap-row: smooth S-curve (same as compact's adjacent case).
- *  (b) Cross wrap-row: smooth bezier that dips DOWN through the
- *      between-rows gap. Control points sit at the midpoint of the gap
- *      between the source's row and the row immediately below, creating
- *      a smooth curve that arcs through the gap. No right-angle bends.
+ *   1. Exit the source's right port horizontally, curving up/down to a
+ *      free lane. The vertical transition lives entirely inside the
+ *      source's right column gap (there are no cards at ANY y inside
+ *      a column gap).
+ *   2. Run horizontally along the lane. The lane sits in a card-free
+ *      band — above all cards (top band), below all cards (bottom
+ *      band), or in the between-rows strip (wrap mode).
+ *   3. Curve from the lane into the target's left port. The vertical
+ *      transition lives entirely inside the target's left column gap.
+ *
+ * All three segments are cubic beziers with horizontal tangents at the
+ * ports and at the lane joins, so the whole path is C1-continuous —
+ * smooth organic curves, no right-angle corners — while provably never
+ * passing under a card.
  */
-function routeEdgeWrap(
-  x1: number, y1: number, x2: number, y2: number,
-  sourceWrapRow: number, targetWrapRow: number,
-  rowBottomY: (r: number) => number,
-  nextRowTopY: (r: number) => number,
+function routeEdgeLane(
+  x1: number, y1: number,  // source right port
+  x2: number, y2: number,  // target left port
+  laneY: number,           // free-lane y (above or below the ports' rows)
 ): EdgePath {
-  const dx = x2 - x1;
-  const offset = bezierOffset(dx);
-
-  if (sourceWrapRow === targetWrapRow) {
-    // Same row → smooth S-curve.
-    return {
-      d: `M${x1},${y1} C${x1 + offset},${y1} ${x2 - offset},${y2} ${x2},${y2}`,
-      markerEnd: `${x2},${y2}`,
-    };
-  }
-
-  // Cross-row → smooth bezier dipping through the between-rows gap.
-  const sBottom = rowBottomY(sourceWrapRow);
-  const nextTop = nextRowTopY(sourceWrapRow);
-  // Midpoint of the gap between source's row and the row below.
-  const laneY = sBottom + (nextTop - sBottom) / 2;
-  // Control points at (x1+offset, laneY) and (x2-offset, laneY) — the
-  // curve arcs down into the gap and back up to the target. Smooth,
-  // no right-angle bends.
-  return {
-    d: `M${x1},${y1} C${x1 + offset},${laneY} ${x2 - offset},${laneY} ${x2},${y2}`,
-    markerEnd: `${x2},${y2}`,
-  };
+  // Horizontal lead-in/out at the ports (cosmetic — the x-ranges below
+  // are what keep the path geometrically card-free).
+  const lead = Math.max(16, Math.min(26, Math.abs(x2 - x1) * 0.08));
+  // Shoulder x positions: inside the source's right gap / the target's
+  // left gap. The target's shoulder is clamped so a wrap-col-0 target
+  // (whose left "gap" is partially the canvas margin) stays on-canvas.
+  const sr = x1 + LANE_SHOULDER;
+  const sl = Math.max(Math.max(6, x2 - GAP_W), x2 - LANE_SHOULDER);
+  const d =
+    `M${x1},${y1}` +
+    ` C${x1 + lead},${y1} ${sr - 14},${laneY} ${sr},${laneY}` +
+    ` L${sl},${laneY}` +
+    ` C${sl + 14},${laneY} ${x2 - lead},${y2} ${x2},${y2}`;
+  return { d, markerEnd: `${x2},${y2}` };
 }
 
 
@@ -660,7 +622,7 @@ export function LineageGraph({ summary, session }: Props) {
   }, [hoveredEdge]);
 
   /* Layout: longest-path depth columns, oldest upstream LEFT, TARGET RIGHT. */
-  const { nodes, edges, layout, bounds, columns, depthMap, leafSet, wrapRowBounds } = useMemo(() => {
+  const { nodes, edges, layout, bounds, columns, depthMap, leafSet, wrapRowBounds, edgeLanes } = useMemo(() => {
     const nodes = summary.nodes || [];
     const edges = summary.edges || [];
     const depthMap = computeLongestPathDepths(edges, summary.start_uid);
@@ -789,9 +751,88 @@ export function LineageGraph({ summary, session }: Props) {
         ? topOffset + numWrapRows * tallestColHeight + (numWrapRows - 1) * WRAP_ROW_GAP + NODE_H + PAD
         : topOffset + tallestColHeight + NODE_H + PAD;
 
+    /* ── Lane assignment for long-range edges ─────────────────────────
+     * Long-range edges (multi-column in compact mode; cross-row or
+     * multi-column within a wrap row) route through free "lanes" (see
+     * routeEdgeLane). Each such edge gets its own staggered lane Y so
+     * parallel long-range edges fan out instead of stacking:
+     *
+     *  - compact TOP band:    between the axis labels and the card tops
+     *                          → edges whose endpoints sit in the upper half.
+     *  - compact BOTTOM band: below the lowest card (cards end at least
+     *                          LAYER_Y - NODE_H above the column-band bottom)
+     *                          → edges whose endpoints sit in the lower half.
+     *  - wrap bands:          the strip below each source row, up to just
+     *                          above the next row's axis header (or the
+     *                          canvas bottom for the last row). Cards in a
+     *                          row end ≥ LAYER_Y - NODE_H above the row's
+     *                          bottomY, so the strip is card-free.
+     * Adjacent-column edges are excluded — they use the in-gap S-curve. */
+    const edgeLanes = new Map<string, number>();
+    {
+      interface LaneCandidate {
+        key: string; sc: number; srow: number; tc: number; y1: number; y2: number;
+      }
+      const topLanes: LaneCandidate[] = [];
+      const bottomLanes: LaneCandidate[] = [];
+      const wrapBands = new Map<number, LaneCandidate[]>();
+      for (const e of edges) {
+        if (!e.source || !e.target) continue;
+        const from = layout.get(e.source);
+        const to = layout.get(e.target);
+        if (!from || !to) continue;
+        const cand: LaneCandidate = {
+          key: `${e.source}\u2192${e.target}`,
+          sc: from.columnIndex, srow: from.row, tc: to.columnIndex,
+          y1: from.y + NODE_H / 2, y2: to.y + NODE_H / 2,
+        };
+        if (layoutMode === "wrap") {
+          const fw = from.wrapRow ?? 0;
+          const tw = to.wrapRow ?? 0;
+          if (fw === tw) {
+            const wcd = (to.wrapCol ?? 0) - (from.wrapCol ?? 0);
+            if (wcd <= 1) continue; // adjacent (or backward, not drawn) — S-curve
+          }
+          if (!wrapBands.has(fw)) wrapBands.set(fw, []);
+          wrapBands.get(fw)!.push(cand);
+        } else {
+          const d = to.columnIndex - from.columnIndex;
+          if (d <= 1) continue; // adjacent / defensive — S-curve
+          if ((cand.y1 + cand.y2) / 2 < topOffset + tallestColHeight / 2) {
+            topLanes.push(cand);
+          } else {
+            bottomLanes.push(cand);
+          }
+        }
+      }
+      // Distribute lanes evenly inside a [yTop, yBottom] band, sorted so
+      // leftmost sources get the outermost (highest/lowest) lane.
+      const assign = (list: LaneCandidate[], yTop: number, yBottom: number) => {
+        if (list.length === 0 || yBottom <= yTop) return;
+        list.sort((a, b) => a.sc - b.sc || a.srow - b.srow || a.tc - b.tc);
+        const n = list.length;
+        list.forEach((c, k) => {
+          const y =
+            n === 1
+              ? (yTop + yBottom) / 2
+              : yTop + ((yBottom - yTop) * (k + 1)) / (n + 1);
+          edgeLanes.set(c.key, Math.round(y * 10) / 10);
+        });
+      };
+      assign(topLanes, TOP_AXIS_H + 8, topOffset - 8);
+      assign(bottomLanes, topOffset + tallestColHeight - (LAYER_Y - NODE_H) + 8, totalHeight - 10);
+      for (const [r, list] of wrapBands) {
+        const bottomY = wrapRowBounds[r]?.bottomY ?? topOffset + tallestColHeight;
+        const bandTop = bottomY - (LAYER_Y - NODE_H) + 8;
+        const bandBottom =
+          r + 1 < numWrapRows ? wrapRowBounds[r + 1].topY - 28 : totalHeight - 10;
+        assign(list, bandTop, bandBottom);
+      }
+    }
+
     return {
       nodes, edges, layout, bounds: { w: totalWidth, h: totalHeight },
-      columns: cols, depthMap, leafSet, wrapRowBounds,
+      columns: cols, depthMap, leafSet, wrapRowBounds, edgeLanes,
     };
   }, [summary, detailMode, layoutMode]);
 
@@ -975,9 +1016,6 @@ export function LineageGraph({ summary, session }: Props) {
   const selectedNode = selectedUid ? nodeMap.get(selectedUid) ?? null : null;
   const modalNode = modalUid ? nodeMap.get(modalUid) ?? null : null;
 
-  // For long-range orthogonal edges, vertical segment Y = top of free lane.
-  const topLaneY = TOP_AXIS_H + 6;
-
   return (
     <div className="space-y-2">
       {/* Toolbar */}
@@ -1123,6 +1161,16 @@ export function LineageGraph({ summary, session }: Props) {
               <stop offset="0%" stopColor={isDark ? "#1e293b" : "#ffffff"} />
               <stop offset="100%" stopColor={isDark ? "#0f172a" : "#f8fafc"} />
             </linearGradient>
+            {/* Clip shape matching the card body's rounded rect. Applied to
+                the left accent bar so its top/bottom corners follow the
+                card's rounded outline — previously the bar's square corners
+                protruded OUTSIDE the card frame, which looked broken. The
+                clip is defined in the referencing element's local user
+                space (each card's <g> has its own translate), so a single
+                shared clipPath serves every card. */}
+            <clipPath id="card-clip">
+              <rect width={NODE_W} height={NODE_H} rx={8} />
+            </clipPath>
             {(["exposure", "particle", "volume", "other"] as EdgeFam[]).map((f) => (
               <marker
                 key={f}
@@ -1204,7 +1252,11 @@ export function LineageGraph({ summary, session }: Props) {
             );
           })}
 
-          {/* Edges (drawn BEFORE nodes so nodes overlay arrows that come near). */}
+          {/* Edges. Every route is card-free by construction: adjacent
+              columns use an in-gap S-curve; long-range edges use a
+              staggered free-lane route (see routeEdgeGap/routeEdgeLane).
+              Edges are still drawn before nodes, but no edge ever passes
+              under a card, so nothing is ever visually clipped. */}
           {edges.map((e, i) => {
             const from = layout.get(e.source);
             const to = layout.get(e.target);
@@ -1243,17 +1295,14 @@ export function LineageGraph({ summary, session }: Props) {
             const isDim = !!highlightSet && !(highlightSet.has(e.source) && highlightSet.has(e.target));
             const opacity = isDim ? 0.08 : isHi ? 1 : 0.55;
             const strokeWidth = isHi ? 2.6 : 1.6;
-            // Pick routing: wrap cross-row → routeEdgeWrap; otherwise →
-            // routeEdge (bezier for adjacent, Manhattan via top-lane for
-            // multi-column within the same row).
-            const d = isWrapCrossRow
-              ? routeEdgeWrap(
-                  x1, y1, x2, y2,
-                  fromWrapRow!, toWrapRow!,
-                  (r: number) => wrapRowBounds[r]?.bottomY ?? y1,
-                  (r: number) => wrapRowBounds[r + 1]?.topY ?? y2,
-                ).d
-              : routeEdge(x1, y1, x2, y2, layoutMode === "wrap" ? ((to as { wrapCol?: number }).wrapCol ?? 0) - ((from as { wrapCol?: number }).wrapCol ?? 0) : deltaCols, topLaneY).d;
+            // Pick routing: long-range edges (assigned a staggered lane
+            // in the layout pass) → smooth lane route; adjacent columns
+            // (and defensive same-column bows) → in-gap S-curve.
+            const laneY = edgeLanes.get(edgeKey);
+            const d = (laneY != null
+              ? routeEdgeLane(x1, y1, x2, y2, laneY)
+              : routeEdgeGap(x1, y1, x2, y2)
+            ).d;
             return (
               <g key={i}>
                 {/* Visible colored path — no pointer events so the wide
@@ -1429,8 +1478,16 @@ export function LineageGraph({ summary, session }: Props) {
                   }
                   filter="url(#card-shadow)"
                 />
-                {/* Left color bar. */}
-                <rect x={0} y={0} width={4} height={NODE_H} rx={2} fill={color} />
+                {/* Left color bar. Inset 1.5px so the card's own border
+                    stroke stays fully visible, and clipped to the card's
+                    rounded outline so the bar never protrudes outside
+                    the card frame. */}
+                <rect
+                  x={1.5} y={0}
+                  width={4} height={NODE_H}
+                  fill={color}
+                  clipPath="url(#card-clip)"
+                />
                 {/* UID row. */}
                 <text
                   x={14}

@@ -35,6 +35,8 @@ export async function GET(req: NextRequest) {
         cryosmart_origin: entry.data.cryosmart_origin,
         cryosmart_auth: entry.data.cryosmart_auth || undefined,
         cryosmart_cookie: entry.data.cryosmart_cookie || undefined,
+        // Log images force-loaded from the SPA's lazy jobLogs state
+        job_log_images: entry.data.job_log_images,
       },
     },
     {

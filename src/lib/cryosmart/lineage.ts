@@ -768,6 +768,23 @@ export function imageAssets(
     });
   }
 
+  // Log images — captured from the SPA's lazy `jobLogs` state by the
+  // Smart Capture script (it force-loads every job's logs via the store's
+  // own log-loading action, then extracts the `imgfiles` fileids). Served
+  // by the same `/api/log_image/<fileid>` endpoint as the tile previews.
+  for (const item of job.log_images || []) {
+    const fileid = item?.fileid || "";
+    const url = logImageUrl(baseUrl, fileid);
+    if (!url) continue;
+    assets.push({
+      kind: "log_image",
+      name: item.name || "log_image",
+      url,
+      src: url,
+      original_url: url,
+    });
+  }
+
   return assets;
 }
 

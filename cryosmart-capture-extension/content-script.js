@@ -1,6 +1,7 @@
 ﻿/**
- * CryoSmart Capture - Content Script v3
+ * CryoSmart Capture - Content Script v4
  * Fixed: Search ALL __vue_app__ elements, not just #q-app
+ * Added: lazy jobLogs force-loading + log image extraction
  */
 
 const EXTENSION_ID = chrome.runtime.id;
@@ -247,9 +248,183 @@ function captureSessionInfo() {
 }
 
 /**
+ * Lazy jobLogs force-loading + log image extraction.
+ * store.jobLogs only fills in when a job's detail view is opened in the
+ * SPA. We calibrate the store's log-loading action on ONE job, then replay
+ * it for every job. HTTP log endpoints as fallback. Best-effort.
+ */
+function extractLogImages(logs) {
+  const out = [];
+  if (!Array.isArray(logs)) return out;
+  for (const entry of logs) {
+    if (!entry) continue;
+    const files = entry.imgfiles || (entry.type === 'image' ? entry.files : null);
+    if (!files || !files.length) continue;
+    for (const file of files) {
+      const fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
+      if (!fid) continue;
+      const name = (file && file.name) || entry.name || entry.title || ('log_image_' + out.length);
+      out.push({ fileid: fid, name });
+    }
+  }
+  return out;
+}
+
+function findLogActions(store) {
+  const found = [];
+  const names = {};
+  let obj = store;
+  for (let depth = 0; depth < 4 && obj; depth++) {
+    try {
+      for (const n of Object.getOwnPropertyNames(obj)) names[n] = 1;
+    } catch (e) { /* ignore */ }
+    try { obj = Object.getPrototypeOf(obj); } catch (e) { break; }
+  }
+  for (const name of Object.keys(names)) {
+    if (!/(log|detail)/i.test(name)) continue;
+    try {
+      if (typeof store[name] === 'function') found.push({ name, fn: store[name] });
+    } catch (e) { /* ignore */ }
+  }
+  found.sort((a, b) => (/log/i.test(a.name) ? 0 : 1) - (/log/i.test(b.name) ? 0 : 1));
+  return found;
+}
+
+function waitForLogs(store, uid, ms) {
+  return new Promise(resolve => {
+    const t0 = Date.now();
+    (function check() {
+      try {
+        const logs = store.jobLogs && store.jobLogs[uid];
+        if (logs && logs.length) return resolve(logs);
+      } catch (e) { /* ignore */ }
+      if (Date.now() - t0 >= ms) return resolve(null);
+      setTimeout(check, 120);
+    })();
+  });
+}
+
+async function httpLogProbe(uid) {
+  const paths = [
+    '/api/job/get_job_logs?job_uid=' + encodeURIComponent(uid),
+    '/api/job/get_logs?job_uid=' + encodeURIComponent(uid),
+    '/api/job/get_job_log?job_uid=' + encodeURIComponent(uid),
+    '/api/log/get_logs?job_uid=' + encodeURIComponent(uid),
+  ];
+  for (const p of paths) {
+    try {
+      const r = await fetch(p, { credentials: 'include' });
+      if (!r.ok) continue;
+      const d = await r.json();
+      const arr = d && (d.data || d.logs) || (Array.isArray(d) ? d : null);
+      if (Array.isArray(arr) && arr.length) return arr;
+    } catch (e) { /* try next */ }
+  }
+  return null;
+}
+
+async function collectLogImages(store, jobs) {
+  const result = {};
+  let hasState = false;
+  try { hasState = 'jobLogs' in store; } catch (e) { /* ignore */ }
+  if (!hasState) {
+    log('jobLogs state not found — skipping log images.');
+    return result;
+  }
+
+  const pending = [];
+  for (const job of jobs) {
+    const uid = job && job.uid;
+    if (!uid) continue;
+    const existing = store.jobLogs && store.jobLogs[uid];
+    if (existing && existing.length) {
+      const imgs = extractLogImages(existing);
+      if (imgs.length) result[uid] = imgs;
+    } else {
+      pending.push(uid);
+    }
+  }
+  log(`Logs already loaded for ${jobs.length - pending.length} job(s); ${pending.length} to force-load.`);
+  if (pending.length === 0) return result;
+
+  const actions = findLogActions(store);
+  log('Log loader candidates:', actions.map(a => a.name).join(', ') || 'none');
+
+  const calibUid = pending[0];
+  let winning = null;
+  const shapes = [calibUid, { job_uid: calibUid }, { uid: calibUid }, [calibUid]];
+
+  outer:
+  for (const action of actions) {
+    for (let s = 0; s < shapes.length; s++) {
+      try {
+        const r = action.fn.call(store, shapes[s]);
+        if (r && typeof r.then === 'function') r.catch(() => {});
+      } catch (e) { /* ignore */ }
+      const logs = await waitForLogs(store, calibUid, 800);
+      if (logs) {
+        winning = { action, shapeIdx: s };
+        const cImgs = extractLogImages(logs);
+        if (cImgs.length) result[calibUid] = cImgs;
+        break outer;
+      }
+    }
+  }
+
+  if (!winning) {
+    const probe = await httpLogProbe(calibUid);
+    if (probe) {
+      winning = { http: true };
+      const pImgs = extractLogImages(probe);
+      if (pImgs.length) result[calibUid] = pImgs;
+    }
+  }
+
+  if (!winning) {
+    log('Could not trigger lazy log loading — capturing without log images.');
+    return result;
+  }
+  log('Log loading works via ' + (winning.http ? 'HTTP endpoint' : `store action "${winning.action.name}"`));
+
+  const t0 = Date.now();
+  const BUDGET_MS = 60000;
+  for (let j = 1; j < pending.length; j++) {
+    const uid = pending[j];
+    if (result[uid]) continue;
+    if (Date.now() - t0 > BUDGET_MS) {
+      log(`Log collection time budget reached — stopping after ${j} job(s).`);
+      break;
+    }
+    let logs = null;
+    const cached = store.jobLogs && store.jobLogs[uid];
+    if (cached && cached.length) {
+      logs = cached;
+    } else if (winning.http) {
+      logs = await httpLogProbe(uid);
+    } else {
+      const arg = [uid, { job_uid: uid }, { uid }, [uid]][winning.shapeIdx];
+      try {
+        const r = winning.action.fn.call(store, arg);
+        if (r && typeof r.then === 'function') r.catch(() => {});
+      } catch (e) { /* ignore */ }
+      logs = await waitForLogs(store, uid, 1200);
+      if (!logs) logs = await httpLogProbe(uid);
+    }
+    if (logs) {
+      const imgs = extractLogImages(logs);
+      if (imgs.length) result[uid] = imgs;
+    }
+    if ((j + 1) % 10 === 0) log(`Log loading progress: ${j + 1}/${pending.length} job(s)...`);
+  }
+
+  log(`Log images collected for ${Object.keys(result).length} of ${jobs.length} job(s)`);
+  return result;
+}
+
+/**
  * Upload to web app
  */
-async function uploadToWebApp(data, webAppUrl) {
+async function uploadToWebApp(data, webAppUrl, logImages) {
   log('Uploading to:', webAppUrl);
 
   const session = captureSessionInfo();
@@ -261,7 +436,8 @@ async function uploadToWebApp(data, webAppUrl) {
       project_uid: data.projectUid,
       experiment_uid: data.experimentUid,
       jobs: data.jobs,
-      source: 'CryoSmart Chrome Extension v3',
+      job_log_images: logImages || {},
+      source: 'CryoSmart Chrome Extension v4',
       captured_at: data.capturedAt,
       cryosmart_origin: session.origin,
       cryosmart_auth: session.auth,
@@ -279,7 +455,8 @@ async function uploadToWebApp(data, webAppUrl) {
     throw new Error('Server error: ' + (result.error || 'unknown'));
   }
   
-  log('Success! Token:', result.token, '| Session:', result.has_session ? 'Available (auth + cookie forwarded)' : 'Not available');
+  const nLogs = Object.keys(logImages || {}).length;
+  log(`Success! Token: ${result.token} | Session: ${result.has_session ? 'Available (auth + cookie forwarded)' : 'Not available'} | Log images: ${nLogs} job(s)`);
   
   return {
     success: true,
@@ -317,7 +494,16 @@ async function capture(options = {}) {
   log('Store found! Type:', result.name);
   
   const data = extractProjectData(projectId, result.store);
-  const uploadResult = await uploadToWebApp(data, webAppUrl);
+
+  // Force-load the LAZY jobLogs and extract log image fileids.
+  let logImages = {};
+  try {
+    logImages = await collectLogImages(result.store, data.jobs);
+  } catch (e) {
+    log('Log image collection failed (non-fatal):', e.message);
+  }
+
+  const uploadResult = await uploadToWebApp(data, webAppUrl, logImages);
   
   if (autoOpen) {
     chrome.tabs.create({ url: uploadResult.webAppUrl, active: true });
@@ -449,7 +635,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ==================== INIT ====================
 
-log('[CryoSmart Capture v3] Loaded. Waiting for Vue...');
+log('[CryoSmart Capture v4] Loaded. Waiting for Vue...');
 
 // Start detection
 waitForProjects().then(result => {

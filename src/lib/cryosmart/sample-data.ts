@@ -114,6 +114,11 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
     ui_tile_images: [
       { name: "imported_small", fileid: "/demo/micrographs.png", num_cols: 6, num_rows: 4 },
     ],
+    // Simulated lazy-jobLogs capture: import jobs emit a motion-summary log
+    // image in production CryoSmart.
+    log_images: [
+      { fileid: "/demo/micrographs.png", name: "log_import_summary" },
+    ],
   }));
 
   // J5: blob_picker_gpu
@@ -140,6 +145,12 @@ export function buildSampleProjectMetadata(opts: SampleDataOptions = {}): { jobs
     ],
     ui_tile_images: [
       { name: "picked_micrographs", fileid: "/demo/picked.png", num_cols: 4, num_rows: 2 },
+    ],
+    // Simulates log images force-loaded from the SPA's lazy jobLogs state
+    // (the Smart Capture script collects these as job_log_images and the
+    // importer merges them onto each job as log_images).
+    log_images: [
+      { fileid: "/demo/micrographs.png", name: "log_pick_overlay" },
     ],
   }));
 

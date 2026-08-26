@@ -43,7 +43,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
   }, []);
 
   // Capture script that runs inside CryoSmart (via browser console)
-  // This version captures complete job metadata AND session info for maps/images
+  // This version captures complete job metadata AND session info for maps/images.
+  // It also force-loads the LAZY jobLogs state (normally only fetched when a
+  // job's detail view is opened) and extracts every log image fileid.
   const captureScript = `
 (function() {
   var APP = '${webAppUrl}';
@@ -134,34 +136,240 @@ export function SmartCapturePanel({ onCapture }: Props) {
     + ', auth=' + (cryosmartAuth ? 'Bearer [token]' : 'none')
     + ', cookie=' + (cryosmartCookie && cryosmartCookie.length ? cryosmartCookie.length + ' chars captured' : 'none'));
   
-  // Upload to web app with session info (origin + WS token + browser cookie)
-  fetch(APP + '/api/cryosmart/import', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      project_uid: projectId,
-      experiment_uid: project.experiments[0]?.uid,
-      jobs: jobs,
-      source: 'CryoSmart SPA Vue Store',
-      captured_at: new Date().toISOString(),
-      cryosmart_origin: cryosmartOrigin,
-      cryosmart_auth: cryosmartAuth,
-      cryosmart_cookie: cryosmartCookie
-    })
-  }).then(function(r) { return r.json(); })
-    .then(function(res) {
-      if (res.ok && res.token) {
-        console.log('Success! Opening web app...');
-        if (res.has_session) {
-          console.log('Session available for map/image downloads (auth + cookie forwarded to server-side proxy).');
-        }
-        window.open(APP + '/?imported=' + res.token + '&pid=' + projectId, '_blank');
-      } else {
-        alert('Upload failed: ' + (res.error || 'Unknown error'));
+  // ─── Log image collection ──────────────────────────────────────────
+  // store.jobLogs is LAZY: the SPA only fetches a job's logs when you open
+  // that job's detail view. To capture log images for EVERY job we:
+  //   1. Harvest logs already present in store.jobLogs.
+  //   2. Find the store action that loads logs (any store function whose
+  //      name matches /log/i) and CALIBRATE its exact call shape on one
+  //      job — trying uid / {job_uid} / {uid} / [uid] and watching
+  //      store.jobLogs[uid] until it appears.
+  //   3. Replay the winning call for every remaining job (time-boxed).
+  //   4. Fallback: probe common HTTP log endpoints.
+  // Best-effort — a failure just means fewer log images, never a failed
+  // capture.
+  function extractLogImages(logs) {
+    var out = [];
+    if (!Array.isArray(logs)) return out;
+    for (var i = 0; i < logs.length; i++) {
+      var log = logs[i];
+      if (!log) continue;
+      var files = log.imgfiles || (log.type === 'image' ? log.files : null);
+      if (!files || !files.length) continue;
+      for (var f = 0; f < files.length; f++) {
+        var file = files[f];
+        var fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
+        if (!fid) continue;
+        var name = (file && file.name) || log.name || log.title || ('log_image_' + out.length);
+        out.push({ fileid: fid, name: name });
       }
-    }).catch(function(e) {
-      alert('Upload failed: ' + e.message);
+    }
+    return out;
+  }
+  
+  function findLogActions(store) {
+    var found = [];
+    var names = {};
+    var obj = store;
+    for (var depth = 0; depth < 4 && obj; depth++) {
+      try {
+        var own = Object.getOwnPropertyNames(obj);
+        for (var i = 0; i < own.length; i++) names[own[i]] = 1;
+      } catch (e) {}
+      try { obj = Object.getPrototypeOf(obj); } catch (e) { break; }
+    }
+    for (var name in names) {
+      if (!/(log|detail)/i.test(name)) continue;
+      try {
+        if (typeof store[name] === 'function') found.push({ name: name, fn: store[name] });
+      } catch (e) {}
+    }
+    // Prefer actions with "log" in the name over generic "detail" loaders.
+    found.sort(function(a, b) {
+      var la = /log/i.test(a.name) ? 0 : 1, lb = /log/i.test(b.name) ? 0 : 1;
+      return la - lb;
     });
+    return found;
+  }
+  
+  function waitForLogs(store, uid, ms) {
+    return new Promise(function(resolve) {
+      var t0 = Date.now();
+      (function check() {
+        try {
+          var logs = store.jobLogs && store.jobLogs[uid];
+          if (logs && logs.length) return resolve(logs);
+        } catch (e) {}
+        if (Date.now() - t0 >= ms) return resolve(null);
+        setTimeout(check, 120);
+      })();
+    });
+  }
+  
+  function httpLogProbe(uid) {
+    var paths = [
+      '/api/job/get_job_logs?job_uid=' + encodeURIComponent(uid),
+      '/api/job/get_logs?job_uid=' + encodeURIComponent(uid),
+      '/api/job/get_job_log?job_uid=' + encodeURIComponent(uid),
+      '/api/log/get_logs?job_uid=' + encodeURIComponent(uid)
+    ];
+    return paths.reduce(function(chain, p) {
+      return chain.then(function(logs) {
+        if (logs) return logs;
+        return fetch(p, { credentials: 'include' })
+          .then(function(r) { return r.ok ? r.json() : null; })
+          .then(function(d) {
+            if (!d) return null;
+            var arr = d.data || d.logs || (Array.isArray(d) ? d : null);
+            return Array.isArray(arr) && arr.length ? arr : null;
+          })
+          .catch(function() { return null; });
+      });
+    }, Promise.resolve(null));
+  }
+  
+  async function collectLogImages(store, jobs) {
+    var result = {};
+    var hasState = false;
+    try { hasState = 'jobLogs' in store; } catch (e) {}
+    if (!hasState) {
+      console.log('[CryoSmart] jobLogs state not found on this CryoSmart build — skipping log images.');
+      return result;
+    }
+    
+    // 1. Harvest logs already loaded (jobs whose detail view was opened).
+    var pending = [];
+    for (var i = 0; i < jobs.length; i++) {
+      var uid = jobs[i].uid;
+      var existing = store.jobLogs && store.jobLogs[uid];
+      if (existing && existing.length) {
+        var imgs = extractLogImages(existing);
+        if (imgs.length) result[uid] = imgs;
+      } else {
+        pending.push(uid);
+      }
+    }
+    console.log('[CryoSmart] Logs already loaded for ' + (jobs.length - pending.length) + ' job(s); ' + pending.length + ' to force-load.');
+    if (pending.length === 0) return result;
+    
+    // 2. Calibrate the loader call on the first pending job.
+    var actions = findLogActions(store);
+    console.log('[CryoSmart] Log loader candidates:', actions.map(function(a) { return a.name; }).join(', ') || 'none');
+    
+    var calibUid = pending[0];
+    var winning = null;   // { action, shapeIdx } or { http: true }
+    var shapes = [calibUid, { job_uid: calibUid }, { uid: calibUid }, [calibUid]];
+    
+    outer:
+    for (var a = 0; a < actions.length; a++) {
+      for (var s = 0; s < shapes.length; s++) {
+        try {
+          var r = actions[a].fn.call(store, shapes[s]);
+          if (r && typeof r.then === 'function') r.catch(function() {});
+        } catch (e) {}
+        var logs = await waitForLogs(store, calibUid, 800);
+        if (logs) {
+          winning = { action: actions[a], shapeIdx: s };
+          var cImgs = extractLogImages(logs);
+          if (cImgs.length) result[calibUid] = cImgs;
+          break outer;
+        }
+      }
+    }
+    
+    if (!winning) {
+      var probe = await httpLogProbe(calibUid);
+      if (probe) {
+        winning = { http: true };
+        var pImgs = extractLogImages(probe);
+        if (pImgs.length) result[calibUid] = pImgs;
+      }
+    }
+    
+    if (!winning) {
+      console.log('[CryoSmart] Could not trigger lazy log loading on this build — capturing without log images. ' +
+        '(Tip: open one job detail view in CryoSmart, then re-run the script.)');
+      return result;
+    }
+    console.log('[CryoSmart] Log loading works via ' + (winning.http ? 'HTTP endpoint' : 'store action "' + winning.action.name + '"') + ' — collecting...');
+    
+    // 3. Replay for every remaining job (time-boxed, progress logged).
+    var t0 = Date.now(), BUDGET_MS = 60000;
+    for (var j = 1; j < pending.length; j++) {
+      var uid2 = pending[j];
+      if (result[uid2]) continue;
+      if (Date.now() - t0 > BUDGET_MS) {
+        console.log('[CryoSmart] Log collection time budget reached — stopping after ' + j + ' job(s).');
+        break;
+      }
+      var logs2 = null;
+      var cached = store.jobLogs && store.jobLogs[uid2];
+      if (cached && cached.length) {
+        logs2 = cached;
+      } else if (winning.http) {
+        logs2 = await httpLogProbe(uid2);
+      } else {
+        var arg = [uid2, { job_uid: uid2 }, { uid: uid2 }, [uid2]][winning.shapeIdx];
+        try {
+          var rr = winning.action.fn.call(store, arg);
+          if (rr && typeof rr.then === 'function') rr.catch(function() {});
+        } catch (e) {}
+        logs2 = await waitForLogs(store, uid2, 1200);
+        if (!logs2) logs2 = await httpLogProbe(uid2);   // per-job HTTP fallback
+      }
+      if (logs2) {
+        var imgs2 = extractLogImages(logs2);
+        if (imgs2.length) result[uid2] = imgs2;
+      }
+      if ((j + 1) % 10 === 0) console.log('[CryoSmart] Log loading progress: ' + (j + 1) + '/' + pending.length + ' job(s)...');
+    }
+    
+    var withImages = Object.keys(result).length;
+    console.log('[CryoSmart] Log images collected for ' + withImages + ' of ' + jobs.length + ' job(s)');
+    return result;
+  }
+  
+  // ─── Upload (async: log collection runs first) ─────────────────────
+  (async function upload() {
+    var logImages = {};
+    try {
+      logImages = await collectLogImages(socketStore, jobs);
+    } catch (e) {
+      console.warn('[CryoSmart] Log image collection failed (non-fatal):', e && e.message);
+    }
+    
+    console.log('Uploading', jobs.length, 'jobs to', APP);
+    fetch(APP + '/api/cryosmart/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project_uid: projectId,
+        experiment_uid: project.experiments[0]?.uid,
+        jobs: jobs,
+        job_log_images: logImages,
+        source: 'CryoSmart SPA Vue Store',
+        captured_at: new Date().toISOString(),
+        cryosmart_origin: cryosmartOrigin,
+        cryosmart_auth: cryosmartAuth,
+        cryosmart_cookie: cryosmartCookie
+      })
+    }).then(function(r) { return r.json(); })
+      .then(function(res) {
+        if (res.ok && res.token) {
+          console.log('Success! Opening web app...');
+          var nLogs = Object.keys(logImages).length;
+          console.log('Captured ' + res.count + ' jobs' + (nLogs ? ' + log images for ' + nLogs + ' job(s)' : '') + '.');
+          if (res.has_session) {
+            console.log('Session available for map/image downloads (auth + cookie forwarded to server-side proxy).');
+          }
+          window.open(APP + '/?imported=' + res.token + '&pid=' + projectId, '_blank');
+        } else {
+          alert('Upload failed: ' + (res.error || 'Unknown error'));
+        }
+      }).catch(function(e) {
+        alert('Upload failed: ' + e.message);
+      });
+  })();
 })();
 `.trim();
 
@@ -270,7 +478,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
               A new tab will open with your complete lineage data loaded
             </p>
             <p className="mt-0.5 text-[11px] text-teal-600">
-              Maps and images can be downloaded when session info is available.
+              Maps, tile images and job log images are captured together, with session credentials (auth + cookie) forwarded for downloads.
             </p>
           </div>
         </div>

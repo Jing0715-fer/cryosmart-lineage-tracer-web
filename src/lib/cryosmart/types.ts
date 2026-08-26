@@ -55,6 +55,16 @@ export interface UiTileImage {
   [key: string]: unknown;
 }
 
+/** One image reference inside a job's runtime logs (`jobLogs[uid][].imgfiles`).
+ *  Captured by the Smart Capture script (which force-loads the lazy jobLogs
+ *  state) and uploaded as `job_log_images`, then merged onto each job as
+ *  `log_images`. Served by the same `/api/log_image/<fileid>` endpoint. */
+export interface LogImageRef {
+  fileid?: string | null;
+  name?: string | null;
+  [key: string]: unknown;
+}
+
 /** `overview_assets` is a free-form per-job overview blob. */
 export type OverviewAssets = Record<string, unknown>;
 
@@ -128,6 +138,9 @@ export interface JobMetadata {
   output_result_groups?: OutputResultGroup[];
   output_group_images?: OutputGroupImages;
   ui_tile_images?: UiTileImage[];
+  /** Images force-loaded from the SPA's lazy `jobLogs` state by the capture
+   *  script ({ fileid, name } refs; see LogImageRef). */
+  log_images?: LogImageRef[];
   overview_assets?: OverviewAssets;
   /** Best-effort resolution number, sometimes pre-computed by the server. */
   radwn_final_A?: number | null;
@@ -211,7 +224,7 @@ export type OutputGroupIndex = Record<string, OutputGroupIndexItem>;
 
 /** A preview image asset attached to a `LineageNode`. */
 export interface ImageAsset {
-  kind: "ui_tile" | "output_group";
+  kind: "ui_tile" | "output_group" | "log_image";
   name: string;
   url: string;
   src: string;

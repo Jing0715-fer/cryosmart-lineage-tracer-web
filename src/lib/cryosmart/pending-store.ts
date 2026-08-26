@@ -17,6 +17,9 @@ interface PendingImport {
     cryosmart_origin?: string;
     cryosmart_auth?: string;
     cryosmart_cookie?: string;
+    // Log images force-loaded from the SPA's lazy jobLogs state:
+    // { [jobUid]: [{ fileid, name }, ...] }
+    job_log_images?: Record<string, unknown>;
   };
   createdAt: number;
   expiresAt: number;

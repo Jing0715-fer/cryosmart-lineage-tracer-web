@@ -98,11 +98,9 @@ export function buildConsoleSnippet(appOrigin: string): string {
   // Self-defense against Hermes/chat markdown link injection.
   // If this snippet was copied from a chat renderer that wraps URLs in
   // a markdown link syntax, strip the prefix before anything else.
-  var APP = 'http://localhost:3010';
-  // Self-defense: strip @url: prefix that Hermes chat renderer may inject.
-  // We construct the regex via String.fromCharCode to avoid any literal backtick
-  // characters in this snippet (which would otherwise terminate the TypeScript
-  // template literal that wraps it).
+  // We construct the backtick via String.fromCharCode to avoid any literal
+  // backtick characters in this snippet (which would otherwise terminate
+  // the TypeScript template literal that wraps it).
   var BACKTICK = String.fromCharCode(96);
   function stripChatPrefix(s) {
     if (typeof s !== 'string') return s;
@@ -112,7 +110,7 @@ export function buildConsoleSnippet(appOrigin: string): string {
     if (s.charAt(s.length - 1) === BACKTICK) s = s.slice(0, -1);
     return s;
   }
-  var APP = stripChatPrefix('http://localhost:3010');
+  var APP = stripChatPrefix('${appOrigin}');
   var href = stripChatPrefix(location.href);
     var m = href.match(new RegExp("\\/projects\\/([^\\/?#]+)", "i"));
   if (!m) { alert('Open a CryoSmart project page first'); return; }
@@ -120,8 +118,8 @@ export function buildConsoleSnippet(appOrigin: string): string {
   var origin = location.origin;
   console.log('[CryoSmart] Capturing', pid, 'from', origin);
 
-  // --- 1. Grab the SPA's existing WS via Pinia socketStore ---
-  function getSocketManager() {
+  // --- 1. Grab the SPA's Pinia socketStore (and its WS manager) ---
+  function getSocketStore() {
     try {
       var el = document.querySelector('#q-app');
       if (!el || !el.__vue_app__) throw new Error('#q-app.__vue_app__ not found');
@@ -129,12 +127,16 @@ export function buildConsoleSnippet(appOrigin: string): string {
       if (!pinia || !pinia._s) throw new Error('$pinia not found');
       var store = pinia._s.get('socketStore');
       if (!store) throw new Error('socketStore not found');
-      var sm = store.ws;  // Pinia getter (lazy-creates if null)
-      if (!sm) throw new Error('socketManager not available');
-      return sm;
+      return store;
     } catch (e) {
       throw new Error('Cannot access SPA WebSocket — are you on a CryoSmart page? (' + e.message + ')');
     }
+  }
+  // The WS manager: some builds expose it as "ws", others as "socketManager".
+  function smOf(store) {
+    var sm = store.ws || store.socketManager;
+    if (!sm) throw new Error('socketManager not available');
+    return sm;
   }
 
   // --- 2. Wrap SPA's core_method in a Promise (it's callback-based) ---
@@ -257,15 +259,199 @@ export function buildConsoleSnippet(appOrigin: string): string {
     return jobs;
   }
 
+  // --- 4b. Force-load the LAZY jobLogs & extract log image fileids ---
+  // store.jobLogs only fills in when a job's detail view is opened in the
+  // SPA. We find the store's log-loading action, CALIBRATE its call shape
+  // on one job, then replay it for every job. HTTP probe as fallback.
+  // Best-effort — failure never aborts the capture.
+  function extractLogImages(logs) {
+    var out = [];
+    if (!Array.isArray(logs)) return out;
+    for (var i = 0; i < logs.length; i++) {
+      var log = logs[i];
+      if (!log) continue;
+      var files = log.imgfiles || (log.type === 'image' ? log.files : null);
+      if (!files || !files.length) continue;
+      for (var f = 0; f < files.length; f++) {
+        var file = files[f];
+        var fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
+        if (!fid) continue;
+        var name = (file && file.name) || log.name || log.title || ('log_image_' + out.length);
+        out.push({ fileid: fid, name: name });
+      }
+    }
+    return out;
+  }
+
+  function findLogActions(store) {
+    var found = [];
+    var names = {};
+    var obj = store;
+    for (var depth = 0; depth < 4 && obj; depth++) {
+      try {
+        var own = Object.getOwnPropertyNames(obj);
+        for (var i = 0; i < own.length; i++) names[own[i]] = 1;
+      } catch (e) {}
+      try { obj = Object.getPrototypeOf(obj); } catch (e) { break; }
+    }
+    for (var name in names) {
+      if (!/(log|detail)/i.test(name)) continue;
+      try {
+        if (typeof store[name] === 'function') found.push({ name: name, fn: store[name] });
+      } catch (e) {}
+    }
+    // Prefer actions with "log" in the name over generic "detail" loaders.
+    found.sort(function(a, b) {
+      var la = /log/i.test(a.name) ? 0 : 1, lb = /log/i.test(b.name) ? 0 : 1;
+      return la - lb;
+    });
+    return found;
+  }
+
+  function waitForLogs(store, uid, ms) {
+    return new Promise(function(resolve) {
+      var t0 = Date.now();
+      (function check() {
+        try {
+          var logs = store.jobLogs && store.jobLogs[uid];
+          if (logs && logs.length) return resolve(logs);
+        } catch (e) {}
+        if (Date.now() - t0 >= ms) return resolve(null);
+        setTimeout(check, 120);
+      })();
+    });
+  }
+
+  function httpLogProbe(uid) {
+    var paths = [
+      '/api/job/get_job_logs?job_uid=' + encodeURIComponent(uid),
+      '/api/job/get_logs?job_uid=' + encodeURIComponent(uid),
+      '/api/job/get_job_log?job_uid=' + encodeURIComponent(uid),
+      '/api/log/get_logs?job_uid=' + encodeURIComponent(uid)
+    ];
+    return paths.reduce(function(chain, p) {
+      return chain.then(function(logs) {
+        if (logs) return logs;
+        return fetch(p, { credentials: 'include' })
+          .then(function(r) { return r.ok ? r.json() : null; })
+          .then(function(d) {
+            if (!d) return null;
+            var arr = d.data || d.logs || (Array.isArray(d) ? d : null);
+            return Array.isArray(arr) && arr.length ? arr : null;
+          })
+          .catch(function() { return null; });
+      });
+    }, Promise.resolve(null));
+  }
+
+  async function collectLogImages(store, jobs) {
+    var result = {};
+    var hasState = false;
+    try { hasState = 'jobLogs' in store; } catch (e) {}
+    if (!hasState) {
+      console.log('[CryoSmart] jobLogs state not found on this CryoSmart build — skipping log images.');
+      return result;
+    }
+    // 1. Harvest logs already loaded (jobs whose detail view was opened).
+    var pending = [];
+    for (var i = 0; i < jobs.length; i++) {
+      var uid = jobs[i] && jobs[i].uid;
+      if (!uid) continue;
+      var existing = store.jobLogs && store.jobLogs[uid];
+      if (existing && existing.length) {
+        var imgs = extractLogImages(existing);
+        if (imgs.length) result[uid] = imgs;
+      } else {
+        pending.push(uid);
+      }
+    }
+    console.log('[CryoSmart] Logs already loaded for ' + (jobs.length - pending.length) + ' job(s); ' + pending.length + ' to force-load.');
+    if (pending.length === 0) return result;
+
+    // 2. Calibrate the loader call on the first pending job.
+    var actions = findLogActions(store);
+    console.log('[CryoSmart] Log loader candidates:', actions.map(function(a) { return a.name; }).join(', ') || 'none');
+
+    var calibUid = pending[0];
+    var winning = null;   // { action, shapeIdx } or { http: true }
+    var shapes = [calibUid, { job_uid: calibUid }, { uid: calibUid }, [calibUid]];
+
+    outer:
+    for (var a = 0; a < actions.length; a++) {
+      for (var s = 0; s < shapes.length; s++) {
+        try {
+          var r = actions[a].fn.call(store, shapes[s]);
+          if (r && typeof r.then === 'function') r.catch(function() {});
+        } catch (e) {}
+        var logs = await waitForLogs(store, calibUid, 800);
+        if (logs) {
+          winning = { action: actions[a], shapeIdx: s };
+          var cImgs = extractLogImages(logs);
+          if (cImgs.length) result[calibUid] = cImgs;
+          break outer;
+        }
+      }
+    }
+
+    if (!winning) {
+      var probe = await httpLogProbe(calibUid);
+      if (probe) {
+        winning = { http: true };
+        var pImgs = extractLogImages(probe);
+        if (pImgs.length) result[calibUid] = pImgs;
+      }
+    }
+
+    if (!winning) {
+      console.log('[CryoSmart] Could not trigger lazy log loading on this build — capturing without log images. ' +
+        '(Tip: open one job detail view in CryoSmart, then re-run the script.)');
+      return result;
+    }
+    console.log('[CryoSmart] Log loading works via ' + (winning.http ? 'HTTP endpoint' : 'store action "' + winning.action.name + '"') + ' — collecting...');
+
+    // 3. Replay for every remaining job (time-boxed, progress logged).
+    var t0 = Date.now(), BUDGET_MS = 60000;
+    for (var j2 = 1; j2 < pending.length; j2++) {
+      var uid2 = pending[j2];
+      if (result[uid2]) continue;
+      if (Date.now() - t0 > BUDGET_MS) {
+        console.log('[CryoSmart] Log collection time budget reached — stopping after ' + j2 + ' job(s).');
+        break;
+      }
+      var logs2 = null;
+      var cached = store.jobLogs && store.jobLogs[uid2];
+      if (cached && cached.length) {
+        logs2 = cached;
+      } else if (winning.http) {
+        logs2 = await httpLogProbe(uid2);
+      } else {
+        var arg = [uid2, { job_uid: uid2 }, { uid: uid2 }, [uid2]][winning.shapeIdx];
+        try {
+          var rr = winning.action.fn.call(store, arg);
+          if (rr && typeof rr.then === 'function') rr.catch(function() {});
+        } catch (e) {}
+        logs2 = await waitForLogs(store, uid2, 1200);
+        if (!logs2) logs2 = await httpLogProbe(uid2);   // per-job HTTP fallback
+      }
+      if (logs2) {
+        var imgs2 = extractLogImages(logs2);
+        if (imgs2.length) result[uid2] = imgs2;
+      }
+      if ((j2 + 1) % 10 === 0) console.log('[CryoSmart] Log loading progress: ' + (j2 + 1) + '/' + pending.length + ' job(s)...');
+    }
+
+    console.log('[CryoSmart] Log images collected for ' + Object.keys(result).length + ' of ' + jobs.length + ' job(s)');
+    return result;
+  }
+
   // --- 5. Upload to web app (with session: origin + WS token + browser cookie) ---
   // CryoSmart authenticates /api/log_image with the session cookie, not the
   // WS token — so we capture document.cookie too (non-HttpOnly cookies only).
-  function captureSession() {
+  function captureSession(store) {
     var origin = location.origin;
     var auth = null;
     var cookie = null;
     try {
-      var store = document.querySelector('#q-app').__vue_app__.config.globalProperties.$pinia._s.get('socketStore');
       if (store && store.socketManager && store.socketManager.token) {
         auth = 'Bearer ' + store.socketManager.token;
       }
@@ -277,8 +463,8 @@ export function buildConsoleSnippet(appOrigin: string): string {
     return { origin: origin, auth: auth, cookie: cookie };
   }
 
-  function upload(jobs) {
-    var session = captureSession();
+  function upload(jobs, logImages, store) {
+    var session = captureSession(store);
     console.log('[CryoSmart] Uploading', jobs.length, 'jobs to', APP);
     return fetch(APP + '/api/cryosmart/import', {
       method: 'POST',
@@ -287,6 +473,7 @@ export function buildConsoleSnippet(appOrigin: string): string {
         project_uid: pid,
         source_url: href,
         jobs: jobs,
+        job_log_images: logImages || {},
         cryosmart_origin: session.origin,
         cryosmart_auth: session.auth,
         cryosmart_cookie: session.cookie
@@ -298,24 +485,31 @@ export function buildConsoleSnippet(appOrigin: string): string {
     })
     .then(function(res){
       if (!res.ok) throw new Error(res.error || 'upload failed');
-      console.log('[CryoSmart] ✓ ' + res.count + ' jobs captured. Opening web app...');
+      var nLogs = Object.keys(logImages || {}).length;
+      console.log('[CryoSmart] ✓ ' + res.count + ' jobs captured' + (nLogs ? ' + log images for ' + nLogs + ' job(s)' : '') + '. Opening web app...');
       window.open(APP + '/?imported=' + encodeURIComponent(res.token) + '&pid=' + encodeURIComponent(pid), '_blank');
     });
   }
 
   // --- main ---
-  try {
-    var sm = getSocketManager();
-    collectJobUids()
-      .then(function(jobs){ return fetchAllJobDetails(sm, jobs); })
-      .then(upload)
-      .catch(function(err){
-        console.error('[CryoSmart] Failed:', err);
-        alert('CryoSmart capture failed: ' + err.message);
-      });
-  } catch (e) {
-    alert(e.message);
-  }
+  (async function(){
+    try {
+      var store = getSocketStore();
+      var sm = smOf(store);
+      var jobs = await collectJobUids();
+      jobs = await fetchAllJobDetails(sm, jobs);
+      var logImages = {};
+      try {
+        logImages = await collectLogImages(store, jobs);
+      } catch (e) {
+        console.warn('[CryoSmart] Log image collection failed (non-fatal):', e && e.message);
+      }
+      await upload(jobs, logImages, store);
+    } catch (err) {
+      console.error('[CryoSmart] Failed:', err);
+      alert('CryoSmart capture failed: ' + (err && err.message));
+    }
+  })();
 })();
 `;
 }

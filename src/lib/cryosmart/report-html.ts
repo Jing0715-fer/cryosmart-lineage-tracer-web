@@ -1472,6 +1472,20 @@ export interface ReportHtmlOptions {
   }
   }
 
+    // Log images — captured from the SPA's lazy jobLogs state by the Smart
+    // Capture script (force-loaded via the store's log-loading action).
+    // Rendered whenever present so runtime log previews make it into the
+    // report alongside the tile/select-2D images.
+    const logImages = (node.images || []).filter((item) => item.kind === "log_image");
+    if (logImages.length > 0) {
+      const html = reportImageBoxes(node.uid, logImages, 6, opts);
+      if (html) {
+        chunks.push(
+          `<div class="media-block"><h3>Log images (${logImages.length})</h3>${html}</div>`,
+        );
+      }
+    }
+
     if (node.select_2d) {
       const s = node.select_2d;
       const chips: string[] = [];

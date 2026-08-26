@@ -20,6 +20,8 @@ interface PendingData {
     cryosmart_origin?: string;
     cryosmart_auth?: string;
     cryosmart_cookie?: string;
+    // Log images force-loaded from the SPA's lazy jobLogs state
+    job_log_images?: Record<string, Array<{ fileid?: string; name?: string }>>;
   };
 }
 
@@ -41,6 +43,43 @@ function buildSessionFromPending(data: PendingData["data"]): CryoSmartSession | 
     auth: data.cryosmart_auth || undefined,
     cookie: data.cryosmart_cookie || undefined,
   };
+}
+
+/**
+ * Merge captured log images (`job_log_images`, keyed by job uid) onto each
+ * job object as `log_images: [{ fileid, name }]`. The lineage builder then
+ * turns them into `/api/log_image/<fileid>` preview assets. Handles both
+ * `{ jobs: [...] }` and bare-array raw payloads. No-op when the capture
+ * didn't include log images.
+ */
+function mergeLogImagesIntoRaw(
+  raw: unknown,
+  jobLogImages: PendingData["data"]["job_log_images"]
+): unknown {
+  if (!jobLogImages) return raw;
+  const attach = (j: unknown): unknown => {
+    const job = j as { uid?: string } | null;
+    if (
+      job &&
+      typeof job === "object" &&
+      job.uid &&
+      Array.isArray(jobLogImages[job.uid]) &&
+      jobLogImages[job.uid].length > 0
+    ) {
+      return { ...job, log_images: jobLogImages[job.uid] };
+    }
+    return j;
+  };
+  if (Array.isArray(raw)) return raw.map(attach);
+  if (
+    raw &&
+    typeof raw === "object" &&
+    Array.isArray((raw as { jobs?: unknown[] }).jobs)
+  ) {
+    const rawObj = raw as { jobs?: unknown[] };
+    return { ...rawObj, jobs: (rawObj.jobs || []).map(attach) };
+  }
+  return raw;
 }
 
 export function useImportedMetadata(opts?: UseImportedOpts) {
@@ -96,9 +135,14 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             const data = (await resp.json()) as PendingData;
             if (data.ok && data.data && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
               const session = buildSessionFromPending(data.data);
-              
+
+              const mergedRaw = mergeLogImagesIntoRaw(
+                data.data.raw || { jobs: data.data.jobs },
+                data.data.job_log_images
+              );
+
               const loaded: LoadedMetadata = {
-                raw: data.data.raw || { jobs: data.data.jobs },
+                raw: mergedRaw,
                 projectUid: data.data.project_uid || "P",
                 jobCount: data.data.jobs.length,
                 source: "upload",
