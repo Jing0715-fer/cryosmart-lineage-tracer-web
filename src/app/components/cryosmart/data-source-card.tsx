@@ -55,10 +55,10 @@ export function DataSourceCard({ loaded, onLoad }: Props) {
               cryosmartOrigin: 'http://192.168.202.11:8080',
             });
           }}
-          webAppUrl={typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3002'}
         />
 
         {loaded && (
+
           <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50/60 p-3 text-[12px]">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
               <span className="text-slate-500">Loaded:</span>

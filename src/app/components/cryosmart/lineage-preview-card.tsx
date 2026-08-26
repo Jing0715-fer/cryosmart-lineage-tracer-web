@@ -30,6 +30,29 @@ export function LineagePreviewCard({ summary, session }: Props) {
   const [reportTab, setReportTab] = useState("stats");
   const { resolvedTheme } = useTheme();
 
+  // Auto-resize the report iframe to fit its content. The report HTML
+  // posts { type: 'cryosmart-report-height', height } via postMessage once
+  // it loads (and on every resize / image load). We listen for it here and
+  // grow the iframe so the report flows naturally in the page — no cramped
+  // fixed-height iframe, no double scrollbar. Clamped to [320, 4000] so a
+  // misbehaving report can't collapse the iframe to 0 or grow it absurdly.
+  const [iframeHeight, setIframeHeight] = useState(600);
+  useEffect(() => {
+    function onMessage(event: MessageEvent) {
+      const data = event.data as { type?: string; height?: number } | null;
+      if (!data || data.type !== "cryosmart-report-height") return;
+      const h = typeof data.height === "number" ? data.height : 0;
+      if (h > 0) {
+        // Clamp to a sensible range.
+        const next = Math.max(320, Math.min(4000, Math.round(h)));
+        // Only update if the change is meaningful (>4px) to avoid render thrash.
+        setIframeHeight((prev) => (Math.abs(prev - next) > 4 ? next : prev));
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
   // Pre-fetch referenced images as base64 data URLs when a live session is
   // available. The resulting map is passed to buildLineageHtmlV2 so <img src>
   // becomes a data: URL — eliminating the iframe-referrer/CORS failure that
@@ -46,6 +69,7 @@ export function LineagePreviewCard({ summary, session }: Props) {
       setEmbeddedImages(null);
       setEmbeddingProgress("");
       setEmbedFailed(false);
+      setIframeHeight(600);
       return;
     }
     let cancelled = false;
@@ -53,6 +77,7 @@ export function LineagePreviewCard({ summary, session }: Props) {
     // above, a dep-change transition.
     setEmbeddedImages(null);
     setEmbedFailed(false);
+    setIframeHeight(600);
     setEmbeddingProgress("Prefetching images for report preview…");
     prefetchImagesForReport(session, summary, (msg) => {
       if (!cancelled) setEmbeddingProgress(msg);
@@ -220,8 +245,28 @@ export function LineagePreviewCard({ summary, session }: Props) {
                     size="sm"
                     className="h-7 text-[11px]"
                     onClick={() => {
-                      const w = window.open();
-                      if (w) { w.document.write(reportHtml); w.document.close(); }
+                      // Open the report in a new tab via a Blob URL. This is
+                      // more reliable than window.open()+document.write()
+                      // (which popup blockers sometimes neuter into a blank
+                      // window), and the resulting tab has a real browsing
+                      // context so the full-width CSS + referrerpolicy
+                      // handling work correctly. The blob URL is revoked
+                      // after 30s — long enough for the tab to navigate
+                      // back to it if the user reloads, short enough not to
+                      // leak memory.
+                      const blob = new Blob([reportHtml], { type: "text/html;charset=utf-8" });
+                      const url = URL.createObjectURL(blob);
+                      const w = window.open(url, "_blank");
+                      if (!w) {
+                        // Popup blocked — fall back to a same-tab navigation
+                        // via a synthetic link click.
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.target = "_blank";
+                        a.rel = "noopener";
+                        a.click();
+                      }
+                      setTimeout(() => URL.revokeObjectURL(url), 30000);
                     }}
                   >
                     <Maximize2 className="mr-1 h-3 w-3" /> Open
@@ -276,8 +321,9 @@ export function LineagePreviewCard({ summary, session }: Props) {
                 key={`report-${resolvedTheme || "light"}-${embeddedImages ? "embedded" : "remote"}`}
                 srcDoc={reportSrcDoc}
                 title="Lineage Report"
-                className="h-[600px] w-full rounded-lg border border-slate-300 bg-white dark:border-slate-700"
-                sandbox="allow-same-origin allow-scripts allow-popups"
+                style={{ height: `${iframeHeight}px` }}
+                className="w-full rounded-lg border border-slate-300 bg-white transition-[height] duration-150 ease-out dark:border-slate-700"
+                sandbox="allow-same-origin allow-scripts allow-popups allow-downloads"
               />
             </div>
           </TabsContent>

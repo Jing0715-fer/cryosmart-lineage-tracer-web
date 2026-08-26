@@ -84,14 +84,18 @@ export async function buildBundle(
   files.push({ path: `${base}.json`, data: utf8(JSON.stringify(summary, null, 2)) });
 
   onProgress?.({ phase: "report", current: 1, total: 6, message: "Generating HTML report…" });
-  // Build HTML report with embedded images when session is available
-  let htmlOpts: ReportHtmlOptions | undefined;
+  // Build HTML report with embedded images when session is available.
+  // bundleMode=true tells reportImgTag to use a local `images/<uid>/<name>.png`
+  // path (with an onerror fallback to the remote URL) for any image that
+  // didn't get embedded as a base64 data URL — the downloadable ZIP ships
+  // the `images/` folder alongside the HTML so the report works offline.
+  let htmlOpts: ReportHtmlOptions = { bundleMode: options.includeImages };
   if (options.includeImages && options.session) {
     onProgress?.({ phase: "images", current: 0, total: 2, message: "Prefetching images for report..." });
     const embeddedImages = await prefetchImagesForReport(options.session, summary, (msg) =>
       onProgress?.({ phase: "images", current: 0, total: 2, message: msg })
     );
-    htmlOpts = { embeddedImages, session: options.session };
+    htmlOpts = { embeddedImages, session: options.session, bundleMode: true };
   }
   files.push({ path: `${base}_report.html`, data: utf8(buildLineageHtmlV2(summary, htmlOpts)) });
 

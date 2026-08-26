@@ -1,31 +1,83 @@
-﻿/**
+/**
  * Browser-side client for fetching CryoSmart images and converting to base64.
- * Used by the bundle builder to pre-fetch images for embedding in HTML reports.
+ * Used by the bundle builder + preview iframe to pre-fetch images for
+ * embedding in HTML reports (so the report is fully self-contained and does
+ * not depend on remote CryoSmart being reachable / referrer / CORS).
  */
 
+import { cryoSmartFetch, type CryoSmartSession } from "./proxy-client";
+
 /**
- * Fetch a CryoSmart path via the proxy and return as base64 data URL.
- * Returns null on failure.
+ * Convert a CryoSmart image URL (full URL or path) to a base64 data URL via
+ * the /api/cryosmart/[...path] proxy. Returns null on any failure.
+ *
+ * `cryosmartPath` may be:
+ *   - a full URL like "http://192.168.4.3:8080/api/log_image/<fileid>"
+ *   - a relative path like "/api/log_image/<fileid>" or "api/log_image/..."
+ *   - a path with a query string like "api/log_image/<fileid>?token=..."
+ *
+ * We normalize it to a path-only (+query) relative to the CryoSmart origin
+ * and hand it to `cryoSmartFetch`, which builds the correct proxy URL and
+ * forwards `base`/`auth`/`cookie` as query params.
  */
 export async function imageToBase64(
-  session: import("./proxy-client").CryoSmartSession,
+  session: CryoSmartSession,
   cryosmartPath: string
 ): Promise<string | null> {
   try {
-    const resp = await fetch(
-      `/api/cryosmart/${cryosmartPath.replace(/^\/+/, "")}?base=${encodeURIComponent(session.baseUrl)}${
-        session.auth ? `&auth=${encodeURIComponent(session.auth)}` : ""
-      }${
-        session.cookie ? `&cookie=${encodeURIComponent(session.cookie)}` : ""
-      }`,
-      { credentials: "same-origin" }
-    );
+    if (!cryosmartPath) return null;
+
+    let pathOnly = cryosmartPath.trim();
+    let existingQuery = "";
+
+    // If it's a full URL, strip the origin so we're left with just the path
+    // (+query). This is the critical fix: previously a full URL like
+    // "http://192.168.4.3:8080/api/log_image/abc" was passed verbatim into
+    // `/api/cryosmart/${fullUrl}`, which the [...path] catch-all then split
+    // into ["http:", "", "192.168.4.3", ...] — producing a mangled, broken
+    // upstream URL and a 404/error response for EVERY image, so embedding
+    // always returned an empty map and images never rendered.
+    if (/^https?:\/\//i.test(pathOnly)) {
+      try {
+        const u = new URL(pathOnly);
+        pathOnly = u.pathname + (u.search ? u.search : "");
+      } catch {
+        // Not a parseable URL — bail out rather than risk a broken request.
+        return null;
+      }
+    }
+
+    // Strip leading slashes + split path / query (cryoSmartFetch expects a
+    // relative path and merges its own query params with any existing ones).
+    const clean = pathOnly.replace(/^\/+/, "");
+    const [p, q] = clean.split("?");
+    pathOnly = p;
+    existingQuery = q || "";
+
+    // Skip empty paths.
+    if (!pathOnly) return null;
+
+    // Re-attach the query so cryoSmartFetch can merge it with base/auth/cookie.
+    const relativePath = existingQuery ? `${pathOnly}?${existingQuery}` : pathOnly;
+
+    const resp = await cryoSmartFetch(session, relativePath);
     if (!resp.ok) return null;
+
     const buf = await resp.arrayBuffer();
+    if (!buf || buf.byteLength === 0) return null;
     const mime = resp.headers.get("content-type") || "image/png";
-    const base64 = btoa(
-      new Uint8Array(buf).reduce((data, byte) => data + String.fromCharCode(byte), "")
-    );
+
+    // Convert bytes → base64. Use chunked String.fromCharCode to avoid the
+    // call-stack limit on large images (btoa on a single huge binary string
+    // throws RangeError "Maximum call stack size exceeded" above ~8MB).
+    const bytes = new Uint8Array(buf);
+    const CHUNK = 0x8000; // 32KB per chunk — safe across all engines.
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      const slice = bytes.subarray(i, i + CHUNK);
+      binary += String.fromCharCode.apply(null, slice as unknown as number[]);
+    }
+    const base64 = btoa(binary);
     return `data:${mime};base64,${base64}`;
   } catch {
     return null;
@@ -35,9 +87,12 @@ export async function imageToBase64(
 /**
  * Pre-fetch all images referenced in the summary and return a map of
  * { remoteUrl → base64DataUrl } for embedding in the HTML report.
+ *
+ * Images are fetched in small concurrency batches to avoid saturating the
+ * browser's connection pool (the proxy + CryoSmart have limited capacity).
  */
 export async function prefetchImagesForReport(
-  session: import("./proxy-client").CryoSmartSession,
+  session: CryoSmartSession,
   summary: import("./types").LineageSummary,
   onProgress?: (msg: string) => void
 ): Promise<Record<string, string>> {
@@ -46,8 +101,6 @@ export async function prefetchImagesForReport(
 
   // Collect all image URLs from the summary
   for (const node of summary.nodes || []) {
-    const uid = node.uid || "J0";
-
     // From node.images
     for (const img of node.images || []) {
       if (img.url) urls.add(img.url);
@@ -94,15 +147,42 @@ export async function prefetchImagesForReport(
   }
 
   const urlList = Array.from(urls).filter(Boolean);
-  let done = 0;
-  for (const url of urlList) {
-    onProgress?.(`Embedding image ${done + 1}/${urlList.length}...`);
-    const dataUrl = await imageToBase64(session, url);
-    if (dataUrl) {
-      out[url] = dataUrl;
-    }
-    done++;
+  if (urlList.length === 0) {
+    onProgress?.("No images referenced in this lineage.");
+    return out;
   }
 
+  // Fetch with limited concurrency (4 at a time) to be gentle on the proxy
+  // and the CryoSmart backend. Preserves order for stable progress messages.
+  const CONCURRENCY = 4;
+  let done = 0;
+  let embedded = 0;
+  let index = 0;
+
+  async function worker() {
+    while (index < urlList.length) {
+      const myIndex = index++;
+      const url = urlList[myIndex];
+      onProgress?.(`Embedding image ${done + 1}/${urlList.length}…`);
+      const dataUrl = await imageToBase64(session, url);
+      if (dataUrl) {
+        out[url] = dataUrl;
+        embedded++;
+      }
+      done++;
+    }
+  }
+
+  const workers: Promise<void>[] = [];
+  for (let i = 0; i < Math.min(CONCURRENCY, urlList.length); i++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+
+  onProgress?.(
+    embedded > 0
+      ? `${embedded}/${urlList.length} images embedded`
+      : "Image embedding failed — falling back to remote URLs"
+  );
   return out;
 }

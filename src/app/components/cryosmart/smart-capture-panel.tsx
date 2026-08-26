@@ -5,28 +5,42 @@
  * The capture script runs inside CryoSmart to access Vue store.
  */
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
-import { 
-  Zap, 
-  ExternalLink, 
-  Copy, 
-  Check, 
+import {
+  Zap,
+  ExternalLink,
+  Copy,
+  Check,
   ChevronRight,
   Info
 } from "lucide-react";
 
 interface Props {
   onCapture: (data: { jobs: unknown[]; projectUid: string; experimentUid: string }) => void;
-  webAppUrl: string;
 }
 
-export function SmartCapturePanel({ onCapture, webAppUrl }: Props) {
+export function SmartCapturePanel({ onCapture }: Props) {
   const [copied, setCopied] = useState(false);
+  // webAppUrl MUST be resolved client-side only (window.location.origin).
+  // Computing it during render with `typeof window !== 'undefined'` produces
+  // a server/client mismatch (server sees a fallback like http://localhost:3002,
+  // client sees the real origin) which propagates into the capture script
+  // string and triggers a React hydration error inside the <pre><code> block.
+  // Using useState + useEffect defers the URL to after hydration, so the
+  // server and the first client render agree on the placeholder.
+  const [webAppUrl, setWebAppUrl] = useState<string>("");
+  useEffect(() => {
+    // Same-origin is the correct target: the capture script POSTs back to
+    // /api/cryosmart/import on this app, then opens /?imported=... in a new tab.
+    if (typeof window !== "undefined" && window.location && window.location.origin) {
+      setWebAppUrl(window.location.origin);
+    }
+  }, []);
 
   // Capture script that runs inside CryoSmart (via browser console)
   // This version captures complete job metadata AND session info for maps/images
@@ -215,7 +229,7 @@ export function SmartCapturePanel({ onCapture, webAppUrl }: Props) {
               size="sm" 
               className="mt-2 h-7 text-[11px]"
               onClick={handleCopyScript}
-              disabled={copied}
+              disabled={copied || !webAppUrl}
             >
               {copied ? (
                 <>
@@ -255,8 +269,8 @@ export function SmartCapturePanel({ onCapture, webAppUrl }: Props) {
           <summary className="cursor-pointer text-[11px] text-slate-500 hover:text-slate-700">
             Show capture script
           </summary>
-          <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-slate-900 p-3 text-[10px] text-emerald-400">
-            <code>{captureScript}</code>
+          <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-slate-900 p-3 text-[10px] text-emerald-400" suppressHydrationWarning>
+            <code suppressHydrationWarning>{captureScript}</code>
           </pre>
         </details>
       </div>
