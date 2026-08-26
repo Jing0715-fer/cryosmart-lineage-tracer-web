@@ -572,3 +572,20 @@ Stage Summary:
 - **Log images end-to-end**: capture → import → pending → merge onto jobs → imageAssets(kind log_image) → graph gallery + detail thumbnails + report "Log images" section, all served by /api/log_image/<fileid> with cookie+auth forwarded.
 - Fixed bonus bugs: buildConsoleSnippet ignored appOrigin (hardcoded localhost:3010); wrap-mode same-row multi-col edges from rows >0 crossing upper rows' cards.
 - Caveat: actual CryoSmart-side log loading can't be tested from the sandbox (192.168.202.11 unreachable) — the action-calibration + HTTP-probe strategy is defensive and degrades gracefully (capture succeeds without log images, console tells the user to open one job detail view and re-run).
+
+---
+Task ID: 4
+Agent: main (Z.ai Code)
+Task: Fix edge-corner roundness (n8n style), fix color-bar/border gap, add sharp/half maps to the report, then merge the user's remote-master work and push.
+
+Work Log:
+- lineage-graph.tsx — rewrote routeEdgeLane as a true n8n "smoothstep" route: straight segments joined by quarter-ellipse rounded corners (cubic beziers with kappa=0.5523 controls, radius up to 24px, scaled down for short detours/lanes). The old single S-bezier had near-coincident control points so the vertical drop happened in a ~2px band and read as a hard 90° corner. New constants: LANE_SHOULDER_W=48 (vertical-run x inside the gap), LANE_CORNER_MAX=24. routeEdgeGap now uses half-gap control offset (fuller S). Card-free guarantee re-proven: every corner hull stays inside a column gap or the card-free lane band; verified geometrically in-browser (sampled every 3px along every edge vs every card rect): 0 violations in compact AND wrap modes.
+- lineage-graph.tsx — card left color bar now starts at strokeWidth/2 (the stroke's inner edge) so it is flush with the border at every border width (1/1.5/2/2.5/3). Previously fixed x=1.5 left a visible gap under selected/hovered cards. VLM-verified on normal + hovered states.
+- normalMapAssets (lineage.ts canonical + report-html.ts + report-svg.ts copies) — no longer filters result_name === "map": real CryoSmart refine jobs keep map_sharp / map_half_A / map_half_B inside the `volume` group (confirmed by bundle.ts suffix list volume.map_sharp / volume.map_half_A/B); masks still excluded by group AND result name (mask_refine lives inside the volume group). reportMapDownloads rows now labeled `group.result_name`; header "map: N 个（含 sharp / half map）". sample-data.ts J10 updated to the real refine structure so Load Demo exercises it.
+- Merged origin/master (user's own commits 6671c11 + fe4236c: raw image_logs pipeline, report download-all preventDefault fix, saveSession call, banner fix). Integrated BOTH log-image pipelines in lineage.ts imageAssets: job.log_images (flattened refs from Smart Capture/bookmarklet/extension scripts, now carrying text+flags) AND job.image_logs (raw entries), deduped by fileid, both categorized by flags (plots→plot, fsc→fsc, slice-*→slice) with text-derived names. types.ts ImageAsset kind = log_image|image_log + log_text/log_flags/category; LogImageRef + text/flags. All four capture scripts (smart-capture-panel.tsx, bookmarklet.ts, capture-extension content-script.js + injection.js) now carry text/flags. page.tsx saveSession made undefined-safe.
+- Verified end-to-end with agent-browser: Load Demo → Graph tab (SVG renders, 10 edges, 0 card violations, VLM confirms rounded corners + flush bars) → Report tab (J10 shows volume / volume.map_sharp / volume.map_half_A / volume.map_half_B, mask excluded). bun run lint: 0 errors. Console errors after clean reload: 0.
+
+Stage Summary:
+- All three user-reported bugs fixed and browser-verified.
+- User's remote-master image_logs work merged (no work lost); capture pipeline upgraded to carry log text/flags for categorization.
+- Local main contains remote master history → push is a clean fast-forward.
