@@ -161,7 +161,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
         var fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
         if (!fid) continue;
         var name = (file && file.name) || log.name || log.title || ('log_image_' + out.length);
-        out.push({ fileid: fid, name: name });
+        // Carry the log entry's text + flags so the web app can derive
+        // friendlier names and categories (plots/fsc/slice) downstream.
+        out.push({ fileid: fid, name: name, text: log.text || null, flags: log.flags || null });
       }
     }
     return out;

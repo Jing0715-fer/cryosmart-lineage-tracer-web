@@ -768,21 +768,69 @@ export function imageAssets(
     });
   }
 
-  // Log images — captured from the SPA's lazy `jobLogs` state by the
-  // Smart Capture script (it force-loads every job's logs via the store's
-  // own log-loading action, then extracts the `imgfiles` fileids). Served
-  // by the same `/api/log_image/<fileid>` endpoint as the tile previews.
+  // Log images — captured from the SPA's LAZY `jobLogs` state. Two shapes
+  // are supported (deduped by fileid):
+  //  1. `job.log_images` — flattened {fileid, name, text, flags} refs from
+  //     the Smart Capture script, which force-loads every job's logs via
+  //     the store's own log-loading action before extracting `imgfiles`.
+  //  2. `job.image_logs` — RAW jobLogs entries ({type:'image', text,
+  //     flags, imgfiles:[{fileid, filename}]}) pasted/merged directly.
+  // Both carry the log entry's text + flags so the assets can be
+  // categorized (plots → plot, fsc → fsc, slice-* → slice).
+  const logSeen = new Set<string>();
+  const logFlags = (flags: unknown): string[] | null =>
+    Array.isArray(flags) ? (flags as string[]) : null;
+  const logCategory = (flags: string[] | null): string => {
+    if (!flags) return "result";
+    if (flags.includes("plots")) return "plot";
+    if (flags.includes("fsc")) return "fsc";
+    if (flags.includes("slice-real") || flags.includes("slice-fourier")) return "slice";
+    return "result";
+  };
+  const logName = (text: string | null | undefined, fallback: string): string => {
+    if (text) {
+      const base = text.split("/").pop()?.replace(/\.mrc$/i, "").trim();
+      if (base) return base;
+    }
+    return fallback || "log_image";
+  };
   for (const item of job.log_images || []) {
     const fileid = item?.fileid || "";
     const url = logImageUrl(baseUrl, fileid);
-    if (!url) continue;
+    if (!url || logSeen.has(fileid)) continue;
+    logSeen.add(fileid);
+    const flags = logFlags(item.flags);
     assets.push({
       kind: "log_image",
-      name: item.name || "log_image",
+      name: logName(item.text, item.name || "log_image"),
       url,
       src: url,
       original_url: url,
+      log_text: item.text || null,
+      log_flags: flags,
+      category: logCategory(flags),
     });
+  }
+  const imageLogs = job.image_logs || [];
+  for (const log of imageLogs) {
+    if (log.type !== "image" || !log.imgfiles || log.imgfiles.length === 0) continue;
+    for (const imgFile of log.imgfiles) {
+      if (!imgFile.fileid) continue;
+      const url = logImageUrl(baseUrl, imgFile.fileid);
+      if (!url || logSeen.has(imgFile.fileid)) continue;
+      logSeen.add(imgFile.fileid);
+      const flags = logFlags(log.flags);
+      assets.push({
+        kind: "image_log",
+        name: logName(log.text, imgFile.filename || "image"),
+        url,
+        src: url,
+        original_url: url,
+        log_text: log.text || null,
+        log_flags: flags,
+        category: logCategory(flags),
+      });
+    }
   }
 
   return assets;

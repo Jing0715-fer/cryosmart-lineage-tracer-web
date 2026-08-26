@@ -371,7 +371,7 @@ async function scrapeImagesForJobs(jobs, projectId, experimentId) {
 /* Lazy jobLogs force-loading + log image extraction                  */
 /* ------------------------------------------------------------------ */
 
-/** Pull {fileid, name} refs out of a job's log entries (log.imgfiles). */
+/** Pull {fileid, name, text, flags} refs out of a job's log entries (log.imgfiles). */
 function extractLogImages(logs) {
   const out = [];
   if (!Array.isArray(logs)) return out;
@@ -383,7 +383,9 @@ function extractLogImages(logs) {
       const fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
       if (!fid) continue;
       const name = (file && file.name) || entry.name || entry.title || ('log_image_' + out.length);
-      out.push({ fileid: fid, name });
+      // Carry the entry's text + flags so the web app can derive friendlier
+      // names and categories (plots/fsc/slice) downstream.
+      out.push({ fileid: fid, name, text: entry.text || null, flags: entry.flags || null });
     }
   }
   return out;
