@@ -768,6 +768,36 @@ export function imageAssets(
     });
   }
 
+  // Add images from jobLogs (internal result images with titles)
+  const imageLogs = (job as any).image_logs || [];
+  for (const log of imageLogs) {
+    if (log.type !== 'image' || !log.imgfiles || log.imgfiles.length === 0) continue;
+    for (const imgFile of log.imgfiles) {
+      if (!imgFile.fileid) continue;
+      const url = logImageUrl(baseUrl, imgFile.fileid);
+      if (!url) continue;
+      const name = log.text
+        ? log.text.split('/').pop()?.replace(/\.mrc$/i, '').trim() || imgFile.filename || 'image'
+        : imgFile.filename || 'image';
+      let category = 'result';
+      if (log.flags) {
+        if (log.flags.includes('plots')) category = 'plot';
+        if (log.flags.includes('fsc')) category = 'fsc';
+        if (log.flags.includes('slice-real') || log.flags.includes('slice-fourier')) category = 'slice';
+      }
+      assets.push({
+        kind: 'image_log' as const,
+        name,
+        url,
+        src: url,
+        original_url: url,
+        log_text: log.text || null,
+        log_flags: log.flags || null,
+        category,
+      });
+    }
+  }
+
   return assets;
 }
 

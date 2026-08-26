@@ -17,6 +17,7 @@ import { buildSampleProjectMetadata } from "@/lib/cryosmart/sample-data";
 import { DEFAULT_BASE_URL } from "@/lib/cryosmart/constants";
 import type { JobMetadata, LineageSummary } from "@/lib/cryosmart/types";
 import { toast } from "sonner";
+import { saveSession } from "@/lib/cryosmart/proxy-client";
 import { ShieldCheck, Globe, Zap, FileCheck2, Loader2, CheckCircle2, AlertCircle, ArrowRight, Keyboard } from "lucide-react";
 
 export default function Home() {
@@ -35,6 +36,7 @@ export default function Home() {
         ...data,
         source: "bookmarklet",
       });
+      saveSession(data.session);
     },
   });
 
@@ -101,7 +103,7 @@ export default function Home() {
     if (importState.status === "loaded") return "mt-2 flex items-center gap-2.5 rounded-lg border border-emerald-300 bg-emerald-50/90 text-emerald-900 px-3 py-2 text-[12.5px] shadow-sm backdrop-blur";
     if (importState.status === "error" || importState.status === "expired") return "mt-2 flex items-center gap-2.5 rounded-lg border border-rose-300 bg-rose-50/90 text-rose-900 px-3 py-2 text-[12.5px] shadow-sm backdrop-blur";
     return "mt-2 flex items-center gap-2.5 rounded-lg border border-teal-300 bg-teal-50/90 text-teal-900 px-3 py-2 text-[12.5px] shadow-sm backdrop-blur";
-  };
+  
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50/50">

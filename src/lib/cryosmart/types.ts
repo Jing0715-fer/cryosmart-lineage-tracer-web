@@ -58,6 +58,25 @@ export interface UiTileImage {
 /** `overview_assets` is a free-form per-job overview blob. */
 export type OverviewAssets = Record<string, unknown>;
 
+/** Image log entry from CryoSmart jobLogs with type: 'image' */
+export interface ImageLogFile {
+  fileid: string;
+  filename: string;
+  filetype: string;
+}
+
+export interface ImageLogEntry {
+  _id: string;
+  created_at?: string;
+  flags?: string[];
+  imgfiles?: ImageLogFile[];
+  index?: number;
+  job_uid?: string;
+  project_uid?: string;
+  text?: string;
+  type?: string;
+}
+
 /** A "slot" inside an input-slot-group connection. */
 export interface Slot {
   slot_name?: string | null;
@@ -129,6 +148,8 @@ export interface JobMetadata {
   output_group_images?: OutputGroupImages;
   ui_tile_images?: UiTileImage[];
   overview_assets?: OverviewAssets;
+  /** Image logs from CryoSmart jobLogs (type: image) - internal result images */
+  image_logs?: ImageLogEntry[];
   /** Best-effort resolution number, sometimes pre-computed by the server. */
   radwn_final_A?: number | null;
   final_resolution_A?: number | null;
@@ -211,13 +232,16 @@ export type OutputGroupIndex = Record<string, OutputGroupIndexItem>;
 
 /** A preview image asset attached to a `LineageNode`. */
 export interface ImageAsset {
-  kind: "ui_tile" | "output_group";
+  kind: "ui_tile" | "output_group" | "image_log";
   name: string;
   url: string;
   src: string;
   original_url: string;
   num_cols?: number | null;
   num_rows?: number | null;
+  log_text?: string | null;
+  log_flags?: string[] | null;
+  category?: string | null;
 }
 
 /** A downloadable map asset attached to a `LineageNode`. */
@@ -381,3 +405,4 @@ export interface LineageReportState {
   roundMemo: Map<string, number>;
   repickSeedMemo: Map<string, boolean>;
 }
+
