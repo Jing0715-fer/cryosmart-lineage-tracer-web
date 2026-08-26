@@ -617,3 +617,21 @@ Stage Summary:
 - Root cause of 直角: wrap-col-0 targets lacked a left gap + a legacy gx2 floor collapsed corner radii to 2px. Fixed with left gutter + floor removal; every edge turn now uses the full n8n-style r=24 quarter-ellipse in BOTH compact and wrap modes.
 - Review also fixed: origin-anchored zoom (now cursor/center-anchored), top-left-pinned fit view (now centered), silent PNG export failure on remote images (now stripped), duplicate React edge keys (now unique).
 - Deferred (recommendations only): stagger parallel descents into the same wrap-col-0 target; SVG export keeps remote hrefs (renders only on the CryoSmart network — document or strip like PNG); top free-lane band in compact mode gets tight (>8 long-range top edges ≈ 5px spacing); guard<50 fixed-point cap in depth computation is fine for ≤50-deep chains.
+
+---
+Task ID: 9
+Agent: main (Z.ai Code)
+Task: Comprehensive project code review with focus on the Report section (细化 + 改进意见).
+
+Work Log:
+- Project environment had been reset (fresh initial commit only); restored working tree from GitHub master (6a65bda), reinstalled deps (bun install), restored .env, restarted dev server on :3000.
+- Deep-read the full report pipeline: report-html.ts (2020 lines), report-html-images.ts, image-embed.ts, lineage-preview-card.tsx (Report tab UI), bundle.ts, lineage.ts image layer (logImageUrl/classSplits/imageAssets/mapAssets/selected2dSummary/normalMapAssets), report-pptx.ts + report-svg.ts headers, zip.ts usage.
+- Browser-verified the Report tab with Load Demo (DOM metrics: 19 imgs, 10 job cards, 4 map rows incl. sharp/half).
+- CRITICAL BUG FOUND & FIXED: REPORT_HTML_V2_SCRIPT had an unbalanced brace (click-listener arrow body never closed) → whole inline script threw "Unexpected token ')'" → (a) iframe auto-resize dead (stuck 600px, report clipped), (b) all "一键下载 map" buttons dead. Diagnosed by extracting the script string and parsing with new Function(), confirmed in-browser via contentWindow.eval. Fixed by adding the missing `}`; added a warning comment. Verified: iframe now auto-grows to 4000px clamp, 0 console errors.
+- LATENT BUG FOUND & FIXED: prefetchImagesForReport collected url-variant keys only for node.images / representative_micrograph_images / start_job, and missed selected_particles_src + excluded_classes_src — while reportImgTag() looks images up by their SRC string. Any capture data where src !== url (overview_assets path) silently failed to embed. Now collects all src variants (deduped; no extra fetches when url===src).
+- Remaining findings documented as prioritized recommendations (see final report to user): ZIP offline-bundle filename mismatches (class previews named class_<i>_preview.png in ZIP vs volume_group in HTML; map previews + select_2d images not collected at all; safePart not applied in collector), ~1000 lines of duplicated helpers across report-html/report-svg/report-pptx/lineage ("duplicated to avoid circular import" — should move to shared module), srcdoc size risk with many base64 images, reportHtml rebuilt on every embeddedImages change, download-all fetch CORS in srcdoc context, data-names never emitted by builders, a11y gaps (<html lang>, table scope), height clamp 4000px vs 5978px actual report height, dead compact branch in reportMetricText.
+- Committed 6787d6d, pushed main→master. Lint clean (0 errors, 1 pre-existing unrelated warning).
+
+Stage Summary:
+- Report review surfaced 1 critical runtime bug (inline script syntax error killing iframe auto-resize + download buttons) and 1 latent embedding bug — both fixed and browser-verified.
+- Full prioritized improvement roadmap delivered covering: ZIP/HTML image-name unification, helper de-duplication into a shared report-shared module, perf (srcdoc size, rebuild granularity, concurrency), download reliability (CORS/popup/direct-navigation fallback), a11y, and UX (height clamp, print stylesheet).
