@@ -6,11 +6,16 @@
  */
 
 import type { LineageSummary } from "./types";
-import { buildLineageHtmlV2, type ReportHtmlOptions } from "./report-html";
+import {
+  buildLineageHtmlV2,
+  localImageFilename,
+  mapPreviewAssetName,
+  type ReportHtmlOptions,
+} from "./report-html";
 import { prefetchImagesForReport } from "./image-embed";
 import { buildPictureFlowSvg } from "./report-svg";
 import { buildPictureFlowPptx } from "./report-pptx";
-import { makePreview } from "./lineage";
+import { makePreview, normalMapAssets } from "./lineage";
 import { makeZip } from "./zip";
 import {
   DEFAULT_BASE_URL,
@@ -165,7 +170,9 @@ export async function buildBundle(
       for (const item of imageItems) {
         try {
           const bytes = await cryoSmartBytes(options.session, item.url);
-          files.push({ path: `images/${item.path}`, data: bytes });
+          // item.path is already the HTML-canonical `images/<uid>/<name>.png`
+          // (from localImageFilename) — no extra prefix here.
+          files.push({ path: item.path, data: bytes });
         } catch (err) {
           warnings.push(`Image ${item.path} failed: ${(err as Error).message}`);
         }
@@ -313,39 +320,61 @@ async function collectPptImages(
   }
 }
 
-/** Gather all preview image URLs referenced by the summary. */
+/** Gather all preview image URLs referenced by the HTML report.
+ *
+ *  IMPORTANT: every `path` MUST mirror the filename that reportImgTag()
+ *  computes in bundle mode via localImageFilename(uid, name). The HTML
+ *  falls back to the remote URL on error, but a matching local file is what
+ *  makes the offline ZIP actually work — historically this collector used
+ *  its own names (`class_<i>_preview.png`, no safePart) and never collected
+ *  map / select-2D previews at all, so the offline report silently 404'd
+ *  every class, map and select-2D preview image. */
 export function collectImageRequests(summary: LineageSummary): Array<{ url: string; path: string }> {
   const out: Array<{ url: string; path: string }> = [];
+  const seen = new Set<string>();
+  const add = (uid: string, name: unknown, url: string | null | undefined) => {
+    if (!url) return;
+    const path = localImageFilename(uid || "J0", String(name ?? "image"));
+    if (seen.has(path)) return;
+    seen.add(path);
+    out.push({ url, path });
+  };
+
   for (const node of summary.nodes || []) {
     const uid = node.uid || "J0";
-    if (Array.isArray(node.images)) {
-      for (const img of node.images) {
-        if (img.url) {
-          out.push({ url: img.url, path: `${uid}/${img.name || "image"}.png` });
-        }
-      }
+
+    // Tile images + log images — reportImageBoxes() names these
+    // `local_name || name || "image"`.
+    for (const img of node.images || []) {
+      const local = (img as { local_name?: string }).local_name || img.name || "image";
+      add(uid, local, img.url);
     }
-    if (Array.isArray(node.representative_micrograph_images)) {
-      for (const img of node.representative_micrograph_images) {
-        if (img.url) {
-          out.push({ url: img.url, path: `${uid}/${img.name || "micrograph"}.png` });
-        }
-      }
+
+    // Representative micrographs (import_micrographs jobs) — same naming.
+    for (const img of node.representative_micrograph_images || []) {
+      const local = (img as { local_name?: string }).local_name || img.name || "micrograph";
+      add(uid, local, img.url);
     }
-    if (Array.isArray(node.classes)) {
-      node.classes.forEach((cls, i) => {
-        // Per-class MRC preview (stored on ClassSplit, not ClassMap)
-        if (cls.mrc_preview_url) {
-          out.push({ url: cls.mrc_preview_url, path: `${uid}/class_${i}_preview.png` });
-        }
-        if (Array.isArray(cls.maps)) {
-          for (const m of cls.maps) {
-            if (m.download_url) {
-              out.push({ url: m.download_url, path: `${uid}/class_${i}_${m.result_name || "map"}.png` });
-            }
-          }
-        }
-      });
+
+    // Select-2D media block — fixed names from reportMediaBlock()
+    // (templates_selected / templates_excluded / particles_selected).
+    const s = node.select_2d;
+    if (s) {
+      add(uid, "templates_selected", s.selected_classes_image);
+      add(uid, "templates_excluded", s.excluded_classes_image);
+      add(uid, "particles_selected", s.selected_particles_image);
+    }
+
+    // Normal map previews (incl. sharp / half maps) — reportMapDownloads()
+    // names these via mapPreviewAssetName().
+    for (const m of normalMapAssets(node)) {
+      add(uid, mapPreviewAssetName(m), m.preview_url);
+    }
+
+    // Per-class map previews — reportClassTable() / reportPictureClassJob()
+    // name these `volume_group || class_<class_index>`.
+    for (const cls of node.classes || []) {
+      add(uid, cls.volume_group || `class_${cls.class_index}`, cls.mrc_preview_url);
     }
   }
   return out;
@@ -354,6 +383,7 @@ export function collectImageRequests(summary: LineageSummary): Array<{ url: stri
 /** Gather all map/MRC download URLs. */
 export function collectMapRequests(summary: LineageSummary): Array<{ url: string; path: string }> {
   const out: Array<{ url: string; path: string }> = [];
+  const seen = new Set<string>();
   const project = summary.project_uid || "P";
   const startUid = summary.start_uid || "J0";
   const baseUrl = summary.base_url || DEFAULT_BASE_URL;
@@ -364,6 +394,7 @@ export function collectMapRequests(summary: LineageSummary): Array<{ url: string
       url: `api/log_image/download_result_file/${project}/${startUid}.${suffix}`,
       path: `${startUid}/BJ.${project}.${startUid}.${suffix}.mrc`,
     });
+    seen.add(`${startUid}/BJ.${project}.${startUid}.${suffix}.mrc`);
   }
 
   // Every node's normal map assets
@@ -375,11 +406,27 @@ export function collectMapRequests(summary: LineageSummary): Array<{ url: string
           // Convert absolute URL → relative path for proxy
           let rel = m.download_url;
           if (rel.startsWith(baseUrl)) rel = rel.slice(baseUrl.length).replace(/^\/+/, "");
-          out.push({
-            url: rel,
-            path: `${uid}/BJ.${project}.${uid}.${m.group || "volume"}.${m.result_name || "map"}.mrc`,
-          });
+          const path = `${uid}/BJ.${project}.${uid}.${m.group || "volume"}.${m.result_name || "map"}.mrc`;
+          if (seen.has(path)) continue;
+          seen.add(path);
+          out.push({ url: rel, path });
         }
+      }
+    }
+    // Class-split map downloads (class_3D / abinit / hetero jobs) — these
+    // are the files behind the report's per-class "map" links. Previously
+    // they were mis-downloaded into images/ as .png; now they land in maps/
+    // with their proper .mrc extension.
+    for (const cls of node.classes || []) {
+      for (const m of cls.maps || []) {
+        if (!m.download_url) continue;
+        let rel = m.download_url;
+        if (rel.startsWith(baseUrl)) rel = rel.slice(baseUrl.length).replace(/^\/+/, "");
+        const group = cls.volume_group || `class_${cls.class_index}`;
+        const path = `${uid}/BJ.${project}.${uid}.${group}.${m.result_name || "map"}.mrc`;
+        if (seen.has(path)) continue;
+        seen.add(path);
+        out.push({ url: rel, path });
       }
     }
   }

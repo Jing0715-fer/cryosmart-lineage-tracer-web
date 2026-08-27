@@ -285,18 +285,22 @@ export interface ReportHtmlOptions {
     return match ? Number(match[1]) : null;
   }
 
-  /** Sanitize a string for use as a path component. */
+  /** Sanitize a string for use as a path component.
+   *  Exported so bundle.ts can save ZIP images under exactly the same
+   *  names that reportImgTag() references in bundle mode. */
   // duplicated from lineage.ts to avoid circular import
-  function safePart(value: unknown): string {
+  export function safePart(value: unknown): string {
     return String(value || "item")
       .replace(/[\\/:*?"<>|#%&{}$!'@+`=]/g, "_")
       .replace(/\s+/g, "_")
       .slice(0, 100);
   }
 
-  /** Local image path inside the report bundle: `images/<uid>/<name>.png`. */
+  /** Local image path inside the report bundle: `images/<uid>/<name>.png`.
+   *  Exported so bundle.ts can mirror these exact paths in the ZIP's
+   *  `images/` folder (any mismatch = silent 404 in the offline report). */
   // duplicated from lineage.ts to avoid circular import
-  function localImageFilename(nodeUid: string, name: string): string {
+  export function localImageFilename(nodeUid: string, name: string): string {
     return `images/${safePart(nodeUid)}/${safePart(name)}.png`;
   }
 
@@ -322,10 +326,23 @@ export interface ReportHtmlOptions {
 
   /** Map preview image name for a volume group ("volume.map" → "volume"). */
   // duplicated from lineage.ts to avoid circular import
-  function mapPreviewImageName(group: unknown): string {
+  export function mapPreviewImageName(group: unknown): string {
     const value = String(group || "volume");
     if (/^(volume|map)$/i.test(value)) return "volume";
     return value.replace(/\.map$/i, "");
+  }
+
+  /** Preview image name for one row of the map download table.
+   *  Mirrors the label logic in reportMapDownloads(): the plain map is named
+   *  after its group ("volume"), sharp/half maps keep `group.result_name`
+   *  ("volume.map_sharp"). Exported so bundle.ts saves the ZIP copy of the
+   *  preview under the exact same filename the HTML references. */
+  export function mapPreviewAssetName(item: MapAsset): string {
+    const label =
+      item.result_name && item.result_name !== "map"
+        ? `${item.group}.${item.result_name}`
+        : item.group;
+    return mapPreviewImageName(label);
   }
 
   /* ================================================================== */
@@ -710,9 +727,9 @@ export interface ReportHtmlOptions {
     if (res) parts.push(res);
     const bin = extractionBinText(node);
     if (bin) parts.push(bin);
-    // popup.js branches on `compact` but returns the same string either way;
-    // keep the branch for verbatim parity.
-    return compact ? parts.join(" · ") : parts.join(" · ");
+    // `compact` is kept in the signature for API compatibility with the
+    // original popup.js port; both modes render the same string.
+    return parts.join(" · ");
   }
 
   /** Variant of `reportMetricText` used by the picture-flow particle steps. */
@@ -1179,7 +1196,7 @@ export interface ReportHtmlOptions {
         }</td><td>${links}</td></tr>`;
       })
       .join("");
-    return `<h3>Class / MRC 来源</h3><table><tr><th>Class</th><th>Particles</th><th>%</th><th>Map downloads</th></tr>${rows}</table>`;
+    return `<h3>Class / MRC 来源</h3><table><tr><th scope="col">Class</th><th scope="col">Particles</th><th scope="col">%</th><th scope="col">Map downloads</th></tr>${rows}</table>`;
   }
 
   /** Map download table for the start node (V1 layout). */
@@ -1191,7 +1208,7 @@ export interface ReportHtmlOptions {
           `<tr><td>${escHtml(name)}</td><td><a href="${escHtml(url)}" target="_blank">download</a></td></tr>`,
       )
       .join("");
-    return `<h3>MRC Maps</h3><table><tr><th>Result</th><th>Download</th></tr>${rows}</table>`;
+    return `<h3>MRC Maps</h3><table><tr><th scope="col">Result</th><th scope="col">Download</th></tr>${rows}</table>`;
   }
 
   /* ================================================================== */
@@ -1228,7 +1245,7 @@ export interface ReportHtmlOptions {
           )}${htmlClassTable(node, summary)}${htmlMapTable(node, summary)}</article>`,
       )
       .join("\n");
-    return `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CryoSmart ${escHtml(
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CryoSmart ${escHtml(
       summary.project_uid,
     )} ${escHtml(summary.start_uid)} Lineage</title><style>${css}</style></head><body><h1>CryoSmart Lineage Report: ${escHtml(
       summary.project_uid,
@@ -1341,7 +1358,7 @@ export interface ReportHtmlOptions {
         )}</td></tr>`;
       })
       .join("");
-    return `<div class="source-block"><h3>来源</h3><table class="source-table"><thead><tr><th>类型</th><th>直接来源</th><th>引用</th><th>合并上游</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    return `<div class="source-block"><h3>来源</h3><table class="source-table"><thead><tr><th scope="col">类型</th><th scope="col">直接来源</th><th scope="col">引用</th><th scope="col">合并上游</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   /** "输出到" side panel for a single node. */
@@ -1550,6 +1567,15 @@ export interface ReportHtmlOptions {
     const maps = normalMapAssets(node);
     if (!maps.length) return "";
     const urls = maps.map((item) => item.download_url).join("|");
+    // Friendly download filenames (mirrors the ZIP maps/ naming:
+    // BJ.<project>.<uid>.<group>.<result>.mrc) — without data-names the
+    // inline script falls back to the URL's last path segment.
+    const dlNames = maps
+      .map(
+        (item) =>
+          `BJ.${summary.project_uid || "P"}.${node.uid}.${item.group || "volume"}.${item.result_name || "map"}.mrc`,
+      )
+      .join("|");
     const rows = maps
       .map((item) => {
         // Show the result name when it's not the plain "map" — nu-refine
@@ -1559,10 +1585,12 @@ export interface ReportHtmlOptions {
           item.result_name && item.result_name !== "map"
             ? `${item.group}.${item.result_name}`
             : item.group;
+        // The local filename MUST come from mapPreviewAssetName() — bundle.ts
+        // saves the ZIP preview image under the same name (offline report).
         const preview = item.preview_url
           ? `<a href="${escHtml(item.preview_original_url || item.preview_url)}" target="_blank">${reportImgTag(
               node.uid,
-              mapPreviewImageName(label),
+              mapPreviewAssetName(item),
               item.preview_src || item.preview_url,
               "map-preview",
               `${label} preview`,
@@ -1576,7 +1604,7 @@ export interface ReportHtmlOptions {
       .join("");
     return `<div class="map-block"><h3>Map / MRC</h3><div class="download-head"><b>map: ${maps.length} 个（含 sharp / half map）</b><button type="button" class="download-all" data-urls="${escHtml(
       urls,
-    )}">一键下载 map</button></div><table class="map-table"><thead><tr><th>Group</th><th>预览</th><th>下载</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    )}" data-names="${escHtml(dlNames)}">一键下载 map</button></div><table class="map-table"><thead><tr><th scope="col">Group</th><th scope="col">预览</th><th scope="col">下载</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   /** Class table (horizontal) + "一键下载 map" for class_3D / abinit / hetero. */
@@ -1586,7 +1614,7 @@ export interface ReportHtmlOptions {
     );
     if (!classJob || !Array.isArray(classJob.classes) || !classJob.classes.length) return "";
     const headers = classJob.classes
-      .map((cls: ClassSplit) => `<th>class ${escHtml(cls.class_index)}</th>`)
+      .map((cls: ClassSplit) => `<th scope="col">class ${escHtml(cls.class_index)}</th>`)
       .join("");
     const counts = classJob.classes
       .map(
@@ -1636,10 +1664,22 @@ export interface ReportHtmlOptions {
       .filter((item: { result_name?: string; download_url: string }) => item.result_name === "map" || !item.result_name)
       .map((item: { download_url: string }) => item.download_url)
       .filter(Boolean);
+    // Friendly per-class download filenames (mirrors the ZIP maps/ naming:
+    // BJ.<project>.<uid>.<volume_group|class_i>.<result>.mrc). Indexed in
+    // lockstep with downloadUrls above so names[i] matches urls[i].
+    const downloadNames = classJob.classes
+      .flatMap((cls: ClassSplit) =>
+        (cls.maps || [])
+          .filter((item) => item.result_name === "map" || !item.result_name)
+          .map((item) =>
+            `BJ.${summary.project_uid || "P"}.${node.uid}.${cls.volume_group || `class_${cls.class_index}`}.${item.result_name || "map"}.mrc`,
+          ),
+      )
+      .filter(Boolean);
     const button = downloadUrls.length
-      ? `<button type="button" class="download-all" data-urls="${escHtml(downloadUrls.join("|"))}">一键下载 map</button>`
+      ? `<button type="button" class="download-all" data-urls="${escHtml(downloadUrls.join("|"))}" data-names="${escHtml(downloadNames.join("|"))}">一键下载 map</button>`
       : "";
-    return `<div class="class-toolbar"><span>Class / Map</span></div><div class="classes horizontal-view"><div class="horizontal-table"><table><tbody><tr><th>Class</th>${headers}</tr><tr><th>颗粒</th>${counts}</tr><tr><th>%</th>${percents}</tr><tr><th>预览</th>${previews}</tr><tr><th>Map</th>${maps}</tr></tbody></table></div></div>${
+    return `<div class="class-toolbar"><span>Class / Map</span></div><div class="classes horizontal-view"><div class="horizontal-table"><table><tbody><tr><th scope="row">Class</th>${headers}</tr><tr><th scope="row">颗粒</th>${counts}</tr><tr><th scope="row">%</th>${percents}</tr><tr><th scope="row">预览</th>${previews}</tr><tr><th scope="row">Map</th>${maps}</tr></tbody></table></div></div>${
       downloadUrls.length
         ? `<div class="download-head"><b>普通 map: ${downloadUrls.length} 个</b>${button}</div>`
         : ""
@@ -1734,7 +1774,9 @@ export interface ReportHtmlOptions {
     const img = s.selected_classes_image
       ? `<div class="pf-select-img">${reportPictureImg(
           node.uid,
-          "selected_classes",
+          // Same name as the media block ("templates_selected") so both
+          // <img> tags share ONE local file in the offline ZIP bundle.
+          "templates_selected",
           s.selected_classes_src || s.selected_classes_image,
           "",
           "templates selected",
@@ -2009,7 +2051,7 @@ export interface ReportHtmlOptions {
       .sort((a, b) => uidOrder(a) - uidOrder(b))
       .map((node) => reportJobCard(node, summary, state, opts))
       .join("");
-    return `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CryoSmart ${escHtml(
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CryoSmart ${escHtml(
       summary.project_uid,
     )} ${escHtml(summary.start_uid)} Lineage</title><script>(function(){try{var t=localStorage.getItem('theme');var d=t==='dark'||(t==='system'||!t)&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;if(d)document.documentElement.classList.add('dark');else document.documentElement.classList.add('light')}catch(e){}})();</script><style>${REPORT_HTML_V2_CSS}</style></head><body><header><div class="top"><div class="title"><h1>CryoSmart Lineage: ${escHtml(
       summary.project_uid,

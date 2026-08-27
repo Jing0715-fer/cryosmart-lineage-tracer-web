@@ -37,8 +37,11 @@ export function LineagePreviewCard({ summary, session, onLoadDemo }: Props) {
   // posts { type: 'cryosmart-report-height', height } via postMessage once
   // it loads (and on every resize / image load). We listen for it here and
   // grow the iframe so the report flows naturally in the page — no cramped
-  // fixed-height iframe, no double scrollbar. Clamped to [320, 4000] so a
-  // misbehaving report can't collapse the iframe to 0 or grow it absurdly.
+  // fixed-height iframe, no double scrollbar. Clamped to [320, 50000] so a
+  // misbehaving report can't collapse the iframe to 0 or grow it absurdly;
+  // the upper bound is deliberately generous — real reports with many job
+  // cards measure ~6000px, and a lower cap (previously 4000) silently
+  // clipped them and re-introduced the internal scrollbar.
   const [iframeHeight, setIframeHeight] = useState(600);
   useEffect(() => {
     function onMessage(event: MessageEvent) {
@@ -46,8 +49,8 @@ export function LineagePreviewCard({ summary, session, onLoadDemo }: Props) {
       if (!data || data.type !== "cryosmart-report-height") return;
       const h = typeof data.height === "number" ? data.height : 0;
       if (h > 0) {
-        // Clamp to a sensible range.
-        const next = Math.max(320, Math.min(4000, Math.round(h)));
+        // Clamp to a sensible range (see comment above for the bounds).
+        const next = Math.max(320, Math.min(50000, Math.round(h)));
         // Only update if the change is meaningful (>4px) to avoid render thrash.
         setIframeHeight((prev) => (Math.abs(prev - next) > 4 ? next : prev));
       }
