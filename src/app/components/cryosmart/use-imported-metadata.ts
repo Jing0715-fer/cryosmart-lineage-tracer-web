@@ -312,6 +312,47 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
       let lastSig = "";
       let lastActivity = Date.now();
 
+      // ── Progressive data application ─────────────────────────────
+      // The graph/report are built from `loaded`, which used to refresh
+      // only TWICE (first jobs snapshot + final /complete). Between
+      // "24/24 jobs scanned" and /complete the script can sit in its
+      // re-trace grace window + byte-upload drain for minutes — during
+      // which the graph and report showed NO log images even though the
+      // strip said "320 captured". Now every change of the image
+      // counters re-applies the (cumulative) session data so the graph,
+      // detail modal and report fill in LIVE as refs + bytes stream in.
+      // /complete still triggers one final unconditional application.
+      let lastDataSig = "";
+      let lastDataFetchAt = 0;
+      const DATA_FETCH_MIN_INTERVAL_MS = 1500;
+
+      /** Fetch the current cumulative session snapshot and apply it. */
+      const applyStagedData = async (): Promise<PendingData | null> => {
+        const dataResp = await fetch(
+          `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
+          { credentials: "same-origin", cache: "no-store" }
+        );
+        if (!dataResp.ok) return null;
+        const data = (await dataResp.json()) as PendingData;
+        if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
+          onLoadedRef.current?.(toLoaded(data, token));
+          return data;
+        }
+        return null;
+      };
+
+      /** Fingerprint of "what data the session holds right now" — any
+       * change means the streamed log images grew and `loaded` is stale. */
+      const dataSigOf = (s: SessionStatus) =>
+        [
+          s.total_jobs,
+          s.log_jobs_total,
+          s.log_jobs_done,
+          s.log_images_count,
+          s.log_images_uploaded,
+          s.status,
+        ].join("|");
+
       while (!cancelled) {
         // Hard timeout only applies BEFORE jobs land — after that the
         // heartbeat-driven stall detector below takes over (a legitimate
@@ -371,10 +412,21 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             Date.now() - lastActivity > STALL_TIMEOUT_MS
           ) {
             if (!cancelled) {
+              // Best-effort rescue: apply whatever the session managed to
+              // collect before the script died, so streamed log images are
+              // not stranded in the store (they were ALREADY counted by
+              // the strip — losing them now would look like the original
+              // "captured 320 but nothing shows" bug).
+              try {
+                await applyStagedData();
+              } catch {
+                // nothing to rescue
+              }
+              if (cancelled) return;
               setState({
                 status: "error",
                 message:
-                  "Capture stalled — the capture script stopped responding (its tab may have been closed). Re-run it when ready.",
+                  "Capture stalled — the capture script stopped responding (its tab may have been closed). The data received so far is shown; re-run the script to capture the rest.",
                 token,
                 startedAt,
                 progress: null,
@@ -388,64 +440,69 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
           // and keep showing live log-collection progress.
           if (sessionStatus.has_data && !stagedLoaded) {
             stagedLoaded = true;
+            lastDataSig = dataSigOf(sessionStatus);
+            lastDataFetchAt = Date.now();
             try {
-              const dataResp = await fetch(
-                `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
-                { credentials: "same-origin", cache: "no-store" }
-              );
               if (cancelled) return;
-              if (dataResp.ok) {
-                const data = (await dataResp.json()) as PendingData;
-                if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
-                  onLoadedRef.current?.(toLoaded(data, token));
-                }
-              }
+              await applyStagedData();
             } catch {
-              // non-fatal: retried on the complete pass
+              // non-fatal: retried by the progressive pass below
+            }
+          } else if (
+            sessionStatus.has_data &&
+            stagedLoaded &&
+            dataSigOf(sessionStatus) !== lastDataSig &&
+            Date.now() - lastDataFetchAt >= DATA_FETCH_MIN_INTERVAL_MS
+          ) {
+            // Log images grew since the last applied snapshot — apply the
+            // new cumulative data so the graph/report refresh LIVE.
+            lastDataSig = dataSigOf(sessionStatus);
+            lastDataFetchAt = Date.now();
+            try {
+              if (cancelled) return;
+              await applyStagedData();
+            } catch {
+              // transient — the next counter change or /complete re-applies
             }
           }
 
           if (sessionStatus.status === "complete") {
-            // Final snapshot (includes every streamed log image).
+            // Final snapshot (includes every streamed log image). Applied
+            // unconditionally even after the progressive passes — the last
+            // word on what the capture collected.
             try {
-              const dataResp = await fetch(
-                `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
-                { credentials: "same-origin", cache: "no-store" }
-              );
               if (cancelled) return;
-              if (dataResp.ok) {
-                const data = (await dataResp.json()) as PendingData;
-                if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
-                  onLoadedRef.current?.(toLoaded(data, token));
-                  const nLogs = sessionStatus.log_images_count;
-                  const withLogs = sessionStatus.log_jobs_with_images;
-                  const uploaded = sessionStatus.log_images_uploaded;
-                  const req = sessionStatus.log_request;
-                  const lineageNote =
-                    sessionStatus.lineage_mode && req && req.jobs.length > 0
-                      ? ` (traced lineage — ${req.jobs.length} of ${data.data.jobs.length} jobs scanned)`
-                      : "";
-                  setState({
-                    status: "loaded",
-                    message:
-                      nLogs > 0
-                        ? `Captured ${data.data.jobs.length} jobs + ${nLogs} log images from ${withLogs} jobs${lineageNote}` +
-                            (uploaded > 0 && uploaded < nLogs
-                              ? ` (${uploaded} with previews).`
-                              : ".")
-                        : sessionStatus.log_jobs_done > 0
-                          ? `Captured ${data.data.jobs.length} jobs — no log images readable on this build (see the CryoSmart console diagnostics).`
-                          : sessionStatus.lineage_mode && !sessionStatus.log_request
-                            ? `Captured ${data.data.jobs.length} jobs — no Trace Lineage ran during the capture window, so no log images were fetched. Re-run the script and trace (or call __csCaptureAll() in the CryoSmart console).`
-                            : `Captured ${data.data.jobs.length} jobs (no log images available).`,
-                    token,
-                    startedAt,
-                    progress: null,
-                    endJobUid: endJobUidSeen,
-                  });
-                  cleanUrl();
-                  return;
-                }
+              const data = await applyStagedData();
+              if (data) {
+                const jobsCount = data.data.jobs?.length ?? 0;
+                const nLogs = sessionStatus.log_images_count;
+                const withLogs = sessionStatus.log_jobs_with_images;
+                const uploaded = sessionStatus.log_images_uploaded;
+                const req = sessionStatus.log_request;
+                const lineageNote =
+                  sessionStatus.lineage_mode && req && req.jobs.length > 0
+                    ? ` (traced lineage — ${req.jobs.length} of ${jobsCount} jobs scanned)`
+                    : "";
+                setState({
+                  status: "loaded",
+                  message:
+                    nLogs > 0
+                      ? `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} jobs${lineageNote}` +
+                          (uploaded > 0 && uploaded < nLogs
+                            ? ` (${uploaded} with previews).`
+                            : ".")
+                      : sessionStatus.log_jobs_done > 0
+                        ? `Captured ${jobsCount} jobs — no log images readable on this build (see the CryoSmart console diagnostics).`
+                        : sessionStatus.lineage_mode && !sessionStatus.log_request
+                          ? `Captured ${jobsCount} jobs — no Trace Lineage ran during the capture window, so no log images were fetched. Re-run the script and trace (or call __csCaptureAll() in the CryoSmart console).`
+                          : `Captured ${jobsCount} jobs (no log images available).`,
+                  token,
+                  startedAt,
+                  progress: null,
+                  endJobUid: endJobUidSeen,
+                });
+                cleanUrl();
+                return;
               }
             } catch {
               // fall through — retry next tick
@@ -472,21 +529,29 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 endJobUid: endJobUidSeen,
               });
             } else {
-              const uploadedNote =
-                sessionStatus.log_images_uploaded > 0
-                  ? ` · ${sessionStatus.log_images_uploaded} image files ready`
-                  : "";
+              const imgs = sessionStatus.log_images_count;
+              const upl = sessionStatus.log_images_uploaded;
+              const scanDone =
+                sessionStatus.log_jobs_total > 0 &&
+                sessionStatus.log_jobs_done >= sessionStatus.log_jobs_total;
               const lineageNote =
                 sessionStatus.lineage_mode && req ? " for the traced lineage" : "";
+              // Phase-aware message: the scan can finish minutes before the
+              // script completes (re-trace grace window + byte upload
+              // drain) — say what is actually happening instead of a
+              // stale "fetching… 24/24".
+              const message =
+                scanDone && imgs > 0 && upl < imgs
+                  ? `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews ${upl}/${imgs}${lineageNote}…`
+                  : scanDone && imgs > 0
+                    ? `Loaded ${sessionStatus.total_jobs} jobs — all ${imgs} log images ready${lineageNote}, finalizing…`
+                    : `Loaded ${sessionStatus.total_jobs} jobs — fetching log images${lineageNote} ` +
+                      `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
+                      (imgs > 0 ? ` (${imgs} captured)` : "") +
+                      "…";
               setState({
                 status: "polling",
-                message:
-                  `Loaded ${sessionStatus.total_jobs} jobs — fetching log images${lineageNote} ` +
-                  `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
-                  (sessionStatus.log_images_count > 0
-                    ? ` (${sessionStatus.log_images_count} captured${uploadedNote})`
-                    : "") +
-                  "…",
+                message,
                 token,
                 startedAt,
                 progress: {

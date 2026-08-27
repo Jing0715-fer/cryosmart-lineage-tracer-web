@@ -20,6 +20,11 @@
  * picked up for 3 minutes after each scan (late traces no longer miss the
  * fetch); the final console line reports refs + uploaded bytes honestly
  * and a zero-image capture prints a loud warning with the fix.
+ *
+ * v3.8: the web app applies streamed log images PROGRESSIVELY (every batch
+ * of refs + bytes re-renders the graph and report live — no more waiting
+ * for the final /complete snapshot), and /complete itself is retried so a
+ * single failed POST can no longer leave the UI polling forever.
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -73,7 +78,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.7 — LAST-ROUND log images. Job metadata
+// CryoSmart Smart Capture v3.8 — LAST-ROUND log images. Job metadata
 // uploads for the WHOLE project immediately (fast), but log images are
 // fetched ONLY for the jobs the traced lineage needs: the script waits for
 // the web app's Trace Lineage action to publish the lineage job list to
@@ -89,7 +94,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
 // calibration that finds logs in ANY store state shape (v3.2). v3.7:
 // 20-minute wait window + 3-minute re-trace grace (late traces no longer
 // miss the fetch), honest image-byte counters, and a loud zero-image
-// diagnostic so an empty capture is obvious in the console.
+// diagnostic so an empty capture is obvious in the console. v3.8: the web
+// app refreshes the graph + report LIVE as images stream in (no more
+// "captured 320 but nothing shows" while the script waits to complete),
+// and /complete is retried so one lost POST cannot strand the session.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -1065,7 +1073,14 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // A re-trace (different end job) unions its lineage into the session
   // request — pick those jobs up for a short window before completing.
   // __csCaptureAll() works here too (fetches every unscanned job).
+  // v3.8: the web app already shows every scanned image (it refreshes the
+  // graph + report LIVE as batches stream in) — this wait only decides
+  // whether MORE jobs get scanned, so it is safe to let it run.
   if (LINEAGE_MODE && knownRequested && !FINISH_NOW) {
+    if ((logRefsStreamed || 0) > 0) {
+      console.log('[CryoSmart] All lineage log images streamed — they are already visible in the web app tab (the graph and report refresh live as bytes arrive).' +
+        ' Waiting up to 3 more minutes for a possible re-trace before completing…');
+    }
     var graceEnd = Date.now() + 180000;   // v3.7: 45s → 3 min — re-traces while reviewing land reliably
     var served = knownRequested.slice();
     while (Date.now() < graceEnd && !FINISH_NOW) {
@@ -1104,8 +1119,16 @@ export function SmartCapturePanel({ onCapture }: Props) {
   await drainImageUploads(240000);
 
   // ── STEP 4: mark the session complete ──────────────────────────────
-  // The web UI stops polling and refreshes with the final data snapshot.
-  try { await post('/complete', {}); } catch (e) {}
+  // The web UI stops polling and shows the final summary. v3.8 retries:
+  // a single lost POST (network blip, tab backgrounded) used to leave the
+  // UI polling forever with the images already safely stored.
+  for (var ci = 0; ci < 3; ci++) {
+    try { await post('/complete', {}); break; }
+    catch (e) {
+      if (ci === 2) console.warn('[CryoSmart] /complete failed after 3 tries:', e && e.message);
+      else await sleepMs(2000);
+    }
+  }
 
   // v3.7: loud zero-image diagnostic — an empty capture (or empty bytes)
   // should be OBVIOUS in the console, not discovered later in the report.

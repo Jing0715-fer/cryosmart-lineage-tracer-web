@@ -139,8 +139,40 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
       ),
     [loadedJobs]
   );
+  /** Count of ALL same-origin session-image URLs present in the loaded
+   * data (log_images src, output_group_images values, ui_tile_images and
+   * image_logs imgfiles fileids rewritten by the merge step). The capture
+   * script uploads bytes for these ASYNCHRONOUSLY — map/tile bytes can
+   * land AFTER the log counters stopped moving, so the summary rebuild
+   * must key on this too, or map previews stay stale. */
+  const loadedSessionImageCount = useMemo(() => {
+    const SESSION_URL_RE = /\/api\/cryosmart\/import\/session\/[^/?#]+\/image\//;
+    let n = 0;
+    const bump = (v: unknown) => {
+      if (typeof v === "string" && SESSION_URL_RE.test(v)) n += 1;
+    };
+    for (const j of loadedJobs) {
+      const job = j as Record<string, unknown> | null;
+      if (!job || typeof job !== "object") continue;
+      const li = job.log_images;
+      if (Array.isArray(li)) for (const r of li) bump((r as { src?: unknown })?.src);
+      const ogi = job.output_group_images;
+      if (ogi && typeof ogi === "object")
+        for (const v of Object.values(ogi as Record<string, unknown>)) bump(v);
+      const tiles = job.ui_tile_images;
+      if (Array.isArray(tiles))
+        for (const t of tiles) bump((t as { fileid?: unknown })?.fileid);
+      const il = job.image_logs;
+      if (Array.isArray(il))
+        for (const l of il)
+          if (l && typeof l === "object" && Array.isArray((l as { imgfiles?: unknown[] }).imgfiles))
+            for (const f of (l as { imgfiles: Array<{ fileid?: unknown }> }).imgfiles)
+              bump(f?.fileid);
+    }
+    return n;
+  }, [loadedJobs]);
   const dataVersion = loaded
-    ? `${datasetKey}#${loadedLogImageCount}#${loadedLogImageWithBytes}`
+    ? `${datasetKey}#${loadedLogImageCount}#${loadedLogImageWithBytes}#${loadedSessionImageCount}`
     : "";
   /** dataVersion the CURRENT summary was built from (set by handleTrace;
   * compared by the auto-refresh effect below). */
@@ -291,11 +323,14 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
   }, [loaded, autoAnchorUid, datasetKey, startJobDirty, tracing, handleTrace]);
 
   /** Auto-refresh a summary that was traced DURING a staged capture: the
-   *  final snapshot (with every streamed log image + uploaded byte) replaces
-   *  `loaded`, but the already-built summary would otherwise stay stale —
-   *  the user would see "Captured N images" yet no images in the graph or
-   *  report. Rebuild silently with the SAME start_uid whenever the loaded
-   *  data's log-image count grows past what the summary was built from. */
+   *  streamed log images land in `loaded` PROGRESSIVELY now (every batch
+   *  of refs + bytes re-applies the session data), and the already-built
+   *  summary would otherwise stay stale — the user would see "320 images
+   *  captured" yet no images in the graph or report. Rebuild silently
+   *  with the SAME start_uid whenever the loaded data's log-image counts
+   *  grow past what the summary was built from. The Trace log keeps only
+   *  the LATEST refresh line (one line that live-updates its counters,
+   *  instead of one appended per streamed batch). */
   useEffect(() => {
     if (!summary || !loaded || !summary.start_uid) return;
     if (!summaryBuiltFromRef.current) return; // nothing traced from THIS load yet
@@ -308,10 +343,17 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
         buildSummary(jobMetadata, summary.project_uid || effectiveProjectId, summary.start_uid, baseUrl)
       );
       onSummary(next);
-      setTraceLog((l) => [
-        ...l,
-        `Log images finished arriving — refreshed lineage (${loadedLogImageCount} image refs, ${loadedLogImageWithBytes} with previews).`,
-      ]);
+      const REFRESH_PREFIX = "Log images streaming in — lineage refreshed (";
+      const refreshLine = `${REFRESH_PREFIX}${loadedLogImageCount} image refs, ${loadedLogImageWithBytes} with previews) — the graph and report update live.`;
+      setTraceLog((l) => {
+        const idx = l.findIndex((x) => x.startsWith(REFRESH_PREFIX));
+        if (idx >= 0) {
+          const copy = l.slice();
+          copy[idx] = refreshLine;
+          return copy;
+        }
+        return [...l, refreshLine];
+      });
     } catch {
       // keep the previous summary — the manual Trace button still works
     }

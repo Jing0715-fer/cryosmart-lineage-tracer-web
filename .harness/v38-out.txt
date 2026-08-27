@@ -1,0 +1,52 @@
+[harness] script: 46998 chars · v3.6: true
+[harness] token: s11-0797f957
+[harness] request-logs posted → {"jobs":["J40","J41","J42","J43","J44","J45","J46"],"revision":1,"requested_at":1787821643241}
+
+===== RESULTS =====
+jobs scanned: 7 [{"uid":"J41","n":2},{"uid":"J40","n":2},{"uid":"J42","n":2},{"uid":"J43","n":2},{"uid":"J44","n":2},{"uid":"J45","n":2},{"uid":"J46","n":2}]
+total log-image refs: 14 · image BYTES uploaded: 14
+old-round refs leaked: false · scanned OUTSIDE lineage: none
+session: jobsWithLogs = 7 · refs = 14 · uploaded ids = 0
+
+----- script console -----
+Extracting data for project: PE2E
+Extracted 46 jobs with full metadata
+[CryoSmart] Page job: J46 · lineage-scoped log capture: ON (46 jobs)
+[CryoSmart] Popup blocked. The live progress URL will be printed below — open it manually.
+[CryoSmart] Live progress page: http://localhost:3000/?imported=s11-0797f957&pid=PE2E
+[CryoSmart] Uploaded 46 jobs — the graph should be rendering in the new tab now.
+[CryoSmart] Waiting for Trace Lineage — log images are fetched only for the traced lineage.
+[CryoSmart]   escape hatches: __csCaptureAll() = every job · __csCaptureFinish() = stop now
+[CryoSmart] Trace Lineage requested 7 job(s) — fetching ONLY their log images (of 46 total).
+[CryoSmart] Logs already in memory for 0 job(s); 7 to load via the log API.
+[CryoSmart] Log loader candidates: getLogsByJob
+[CryoSmart] Loader "getLogsByJob" source (diagnostics):
+getLogsByJob(uid) {
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        jobLogs[uid] = [
+          { type: "text", text: "round 1 note", flags: [] },
+          { type: "image", text: "Selected 21 classes", imgfiles: [{ fileid: `${uid}_sel_r1`, filename: "sel_r1.png" }] },
+          { type: "image", text: "Excluded 179 classes", imgfiles: [{ fileid: `${uid}_exc_r1`, filename: "exc_r1.png" }] },
+          { type: "image", text: "Selected 21 classes", imgfiles: [{ fileid: `${uid}_sel_r2`, filename: "sel_r2.png" }] },
+          { type: "image", text: "Excluded 179 classes", imgfiles: [{ fileid: `${uid}_exc_r2`, filename: "exc_r2.png" }] }
+        ];
+        resolve(void 0);
+      }, 15);
+    });
+  }
+[CryoSmart] Calibrating on job(s): J41, J42, J43 (image-rich types first)
+[CryoSmart] Logs landed in state at "jobLogStore.jobLogs.J41" — deep-scan mode.
+[CryoSmart] Log loading works via store action "getLogsByJob" (diff) — scanning 7 job(s)...
+[CryoSmart] Image store accepted 0 of 6 image(s) in a batch (size cap or invalid data URL).
+[CryoSmart] Image store accepted 0 of 6 image(s) in a batch (size cap or invalid data URL).
+[CryoSmart] All lineage log images streamed — they are already visible in the web app tab (the graph and report refresh live as bytes arrive). Waiting up to 3 more minutes for a possible re-trace before completing…
+[CryoSmart] Image store accepted 0 of 2 image(s) in a batch (size cap or invalid data URL).
+[CryoSmart] Image bytes uploaded: 0 ok, 14 failed/skipped.
+[CryoSmart] ⚠ 14 log-image refs were captured but ZERO image bytes uploaded —
+   previews will be missing. The CryoSmart /api/log_image/ endpoint rejected every fetch
+   (expired session or removed files). Re-login to CryoSmart and re-run the script.
+[CryoSmart] Capture complete — lineage-scoped: 7 of 46 jobs scanned · 14 log image(s) · 0 with bytes · multi-round jobs keep only their latest round's log images. Live page: http://localhost:3000/?imported=s11-0797f957&pid=PE2E
+--------------------------
+
+✅ HARNESS PASS — v3.6 lineage capture works end-to-end

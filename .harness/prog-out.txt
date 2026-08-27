@@ -1,0 +1,7 @@
+[09:01:04] TOKEN=s10-05adddf2
+[09:01:05] jobs posted
+[09:01:22] logs batch 1 (J2: 2 refs) — browser should apply refs progressively NOW
+[09:01:28] bytes 1 (j2_fsc_r2 + vol_prev + tile_mic) — J2 log image + map preview must be LIVE in the app NOW (no /complete yet)
+[09:01:34] logs batch 2 (J3: 3 refs)
+[09:01:38] bytes 2 (J3 images) — J3 modal must show 2 log images NOW (still not complete)
+[09:01:49] complete posted — strip should switch to the final summary

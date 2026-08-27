@@ -102,9 +102,21 @@ globalThis.alert = (m) => clog("[alert]", m);
 globalThis.console = { log: clog, warn: clog, error: clog };
 globalThis.FileReader = class {
   readAsDataURL(blob) {
-    setTimeout(() => {
-      this.result = `data:image/png;base64,${blob.bytes.toString("base64")}`;
-      this.onload({ result: this.result });
+    setTimeout(async () => {
+      try {
+        // Bun's native Response.blob() returns a NATIVE Blob whose `bytes`
+        // is a METHOD (Promise<Uint8Array>) — stringifying it produced
+        // "data:...;base64,function bytes() {...}" and the server rightly
+        // rejected every batch. Handle both native and mock Blobs.
+        const buf =
+          typeof blob?.bytes === "function"
+            ? await blob.bytes()
+            : Buffer.from(blob?.bytes ?? blob);
+        this.result = `data:image/png;base64,${Buffer.from(buf).toString("base64")}`;
+        this.onload({ result: this.result });
+      } catch (e) {
+        if (this.onerror) this.onerror(e);
+      }
     });
   }
 };
@@ -186,12 +198,15 @@ function checkResults() {
     .then((d) => {
       const withLogs = Object.keys(d.data.job_log_images || {}).length;
       const refCount = Object.values(d.data.job_log_images || {}).reduce((n, a) => n + a.length, 0);
-      RC.log("session: jobsWithLogs =", withLogs, "· refs =", refCount, "· uploaded ids =", (d.data.uploaded_image_ids || []).length);
+      const uploadedIds = (d.data.uploaded_image_ids || []).length;
+      RC.log("session: jobsWithLogs =", withLogs, "· refs =", refCount, "· uploaded ids =", uploadedIds);
       RC.log("\n----- script console -----");
       for (const l of logBuffer) RC.log(l);
       RC.log("--------------------------");
-      const ok = refCount === 14 && bytesStored === 14 && !oldRoundLeaked && outside.length === 0;
-      RC.log(ok ? "\n✅ HARNESS PASS — v3.6 lineage capture works end-to-end" : "\n❌ HARNESS FAIL");
+      // v3.8: bytes must be STORED server-side too (not merely POSTED) —
+      // the graph/report render from the session image store.
+      const ok = refCount === 14 && uploadedIds === 14 && bytesStored === 14 && !oldRoundLeaked && outside.length === 0;
+      RC.log(ok ? "\n✅ HARNESS PASS — v3.8 lineage capture works end-to-end" : "\n❌ HARNESS FAIL");
       process.exit(ok ? 0 : 2);
     });
 }
