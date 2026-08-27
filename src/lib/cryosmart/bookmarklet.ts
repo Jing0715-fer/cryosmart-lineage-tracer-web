@@ -286,6 +286,14 @@ export function buildConsoleSnippet(appOrigin: string): string {
   }
 
   function findLogActions(store) {
+    // SAFETY: calibration actually CALLS these actions in the user's SPA.
+    // "login"/"logout" contain "log" and must NEVER be candidates (a real
+    // CryoSmart session was once destroyed this way); same for clear/reset
+    // actions (clearLogsByJob) and setters/creators. Read-only loaders only.
+    var AUTH_RE = /(login|logout|signin|sign_out|signout|sign_in|signup|register|auth|token|password|session|permission|role)/i;
+    var DESTRUCTIVE_RE = /(clear|reset|remove|delet|drop|purge|wipe|destroy|disconnect)/i;
+    var WRITE_PREFIX_RE = /^(set|create|update|add|new|init|connect|close|send|post|put|append|push|save|write)/i;
+    var READ_PREFIX_RE = /^(get|fetch|load|request|query|list|pull|read|show|open)/i;
     var found = [];
     var names = {};
     var obj = store;
@@ -297,15 +305,20 @@ export function buildConsoleSnippet(appOrigin: string): string {
       try { obj = Object.getPrototypeOf(obj); } catch (e) { break; }
     }
     for (var name in names) {
-      if (!/(log|detail)/i.test(name)) continue;
+      if (!/(log|detail)/i.test(name)) continue;   // must mention logs/details
+      if (AUTH_RE.test(name)) continue;            // login/logout/… — NEVER call
+      if (DESTRUCTIVE_RE.test(name)) continue;     // clearLogsByJob etc.
+      if (WRITE_PREFIX_RE.test(name)) continue;    // setLogs/updateLogs etc.
       try {
         if (typeof store[name] === 'function') found.push({ name: name, fn: store[name] });
       } catch (e) {}
     }
-    // Prefer actions with "log" in the name over generic "detail" loaders.
+    // Prefer explicit log fetchers (getLogsByJob) over generic detail loaders.
     found.sort(function(a, b) {
       var la = /log/i.test(a.name) ? 0 : 1, lb = /log/i.test(b.name) ? 0 : 1;
-      return la - lb;
+      if (la !== lb) return la - lb;
+      var ra = READ_PREFIX_RE.test(a.name) ? 0 : 1, rb = READ_PREFIX_RE.test(b.name) ? 0 : 1;
+      return ra - rb;
     });
     return found;
   }

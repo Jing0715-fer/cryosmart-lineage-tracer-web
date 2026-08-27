@@ -64,6 +64,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
+// CryoSmart Smart Capture v3.1 — safe log-action calibration (auth/destructive store actions excluded)
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -281,9 +282,25 @@ export function SmartCapturePanel({ onCapture }: Props) {
   }
 
   function findLogActions() {
+    // SAFETY: the calibration step below actually CALLS these actions inside
+    // the user's SPA, so the candidate list must be strictly read-only.
+    // "login"/"logout" both CONTAIN "log" and once destroyed a real
+    // CryoSmart session during calibration — hence the hard blocklists:
+    //   AUTH_RE        — never touch anything auth/session related
+    //   DESTRUCTIVE_RE — never call clear/reset/delete-style actions
+    //                    (e.g. clearLogsByJob wipes cached logs)
+    //   WRITE_PREFIX   — never call setters/creators/connectors
+    var AUTH_RE = /(login|logout|signin|sign_out|signout|sign_in|signup|register|auth|token|password|session|permission|role)/i;
+    var DESTRUCTIVE_RE = /(clear|reset|remove|delet|drop|purge|wipe|destroy|disconnect)/i;
+    var WRITE_PREFIX_RE = /^(set|create|update|add|new|init|connect|close|send|post|put|append|push|save|write)/i;
+    var READ_PREFIX_RE = /^(get|fetch|load|request|query|list|pull|read|show|open)/i;
     var found = [];
     for (var i = 0; i < stores.length; i++) {
       var store = stores[i];
+      // Skip stores that look like an auth/user/session store entirely.
+      var storeId = '';
+      try { storeId = String(store.$id || ''); } catch (e) {}
+      if (AUTH_RE.test(storeId)) continue;
       var names = {};
       var obj = store;
       for (var depth = 0; depth < 4 && obj; depth++) {
@@ -294,16 +311,21 @@ export function SmartCapturePanel({ onCapture }: Props) {
         try { obj = Object.getPrototypeOf(obj); } catch (e) { break; }
       }
       for (var name in names) {
-        if (!/(log|detail)/i.test(name)) continue;
+        if (!/(log|detail)/i.test(name)) continue;   // must mention logs/details
+        if (AUTH_RE.test(name)) continue;            // login/logout/… — NEVER call
+        if (DESTRUCTIVE_RE.test(name)) continue;     // clearLogsByJob etc.
+        if (WRITE_PREFIX_RE.test(name)) continue;    // setLogs/updateLogs etc.
         try {
           if (typeof store[name] === 'function') found.push({ store: store, name: name, fn: store[name] });
         } catch (e) {}
       }
     }
-    // Prefer actions with "log" in the name over generic "detail" loaders.
+    // Prefer explicit log fetchers (getLogsByJob) over generic detail loaders.
     found.sort(function(a, b) {
       var la = /log/i.test(a.name) ? 0 : 1, lb = /log/i.test(b.name) ? 0 : 1;
-      return la - lb;
+      if (la !== lb) return la - lb;
+      var ra = READ_PREFIX_RE.test(a.name) ? 0 : 1, rb = READ_PREFIX_RE.test(b.name) ? 0 : 1;
+      return ra - rb;
     });
     return found;
   }
