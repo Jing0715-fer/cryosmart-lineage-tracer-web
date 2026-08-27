@@ -88,6 +88,13 @@ function buildSessionFromPending(data: PendingData["data"]): CryoSmartSession | 
  * builder turns each ref into an ImageAsset. Handles both `{ jobs: [...] }`
  * and bare-array raw payloads. No-op when the capture didn't include log
  * images.
+ *
+ * Additionally, ANY other fileid-carrying field on the job
+ * (`output_group_images`, `ui_tile_images`, `image_logs[].imgfiles`)
+ * whose bytes were uploaded is rewritten to the same session-image URL —
+ * those fields flow into node.images / map previews / representative
+ * micrographs, and without the rewrite they'd stay direct intranet URLs
+ * that mixed-content-fail on the HTTPS preview.
  */
 function mergeLogImagesIntoRaw(
   raw: unknown,
@@ -123,18 +130,68 @@ function mergeLogImagesIntoRaw(
     }
     return ref;
   };
+  /** Rewrite a bare fileid string to its same-origin session-image URL. */
+  const refile = (v: unknown): unknown =>
+    typeof v === "string" && sessionBase && uploaded.has(v)
+      ? sessionBase + encodeURIComponent(v)
+      : v;
   const attach = (j: unknown): unknown => {
     const job = j as { uid?: string } | null;
+    if (!job || typeof job !== "object" || !job.uid) return j;
+    let out: Record<string, unknown> = { ...(job as Record<string, unknown>) };
     if (
-      job &&
-      typeof job === "object" &&
-      job.uid &&
       Array.isArray(jobLogImages[job.uid]) &&
       jobLogImages[job.uid].length > 0
     ) {
-      return { ...job, log_images: jobLogImages[job.uid].map(decorate) };
+      out.log_images = jobLogImages[job.uid].map(decorate);
     }
-    return j;
+    if (sessionBase) {
+      // output_group_images: { [groupName]: fileid } — feeds node.images
+      // (output_group kind) AND every map preview_url.
+      if (out.output_group_images && typeof out.output_group_images === "object") {
+        let changed = false;
+        const ogi: Record<string, unknown> = { ...(out.output_group_images as Record<string, unknown>) };
+        for (const [k, v] of Object.entries(ogi)) {
+          const rv = refile(v);
+          if (rv !== v) { ogi[k] = rv; changed = true; }
+        }
+        if (changed) out.output_group_images = ogi;
+      }
+      // ui_tile_images: [{ name, fileid, ... }] — feeds node.images
+      // (ui_tile kind) and representative micrographs.
+      if (Array.isArray(out.ui_tile_images)) {
+        let changed = false;
+        const tiles = (out.ui_tile_images as Array<Record<string, unknown>>).map((t) => {
+          if (t && typeof t === "object" && typeof t.fileid === "string" && uploaded.has(t.fileid)) {
+            changed = true;
+            return { ...t, fileid: sessionBase + encodeURIComponent(t.fileid) };
+          }
+          return t;
+        });
+        if (changed) out.ui_tile_images = tiles;
+      }
+      // image_logs: [{ type:'image', imgfiles:[{fileid, filename}] }] —
+      // cached logs embedded by the capture script before upload.
+      if (Array.isArray(out.image_logs)) {
+        let changed = false;
+        const logs = (out.image_logs as Array<Record<string, unknown>>).map((l) => {
+          if (l && typeof l === "object" && Array.isArray(l.imgfiles)) {
+            let fChanged = false;
+            const files = (l.imgfiles as Array<Record<string, unknown>>).map((f) => {
+              if (f && typeof f === "object" && typeof f.fileid === "string" && uploaded.has(f.fileid)) {
+                fChanged = true;
+                return { ...f, fileid: sessionBase + encodeURIComponent(f.fileid) };
+              }
+              return f;
+            });
+            if (fChanged) { changed = true; return { ...l, imgfiles: files }; }
+          }
+          return l;
+        });
+        if (changed) out.image_logs = logs;
+      }
+    }
+    return out;
   };
   if (Array.isArray(raw)) return raw.map(attach);
   if (

@@ -105,7 +105,12 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
 
   /** Total log-image refs across the loaded jobs — the staged capture
    * streams these in AFTER the first snapshot, so this count is the
-   * "data freshness" signal for the summary auto-refresh below. */
+   * "data freshness" signal for the summary auto-refresh below.
+   * withBytes additionally counts refs that carry a renderable src
+   * (same-origin session URL or inline data:) — refs land first and their
+   * BYTES follow asynchronously, so the summary must refresh on EITHER
+   * counter growing (a byte arriving after a trace changes nothing in the
+   * ref count but everything in what the modal/report can render). */
   const loadedLogImageCount = useMemo(
     () =>
       loadedJobs.reduce(
@@ -114,7 +119,21 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
       ),
     [loadedJobs]
   );
-  const dataVersion = loaded ? `${datasetKey}#${loadedLogImageCount}` : "";
+  const loadedLogImageWithBytes = useMemo(
+    () =>
+      loadedJobs.reduce(
+        (n, j) =>
+          n +
+          ((j as { log_images?: Array<{ src?: string; data?: string }> }).log_images || []).filter(
+            (r) => typeof r.src === "string" && r.src.length > 0
+          ).length,
+        0
+      ),
+    [loadedJobs]
+  );
+  const dataVersion = loaded
+    ? `${datasetKey}#${loadedLogImageCount}#${loadedLogImageWithBytes}`
+    : "";
   /** dataVersion the CURRENT summary was built from (set by handleTrace;
   * compared by the auto-refresh effect below). */
   const summaryBuiltFromRef = useRef("");
@@ -224,12 +243,12 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
       onSummary(next);
       setTraceLog((l) => [
         ...l,
-        `Log images finished arriving — refreshed lineage (${loadedLogImageCount} image refs attached).`,
+        `Log images finished arriving — refreshed lineage (${loadedLogImageCount} image refs, ${loadedLogImageWithBytes} with previews).`,
       ]);
     } catch {
       // keep the previous summary — the manual Trace button still works
     }
-  }, [loaded, summary, dataVersion, loadedJobs, loadedLogImageCount, effectiveProjectId, onSummary]);
+  }, [loaded, summary, dataVersion, loadedJobs, loadedLogImageCount, loadedLogImageWithBytes, effectiveProjectId, onSummary]);
 
   const importPct = importInfo?.progress
     ? Math.min(100, Math.round((importInfo.progress.done / Math.max(1, importInfo.progress.total)) * 100))

@@ -14,8 +14,8 @@ import {
  * it works from an HTTPS page (no mixed content) and needs no intranet
  * access from either the browser or the app server.
  *
- * 404s once the session expires (15-min TTL); consumers fall back to the
- * direct CryoSmart URL in that case.
+ * 404s once the session expires (45-min sliding TTL, refreshed by every
+ * read); consumers fall back to the direct CryoSmart URL in that case.
  */
 export async function GET(
   _req: NextRequest,

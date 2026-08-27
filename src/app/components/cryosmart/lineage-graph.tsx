@@ -93,13 +93,26 @@ interface Props {
   session?: CryoSmartSession | null;
 }
 
-/* ── Layout constants ─────────────────────────────────────────────────── */
-const NODE_W = 208;
+/* ── Layout constants ───────────────────────────────────────────────────
+ * The card GEOMETRY is mode-dependent: detail-mode cards are both wider and
+ * taller than compact cards so the inline preview grid (up to 4 images) has
+ * real room — hetero-refine montages and ab-initio class slices were
+ * previously squeezed into a 180×100 box (user: "hetero-refine的图太小了").
+ * The column gap (LAYER_X − NODE_W) stays ≥ 72px in BOTH modes, so the
+ * card-free routing corridors below hold at either width. */
+const NODE_W_COMPACT = 208;
+const NODE_W_DETAIL = 256;
 const NODE_H_COMPACT = 84;
-const NODE_H_DETAIL = 188;
-const LAYER_X = 280;
+const NODE_H_DETAIL = 260;
+const LAYER_X_COMPACT = 280; // gap 72
+const LAYER_X_DETAIL = 336;  // gap 80
 const LAYER_Y_COMPACT = 116;
-const LAYER_Y_DETAIL = 212;
+const LAYER_Y_DETAIL = 284;
+/** Detail-mode inline preview grid geometry (inside the card). */
+const THUMB_X = 10;
+const THUMB_Y = 74;
+const THUMB_GUTTER = 6;
+const THUMB_MAX_IMAGES = 4;
 const PAD = 28;
 const TOP_AXIS_H = 50;
 const TOP_LANE_H = 36; // "free lane" above cards for long-range orthogonal edges
@@ -399,49 +412,75 @@ function buildProxyFallback(
   return `/api/proxy-image/${fileid}?${params.toString()}`;
 }
 
-/** Pick the best preview image for a node (used by detail-mode thumbnail). */
-function pickPreviewImage(node: LineageNode): ImageAsset | null {
-  if (node.images && node.images.length > 0) return node.images[0];
-  if (node.representative_micrograph_images && node.representative_micrograph_images.length > 0) {
-    return node.representative_micrograph_images[0];
-  }
+/** Pick up to `max` preview images for a node (detail-mode inline grid).
+ *  Candidates are collected like the modal gallery (curated tiles first,
+ *  then log images), deduped by src, then partitioned so RENDERABLE images
+ *  (same-origin paths, session-image URLs, inline data:) come before direct
+ *  intranet URLs — the app is viewed over HTTPS where direct
+ *  `http://<cryosmart>` images are mixed-content blocked, so without this
+ *  ordering a card's 4-cell grid could fill with broken tiles while
+ *  perfectly-good session images wait behind them.
+ *  Showing SEVERAL images matters for classification jobs — an ab-initio
+ *  run produces one slice PER class and the old single-thumbnail card hid
+ *  every class but the first (user: "ab-initio只显示1类，不完整"). */
+function isRenderableSrc(src: string | null | undefined): boolean {
+  if (!src) return false;
+  return src.startsWith("data:") || src.startsWith("/");
+}
+
+function pickPreviewImages(node: LineageNode, max = THUMB_MAX_IMAGES): ImageAsset[] {
+  const all: ImageAsset[] = [];
+  const seen = new Set<string>();
+  const push = (img: ImageAsset | null | undefined) => {
+    if (!img || !img.src) return;
+    if (seen.has(img.src)) return;
+    seen.add(img.src);
+    all.push(img);
+  };
+  for (const im of node.images || []) push(im);
+  for (const im of node.representative_micrograph_images || []) push(im);
   if (node.select_2d?.selected_classes_src) {
-    return {
+    push({
       kind: "ui_tile",
       name: "selected_classes",
       url: node.select_2d.selected_classes_image || "",
       src: node.select_2d.selected_classes_src,
       original_url: node.select_2d.selected_classes_original_url || "",
-    };
+    });
   }
-  if (node.classes && node.classes.length > 0) {
-    const c = node.classes.find((x) => !!x.mrc_preview_src) || node.classes[0];
-    if (c?.mrc_preview_src) {
-      return {
+  for (const c of node.classes || []) {
+    if (c.mrc_preview_src) {
+      push({
         kind: "ui_tile",
         name: `class_${c.class_index}`,
         url: c.mrc_preview_url || "",
         src: c.mrc_preview_src,
         original_url: c.mrc_preview_original_url || "",
-      };
+      });
     }
   }
-  if (node.maps && node.maps.length > 0) {
-    const m = node.maps.find((x) => !!x.preview_src) || node.maps[0];
-    if (m?.preview_src) {
-      return {
+  for (const m of node.maps || []) {
+    if (m.preview_src) {
+      push({
         kind: "ui_tile",
         name: m.group,
         url: m.preview_url || "",
         src: m.preview_src,
         original_url: m.preview_original_url || "",
-      };
+      });
     }
   }
-  return null;
+  // Stable partition: renderable sources first (sort is stable, so the
+  // original curated order is preserved within each half).
+  const ranked = [...all].sort(
+    (a, b) => Number(isRenderableSrc(b.src)) - Number(isRenderableSrc(a.src)),
+  );
+  return ranked.slice(0, max);
 }
 
-/** Collect ALL preview images for a node (used by the modal gallery). */
+/** Collect ALL preview images for a node (used by the modal gallery).
+ *  Same renderable-first ranking as pickPreviewImages so the modal opens on
+ *  an image that can actually load instead of a mixed-content-blocked one. */
 function collectAllImages(node: LineageNode): ImageAsset[] {
   const out: ImageAsset[] = [];
   const seen = new Set<string>();
@@ -502,13 +541,20 @@ function collectAllImages(node: LineageNode): ImageAsset[] {
       });
     }
   }
-  return out;
+  // Stable partition: renderable sources first (same rationale as
+  // pickPreviewImages — the gallery's first image is what the modal opens
+  // on, so it should be one that loads).
+  return [...out].sort(
+    (a, b) => Number(isRenderableSrc(b.src)) - Number(isRenderableSrc(a.src)),
+  );
 }
 
 /* ── Edge routing: n8n-style smooth curves that NEVER cross a card. ── */
 
-/** Width of the free vertical corridor between adjacent columns. */
-const GAP_W = LAYER_X - NODE_W; // 72px — no card ever lives inside a gap
+/** Width of the free vertical corridor between adjacent columns (the
+ *  compact-mode gap — the WORST case; detail mode's 80px gap only adds
+ *  room, so every routing constant derived from this stays safe). */
+const GAP_W = LAYER_X_COMPACT - NODE_W_COMPACT; // 72px — no card ever lives inside a gap
 
 /** How far into a column gap the lane-route's vertical runs live.
  *  Split so the gap's 72px width gives the vertical run ~48px and leaves
@@ -529,8 +575,8 @@ interface EdgePath {
  *  Single source of truth — the node layout AND the per-row axis labels must
  *  agree on it, or the headers drift off their cards (the label formula
  *  previously missed the gutter and sat 56px left of its column). */
-function wrapColX(wrapCol: number): number {
-  return PAD + WRAP_LEFT_GUTTER + wrapCol * LAYER_X;
+function wrapColX(wrapCol: number, layerX: number): number {
+  return PAD + WRAP_LEFT_GUTTER + wrapCol * layerX;
 }
 
 /**
@@ -574,6 +620,15 @@ function routeEdgeGap(
  *   3. Round out of the lane into a vertical run inside the target's
  *      left column gap, then round into the target's left port.
  *
+ * `stag1` / `stag2` shift the two vertical runs sideways WITHIN their
+ * column gaps. Without them every long-range edge whose source sits in
+ * the same column would drop at the SAME x (x1 + LANE_SHOULDER_W) — their
+ * vertical segments overprinted into the single muddy "thick line" the
+ * user reported. Staggering by the source/target ROW spreads each column's
+ * vertical runs across 5 distinct corridors 6px apart, so crossings stay
+ * legible instead of stacking. The clamps keep each run inside its gap
+ * ([x1+34, x1+58] / [x2-58, x2-34]) — card-free at every y in both modes.
+ *
  * Corner radii are as large as the geometry allows (up to
  * LANE_CORNER_MAX, scaled down when the vertical detour or the lane run
  * is short), and each corner is a cubic bezier approximating a quarter
@@ -594,6 +649,8 @@ function routeEdgeLane(
   x1: number, y1: number,  // source right port
   x2: number, y2: number,  // target left port
   laneY: number,           // free-lane y (above or below the ports' rows)
+  stag1 = 0,               // sideways stagger of the source-side vertical run
+  stag2 = 0,               // sideways stagger of the target-side vertical run
 ): EdgePath {
   const s1 = laneY >= y1 ? 1 : -1;   // vertical direction source → lane
   const s2 = y2 >= laneY ? 1 : -1;   // vertical direction lane → target
@@ -607,7 +664,7 @@ function routeEdgeLane(
   // canvas with full room for the r=24 corners). The clamps below are
   // defensive only — they keep the run inside the canvas (≥6) and ≥12px
   // before the target port in case a future layout squeezes the gap again.
-  const gx1 = x1 + LANE_SHOULDER_W;
+  const gx1 = Math.min(Math.max(x1 + LANE_SHOULDER_W + stag1, x1 + 34), x1 + GAP_W - 14);
   // NOTE: an earlier version floored gx2 with max(gx2Raw, min(gx1+4, x2-12))
   // — that floor ONLY ever bound for backward (wrap-col-0) targets, where it
   // pushed the descent to x2-12 and collapsed the corner radii to ~2px (the
@@ -615,7 +672,7 @@ function routeEdgeLane(
   // vertical run centered in the target's left gap/gutter with full room for
   // the r=24 quarter-ellipse corners; short lanes already degenerate safely
   // via the laneRoom shrink below.
-  const gx2 = Math.min(Math.max(x2 - LANE_SHOULDER_W, 6), x2 - 12);
+  const gx2 = Math.min(Math.max(x2 - LANE_SHOULDER_W - stag2, 6), x2 - 12);
   // Lane direction: normally left→right, but a wrap-col-0 target sits
   // LEFT of the source, so the lane run goes right→left along the
   // card-free band (never under a card).
@@ -624,11 +681,13 @@ function routeEdgeLane(
   // Corner radii — as large as the room allows (n8n smoothstep style).
   //  A: port stub → source vertical run      B: source vertical → lane
   //  C: lane → target vertical run           D: target vertical → port
+  //  A and D are bounded by the ACTUAL stub length (gx1−x1 / x2−gx2), which
+  //  the stagger can shorten below the nominal shoulder width.
   const lead = 10;
-  let rA = Math.min(LANE_CORNER_MAX, dy1 * 0.45, LANE_SHOULDER_W - lead);
+  let rA = Math.min(LANE_CORNER_MAX, dy1 * 0.45, gx1 - x1 - lead);
   let rB = Math.min(LANE_CORNER_MAX, dy1 * 0.45, GAP_W - LANE_SHOULDER_W);
   let rC = Math.min(LANE_CORNER_MAX, dy2 * 0.45, GAP_W - LANE_SHOULDER_W);
-  let rD = Math.min(LANE_CORNER_MAX, dy2 * 0.45, LANE_SHOULDER_W - lead);
+  let rD = Math.min(LANE_CORNER_MAX, dy2 * 0.45, x2 - gx2 - lead);
   // Lane-side corners of a wrap-col-0 target extend toward the port —
   // clamp them so they stay clear of the target card's left edge.
   const portRoom = x2 - gx2 - lead;
@@ -703,7 +762,11 @@ export function LineageGraph({ summary, session }: Props) {
   const targetColor    = "#dc2626"; // red-600 — TARGET / trace destination
 
   const [detailMode, setDetailMode] = useState(false);
+  // Mode-dependent geometry (see the constants block above). Everything
+  // downstream — card bodies, ports, lanes, wrap columns — reads THESE.
+  const NODE_W = detailMode ? NODE_W_DETAIL : NODE_W_COMPACT;
   const NODE_H = detailMode ? NODE_H_DETAIL : NODE_H_COMPACT;
+  const LAYER_X = detailMode ? LAYER_X_DETAIL : LAYER_X_COMPACT;
   const LAYER_Y = detailMode ? LAYER_Y_DETAIL : LAYER_Y_COMPACT;
 
   const svgRef = useRef<SVGSVGElement>(null);
@@ -733,7 +796,7 @@ export function LineageGraph({ summary, session }: Props) {
   }, [hoveredEdge]);
 
   /* Layout: longest-path depth columns, oldest upstream LEFT, TARGET RIGHT. */
-  const { nodes, edges, layout, bounds, columns, depthMap, leafSet, wrapRowBounds, edgeLanes } = useMemo(() => {
+  const { nodes, edges, layout, bounds, columns, depthMap, leafSet, wrapRowBounds, edgeLanes, portDy } = useMemo(() => {
     const nodes = summary.nodes || [];
     const edges = summary.edges || [];
     const depthMap = computeLongestPathDepths(edges, summary.start_uid);
@@ -837,7 +900,7 @@ export function LineageGraph({ summary, session }: Props) {
         layout.set(n.uid, {
           x:
             layoutMode === "wrap"
-              ? wrapColX(cw.wrapCol)
+              ? wrapColX(cw.wrapCol, LAYER_X)
               : PAD + c.columnIndex * LAYER_X,
           y: startY + i * LAYER_Y,
           columnIndex: c.columnIndex,
@@ -875,6 +938,48 @@ export function LineageGraph({ summary, session }: Props) {
         ? topOffset + numWrapRows * tallestColHeight + (numWrapRows - 1) * WRAP_ROW_GAP + NODE_H + PAD
         : topOffset + tallestColHeight + NODE_H + PAD;
 
+    /* ── Port fan-out ───────────────────────────────────────────────────
+     * Every edge used to enter/leave a card at the SAME point (the side's
+     * vertical center). A hub node with k connections drew k curves all
+     * converging onto one point — and parallel edges (same source→target,
+     * different data kinds) overprinted EXACTLY, reading as one muddy
+     * "thick line" (user: "有一些线很粗"). n8n-style port slots: each
+     * node's k connections get their own port spread ±26px around the
+     * center, so curves fan out and parallel edges stay visually distinct. */
+    const portDy = new Map<number, { dy1: number; dy2: number }>();
+    {
+      const outLists = new Map<string, number[]>();
+      const inLists = new Map<string, number[]>();
+      edges.forEach((e, i) => {
+        if (!e.source || !e.target) return;
+        if (!outLists.has(e.source)) outLists.set(e.source, []);
+        outLists.get(e.source)!.push(i);
+        if (!inLists.has(e.target)) inLists.set(e.target, []);
+        inLists.get(e.target)!.push(i);
+      });
+      const spread = (k: number): number[] => {
+        if (k <= 1) return [0];
+        const maxHalf = 26;
+        const step = Math.min(14, (maxHalf * 2) / (k - 1));
+        const half = (step * (k - 1)) / 2;
+        return Array.from({ length: k }, (_, j) => -half + j * step);
+      };
+      for (const list of outLists.values()) {
+        const dys = spread(list.length);
+        list.forEach((edgeIdx, j) => {
+          const cur = portDy.get(edgeIdx) || { dy1: 0, dy2: 0 };
+          portDy.set(edgeIdx, { ...cur, dy1: dys[j] });
+        });
+      }
+      for (const list of inLists.values()) {
+        const dys = spread(list.length);
+        list.forEach((edgeIdx, j) => {
+          const cur = portDy.get(edgeIdx) || { dy1: 0, dy2: 0 };
+          portDy.set(edgeIdx, { ...cur, dy2: dys[j] });
+        });
+      }
+    }
+
     /* ── Lane assignment for long-range edges ─────────────────────────
      * Long-range edges (multi-column in compact mode; cross-row or
      * multi-column within a wrap row) route through free "lanes" (see
@@ -900,35 +1005,36 @@ export function LineageGraph({ summary, session }: Props) {
       const topLanes: LaneCandidate[] = [];
       const bottomLanes: LaneCandidate[] = [];
       const wrapBands = new Map<number, LaneCandidate[]>();
-      for (const e of edges) {
-        if (!e.source || !e.target) continue;
+      edges.forEach((e, i) => {
+        if (!e.source || !e.target) return;
         const from = layout.get(e.source);
         const to = layout.get(e.target);
-        if (!from || !to) continue;
+        if (!from || !to) return;
+        const pd = portDy.get(i) || { dy1: 0, dy2: 0 };
         const cand: LaneCandidate = {
           key: `${e.source}\u2192${e.target}`,
           sc: from.columnIndex, srow: from.row, tc: to.columnIndex,
-          y1: from.y + NODE_H / 2, y2: to.y + NODE_H / 2,
+          y1: from.y + NODE_H / 2 + pd.dy1, y2: to.y + NODE_H / 2 + pd.dy2,
         };
         if (layoutMode === "wrap") {
           const fw = from.wrapRow ?? 0;
           const tw = to.wrapRow ?? 0;
           if (fw === tw) {
             const wcd = (to.wrapCol ?? 0) - (from.wrapCol ?? 0);
-            if (wcd <= 1) continue; // adjacent (or backward, not drawn) — S-curve
+            if (wcd <= 1) return; // adjacent (or backward, not drawn) — S-curve
           }
           if (!wrapBands.has(fw)) wrapBands.set(fw, []);
           wrapBands.get(fw)!.push(cand);
         } else {
           const d = to.columnIndex - from.columnIndex;
-          if (d <= 1) continue; // adjacent / defensive — S-curve
+          if (d <= 1) return; // adjacent / defensive — S-curve
           if ((cand.y1 + cand.y2) / 2 < topOffset + tallestColHeight / 2) {
             topLanes.push(cand);
           } else {
             bottomLanes.push(cand);
           }
         }
-      }
+      });
       // Distribute lanes evenly inside a [yTop, yBottom] band, sorted so
       // leftmost sources get the outermost (highest/lowest) lane.
       const assign = (list: LaneCandidate[], yTop: number, yBottom: number) => {
@@ -956,7 +1062,7 @@ export function LineageGraph({ summary, session }: Props) {
 
     return {
       nodes, edges, layout, bounds: { w: totalWidth, h: totalHeight },
-      columns: cols, depthMap, leafSet, wrapRowBounds, edgeLanes,
+      columns: cols, depthMap, leafSet, wrapRowBounds, edgeLanes, portDy,
     };
   }, [summary, detailMode, layoutMode]);
 
@@ -975,15 +1081,16 @@ export function LineageGraph({ summary, session }: Props) {
     return m;
   }, [nodes]);
 
-  /** Map of nodeUid → first-preview-image base64 data URL (detail-mode). */
-  const [embeddedThumbs, setEmbeddedThumbs] = useState<Record<string, string>>({});
+  /** Map of nodeUid → up-to-4 preview-image base64 data URLs (detail-mode
+   *  inline grid). Pre-fetched so the cards render self-contained. */
+  const [embeddedThumbs, setEmbeddedThumbs] = useState<Record<string, string[]>>({});
   useEffect(() => {
     if (!session || !detailMode) {
       setEmbeddedThumbs({});
       return;
     }
     let cancelled = false;
-    const thumbs: Record<string, string> = {};
+    const thumbs: Record<string, string[]> = {};
     // Capture the narrowed (non-null) session — the early-return guard above
     // narrows `session`, but that narrowing doesn't survive into the worker
     // closure below.
@@ -991,25 +1098,29 @@ export function LineageGraph({ summary, session }: Props) {
     (async () => {
       // Dynamic import to keep the lib out of the server bundle.
       const { imageToBase64 } = await import("@/lib/cryosmart/image-embed");
-      const tasks: Promise<void>[] = [];
-      const CONCURRENCY = 4;
+      // Flat task list: one entry per (node, image) pair.
+      const tasks: Array<{ uid: string; src: string }> = [];
+      for (const n of nodes) {
+        for (const img of pickPreviewImages(n)) {
+          if (img.src) tasks.push({ uid: n.uid, src: img.src });
+        }
+      }
+      const CONCURRENCY = 6;
       let cursor = 0;
       async function worker() {
-        while (cursor < nodes.length) {
-          const idx = cursor++;
-          const n = nodes[idx];
-          const img = pickPreviewImage(n);
-          if (!img) continue;
+        while (cursor < tasks.length) {
+          const task = tasks[cursor++];
           try {
-            const b64 = await imageToBase64(sess, img.src);
-            if (!cancelled && b64) thumbs[n.uid] = b64;
+            const b64 = await imageToBase64(sess, task.src);
+            if (!cancelled && b64) {
+              (thumbs[task.uid] ||= []).push(b64);
+            }
           } catch {
             // ignore — fallback to remote URL in render
           }
         }
       }
-      for (let i = 0; i < CONCURRENCY; i++) tasks.push(worker());
-      await Promise.all(tasks);
+      await Promise.all(Array.from({ length: CONCURRENCY }, worker));
       if (!cancelled && Object.keys(thumbs).length > 0) setEmbeddedThumbs(thumbs);
     })();
     return () => { cancelled = true; };
@@ -1397,7 +1508,7 @@ export function LineageGraph({ summary, session }: Props) {
             const cw = col as typeof columns[number] & { wrapRow?: number; wrapCol?: number };
             const cx =
               layoutMode === "wrap"
-                ? wrapColX(cw.wrapCol ?? 0) + NODE_W / 2
+                ? wrapColX(cw.wrapCol ?? 0, LAYER_X) + NODE_W / 2
                 : PAD + col.columnIndex * LAYER_X + NODE_W / 2;
             const cy =
               layoutMode === "wrap" && cw.wrapRow != null && wrapRowBounds[cw.wrapRow]
@@ -1435,15 +1546,21 @@ export function LineageGraph({ summary, session }: Props) {
               columns use an in-gap S-curve; long-range edges use a
               staggered free-lane route (see routeEdgeGap/routeEdgeLane).
               Edges are still drawn before nodes, but no edge ever passes
-              under a card, so nothing is ever visually clipped. */}
+              under a card, so nothing is ever visually clipped.
+              Port fan-out (portDy) + corridor stagger below keep parallel
+              and hub-converging edges from overprinting into "thick"
+              muddy lines. */}
           {edges.map((e, i) => {
             const from = layout.get(e.source);
             const to = layout.get(e.target);
             if (!from || !to) return null;
+            // Port fan-out: each connection gets its own slot on the card
+            // side, spread ±26px around the center (n8n-style handles).
+            const pd = portDy.get(i) || { dy1: 0, dy2: 0 };
             const x1 = from.x + NODE_W;
-            const y1 = from.y + NODE_H / 2;
+            const y1 = from.y + NODE_H / 2 + pd.dy1;
             const x2 = to.x;
-            const y2 = to.y + NODE_H / 2;
+            const y2 = to.y + NODE_H / 2 + pd.dy2;
             const deltaCols = to.columnIndex - from.columnIndex;
             // Skip edges that would go backward (shouldn't happen with
             // longest-path depths, but defensive — keeps the graph clean).
@@ -1478,8 +1595,13 @@ export function LineageGraph({ summary, session }: Props) {
             // in the layout pass) → smooth lane route; adjacent columns
             // (and defensive same-column bows) → in-gap S-curve.
             const laneY = edgeLanes.get(edgeKey);
+            // Corridor stagger: shift each vertical run sideways inside its
+            // column gap by the source/target ROW so same-column runs don't
+            // overprint (see routeEdgeLane docs).
+            const stag1 = ((from.row % 5) - 2) * 6;
+            const stag2 = ((to.row % 5) - 2) * 6;
             const d = (laneY != null
-              ? routeEdgeLane(x1, y1, x2, y2, laneY)
+              ? routeEdgeLane(x1, y1, x2, y2, laneY, stag1, stag2)
               : routeEdgeGap(x1, y1, x2, y2)
             ).d;
             return (
@@ -1488,6 +1610,21 @@ export function LineageGraph({ summary, session }: Props) {
               // paths, legitimately). Suffix the index so React keys stay
               // unique while still being stable across re-renders.
               <g key={`${edgeKey}#${i}`}>
+                {/* Highlight casing — a background-colored halo under the
+                    colored path so a highlighted edge visually separates
+                    from the pack instead of blending into neighbours. */}
+                {isHi && (
+                  <path
+                    d={d}
+                    fill="none"
+                    stroke={bgColor}
+                    strokeWidth={strokeWidth + 4}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                    opacity={0.85}
+                    pointerEvents="none"
+                  />
+                )}
                 {/* Visible colored path — no pointer events so the wide
                     hit area below is the only thing the user interacts
                     with (avoids 1.6px stroke being nearly impossible
@@ -1557,13 +1694,16 @@ export function LineageGraph({ summary, session }: Props) {
                   ? `${node.uid}, ${node.job_type}, ${formatMetrics(node)}, disconnected`
                   : `${node.uid}, ${node.job_type}, ${formatMetrics(node)}, ${depth} hop${depth === 1 ? "" : "s"} to target`;
 
-            const previewImg = detailMode ? pickPreviewImage(node) : null;
-            const embeddedB64 = previewImg ? embeddedThumbs[node.uid] : undefined;
-            const imgSrc = embeddedB64 || withSession(previewImg?.src || previewImg?.original_url, session);
-            // Proxy fallback for when the browser can't reach CryoSmart directly.
-            const imgProxyFallback = !embeddedB64
-              ? buildProxyFallback(previewImg?.src || previewImg?.original_url, session)
-              : null;
+            // Detail-mode inline preview: up to THUMB_MAX_IMAGES images in a
+            // 1-wide (single image) or 2×2 grid — classification jobs show
+            // ALL their classes at a glance instead of just the first.
+            const previewImgs = detailMode ? pickPreviewImages(node) : [];
+            const embeddedList = previewImgs.length ? embeddedThumbs[node.uid] : undefined;
+            const thumbW = NODE_W - THUMB_X * 2;
+            const thumbH = NODE_H - THUMB_Y - 10;
+            const cellW = (thumbW - THUMB_GUTTER) / 2;
+            const cellH = (thumbH - THUMB_GUTTER) / 2;
+            const extraCount = Math.max(0, collectAllImages(node).length - previewImgs.length);
 
             return (
               <g
@@ -1760,48 +1900,122 @@ export function LineageGraph({ summary, session }: Props) {
                   </text>
                 </g>
 
-                {/* Inline preview thumbnail (detail mode only). */}
-                {detailMode && previewImg && imgSrc && (
-                  <image
-                    href={imgSrc}
-                    x={14}
-                    y={78}
-                    width={NODE_W - 28}
-                    height={NODE_H - 88}
-                    preserveAspectRatio="xMidYMid meet"
-                    // referrerpolicy is honored on SVG <image> by Chromium
-                    // (and mirrors the report's <meta name="referrer">), but
-                    // React's SVGProps doesn't model it — cast to keep tsc
-                    // happy while preserving the runtime attribute.
-                    {...({ referrerPolicy: "no-referrer" } as React.SVGProps<SVGImageElement>)}
-                    onError={
-                      imgProxyFallback
-                        ? (e) => {
-                            const t = e.currentTarget;
-                            if (t.getAttribute("data-tried")) return;
-                            t.setAttribute("data-tried", "1");
-                            t.setAttribute("href", imgProxyFallback);
+                {/* Inline preview grid (detail mode only).
+                    - 1 image  → single large preview (full card width × the
+                      taller detail-card body — square class slices render at
+                      ~176px instead of the old 100px).
+                    - 2+ images → 2×2 grid of cells so ab-initio / hetero-refine
+                      show every class at a glance; a "+N" chip on the last
+                      cell points at the full gallery in the detail modal. */}
+                {detailMode && previewImgs.length === 1 && (() => {
+                  const img = previewImgs[0];
+                  const b64 = embeddedList?.[0];
+                  const src = b64 || withSession(img.src || img.original_url, session);
+                  const fallback = !b64
+                    ? buildProxyFallback(img.src || img.original_url, session)
+                    : null;
+                  return src ? (
+                    <image
+                      href={src}
+                      x={THUMB_X}
+                      y={THUMB_Y}
+                      width={thumbW}
+                      height={thumbH}
+                      preserveAspectRatio="xMidYMid meet"
+                      // referrerpolicy is honored on SVG <image> by Chromium
+                      // (and mirrors the report's <meta name="referrer">), but
+                      // React's SVGProps doesn't model it — cast to keep tsc
+                      // happy while preserving the runtime attribute.
+                      {...({ referrerPolicy: "no-referrer" } as React.SVGProps<SVGImageElement>)}
+                      onError={
+                        fallback
+                          ? (e) => {
+                              const t = e.currentTarget;
+                              if (t.getAttribute("data-tried")) return;
+                              t.setAttribute("data-tried", "1");
+                              t.setAttribute("href", fallback);
+                            }
+                          : undefined
+                      }
+                    />
+                  ) : (
+                    <rect
+                      x={THUMB_X} y={THUMB_Y}
+                      width={thumbW} height={thumbH}
+                      rx={4}
+                      fill={isDark ? "#1e293b" : "#f1f5f9"}
+                      stroke={borderColor}
+                    />
+                  );
+                })()}
+                {detailMode && previewImgs.length >= 2 && previewImgs.map((img, k) => {
+                  const col = k % 2;
+                  const row = Math.floor(k / 2);
+                  const cx = THUMB_X + col * (cellW + THUMB_GUTTER);
+                  const cy = THUMB_Y + row * (cellH + THUMB_GUTTER);
+                  const b64 = embeddedList?.[k];
+                  const src = b64 || withSession(img.src || img.original_url, session);
+                  const fallback = !b64
+                    ? buildProxyFallback(img.src || img.original_url, session)
+                    : null;
+                  const isLast = k === previewImgs.length - 1;
+                  return (
+                    <g key={`${img.src}-${k}`}>
+                      {/* Cell frame — keeps an empty slot visible when the
+                          image is still loading or failed to load. */}
+                      <rect
+                        x={cx} y={cy}
+                        width={cellW} height={cellH}
+                        rx={4}
+                        fill={isDark ? "#1e293b" : "#f1f5f9"}
+                        stroke={borderColor}
+                      />
+                      {src && (
+                        <image
+                          href={src}
+                          x={cx + 1} y={cy + 1}
+                          width={cellW - 2} height={cellH - 2}
+                          preserveAspectRatio="xMidYMid meet"
+                          {...({ referrerPolicy: "no-referrer" } as React.SVGProps<SVGImageElement>)}
+                          onError={
+                            fallback
+                              ? (e) => {
+                                  const t = e.currentTarget;
+                                  if (t.getAttribute("data-tried")) return;
+                                  t.setAttribute("data-tried", "1");
+                                  t.setAttribute("href", fallback);
+                                }
+                              : undefined
                           }
-                        : undefined
-                    }
-                  />
-                )}
-                {detailMode && previewImg && !imgSrc && (
-                  <rect
-                    x={14} y={78}
-                    width={NODE_W - 28} height={NODE_H - 88}
-                    rx={4}
-                    fill={isDark ? "#1e293b" : "#f1f5f9"}
-                    stroke={borderColor}
-                  />
-                )}
-                {detailMode && !previewImg && (
-                  <g transform={`translate(${NODE_W / 2 - 40}, 86)`}>
-                    <rect width={80} height={NODE_H - 96} rx={4}
+                        />
+                      )}
+                      {/* "+N more" chip on the last cell when the job has
+                          more images than the grid shows. */}
+                      {isLast && extraCount > 0 && (
+                        <g transform={`translate(${cx + cellW - 40}, ${cy + cellH - 16})`}>
+                          <rect width={36} height={14} rx={7} fill={color} opacity={0.92} />
+                          <text
+                            x={18} y={10.5}
+                            textAnchor="middle"
+                            fontSize={9}
+                            fontWeight={700}
+                            fill="#ffffff"
+                            style={{ fontFamily: "var(--font-geist-mono, monospace)" }}
+                          >
+                            +{extraCount}
+                          </text>
+                        </g>
+                      )}
+                    </g>
+                  );
+                })}
+                {detailMode && previewImgs.length === 0 && (
+                  <g transform={`translate(${THUMB_X}, ${THUMB_Y})`}>
+                    <rect width={thumbW} height={thumbH} rx={4}
                       fill={isDark ? "#1e293b" : "#f1f5f9"}
                       stroke={borderColor} />
                     <text
-                      x={40} y={(NODE_H - 96) / 2 + 4}
+                      x={thumbW / 2} y={thumbH / 2 + 4}
                       textAnchor="middle"
                       fontSize={9}
                       fill={mutedColor}
@@ -2037,6 +2251,12 @@ function NodeDetailModal({
   const allImages = useMemo(() => collectAllImages(node), [node]);
   const [embeddedGallery, setEmbeddedGallery] = useState<Record<string, string>>({});
   const [activeIdx, setActiveIdx] = useState(0);
+  /* Image srcs that failed EVERY load strategy (direct + proxy fallback).
+   * Used to swap the broken-image icon for a calm "not captured" tile —
+   * e.g. log images whose bytes never reached the session store, or a
+   * session whose TTL expired. */
+  const [failedSrcs, setFailedSrcs] = useState<Record<string, true>>({});
+  useEffect(() => { setFailedSrcs({}); setActiveIdx(0); }, [node.uid]);
 
   /* Pre-fetch all gallery images as base64 when a session is available,
    * so they render self-contained (no remote/referrer/CORS issues). */
@@ -2203,7 +2423,7 @@ function NodeDetailModal({
                         maxHeight: 360,
                       }}
                     >
-                      {activeSrc ? (
+                      {activeSrc && !failedSrcs[activeImage?.src || ""] ? (
                         <img
                           src={activeSrc}
                           alt={activeImage?.name || "preview"}
@@ -2211,17 +2431,31 @@ function NodeDetailModal({
                           loading="lazy"
                           decoding="async"
                           onError={
-                            activeFallback
-                              ? (e) => {
-                                  const t = e.currentTarget;
-                                  if (t.dataset.tried) return;
-                                  t.dataset.tried = "1";
-                                  t.src = activeFallback;
-                                }
-                              : undefined
+                            (e) => {
+                              const t = e.currentTarget;
+                              const key = activeImage?.src || activeSrc;
+                              if (t.dataset.tried) {
+                                setFailedSrcs((prev) => ({ ...prev, [key]: true }));
+                                return;
+                              }
+                              t.dataset.tried = "1";
+                              if (activeFallback) t.src = activeFallback;
+                              else setFailedSrcs((prev) => ({ ...prev, [key]: true }));
+                            }
                           }
                           style={{ maxWidth: "100%", maxHeight: 340, objectFit: "contain" }}
                         />
+                      ) : activeSrc ? (
+                        <div className="flex flex-col items-center gap-1 px-6 text-center">
+                          <ImageIcon className="h-5 w-5 opacity-40" style={{ color: mutedColor }} />
+                          <div className="text-[11px]" style={{ color: mutedColor }}>
+                            Image unavailable — its bytes were not captured by the
+                            Smart Capture script (or the session expired).
+                          </div>
+                          <div className="text-[10px] font-mono" style={{ color: mutedColor }}>
+                            {activeImage?.name}
+                          </div>
+                        </div>
                       ) : (
                         <div className="text-[11px]" style={{ color: mutedColor }}>
                           image unavailable
@@ -2249,24 +2483,29 @@ function NodeDetailModal({
                               }}
                               aria-label={`Show image ${idx + 1}: ${img.name}`}
                             >
-                              {src ? (
+                              {src && !failedSrcs[img.src] ? (
                                 <img
                                   src={src}
                                   alt={img.name}
                                   referrerPolicy="no-referrer"
                                   loading="lazy"
                                   onError={
-                                    fallback
-                                      ? (e) => {
-                                          const t = e.currentTarget;
-                                          if (t.dataset.tried) return;
-                                          t.dataset.tried = "1";
-                                          t.src = fallback;
-                                        }
-                                      : undefined
+                                    (e) => {
+                                      const t = e.currentTarget;
+                                      if (t.dataset.tried) {
+                                        setFailedSrcs((prev) => ({ ...prev, [img.src]: true }));
+                                        return;
+                                      }
+                                      t.dataset.tried = "1";
+                                      if (fallback) t.src = fallback;
+                                      else setFailedSrcs((prev) => ({ ...prev, [img.src]: true }));
+                                    }
                                   }
                                   style={{ width: "100%", height: "100%", objectFit: "cover" }}
                                 />
+                              ) : src ? (
+                                <div className="flex h-full w-full items-center justify-center text-[8px]"
+                                  style={{ color: mutedColor }} title="bytes not captured">✕</div>
                               ) : (
                                 <div className="flex h-full w-full items-center justify-center text-[8px]"
                                   style={{ color: mutedColor }}>—</div>

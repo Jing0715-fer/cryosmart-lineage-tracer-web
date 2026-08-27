@@ -77,12 +77,17 @@ export async function GET(
   if (auth) headers["Authorization"] = auth;
 
   try {
+    // 10s abort timeout — when this server can't route to the user's
+    // intranet CryoSmart, the connect attempt otherwise hangs the <img>
+    // onerror chain for minutes (user-visible as "images take forever").
+    // Failing fast lets the report/modal swap in their placeholders.
     const upstream = await fetch(targetUrl, {
       method: "GET",
       headers,
       redirect: "follow",
       credentials: "omit",
       cache: "no-store",
+      signal: AbortSignal.timeout(10_000),
     });
 
     const contentType =

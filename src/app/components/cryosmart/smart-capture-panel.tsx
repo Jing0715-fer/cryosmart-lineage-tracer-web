@@ -64,10 +64,13 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.3 — uploads log-image BYTES (the script runs
+// CryoSmart Smart Capture v3.4 — uploads log-image BYTES (the script runs
 // same-origin with CryoSmart, so it is the only party that can fetch them;
 // the web app is usually viewed over HTTPS where direct http://<cryosmart>
-// images are mixed-content blocked). Also: deep-scan log calibration that
+// images are mixed-content blocked). v3.4: 6 concurrent byte workers + a
+// 240s drain budget so large captures (900+ images) upload COMPLETELY
+// before /complete (v3.3's 3 workers/90s left most bytes unsent, which
+// showed up as broken report images). Also: deep-scan log calibration that
 // finds logs in ANY store state shape (incl. WebSocket-delivered logs).
 (async function() {
   var APP = '${webAppUrl}';
@@ -496,7 +499,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
     });
   }
 
-  // ── Image-BYTE upload (v3.3) ─────────────────────────────────────
+  // ── Image-BYTE upload (v3.3; v3.4 raises workers + budget) ───
   // The web app is typically opened over HTTPS; direct
   // http://<cryosmart>/api/log_image/<fileid> <img> loads are then
   // mixed-content blocked, and the app's server cannot reach this
@@ -505,6 +508,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // serves them same-origin and they render everywhere (graph job detail,
   // HTML report, downloads).
   var IMG_MAX_BYTES = 4 * 1024 * 1024;      // skip images larger than ~4MB
+  var IMG_WORKERS = 6;                        // concurrent byte fetchers (v3.4)
   var imgQueue = [];                          // pending refs
   var imgBatch = [];                          // fetched, awaiting POST
   var imgWorkers = 0;
@@ -562,7 +566,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
       if (!imgs) continue;
       for (var k = 0; k < imgs.length; k++) imgQueue.push(imgs[k]);
     }
-    while (imgWorkers < 3 && imgQueue.length) { imgWorkers++; imgWorker(); }
+    while (imgWorkers < IMG_WORKERS && imgQueue.length) { imgWorkers++; imgWorker(); }
   }
 
   // Wait (bounded) for every queued image to be fetched + posted.
@@ -846,8 +850,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
 
   // ── STEP 3.5: wait for the image-byte uploads to land ──────────────
   // Refs are already streamed; the BYTES upload concurrently with the scan.
-  // Give them a bounded extra window so the final snapshot includes them.
-  await drainImageUploads(90000);
+  // v3.4 gives them a 240s window — a real capture can carry 900+ images
+  // and v3.3's 90s budget regularly expired mid-queue, leaving most bytes
+  // unsent (report images then rendered broken because only refs existed).
+  await drainImageUploads(240000);
 
   // ── STEP 4: mark the session complete ──────────────────────────────
   // The web UI stops polling and refreshes with the final data snapshot.

@@ -11,6 +11,11 @@ import { cryoSmartFetch, type CryoSmartSession } from "./proxy-client";
  * Convert a CryoSmart image URL (full URL or path) to a base64 data URL via
  * the /api/cryosmart/[...path] proxy. Returns null on any failure.
  *
+ * Every fetch is bounded by a 10s abort timeout — an unreachable upstream
+ * (e.g. the app server trying to reach an intranet CryoSmart it can't route
+ * to) otherwise HANGS the connection pool slot for minutes, which is what
+ * made large report embeds feel frozen (user: "加载需要比较长时间").
+ *
  * `cryosmartPath` may be:
  *   - a full URL like "http://192.168.4.3:8080/api/log_image/<fileid>"
  *   - a relative path like "/api/log_image/<fileid>" or "api/log_image/..."
@@ -20,6 +25,8 @@ import { cryoSmartFetch, type CryoSmartSession } from "./proxy-client";
  * and hand it to `cryoSmartFetch`, which builds the correct proxy URL and
  * forwards `base`/`auth`/`cookie` as query params.
  */
+const FETCH_TIMEOUT_MS = 10_000;
+
 export async function imageToBase64(
   session: CryoSmartSession,
   cryosmartPath: string
@@ -38,7 +45,10 @@ export async function imageToBase64(
     // proxy (the generic `/api/...` branch below would forward them to the
     // CryoSmart server, which doesn't have that path → 404).
     if (/^\/api\/cryosmart\/import\/session\/[^/]+\/image\//i.test(pathOnly)) {
-      const resp = await fetch(pathOnly, { credentials: "same-origin" });
+      const resp = await fetch(pathOnly, {
+        credentials: "same-origin",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       if (!resp.ok) return null;
       const buf = await resp.arrayBuffer();
       if (!buf || buf.byteLength === 0) return null;
@@ -50,7 +60,10 @@ export async function imageToBase64(
     // /demo/*.png sample images) must not go through the CryoSmart proxy —
     // fetch them directly from this origin instead.
     if (/^\/(?!api\/)/i.test(pathOnly)) {
-      const resp = await fetch(pathOnly, { credentials: "same-origin" });
+      const resp = await fetch(pathOnly, {
+        credentials: "same-origin",
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       if (!resp.ok) return null;
       const buf = await resp.arrayBuffer();
       if (!buf || buf.byteLength === 0) return null;
@@ -115,12 +128,31 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 }
 
 /**
- * Pre-fetch all images referenced in the summary and return a map of
+ * Pre-fetch the images the report will actually DISPLAY and return a map of
  * { remoteUrl → base64DataUrl } for embedding in the HTML report.
  *
- * Images are fetched in small concurrency batches to avoid saturating the
- * browser's connection pool (the proxy + CryoSmart have limited capacity).
+ * The scope mirrors report-html.ts's rendering caps exactly — previously the
+ * prefetch collected EVERY referenced image (a real capture can carry 900+
+ * log-image refs while the report shows at most 12 per job), so the embed
+ * step fetched ~5× more URLs than the report ever renders, at concurrency 4,
+ * each potentially hanging on an unreachable proxy. That was the "report
+ * images take forever" experience.
+ *
+ * Scope per node (matching reportMediaBlock / reportClassTable /
+ * reportMapDownloads / reportImageBoxes):
+ *   - node.images: log_image refs → first 12; other kinds are not rendered
+ *     by the report (they feed the graph modal instead) → skipped.
+ *   - representative_micrograph_images → first 3.
+ *   - select_2d → the 3 tile images.
+ *   - classes → every mrc_preview (the classes table renders all rows).
+ *   - maps → every preview (the map table renders all rows).
+ * Both the `.url` AND `.src` variants are collected: reportImgTag() looks
+ * images up by their SRC string, so every src that can differ from its url
+ * must be a key in the returned map. Fetches are deduped, so adding both
+ * variants costs nothing extra when they're equal.
  */
+const REPORT_LOG_IMAGE_LIMIT = 12;
+
 export async function prefetchImagesForReport(
   session: CryoSmartSession,
   summary: import("./types").LineageSummary,
@@ -128,65 +160,55 @@ export async function prefetchImagesForReport(
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   const urls = new Set<string>();
+  const add = (url?: string | null, ...also: Array<string | null | undefined>) => {
+    if (url) urls.add(url);
+    for (const u of also) if (u && u !== url) urls.add(u);
+  };
 
-  // Collect all image URLs from the summary. Both the `.url` AND `.src`
-  // variants are collected: reportImgTag() looks images up by their SRC
-  // string, so every src that can differ from its url must be a key in the
-  // returned map (overview_assets capture data can carry distinct url/src).
-  // Fetches are deduped below, so adding both variants costs nothing extra
-  // when they're equal (the common lineage.ts case).
   for (const node of summary.nodes || []) {
-    // From node.images
-    for (const img of node.images || []) {
-      if (img.url) urls.add(img.url);
-      if (img.src && img.src !== img.url) urls.add(img.src);
+    // From node.images — log images only, capped at the report's per-job
+    // display limit (non-log node.images are not rendered by the report).
+    const logImages = (node.images || []).filter((img) => img.kind === "log_image");
+    for (const img of logImages.slice(0, REPORT_LOG_IMAGE_LIMIT)) {
+      add(img.url, img.src);
     }
 
-    // From representative_micrograph_images
-    for (const img of node.representative_micrograph_images || []) {
-      if (img.url) urls.add(img.url);
-      if (img.src && img.src !== img.url) urls.add(img.src);
+    // From representative_micrograph_images (report shows 3).
+    for (const img of (node.representative_micrograph_images || []).slice(0, 3)) {
+      add(img.url, img.src);
     }
 
-    // From select_2d
+    // From select_2d (report shows the 3 tile images).
     if (node.select_2d) {
       const s = node.select_2d;
-      if (s.selected_classes_image) urls.add(s.selected_classes_image);
-      if (s.selected_classes_src) urls.add(s.selected_classes_src);
-      if (s.selected_particles_image) urls.add(s.selected_particles_image);
-      if (s.selected_particles_src) urls.add(s.selected_particles_src);
-      if (s.excluded_classes_image) urls.add(s.excluded_classes_image);
-      if (s.excluded_classes_src) urls.add(s.excluded_classes_src);
+      add(s.selected_classes_image, s.selected_classes_src);
+      add(s.selected_particles_image, s.selected_particles_src);
+      add(s.excluded_classes_image, s.excluded_classes_src);
     }
 
-    // From class splits (mrc preview)
+    // From class splits (mrc preview — the classes table renders every row).
     for (const cls of node.classes || []) {
-      if (cls.mrc_preview_url) urls.add(cls.mrc_preview_url);
-      if (cls.mrc_preview_src) urls.add(cls.mrc_preview_src);
+      add(cls.mrc_preview_url, cls.mrc_preview_src);
     }
 
-    // From maps (preview URLs)
+    // From maps (preview URLs — the map table renders every row).
     for (const m of node.maps || []) {
-      if (m.preview_url) urls.add(m.preview_url);
-      if (m.preview_src) urls.add(m.preview_src);
+      add(m.preview_url, m.preview_src);
     }
   }
 
-  // Also collect from the start job
+  // Also collect from the start job (picture-flow section).
   const sj = summary.start_job;
   if (sj) {
-    for (const img of sj.images || []) {
-      if (img.url) urls.add(img.url);
-      if (img.src && img.src !== img.url) urls.add(img.src);
+    const logImages = (sj.images || []).filter((img) => img.kind === "log_image");
+    for (const img of logImages.slice(0, REPORT_LOG_IMAGE_LIMIT)) {
+      add(img.url, img.src);
     }
     if (sj.select_2d) {
       const s = sj.select_2d;
-      if (s.selected_classes_image) urls.add(s.selected_classes_image);
-      if (s.selected_classes_src) urls.add(s.selected_classes_src);
-      if (s.selected_particles_image) urls.add(s.selected_particles_image);
-      if (s.selected_particles_src) urls.add(s.selected_particles_src);
-      if (s.excluded_classes_image) urls.add(s.excluded_classes_image);
-      if (s.excluded_classes_src) urls.add(s.excluded_classes_src);
+      add(s.selected_classes_image, s.selected_classes_src);
+      add(s.selected_particles_image, s.selected_particles_src);
+      add(s.excluded_classes_image, s.excluded_classes_src);
     }
   }
 
@@ -196,9 +218,10 @@ export async function prefetchImagesForReport(
     return out;
   }
 
-  // Fetch with limited concurrency (4 at a time) to be gentle on the proxy
-  // and the CryoSmart backend. Preserves order for stable progress messages.
-  const CONCURRENCY = 4;
+  // Fetch with limited concurrency (8 at a time). Session-image URLs are
+  // same-origin in-memory serves — fast; remote/proxied URLs are bounded by
+  // the 10s abort timeout inside imageToBase64 so nothing hangs the pool.
+  const CONCURRENCY = 8;
   let done = 0;
   let embedded = 0;
   let index = 0;

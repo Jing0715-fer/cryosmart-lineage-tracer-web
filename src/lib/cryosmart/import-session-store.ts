@@ -73,7 +73,12 @@ export interface ImportSession {
   expiresAt: number;
 }
 
-const TTL_MS = 15 * 60 * 1000; // captures can take minutes; page may be reloaded
+const TTL_MS = 45 * 60 * 1000; // captures can take minutes; review can take
+// longer. Sessions whose data (esp. uploaded image BYTES) is still being
+// READ are kept alive by the sliding refresh below — an untouched session
+// expires 45 min after its last access. Previously a flat 15 min, which
+// regularly killed the image store while the user was still reading the
+// report → every session-image URL 404'd → "graph details has no log image".
 const MAX_ENTRIES = 60;
 
 const globalRef = globalThis as unknown as {
@@ -147,6 +152,11 @@ export function getImportSession(token: string): ImportSession | null {
     store.delete(token);
     return null;
   }
+  // Sliding expiry — every read (status poll, /data fetch, image byte
+  // serve) pushes expiry out by the full TTL, so a session the user is
+  // actively viewing never dies under them, while an abandoned one is
+  // still collected after the TTL.
+  entry.expiresAt = Date.now() + TTL_MS;
   return entry;
 }
 

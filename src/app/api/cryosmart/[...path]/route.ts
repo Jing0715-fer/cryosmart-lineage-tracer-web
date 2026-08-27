@@ -62,12 +62,16 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
   if (auth) headers["Authorization"] = auth;
 
   try {
+    // 10s abort timeout — unreachable intranet upstreams otherwise hang the
+    // request for minutes (this route backs the image base64 pre-fetch and
+    // every proxied data call).
     const upstream = await fetch(targetUrl, {
       method: "GET",
       headers,
       redirect: "follow",
       credentials: "omit",
       cache: "no-store",
+      signal: AbortSignal.timeout(10_000),
     });
 
     const contentType = upstream.headers.get("content-type") || "application/octet-stream";
