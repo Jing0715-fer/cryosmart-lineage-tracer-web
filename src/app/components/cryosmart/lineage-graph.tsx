@@ -413,14 +413,21 @@ function buildProxyFallback(
 }
 
 /** Pick up to `max` preview images for a node (detail-mode inline grid).
- *  Candidates are collected like the modal gallery (curated tiles first,
- *  then log images), deduped by src, then partitioned so RENDERABLE images
+ *  CARD images are the job's UI-TILE images ONLY (user request: "卡片上的
+ *  图片只显示ui title图片即可，其他都不显示") — each image type has its
+ *  own place now:
+ *    ui_tile   → the graph card (ab-initio class slices, select-2D template
+ *                tiles and representative micrographs all LIVE in
+ *                ui_tile_images, so those previews keep working),
+ *    log images → the job-detail modal gallery (collectAllImages),
+ *    output-group images → the Maps / download section.
+ *  Candidates are deduped by src, then partitioned so RENDERABLE images
  *  (same-origin paths, session-image URLs, inline data:) come before direct
  *  intranet URLs — the app is viewed over HTTPS where direct
  *  `http://<cryosmart>` images are mixed-content blocked, so without this
  *  ordering a card's 4-cell grid could fill with broken tiles while
  *  perfectly-good session images wait behind them.
- *  Showing SEVERAL images matters for classification jobs — an ab-initio
+ *  Showing SEVERAL tiles matters for classification jobs — an ab-initio
  *  run produces one slice PER class and the old single-thumbnail card hid
  *  every class but the first (user: "ab-initio只显示1类，不完整"). */
 function isRenderableSrc(src: string | null | undefined): boolean {
@@ -431,44 +438,11 @@ function isRenderableSrc(src: string | null | undefined): boolean {
 function pickPreviewImages(node: LineageNode, max = THUMB_MAX_IMAGES): ImageAsset[] {
   const all: ImageAsset[] = [];
   const seen = new Set<string>();
-  const push = (img: ImageAsset | null | undefined) => {
-    if (!img || !img.src) return;
-    if (seen.has(img.src)) return;
-    seen.add(img.src);
-    all.push(img);
-  };
-  for (const im of node.images || []) push(im);
-  for (const im of node.representative_micrograph_images || []) push(im);
-  if (node.select_2d?.selected_classes_src) {
-    push({
-      kind: "ui_tile",
-      name: "selected_classes",
-      url: node.select_2d.selected_classes_image || "",
-      src: node.select_2d.selected_classes_src,
-      original_url: node.select_2d.selected_classes_original_url || "",
-    });
-  }
-  for (const c of node.classes || []) {
-    if (c.mrc_preview_src) {
-      push({
-        kind: "ui_tile",
-        name: `class_${c.class_index}`,
-        url: c.mrc_preview_url || "",
-        src: c.mrc_preview_src,
-        original_url: c.mrc_preview_original_url || "",
-      });
-    }
-  }
-  for (const m of node.maps || []) {
-    if (m.preview_src) {
-      push({
-        kind: "ui_tile",
-        name: m.group,
-        url: m.preview_url || "",
-        src: m.preview_src,
-        original_url: m.preview_original_url || "",
-      });
-    }
+  for (const im of node.images || []) {
+    if (im.kind !== "ui_tile") continue;   // card = UI title images only
+    if (!im.src || seen.has(im.src)) continue;
+    seen.add(im.src);
+    all.push(im);
   }
   // Stable partition: renderable sources first (sort is stable, so the
   // original curated order is preserved within each half).
@@ -478,68 +452,23 @@ function pickPreviewImages(node: LineageNode, max = THUMB_MAX_IMAGES): ImageAsse
   return ranked.slice(0, max);
 }
 
-/** Collect ALL preview images for a node (used by the modal gallery).
+/** Collect the LOG images for a node (the modal gallery). Detail-page rule
+ *  (user request: "点开详情页不显示ui title图，显示log图"): the gallery
+ *  shows the job's runtime log images — kind `log_image` (flattened refs
+ *  from the Smart Capture script) and kind `image_log` (raw jobLogs entries
+ *  embedded on the job). UI-tile / output-group / class / map previews do
+ *  NOT belong here; they render on the card, in the classes table and in
+ *  the maps/download section respectively (each image has ONE home).
  *  Same renderable-first ranking as pickPreviewImages so the modal opens on
  *  an image that can actually load instead of a mixed-content-blocked one. */
 function collectAllImages(node: LineageNode): ImageAsset[] {
   const out: ImageAsset[] = [];
   const seen = new Set<string>();
-  const push = (img: ImageAsset | null | undefined) => {
-    if (!img || !img.src) return;
-    if (seen.has(img.src)) return;
-    seen.add(img.src);
-    out.push(img);
-  };
-  for (const im of node.images || []) push(im);
-  for (const im of node.representative_micrograph_images || []) push(im);
-  if (node.select_2d?.selected_classes_src) {
-    push({
-      kind: "ui_tile",
-      name: "selected_classes",
-      url: node.select_2d.selected_classes_image || "",
-      src: node.select_2d.selected_classes_src,
-      original_url: node.select_2d.selected_classes_original_url || "",
-    });
-  }
-  if (node.select_2d?.selected_particles_src) {
-    push({
-      kind: "ui_tile",
-      name: "selected_particles",
-      url: node.select_2d.selected_particles_image || "",
-      src: node.select_2d.selected_particles_src,
-      original_url: node.select_2d.selected_particles_original_url || "",
-    });
-  }
-  if (node.select_2d?.excluded_classes_src) {
-    push({
-      kind: "ui_tile",
-      name: "excluded_classes",
-      url: node.select_2d.excluded_classes_image || "",
-      src: node.select_2d.excluded_classes_src,
-      original_url: node.select_2d.excluded_classes_original_url || "",
-    });
-  }
-  for (const c of node.classes || []) {
-    if (c.mrc_preview_src) {
-      push({
-        kind: "ui_tile",
-        name: `class_${c.class_index}`,
-        url: c.mrc_preview_url || "",
-        src: c.mrc_preview_src,
-        original_url: c.mrc_preview_original_url || "",
-      });
-    }
-  }
-  for (const m of node.maps || []) {
-    if (m.preview_src) {
-      push({
-        kind: "ui_tile",
-        name: m.group,
-        url: m.preview_url || "",
-        src: m.preview_src,
-        original_url: m.preview_original_url || "",
-      });
-    }
+  for (const im of node.images || []) {
+    if (im.kind !== "log_image" && im.kind !== "image_log") continue;
+    if (!im.src || seen.has(im.src)) continue;
+    seen.add(im.src);
+    out.push(im);
   }
   // Stable partition: renderable sources first (same rationale as
   // pickPreviewImages — the gallery's first image is what the modal opens
@@ -1703,7 +1632,14 @@ export function LineageGraph({ summary, session }: Props) {
             const thumbH = NODE_H - THUMB_Y - 10;
             const cellW = (thumbW - THUMB_GUTTER) / 2;
             const cellH = (thumbH - THUMB_GUTTER) / 2;
-            const extraCount = Math.max(0, collectAllImages(node).length - previewImgs.length);
+            // "+N" chip counts the ui-tile images the grid couldn't fit —
+            // the card shows ONLY ui tiles now, so the overflow is tiles
+            // (log images live in the modal, not behind this chip).
+            const tileSrcs = new Set<string>();
+            for (const im of node.images || []) {
+              if (im.kind === "ui_tile" && im.src) tileSrcs.add(im.src);
+            }
+            const extraCount = Math.max(0, tileSrcs.size - previewImgs.length);
 
             return (
               <g
@@ -2389,11 +2325,13 @@ function NodeDetailModal({
 
             {/* RIGHT: image gallery + output groups + maps + classes + edges */}
             <div className="space-y-4">
-              {/* Image gallery */}
+              {/* Image gallery — LOG images only. UI-tile images render on
+                  the graph card, output-group images in the Maps section;
+                  each image type has exactly one home (user request). */}
               <section>
                 <div className="mb-1.5 flex items-center justify-between">
                   <h4 className="flex items-center gap-1.5 text-[12px] font-semibold" style={{ color: textColor }}>
-                    <ImageIcon className="h-3.5 w-3.5" /> Images
+                    <ImageIcon className="h-3.5 w-3.5" /> Log images
                     <span className="font-mono text-[10px]" style={{ color: mutedColor }}>
                       ({allImages.length})
                     </span>
@@ -2409,7 +2347,7 @@ function NodeDetailModal({
                     className="flex h-32 items-center justify-center rounded-md border border-dashed text-[11px]"
                     style={{ borderColor, color: mutedColor }}
                   >
-                    No preview images attached to this job.
+                    No log images captured for this job.
                   </div>
                 ) : (
                   <div className="space-y-2">
@@ -2719,11 +2657,11 @@ function ClassesTable({
                           fallback
                             ? (e) => {
                                 const t = e.currentTarget;
-                                if (t.dataset.tried) return;
+                                if (t.dataset.tried) { t.style.display = "none"; return; }
                                 t.dataset.tried = "1";
                                 t.src = fallback;
                               }
-                            : undefined
+                            : (e) => { e.currentTarget.style.display = "none"; }
                         }
                         style={{ width: 48, height: 48, objectFit: "cover" }} />
                     ) : (
@@ -2760,6 +2698,10 @@ function MapsList({
   mutedColor: string;
   borderColor: string;
 }) {
+  /* The Maps section is the home of the job's OUTPUT-GROUP images (user
+   * rule: "下载map处显示output group图") — `preview_src` comes from
+   * `output_group_images[group]`, and a failed preview hides itself
+   * instead of showing a broken-image icon. */
   const [embedded, setEmbedded] = useState<Record<string, string>>({});
   useEffect(() => {
     if (!session) return;
@@ -2799,11 +2741,11 @@ function MapsList({
                       fallback
                         ? (e) => {
                             const t = e.currentTarget;
-                            if (t.dataset.tried) return;
+                            if (t.dataset.tried) { t.style.display = "none"; return; }
                             t.dataset.tried = "1";
                             t.src = fallback;
                           }
-                        : undefined
+                        : (e) => { e.currentTarget.style.display = "none"; }
                     }
                     style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
                 ) : (

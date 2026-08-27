@@ -720,6 +720,72 @@ export function classSplits(
 /* Image / map assets                                                  */
 /* ------------------------------------------------------------------ */
 
+/** Normalize a log entry's text into a dedupe key (trimmed), or null when
+ *  the entry carries no usable title. */
+function logTextKey(text: unknown): string | null {
+  if (typeof text !== "string") return null;
+  const t = text.trim();
+  return t || null;
+}
+
+/**
+ * LAST-ROUND-ONLY filter for RAW jobLogs entries (`image_logs`).
+ *
+ * Multi-round jobs (re-run in CryoSmart) re-emit the SAME log entries —
+ * same `text` title ("Selected 21 classes", "Excluded 179 classes", …) —
+ * once per round, and only the LAST round's image files still exist on the
+ * CryoSmart server: older rounds' fileids 404, which used to leave broken
+ * image boxes in the report whose titles duplicated the working ones.
+ * Keep only the LAST entry per distinct title; entries without a title
+ * are kept as-is (nothing to key a round on).
+ */
+function lastRoundImageLogEntries<T extends { text?: unknown }>(entries: T[]): T[] {
+  if (entries.length < 2) return entries;
+  const lastIdx = new Map<string, number>();
+  for (let i = 0; i < entries.length; i++) {
+    const key = logTextKey(entries[i]?.text);
+    if (key !== null) lastIdx.set(key, i);
+  }
+  if (lastIdx.size === 0) return entries;
+  return entries.filter((entry, i) => {
+    const key = logTextKey(entry?.text);
+    return key === null || lastIdx.get(key) === i;
+  });
+}
+
+/**
+ * LAST-ROUND-ONLY filter for FLATTENED log-image refs (`log_images`).
+ *
+ * The capture script flattens each jobLogs entry's `imgfiles` into refs,
+ * so the refs of one entry arrive CONSECUTIVELY and share the entry's
+ * `text`. Group refs into consecutive same-title runs, then keep only the
+ * LAST run per distinct title — that run is the job's final round, whose
+ * files still exist on the server. Refs without a title are kept as-is.
+ */
+function lastRoundLogImageRefs<T extends { text?: unknown }>(refs: T[]): T[] {
+  if (refs.length < 2) return refs;
+  // Build consecutive runs: { key, start, end } (key === null → untitled).
+  const runs: Array<{ key: string | null; start: number; end: number }> = [];
+  for (let i = 0; i < refs.length; i++) {
+    const key = logTextKey(refs[i]?.text);
+    const prev = runs[runs.length - 1];
+    if (prev && prev.key !== null && prev.key === key) prev.end = i + 1;
+    else runs.push({ key, start: i, end: i + 1 });
+  }
+  const lastRunByKey = new Map<string, number>();
+  runs.forEach((run, idx) => {
+    if (run.key !== null) lastRunByKey.set(run.key, idx);
+  });
+  if (lastRunByKey.size === 0) return refs;
+  const keep = new Array<boolean>(refs.length).fill(false);
+  runs.forEach((run, idx) => {
+    if (run.key === null || lastRunByKey.get(run.key) === idx) {
+      for (let i = run.start; i < run.end; i++) keep[i] = true;
+    }
+  });
+  return refs.filter((_, i) => keep[i]);
+}
+
 /** Collect preview image assets (ui_tile + output_group) for a job. */
 export function imageAssets(
   job: JobMetadata,
@@ -775,7 +841,10 @@ export function imageAssets(
   //  2. `job.image_logs` — RAW jobLogs entries ({type:'image', text,
   //     flags, imgfiles:[{fileid, filename}]}) pasted/merged directly.
   // Both carry the log entry's text + flags so the assets can be
-  // categorized (plots → plot, fsc → fsc, slice-* → slice).
+  // categorized (plots → plot, fsc → fsc, slice-* → slice). Both are ALSO
+  // filtered to the LAST round per title (multi-round jobs re-emit the
+  // same entries every run and only the final round's files survive on
+  // the server — see lastRoundLogImageRefs / lastRoundImageLogEntries).
   const logSeen = new Set<string>();
   const logFlags = (flags: unknown): string[] | null =>
     Array.isArray(flags) ? (flags as string[]) : null;
@@ -793,7 +862,7 @@ export function imageAssets(
     }
     return fallback || "log_image";
   };
-  for (const item of job.log_images || []) {
+  for (const item of lastRoundLogImageRefs(job.log_images || [])) {
     const fileid = item?.fileid || "";
     // Prefer an explicit src: a same-origin session-image URL (staged flow,
     // bytes uploaded by the capture script) or an inline data: URL (legacy
@@ -819,7 +888,7 @@ export function imageAssets(
       category: logCategory(flags),
     });
   }
-  const imageLogs = job.image_logs || [];
+  const imageLogs = lastRoundImageLogEntries(job.image_logs || []);
   for (const log of imageLogs) {
     if (log.type !== "image" || !log.imgfiles || log.imgfiles.length === 0) continue;
     for (const imgFile of log.imgfiles) {

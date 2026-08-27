@@ -267,16 +267,32 @@ export function buildConsoleSnippet(appOrigin: string): string {
   function extractLogImages(logs) {
     var out = [];
     if (!Array.isArray(logs)) return out;
+    // LAST-ROUND-ONLY (kept in sync with the Smart Capture panel script):
+    // multi-round jobs re-emit the SAME log entries (same text title) once
+    // per round, and only the FINAL round's image files still exist on the
+    // server — older rounds' fileids 404. Keep the last entry per title.
+    var lastIdxByText = Object.create(null);
+    var eligible = [];
     for (var i = 0; i < logs.length; i++) {
-      var log = logs[i];
-      if (!log) continue;
-      var files = log.imgfiles || (log.type === 'image' ? log.files : null);
+      var lg = logs[i];
+      if (!lg) continue;
+      var files = lg.imgfiles || (lg.type === 'image' ? lg.files : null);
       if (!files || !files.length) continue;
-      for (var f = 0; f < files.length; f++) {
-        var file = files[f];
+      eligible.push(i);
+      var key = (typeof lg.text === 'string' && lg.text.trim()) ? lg.text.trim() : null;
+      if (key !== null) lastIdxByText[key] = i;
+    }
+    for (var p = 0; p < eligible.length; p++) {
+      var li = eligible[p];
+      var log = logs[li];
+      var key2 = (typeof log.text === 'string' && log.text.trim()) ? log.text.trim() : null;
+      if (key2 !== null && lastIdxByText[key2] !== li) continue;   // older round — skip
+      var files2 = log.imgfiles || (log.type === 'image' ? log.files : null);
+      for (var f = 0; f < files2.length; f++) {
+        var file = files2[f];
         var fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
         if (!fid) continue;
-        var name = (file && file.name) || log.name || log.title || ('log_image_' + out.length);
+        var name = (file && (file.name || file.filename)) || log.name || log.title || ('log_image_' + out.length);
         // Carry the log entry's text + flags so the web app can derive
         // friendlier names and categories (plots/fsc/slice) downstream.
         out.push({ fileid: fid, name: name, text: log.text || null, flags: log.flags || null });

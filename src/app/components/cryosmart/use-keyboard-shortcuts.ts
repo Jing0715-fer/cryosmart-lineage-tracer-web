@@ -22,12 +22,16 @@ interface ShortcutActions {
 export function useKeyboardShortcuts(actions: ShortcutActions) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
+      // `e.target` is not always an Element (synthetic events dispatched on
+      // `document`, some browser-internal keydowns) — guard before touching
+      // Element-only APIs.
+      const target = (e.target instanceof Element ? e.target : null) as HTMLElement | null;
       const isInput =
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.isContentEditable ||
-        target.getAttribute("role") === "textbox";
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable ||
+          target.getAttribute("role") === "textbox");
 
       // Cmd/Ctrl + Enter → Trace
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {

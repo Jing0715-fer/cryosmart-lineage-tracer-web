@@ -140,8 +140,9 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
  *
  * Scope per node (matching reportMediaBlock / reportClassTable /
  * reportMapDownloads / reportImageBoxes):
- *   - node.images: log_image refs → first 12; other kinds are not rendered
- *     by the report (they feed the graph modal instead) → skipped.
+ *   - node.images: log-image refs (log_image + image_log kinds) → first 12;
+ *     other kinds are not rendered by the report (they feed the graph
+ *     card / modal instead) → skipped.
  *   - representative_micrograph_images → first 3.
  *   - select_2d → the 3 tile images.
  *   - classes → every mrc_preview (the classes table renders all rows).
@@ -166,9 +167,12 @@ export async function prefetchImagesForReport(
   };
 
   for (const node of summary.nodes || []) {
-    // From node.images — log images only, capped at the report's per-job
-    // display limit (non-log node.images are not rendered by the report).
-    const logImages = (node.images || []).filter((img) => img.kind === "log_image");
+    // From node.images — log images only (log_image + image_log kinds,
+    // mirroring reportMediaBlock), capped at the report's per-job display
+    // limit (non-log node.images are not rendered by the report).
+    const logImages = (node.images || []).filter(
+      (img) => img.kind === "log_image" || img.kind === "image_log"
+    );
     for (const img of logImages.slice(0, REPORT_LOG_IMAGE_LIMIT)) {
       add(img.url, img.src);
     }
@@ -200,7 +204,9 @@ export async function prefetchImagesForReport(
   // Also collect from the start job (picture-flow section).
   const sj = summary.start_job;
   if (sj) {
-    const logImages = (sj.images || []).filter((img) => img.kind === "log_image");
+    const logImages = (sj.images || []).filter(
+      (img) => img.kind === "log_image" || img.kind === "image_log"
+    );
     for (const img of logImages.slice(0, REPORT_LOG_IMAGE_LIMIT)) {
       add(img.url, img.src);
     }

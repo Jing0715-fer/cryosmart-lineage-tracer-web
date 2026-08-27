@@ -4,15 +4,16 @@
  * Provides instructions for capturing CryoSmart metadata via browser console.
  * The capture script runs inside CryoSmart to access Vue store.
  *
- * Staged capture flow (v3.5):
+ * Staged capture flow (v3.6):
  *   0. Open about:blank synchronously → popup can NEVER be blocked.
  *   1. POST /api/cryosmart/import/session        → token (tiny request)
  *      → navigate the already-open tab to /?imported=<token>
  *   2. POST .../jobs    → the web app renders the graph immediately
- *      (v3.5: the app AUTO-TRACES when the script ran on a job page —
+ *      (the app AUTO-TRACES when the script ran on a job page —
  *       end_job_uid — and publishes the lineage via .../request-logs)
  *   3. POST .../logs    → log-image batches stream in with live progress
- *      (v3.5: ONLY for the requested lineage jobs on large projects)
+ *      (ONLY for the requested lineage jobs, and ONLY the LAST round of
+ *       multi-round jobs — older rounds' files no longer exist)
  *   4. POST .../complete → UI stops polling and refreshes with final data
  */
 
@@ -67,15 +68,18 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.5 — LINEAGE-SCOPED log images. Job metadata
+// CryoSmart Smart Capture v3.6 — LAST-ROUND log images. Job metadata
 // uploads for the WHOLE project immediately (fast), but log images are
 // fetched ONLY for the jobs the traced lineage needs: the script waits for
 // the web app's Trace Lineage action to publish the lineage job list to
 // the session, then scans just those jobs (a 46-job project with 900+
-// images typically needs only ~10 jobs). Run the script from the END JOB's
-// page and the app auto-traces — zero manual setup. Console escape
-// hatches while it waits: __csCaptureAll() (fetch every job's logs) and
-// __csCaptureFinish() (stop now). Still uploads log-image BYTES
+// images typically needs only ~10 jobs). Multi-round jobs keep ONLY their
+// latest round's log entries — re-runs re-emit the same titles and the
+// older rounds' files are gone from the server, so fetching them only
+// produced broken report images and wasted time. Run the script from the
+// END JOB's page and the app auto-traces — zero manual setup. Console
+// escape hatches while it waits: __csCaptureAll() (fetch every job's
+// logs) and __csCaptureFinish() (stop now). Still uploads log-image BYTES
 // same-origin (6 workers, 240s drain — v3.4) and keeps the deep-scan log
 // calibration that finds logs in ANY store state shape (v3.2).
 (async function() {
@@ -148,8 +152,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
         }),
       };
       // Some builds embed raw log entries directly on the job object.
+      // (v3.6: trimmed to the LAST round per title — older rounds' files
+      //  no longer exist on the server.)
       if (Array.isArray(job.image_logs) && job.image_logs.length) {
-        entry.image_logs = job.image_logs;
+        entry.image_logs = lastRoundEntries(job.image_logs);
       }
       jobs.push(entry);
     }
@@ -302,13 +308,31 @@ export function SmartCapturePanel({ onCapture }: Props) {
   function extractLogImages(logs) {
     var out = [];
     if (!Array.isArray(logs)) return out;
+    // v3.6 LAST-ROUND-ONLY: multi-round jobs (re-run in CryoSmart) re-emit
+    // the SAME log entries — same text title ("Selected 21 classes", …) —
+    // once per round, and only the FINAL round's image files still exist on
+    // the server: older rounds' fileids 404. Keep only the LAST entry per
+    // title so neither dead refs nor their bytes are ever fetched/uploaded
+    // (this is also what keeps multi-round log capture FAST).
+    var lastIdxByText = Object.create(null);
+    var eligible = [];
     for (var i = 0; i < logs.length; i++) {
-      var log = logs[i];
-      if (!log) continue;
-      var files = log.imgfiles || (log.type === 'image' ? log.files : null);
+      var lg = logs[i];
+      if (!lg) continue;
+      var files = lg.imgfiles || (lg.type === 'image' ? lg.files : null);
       if (!files || !files.length) continue;
-      for (var f = 0; f < files.length; f++) {
-        var file = files[f];
+      eligible.push(i);
+      var key = (typeof lg.text === 'string' && lg.text.trim()) ? lg.text.trim() : null;
+      if (key !== null) lastIdxByText[key] = i;
+    }
+    for (var p = 0; p < eligible.length; p++) {
+      var li = eligible[p];
+      var log = logs[li];
+      var key2 = (typeof log.text === 'string' && log.text.trim()) ? log.text.trim() : null;
+      if (key2 !== null && lastIdxByText[key2] !== li) continue;   // older round — skip
+      var files2 = log.imgfiles || (log.type === 'image' ? log.files : null);
+      for (var f = 0; f < files2.length; f++) {
+        var file = files2[f];
         var fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
         if (!fid) continue;
         var name = (file && (file.name || file.filename)) || log.name || log.title || ('log_image_' + out.length);
@@ -316,6 +340,22 @@ export function SmartCapturePanel({ onCapture }: Props) {
       }
     }
     return out;
+  }
+
+  // v3.6: LAST-ROUND-ONLY filter for RAW image-log entries (entry-level).
+  // Same rationale as extractLogImages above, applied to the raw entries
+  // embedded on jobs (STEP 2) — keep only the last entry per title.
+  function lastRoundEntries(arr) {
+    if (!Array.isArray(arr) || arr.length < 2) return arr;
+    var lastByText = Object.create(null);
+    for (var i = 0; i < arr.length; i++) {
+      var t = arr[i] && typeof arr[i].text === 'string' && arr[i].text.trim();
+      if (t) lastByText[t] = i;
+    }
+    return arr.filter(function(entry, i) {
+      var t = entry && typeof entry.text === 'string' && entry.text.trim();
+      return !t || lastByText[t] === i;
+    });
   }
 
   function allStores() {
@@ -663,7 +703,8 @@ export function SmartCapturePanel({ onCapture }: Props) {
         var ce = cached[c];
         if (ce && (ce.type === 'image' || (ce.imgfiles && ce.imgfiles.length))) rawLogs.push(ce);
       }
-      if (rawLogs.length) jobEntry.image_logs = rawLogs;
+      // v3.6: keep only the LAST round per title (older rounds 404).
+      if (rawLogs.length) jobEntry.image_logs = lastRoundEntries(rawLogs);
     }
   }
 
@@ -1046,6 +1087,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
     (LINEAGE_MODE && knownRequested && !CAPTURE_ALL_LATE
       ? ' — lineage-scoped: ' + knownRequested.length + ' of ' + ALL_UIDS.length + ' jobs scanned'
       : '') +
+    " · multi-round jobs keep only their latest round's log images" +
     '. Live page:', appUrl);
 })();
 `.trim();
@@ -1158,7 +1200,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
               progress. The lineage graph renders as soon as job metadata
               lands, auto-traces from your page job, and log images stream in
               <strong> only for the traced lineage</strong> — the other jobs
-              are skipped, saving minutes on large projects.
+              are skipped, and multi-round jobs fetch only their
+              <strong>latest round's</strong> images, saving minutes on
+              large projects.
             </p>
             <p className="mt-0.5 text-[11px] text-teal-600">
               Maps, tile images and job log images are captured with session credentials (auth + cookie) forwarded for downloads.
