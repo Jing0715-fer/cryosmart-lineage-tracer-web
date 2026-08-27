@@ -33,6 +33,14 @@ interface Props {
   awaitingImport?: boolean;
   /** Live capture status rendered INSIDE this card, so the popup landing here never has to look elsewhere for progress. */
   importInfo?: ImportPanelInfo;
+  /** Active staged-capture token — a successful Trace publishes the lineage's
+   * job list to the session so the capture script fetches ONLY those jobs'
+   * log images (v3.5 lineage-scoped capture). Null when not capturing. */
+  importToken?: string | null;
+  /** v3.5: job whose CryoSmart page the capture script ran on. Once jobs land
+   * the Start Job field auto-fills with it and the trace runs automatically —
+   * running the script from the end job's page needs zero manual setup. */
+  autoTraceJobUid?: string | null;
 }
 
 export interface TraceOptions {
@@ -42,7 +50,7 @@ export interface TraceOptions {
   includeFinalResults: boolean;
 }
 
-export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, initialOptions, awaitingImport, importInfo }: Props) {
+export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, initialOptions, awaitingImport, importInfo, importToken, autoTraceJobUid }: Props) {
   const [startJob, setStartJob] = useState("");
   const [startJobDirty, setStartJobDirty] = useState(false);
   const [projectId, setProjectId] = useState("");
@@ -95,9 +103,19 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
     return sorted[sorted.length - 1].uid;
   }, []);
 
+  /** The capture script's page-job anchor, validated against the loaded
+   * jobs (a uid from another project/dataset is ignored). */
+  const autoAnchorUid = useMemo(() => {
+    if (!autoTraceJobUid) return null;
+    const norm = normalizeJobUid(autoTraceJobUid);
+    return loadedJobs.some((j) => normalizeJobUid(String(j.uid)) === norm)
+      ? autoTraceJobUid
+      : null;
+  }, [autoTraceJobUid, loadedJobs]);
+
   const suggestedStartJob = useMemo(
-    () => (loadedJobs.length ? suggestStartJob(loadedJobs) : ""),
-    [loadedJobs, suggestStartJob]
+    () => autoAnchorUid || (loadedJobs.length ? suggestStartJob(loadedJobs) : ""),
+    [autoAnchorUid, loadedJobs, suggestStartJob]
   );
   // Derived value: the user's typed job wins once they edit the field;
   // until then the smart suggestion auto-fills the input.
@@ -137,6 +155,10 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
   /** dataVersion the CURRENT summary was built from (set by handleTrace;
   * compared by the auto-refresh effect below). */
   const summaryBuiltFromRef = useRef("");
+  /** datasetKey the CURRENT summary was traced from — gates the auto-trace
+   * effect (fires at most once per dataset, and never over a trace the user
+   * started manually). */
+  const tracedDatasetKeyRef = useRef("");
 
   useEffect(() => {
     if (!loaded) {
@@ -169,7 +191,7 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
     return "P";
   }, [projectId, loaded]);
 
-  const handleTrace = useCallback(async () => {
+  const handleTrace = useCallback(async (opts?: { auto?: boolean; overrideUid?: string }) => {
     if (!loaded) {
       toast.error("Load a data source first.");
       return;
@@ -178,7 +200,7 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
     setTraceLog([]);
     onSummary(null);
     try {
-      const startUid = normalizeJobUid(effectiveStartJob);
+      const startUid = normalizeJobUid(opts?.overrideUid || effectiveStartJob);
       const jobMetadata = loadedJobs as JobMetadata[];
       if (jobMetadata.length === 0) throw new Error("No jobs found in the loaded data.");
 
@@ -200,20 +222,58 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
         );
       }
 
-      setTraceLog((l) => [...l, `Building project jobs map (${jobMetadata.length} jobs)…`]);
+      setTraceLog((l) => [
+        ...l,
+        opts?.auto
+          ? `Auto-trace: anchored to the current CryoSmart page job ${startUid} — no manual setup needed.`
+          : `Building project jobs map (${jobMetadata.length} jobs)…`,
+      ]);
       const baseUrl = loaded.session?.baseUrl || DEFAULT_BASE_URL;
 
       setTraceLog((l) => [...l, `Tracing upstream lineage from ${startUid}…`]);
       const summary = buildSummary(jobMetadata, effectiveProjectId, startUid, baseUrl);
       const normalized = normalizeLineageSummary(summary);
       summaryBuiltFromRef.current = dataVersion;
+      tracedDatasetKeyRef.current = datasetKey;
       onSummary(normalized);
       setTraceLog((l) => [...l, `Done. ${normalized.nodes.length} nodes, ${normalized.edges.length} edges.`]);
       toast.success(`Traced ${normalized.nodes.length} jobs upstream from ${startUid}`);
-      // Jump to the Lineage Preview so the result is immediately visible.
-      setTimeout(() => {
-        document.getElementById("preview")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }, 150);
+
+      // v3.5 lineage-scoped capture: publish the lineage's job list so the
+      // capture script (still waiting after uploading all job metadata)
+      // fetches log images for ONLY these jobs — a 46-job project with 900+
+      // images typically needs just the ~10 traced jobs. Fire-and-forget:
+      // a failure only means the script falls back to its own policy.
+      if (importToken && awaitingImport) {
+        const uids = normalized.nodes
+          .map((n) => String(n.uid))
+          .filter((u) => u.length > 0);
+        if (uids.length > 0) {
+          fetch(
+            `/api/cryosmart/import/session/${encodeURIComponent(importToken)}/request-logs`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ jobs: uids }),
+            }
+          ).catch(() => {
+            // non-fatal — the capture script still has its escape hatches
+          });
+          setTraceLog((l) => [
+            ...l,
+            `Log-image fetch scoped to this ${uids.length}-job lineage — the capture script skips the other jobs.`,
+          ]);
+        }
+      }
+
+      // Jump to the Lineage Preview so the result is immediately visible
+      // (manual traces only — an auto-trace keeps the user on the live
+      // capture progress, which lives in this card).
+      if (!opts?.auto) {
+        setTimeout(() => {
+          document.getElementById("preview")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 150);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setTraceLog((l) => [...l, `Error: ${msg}`]);
@@ -221,7 +281,24 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
     } finally {
       setTracing(false);
     }
-  }, [loaded, effectiveStartJob, loadedJobs, effectiveProjectId, suggestStartJob, onSummary, dataVersion]);
+  }, [loaded, effectiveStartJob, loadedJobs, effectiveProjectId, suggestStartJob, onSummary, dataVersion, datasetKey, importToken, awaitingImport]);
+
+  /** v3.5 AUTO-TRACE: when the capture script ran on a JOB page (it passes
+   * end_job_uid with the session), trace the moment jobs land — the user
+   * skips the manual Start Job + Trace setup entirely. Fires at most once
+   * per dataset and never overrides a trace the user started themselves. */
+  useEffect(() => {
+    if (!loaded || !autoAnchorUid) return;
+    if (startJobDirty || tracing) return;
+    if (tracedDatasetKeyRef.current === datasetKey) return;
+    // Deferred so the setState inside handleTrace is not synchronous in the
+    // effect body (react-compiler restriction).
+    const t = setTimeout(() => {
+      tracedDatasetKeyRef.current = datasetKey;
+      handleTrace({ auto: true, overrideUid: autoAnchorUid });
+    }, 0);
+    return () => clearTimeout(t);
+  }, [loaded, autoAnchorUid, datasetKey, startJobDirty, tracing, handleTrace]);
 
   /** Auto-refresh a summary that was traced DURING a staged capture: the
    *  final snapshot (with every streamed log image + uploaded byte) replaces
@@ -323,7 +400,13 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
             )}
             <p className="mt-2 text-[11px] leading-snug text-teal-700/80 dark:text-teal-300/60">
               {loaded
-                ? "Lineage is ready to trace — log images keep streaming in as they arrive."
+                ? summary
+                  ? importInfo?.progress
+                    ? "Lineage traced — log images keep streaming in as they arrive."
+                    : "Lineage traced — log images will be fetched for its jobs."
+                  : autoAnchorUid
+                    ? `Auto-tracing from the page job ${autoAnchorUid} — log images are fetched only for the traced lineage.`
+                    : "Click Trace Lineage below — log images are then fetched only for the traced jobs."
                 : "Jobs will appear here automatically — no need to scroll or refresh."}
             </p>
           </div>
@@ -370,7 +453,7 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
           </div>
           <div className="flex flex-col justify-end gap-1.5">
             <Button
-              onClick={handleTrace}
+              onClick={() => handleTrace()}
               disabled={!loaded || tracing}
               className={
                 "h-9 w-full bg-teal-600 text-[13px] transition-shadow hover:bg-teal-700 " +

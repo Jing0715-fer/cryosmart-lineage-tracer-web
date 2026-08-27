@@ -18,7 +18,9 @@ import {
  *     cryosmart_auth: "Bearer eyJ..." | null,
  *     cryosmart_cookie: "..." | null,
  *     source: "CryoSmart SPA Vue Store",
- *     captured_at: "2026-..." (optional)
+ *     captured_at: "2026-..." (optional),
+ *     end_job_uid: "J46" | null,     // v3.5: page the script ran on
+ *     lineage_mode: true              // v3.5: wait for Trace Lineage request
  *   }
  *
  * Then:
@@ -43,15 +45,22 @@ export async function POST(req: NextRequest) {
   const str = (v: unknown): string | undefined =>
     typeof v === "string" && v.length > 0 ? v : undefined;
 
-  const session = createImportSession({
-    project_uid: str(obj.project_uid),
-    experiment_uid: str(obj.experiment_uid),
-    source_url: str(obj.source_url),
-    captured_at: str(obj.captured_at),
-    cryosmart_origin: str(obj.cryosmart_origin),
-    cryosmart_auth: str(obj.cryosmart_auth),
-    cryosmart_cookie: str(obj.cryosmart_cookie),
-  });
+  const session = createImportSession(
+    {
+      project_uid: str(obj.project_uid),
+      experiment_uid: str(obj.experiment_uid),
+      source_url: str(obj.source_url),
+      captured_at: str(obj.captured_at),
+      cryosmart_origin: str(obj.cryosmart_origin),
+      cryosmart_auth: str(obj.cryosmart_auth),
+      cryosmart_cookie: str(obj.cryosmart_cookie),
+    },
+    "session created",
+    {
+      endJobUid: str(obj.end_job_uid) ?? null,
+      lineageMode: obj.lineage_mode === true,
+    }
+  );
 
   return NextResponse.json(
     {

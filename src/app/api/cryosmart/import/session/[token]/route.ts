@@ -13,9 +13,17 @@ import {
  *   status: awaiting_jobs → collecting_logs → complete
  *   has_data: true once jobs are uploaded (graph can render)
  *   log_jobs_done / log_jobs_total / log_images_count: log collection progress
+ *   end_job_uid / lineage_mode / log_request: v3.5 lineage-scoped capture
+ *
+ * `?hb=1` — capture-script HEARTBEAT. While the script WAITS for the user's
+ * Trace Lineage request (v3.5 lineage mode) nothing else changes on the
+ * session, so the UI's stall detector needs a liveness signal: the script
+ * polls with ?hb=1 every ~3s, bumping `updated_at`. If the script's tab
+ * dies, the heartbeat stops and the UI times out with a clear message
+ * instead of polling forever.
  */
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   ctx: { params: Promise<{ token: string }> }
 ) {
   const { token } = await ctx.params;
@@ -29,6 +37,9 @@ export async function GET(
       },
       { status: 404, headers: IMPORT_SESSION_CORS }
     );
+  }
+  if (req.nextUrl.searchParams.get("hb") === "1") {
+    session.updatedAt = Date.now();
   }
   return NextResponse.json(sessionProgress(session), {
     headers: IMPORT_SESSION_CORS,

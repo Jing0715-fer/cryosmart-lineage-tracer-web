@@ -43,6 +43,20 @@ export interface ImportSession {
   token: string;
   status: ImportSessionStatus;
   data: ImportSessionData;
+  /** v3.5: the job whose CryoSmart page the capture script was run on.
+   * The web UI auto-fills Start Job with it and auto-traces the moment
+   * jobs land, so running the script from the END JOB's page needs zero
+   * manual setup. Null when the script ran from a non-job page. */
+  endJobUid: string | null;
+  /** v3.5: log images are fetched ONLY for jobs published to `logRequest`
+   * by the web UI's Trace Lineage action (lineage-scoped capture — a
+   * 46-job project with 900+ images typically needs only ~10 jobs). When
+   * false (small projects, or older scripts) every job is scanned. */
+  lineageMode: boolean;
+  /** Lineage job uids requested by the web UI's Trace action. Unioned
+   * across re-traces; `revision` bumps on every update so the capture
+   * script (and the UI's stall detector) can see changes. */
+  logRequest: { jobs: string[]; revision: number; requestedAt: number } | null;
   /** Log images streamed in batches: { [jobUid]: [{fileid, name, ...}] } */
   jobLogImages: Record<string, LogImageRef[]>;
   /** Image BYTES uploaded by the capture script (it runs same-origin with
@@ -117,7 +131,8 @@ function newToken(): string {
 
 export function createImportSession(
   data: ImportSessionData,
-  note = "session created"
+  note = "session created",
+  opts?: { endJobUid?: string | null; lineageMode?: boolean }
 ): ImportSession {
   gc();
   const token = newToken();
@@ -126,6 +141,9 @@ export function createImportSession(
     token,
     status: "awaiting_jobs",
     data: { ...data, captured_at: data.captured_at || new Date().toISOString() },
+    endJobUid: opts?.endJobUid || null,
+    lineageMode: opts?.lineageMode === true,
+    logRequest: null,
     jobLogImages: {},
     imageStore: new Map(),
     imageStoreBytes: 0,
@@ -251,6 +269,49 @@ export function addImagesToSession(
   return stored;
 }
 
+/**
+ * v3.5: record the traced lineage's job list — the capture script waits
+ * for this and then fetches log images for ONLY these jobs. Re-traces
+ * UNION into the existing list (jobs already scanned are skipped
+ * client-side); `revision` bumps so pollers see the change.
+ */
+export function setLogRequest(session: ImportSession, jobs: unknown): ImportSession {
+  const requested = Array.isArray(jobs)
+    ? Array.from(
+        new Set(
+          jobs.filter((j): j is string => typeof j === "string" && j.length > 0)
+        )
+      )
+    : [];
+  if (requested.length === 0) return session;
+  // Keep only jobs that exist in the captured set (belt-and-braces: the
+  // UI traces from the session's own jobs, but a stale/reloaded tab could
+  // post uids from a different dataset).
+  let effective = requested;
+  if (Array.isArray(session.data.jobs) && session.data.jobs.length > 0) {
+    const captured = new Set(
+      (session.data.jobs as Array<{ uid?: unknown }>)
+        .map((j) => (j && typeof j.uid === "string" ? j.uid : null))
+        .filter((u): u is string => !!u)
+    );
+    effective = requested.filter((u) => captured.has(u));
+    if (effective.length === 0) return session;
+  }
+  const existing = session.logRequest ? session.logRequest.jobs : [];
+  const union = Array.from(new Set([...existing, ...effective]));
+  session.logRequest = {
+    jobs: union,
+    revision: (session.logRequest?.revision || 0) + 1,
+    requestedAt: Date.now(),
+  };
+  // In lineage mode the progress denominator is the requested lineage
+  // size (every scanned job comes from the request), not the whole project.
+  if (session.lineageMode) session.logJobsTotal = union.length;
+  if (session.status === "awaiting_jobs") session.status = "collecting_logs";
+  session.updatedAt = Date.now();
+  return session;
+}
+
 /** Serve a stored image as a Response (or null when not found). */
 export function sessionImageResponse(
   session: ImportSession,
@@ -299,6 +360,15 @@ export function sessionProgress(session: ImportSession) {
     log_images_count: session.logImagesCount,
     log_images_uploaded: session.logImagesUploaded,
     log_jobs_with_images: session.logJobsWithImages,
+    end_job_uid: session.endJobUid,
+    lineage_mode: session.lineageMode,
+    log_request: session.logRequest
+      ? {
+          jobs: session.logRequest.jobs,
+          revision: session.logRequest.revision,
+          requested_at: session.logRequest.requestedAt,
+        }
+      : null,
     note: session.note,
     updated_at: session.updatedAt,
     expires_in: Math.max(0, Math.round((session.expiresAt - Date.now()) / 1000)),

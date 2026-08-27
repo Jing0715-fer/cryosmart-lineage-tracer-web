@@ -4,12 +4,15 @@
  * Provides instructions for capturing CryoSmart metadata via browser console.
  * The capture script runs inside CryoSmart to access Vue store.
  *
- * Staged capture flow (v3):
+ * Staged capture flow (v3.5):
  *   0. Open about:blank synchronously → popup can NEVER be blocked.
  *   1. POST /api/cryosmart/import/session        → token (tiny request)
  *      → navigate the already-open tab to /?imported=<token>
  *   2. POST .../jobs    → the web app renders the graph immediately
+ *      (v3.5: the app AUTO-TRACES when the script ran on a job page —
+ *       end_job_uid — and publishes the lineage via .../request-logs)
  *   3. POST .../logs    → log-image batches stream in with live progress
+ *      (v3.5: ONLY for the requested lineage jobs on large projects)
  *   4. POST .../complete → UI stops polling and refreshes with final data
  */
 
@@ -64,14 +67,17 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.4 — uploads log-image BYTES (the script runs
-// same-origin with CryoSmart, so it is the only party that can fetch them;
-// the web app is usually viewed over HTTPS where direct http://<cryosmart>
-// images are mixed-content blocked). v3.4: 6 concurrent byte workers + a
-// 240s drain budget so large captures (900+ images) upload COMPLETELY
-// before /complete (v3.3's 3 workers/90s left most bytes unsent, which
-// showed up as broken report images). Also: deep-scan log calibration that
-// finds logs in ANY store state shape (incl. WebSocket-delivered logs).
+// CryoSmart Smart Capture v3.5 — LINEAGE-SCOPED log images. Job metadata
+// uploads for the WHOLE project immediately (fast), but log images are
+// fetched ONLY for the jobs the traced lineage needs: the script waits for
+// the web app's Trace Lineage action to publish the lineage job list to
+// the session, then scans just those jobs (a 46-job project with 900+
+// images typically needs only ~10 jobs). Run the script from the END JOB's
+// page and the app auto-traces — zero manual setup. Console escape
+// hatches while it waits: __csCaptureAll() (fetch every job's logs) and
+// __csCaptureFinish() (stop now). Still uploads log-image BYTES
+// same-origin (6 workers, 240s drain — v3.4) and keeps the deep-scan log
+// calibration that finds logs in ANY store state shape (v3.2).
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -155,6 +161,59 @@ export function SmartCapturePanel({ onCapture }: Props) {
 
   console.log('Extracted', jobs.length, 'jobs with full metadata');
 
+  // ── v3.5: detect the job whose page the user is on ────────────────
+  // It becomes the session's end_job_uid: the web app auto-fills Start
+  // Job with it AND auto-traces the moment jobs land, so running the
+  // script from the END JOB's page needs zero manual setup.
+  function detectCurrentJobUid() {
+    // (a) URL: /job/<uid>, /jobs/<uid>, ?job=<uid>, #/jobs/<uid> …
+    var m = location.href.match(/[?&/]jobs?[=/]([A-Za-z]?[0-9][A-Za-z0-9_-]{0,40})/i);
+    if (m) return m[1];
+    // (b) Vue Router current-route params
+    try {
+      var router = qApp.__vue_app__.config.globalProperties.$router;
+      var route = router && router.currentRoute && router.currentRoute.value;
+      var params = route && route.params;
+      if (params && typeof params === 'object') {
+        var keys = ['job_uid', 'jobUid', 'jobId', 'job_id', 'uid', 'id'];
+        for (var i = 0; i < keys.length; i++) {
+          var v = params[keys[i]];
+          if (v && typeof v === 'string') return v;
+        }
+      }
+    } catch (e) {}
+    // (c) pinia state: current/selected/active job pointers (read-only)
+    var hit = null;
+    try {
+      pinia._s.forEach(function(s) {
+        if (hit || !s) return;
+        var st = s.$state || s;
+        var ks = Object.keys(st);
+        for (var k = 0; k < ks.length; k++) {
+          if (!/^(current|selected|active)[_]?job/i.test(ks[k])) continue;
+          var val = st[ks[k]];
+          if (typeof val === 'string' && val) { hit = val; return; }
+          if (val && typeof val === 'object' && typeof val.uid === 'string' && val.uid) { hit = val.uid; return; }
+        }
+      });
+    } catch (e) {}
+    return hit;
+  }
+  var currentJobUid = detectCurrentJobUid();
+  if (currentJobUid) {
+    var knownJob = null;
+    for (var cj = 0; cj < jobs.length; cj++) {
+      if (String(jobs[cj].uid).replace(/^J/i, '') === String(currentJobUid).replace(/^J/i, '')) { knownJob = jobs[cj].uid; break; }
+    }
+    currentJobUid = knownJob;   // null when the uid is not one of THIS project's jobs
+  }
+  // v3.5 lineage mode: on big projects log images are fetched ONLY for
+  // the jobs the traced lineage needs (wait for Trace Lineage). Small
+  // projects capture everything — the wait isn't worth it.
+  var LINEAGE_MODE = jobs.length > 15;
+  console.log('[CryoSmart] Page job: ' + (currentJobUid || 'not detected') +
+    ' · lineage-scoped log capture: ' + (LINEAGE_MODE ? 'ON (' + jobs.length + ' jobs)' : 'off (small project)'));
+
   // ── STEP 0: open the progress tab NOW ──────────────────────────────
   // Popup blockers only honour window.open() during the brief user-gesture
   // window after pressing Enter. We open about:blank synchronously here —
@@ -195,7 +254,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
         cryosmart_auth: cryosmartAuth,
         cryosmart_cookie: cryosmartCookie,
         source: 'CryoSmart SPA Vue Store (staged)',
-        captured_at: new Date().toISOString()
+        captured_at: new Date().toISOString(),
+        end_job_uid: currentJobUid || undefined,
+        lineage_mode: LINEAGE_MODE
       })
     });
     sess = await r0.json();
@@ -586,15 +647,16 @@ export function SmartCapturePanel({ onCapture }: Props) {
     });
   }
 
-  // ── STEP 2: harvest cached logs + upload jobs ──────────────────────
-  // Cached logs are embedded onto each job as raw 'image_logs' entries
-  // (full fidelity: type/text/flags/imgfiles) before the jobs POST, so the
-  // graph renders with log images immediately where available.
-  var pending = [];
+  // ── STEP 2: embed cached logs + upload job metadata (fast) ────────
+  // Cached log entries ride along INSIDE the jobs payload as raw
+  // 'image_logs' entries (full fidelity: type/text/flags/imgfiles, refs
+  // only — no bytes). v3.5 DEFERS their refs + byte uploads to the
+  // lineage-scoped scan in STEP 3, so jobs outside the traced lineage
+  // never cost fetch time. The graph renders instantly either way.
+  var pending = jobs.map(function(j) { return j.uid; });
   for (var i2 = 0; i2 < jobs.length; i2++) {
     var jobEntry = jobs[i2];
-    var uid = jobEntry.uid;
-    var cached = readLogState(uid);
+    var cached = readLogState(jobEntry.uid);
     if (cached && cached.length) {
       var rawLogs = [];
       for (var c = 0; c < cached.length; c++) {
@@ -602,14 +664,8 @@ export function SmartCapturePanel({ onCapture }: Props) {
         if (ce && (ce.type === 'image' || (ce.imgfiles && ce.imgfiles.length))) rawLogs.push(ce);
       }
       if (rawLogs.length) jobEntry.image_logs = rawLogs;
-      batch.push({ uid: uid, images: extractLogImages(cached) });
-    } else if (jobEntry.image_logs && jobEntry.image_logs.length) {
-      batch.push({ uid: uid, images: extractLogImages(jobEntry.image_logs) });
-    } else {
-      pending.push(uid);
     }
   }
-  console.log('[CryoSmart] Logs already loaded for ' + (jobs.length - pending.length) + ' job(s); ' + pending.length + ' to scan.');
 
   var up = null;
   try {
@@ -648,20 +704,118 @@ export function SmartCapturePanel({ onCapture }: Props) {
     return;
   }
   console.log('[CryoSmart] Uploaded ' + up.count + ' jobs — the graph should be rendering in the new tab now.');
-  await flushLogs(true);
 
-  // ── STEP 3: scan remaining jobs for log images (streamed) ─────────
+  // ── STEP 3 (v3.5): wait for Trace Lineage, then scan ONLY those jobs ─
+  // The expensive part of a capture is log-image fetching (real projects
+  // carry 900+ images across 40+ jobs, most OUTSIDE the lineage the user
+  // actually traces). v3.5 uploads job metadata for everyone but waits for
+  // the web app's Trace Lineage action to publish the lineage job list to
+  // the session, then fetches log images for just those jobs.
+  //   Script run on the END JOB's page → the app auto-traces and this
+  //   resolves within seconds. Script run on a project page → pick a
+  //   Start Job in the app tab and click Trace Lineage.
+  var ALL_UIDS = pending.slice();
+  var knownRequested = null;
+  var FINISH_NOW = false;
+  var CAPTURE_ALL_LATE = false;
+  window.__csCaptureAll = function() {
+    CAPTURE_ALL_LATE = true;
+    knownRequested = ALL_UIDS.slice();
+    console.log('[CryoSmart] __csCaptureAll — fetching log images for EVERY job.');
+  };
+  window.__csCaptureFinish = function() {
+    FINISH_NOW = true;
+    console.log('[CryoSmart] __csCaptureFinish — completing without further log fetching.');
+  };
+
+  function fetchStatus(hb) {
+    return fetch(APP + '/api/cryosmart/import/session/' + token + (hb ? '?hb=1' : ''), { cache: 'no-store' })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .catch(function() { return null; });
+  }
+  function sleepMs(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+
+  if (LINEAGE_MODE) {
+    var WAIT_MS = 15 * 60 * 1000;
+    var waitStart = Date.now();
+    var misses = 0;
+    console.log('[CryoSmart] Waiting for Trace Lineage — log images are fetched only for the traced lineage.');
+    console.log('[CryoSmart]   escape hatches: __csCaptureAll() = every job · __csCaptureFinish() = stop now');
+    while (!knownRequested && !FINISH_NOW) {
+      if (Date.now() - waitStart > WAIT_MS) {
+        console.log('[CryoSmart] No Trace Lineage within 15 min — completing without log images.');
+        break;
+      }
+      var st = await fetchStatus(true);   // ?hb=1 heartbeat: tells the app this script is alive
+      if (!st) {
+        misses++;
+        if (misses >= 5) { console.warn('[CryoSmart] Cannot reach the web app — completing.'); break; }
+      } else {
+        misses = 0;
+        if (st.status === 'complete') break;
+        if (st.log_request && st.log_request.jobs && st.log_request.jobs.length) {
+          knownRequested = st.log_request.jobs.slice();
+        }
+      }
+      await sleepMs(3000);
+    }
+    if (knownRequested) {
+      if (CAPTURE_ALL_LATE) {
+        pending = ALL_UIDS.slice();
+        console.log('[CryoSmart] Fetching log images for ALL ' + pending.length + ' job(s) (__csCaptureAll).');
+      } else {
+        var uidSet = {};
+        for (var q2 = 0; q2 < jobs.length; q2++) uidSet[jobs[q2].uid] = true;
+        pending = knownRequested.filter(function(u) { return uidSet[u]; });
+        console.log('[CryoSmart] Trace Lineage requested ' + pending.length + ' job(s) — fetching ONLY their log images (of ' + ALL_UIDS.length + ' total).');
+      }
+    } else {
+      pending = [];   // timed out / __csCaptureFinish / app unreachable
+    }
+  }
+
+  // Loader calibration result + already-streamed bookkeeping, shared
+  // across scan passes (initial request + the re-trace grace window below).
+  var winning = null;   // {action, shapeIdx, mode:'state'|'return'|'diff'} or {http:true}
+  var scanned = {};
+
   async function scanLogs() {
     if (pending.length === 0) return;
 
+    // In-memory logs (cached jobLogs state or embedded image_logs) cost
+    // nothing to harvest; the loader CALIBRATION must only run on truly
+    // lazy jobs — a pre-cached job would make whatever action was tried
+    // first look like the working loader.
+    function cachedLogsFor(uid) {
+      var c = readLogState(uid);
+      if (c && c.length) return c;
+      for (var ii = 0; ii < jobs.length; ii++) {
+        if (jobs[ii].uid === uid && Array.isArray(jobs[ii].image_logs) && jobs[ii].image_logs.length) {
+          return jobs[ii].image_logs;
+        }
+      }
+      return null;
+    }
+    function shapesFor(uid) {
+      var row = null;
+      for (var i = 0; i < jobs.length; i++) if (jobs[i].uid === uid) { row = jobs[i]; break; }
+      var sh = [uid, { job_uid: uid }, { uid: uid }, [uid]];
+      if (row) sh.push(row);
+      sh.push({ uid: uid, project_uid: projectId });
+      return sh;
+    }
+    var lazy = pending.filter(function(u) { return !scanned[u] && !cachedLogsFor(u); });
+    console.log('[CryoSmart] Logs already in memory for ' + (pending.length - lazy.length) + ' job(s); ' + lazy.length + ' to load via the log API.');
+
+    var socketMsgs = [];
+    var unsniff = null;
+    if (lazy.length > 0 && !winning) {
     var actions = findLogActions();
     console.log('[CryoSmart] Log loader candidates:', actions.map(function(a) { return a.name; }).join(', ') || 'none');
 
     // v3.2: sniff WebSocket message types while scanning — on some builds
     // the logs arrive via WS (e.g. insert_events); this shows what actually
     // flows when the loader is called.
-    var socketMsgs = [];
-    var unsniff = null;
     try {
       var sm = socketStore && socketStore.socketManager;
       var wsx = sm && sm.ws;
@@ -688,31 +842,19 @@ export function SmartCapturePanel({ onCapture }: Props) {
       } catch (e) {}
     }
 
-    // v3.2: calibrate on up to 3 jobs, image-rich job types FIRST. The old
-    // script calibrated on J1 (import movies), which often has no image logs
-    // at all — making a perfectly working loader look broken.
+    // v3.2: calibrate on up to 3 LAZY jobs, image-rich job types FIRST.
+    // The old script calibrated on J1 (import movies), which often has no
+    // image logs at all — making a perfectly working loader look broken.
     var typeByUid = {};
     for (var t2 = 0; t2 < jobs.length; t2++) typeByUid[jobs[t2].uid] = jobs[t2].job_type || '';
     var RICH_RE = /refine|class|3d|2d|reconstruct|sharpen|nu|motion|ctf|mask|build/i;
-    var calibPool = pending.slice().sort(function(x, y) {
+    var calibPool = lazy.slice().sort(function(x, y) {
       return (RICH_RE.test(typeByUid[y] || '') ? 1 : 0) - (RICH_RE.test(typeByUid[x] || '') ? 1 : 0);
     });
     var calibTries = Math.min(3, calibPool.length);
     if (calibTries > 0) {
       console.log('[CryoSmart] Calibrating on job(s): ' + calibPool.slice(0, calibTries).join(', ') + ' (image-rich types first)');
     }
-
-    function shapesFor(uid) {
-      var row = null;
-      for (var i = 0; i < jobs.length; i++) if (jobs[i].uid === uid) { row = jobs[i]; break; }
-      var sh = [uid, { job_uid: uid }, { uid: uid }, [uid]];
-      if (row) sh.push(row);
-      sh.push({ uid: uid, project_uid: projectId });
-      return sh;
-    }
-
-    var scanned = {};
-    var winning = null;   // {action, shapeIdx, mode:'state'|'return'|'diff'} or {http:true}
 
     outer:
     for (var ci = 0; ci < calibTries && !winning; ci++) {
@@ -779,24 +921,30 @@ export function SmartCapturePanel({ onCapture }: Props) {
       }
     }
 
-    if (!winning) {
-      console.log('[CryoSmart] Could not trigger lazy log loading on this build — finishing without per-job log images. ' +
+    }   // end: loader calibration (runs only when lazy jobs exist)
+
+    if (!winning && lazy.length > 0) {
+      console.log('[CryoSmart] Could not trigger lazy log loading on this build — harvesting in-memory logs only. ' +
         '(Tip: open one job detail view in CryoSmart, then re-run the script to harvest its cached logs.)');
       console.log('[CryoSmart] ── Diagnostics (paste this whole block back to the maintainer) ──');
       try { console.log('pinia stores:\\n' + storeSummary(stores)); } catch (e) {}
       console.log('socket messages during scan (' + socketMsgs.length + '): ' + socketMsgs.slice(-60).join(', '));
-      if (unsniff) unsniff();
-      return;
     }
     await flushLogs(true);
-    console.log('[CryoSmart] Log loading works via ' +
-      (winning.http ? 'HTTP endpoint' : 'store action "' + winning.action.name + '" (' + winning.mode + ')') +
-      ' — scanning ' + pending.length + ' job(s)...');
+    if (winning) {
+      console.log('[CryoSmart] Log loading works via ' +
+        (winning.http ? 'HTTP endpoint' : 'store action "' + winning.action.name + '" (' + winning.mode + ')') +
+        ' — scanning ' + pending.length + ' job(s)...');
+    } else {
+      console.log('[CryoSmart] Harvesting in-memory logs for ' + pending.length + ' job(s)...');
+    }
 
-    // Replay for every remaining job (time-boxed, streamed to the UI).
-    // Unified retrieval: try the return value, then watch ALL store state
-    // (deep-scan + classic maps), then the HTTP probe as a per-job fallback.
-    var t0 = Date.now(), BUDGET_MS = 120000;
+    // Scan every pending job (time-boxed, streamed to the UI). Unified
+    // retrieval: in-memory logs first (free), then the calibrated loader
+    // (return value → ALL store state → per-job HTTP probe). Jobs with no
+    // readable logs still stream an EMPTY batch so the progress count stays
+    // exact — and the lineage-scoped total equals the request size.
+    var t0 = Date.now(), BUDGET_MS = 180000;
     for (var j = 0; j < pending.length; j++) {
       var uid2 = pending[j];
       if (scanned[uid2]) continue;
@@ -804,8 +952,8 @@ export function SmartCapturePanel({ onCapture }: Props) {
         console.log('[CryoSmart] Log collection time budget reached — stopping after ' + j + '/' + pending.length + ' job(s).');
         break;
       }
-      var logs2 = readLogState(uid2);
-      if (!logs2) {
+      var logs2 = cachedLogsFor(uid2);
+      if (!logs2 && winning) {
         if (winning.http) {
           logs2 = await httpLogProbe(uid2);
         } else {
@@ -833,19 +981,55 @@ export function SmartCapturePanel({ onCapture }: Props) {
           if (!logs2) logs2 = await httpLogProbe(uid2);   // per-job HTTP fallback
         }
       }
+      scanned[uid2] = true;
       batch.push({ uid: uid2, images: logs2 ? extractLogImages(logs2) : [] });
       await flushLogs(false);
       if ((j + 1) % 20 === 0) console.log('[CryoSmart] Log scan progress: ' + (j + 1) + '/' + pending.length + ' job(s)...');
     }
     await flushLogs(true);
     if (unsniff) unsniff();
-    console.log('[CryoSmart] Socket messages during scan: ' + socketMsgs.slice(-60).join(', '));
+    if (socketMsgs.length) console.log('[CryoSmart] Socket messages during scan: ' + socketMsgs.slice(-60).join(', '));
   }
 
   try {
     await scanLogs();
   } catch (e) {
     console.warn('[CryoSmart] Log collection failed (non-fatal):', e && e.message);
+  }
+
+  // ── STEP 3.6 (v3.5): grace window for re-traces ────────────────────
+  // A re-trace (different end job) unions its lineage into the session
+  // request — pick those jobs up for a short window before completing.
+  // __csCaptureAll() works here too (fetches every unscanned job).
+  if (LINEAGE_MODE && knownRequested && !FINISH_NOW) {
+    var graceEnd = Date.now() + 45000;
+    var served = knownRequested.slice();
+    while (Date.now() < graceEnd && !FINISH_NOW) {
+      await sleepMs(3000);
+      if (FINISH_NOW) break;
+      if (CAPTURE_ALL_LATE) {
+        var rest = ALL_UIDS.filter(function(u) { return !scanned[u]; });
+        if (rest.length) {
+          pending = rest;
+          console.log('[CryoSmart] Fetching log images for the remaining ' + rest.length + ' job(s) (__csCaptureAll).');
+          try { await scanLogs(); } catch (e) {}
+        }
+        break;
+      }
+      var stg = await fetchStatus(true);
+      var reqg = (stg && stg.log_request && stg.log_request.jobs) || [];
+      var extra = [];
+      var servedSet = {};
+      for (var s1 = 0; s1 < served.length; s1++) servedSet[served[s1]] = 1;
+      for (var s2 = 0; s2 < reqg.length; s2++) if (!servedSet[reqg[s2]]) extra.push(reqg[s2]);
+      if (extra.length) {
+        served = reqg.slice();
+        pending = extra;
+        console.log('[CryoSmart] Re-trace detected — fetching ' + extra.length + ' more job(s).');
+        try { await scanLogs(); } catch (e) {}
+        graceEnd = Date.now() + 45000;
+      }
+    }
   }
 
   // ── STEP 3.5: wait for the image-byte uploads to land ──────────────
@@ -858,7 +1042,11 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // ── STEP 4: mark the session complete ──────────────────────────────
   // The web UI stops polling and refreshes with the final data snapshot.
   try { await post('/complete', {}); } catch (e) {}
-  console.log('[CryoSmart] Capture complete. Live page:', appUrl);
+  console.log('[CryoSmart] Capture complete' +
+    (LINEAGE_MODE && knownRequested && !CAPTURE_ALL_LATE
+      ? ' — lineage-scoped: ' + knownRequested.length + ' of ' + ALL_UIDS.length + ' jobs scanned'
+      : '') +
+    '. Live page:', appUrl);
 })();
 `.trim();
 
@@ -924,7 +1112,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
                 <div className="text-[11px] text-amber-800">
                   <strong>How to use:</strong>
                   <ol className="mt-1 ml-2 list-decimal space-y-0.5">
-                    <li>Open CryoSmart and navigate to your project</li>
+                    <li>Open CryoSmart and navigate to your project — best: the FINAL job's page (the tracer auto-anchors to it)</li>
                     <li>Wait for the page to fully load (jobs visible)</li>
                     <li>Press <kbd className="rounded bg-white px-1 font-mono text-[10px]">F12</kbd> to open Developer Tools</li>
                     <li>Click the <strong>Console</strong> tab</li>
@@ -964,14 +1152,16 @@ export function SmartCapturePanel({ onCapture }: Props) {
             3
           </div>
           <div className="flex-1">
-            <p className="text-[13px] font-medium text-emerald-700">Live progress!</p>
+            <p className="text-[13px] font-medium text-emerald-700">Fully automatic</p>
             <p className="mt-0.5 text-[11px] text-slate-500">
-              A new tab opens <strong>immediately</strong> and shows the capture
-              progress in real time — the lineage graph renders as soon as job
-              metadata lands, then log images stream in.
+              A new tab opens <strong>immediately</strong> and shows live
+              progress. The lineage graph renders as soon as job metadata
+              lands, auto-traces from your page job, and log images stream in
+              <strong> only for the traced lineage</strong> — the other jobs
+              are skipped, saving minutes on large projects.
             </p>
             <p className="mt-0.5 text-[11px] text-teal-600">
-              Maps, tile images and job log images are captured together, with session credentials (auth + cookie) forwarded for downloads.
+              Maps, tile images and job log images are captured with session credentials (auth + cookie) forwarded for downloads.
             </p>
           </div>
         </div>

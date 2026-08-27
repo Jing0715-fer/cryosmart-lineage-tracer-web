@@ -175,10 +175,10 @@ export default function Home() {
                 <span className="rounded-full bg-teal-50 px-2.5 py-0.5 text-[10px] font-medium text-teal-700">Recommended</span>
               </div>
               <div className="space-y-3 text-[13px] text-slate-600">
-                <p><strong>1. Open CryoSmart</strong> in your browser and navigate to your project</p>
+                <p><strong>1. Open CryoSmart</strong> and navigate to your project — or straight to the final job's page (recommended)</p>
                 <p><strong>2. Copy the capture script</strong> from the Smart Capture panel below</p>
                 <p><strong>3. Paste in browser console</strong> (F12 then Console tab)</p>
-                <p><strong>4. Data auto-imports</strong> with session for maps and images</p>
+                <p><strong>4. Fully automatic</strong> — job metadata imports instantly, the lineage auto-traces from your page job, and log images are fetched only for that lineage</p>
               </div>
               <div className="mt-4 flex items-center gap-2 text-[11px] text-slate-500">
                 <Keyboard className="h-3.5 w-3.5" />
@@ -227,6 +227,8 @@ export default function Home() {
                 ? { message: importState.message, progress: importState.progress }
                 : undefined
             }
+            importToken={importState.status === "polling" ? importState.token : null}
+            autoTraceJobUid={importState.endJobUid}
           />
           <LineagePreviewCard summary={summary} session={loaded?.session ?? null} onLoadDemo={handleLoadDemo} />
           <DownloadCard summary={summary} options={traceOptions} loaded={loaded} />

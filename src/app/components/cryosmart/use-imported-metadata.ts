@@ -43,6 +43,14 @@ interface SessionStatus {
   log_images_uploaded: number;
   log_jobs_with_images: number;
   note: string;
+  /** v3.5: job whose CryoSmart page the script ran on (auto-trace anchor). */
+  end_job_uid?: string | null;
+  /** v3.5: log images are fetched only for the requested lineage jobs. */
+  lineage_mode?: boolean;
+  /** v3.5: lineage job list requested by the UI's Trace action. */
+  log_request?: { jobs: string[]; revision: number; requested_at?: number } | null;
+  /** Session mutation clock — bumped by the script's ?hb=1 heartbeat. */
+  updated_at?: number;
 }
 
 export interface ImportProgress {
@@ -63,6 +71,12 @@ export interface ImportState {
   startedAt: number | null;
   /** Live log-collection progress (staged flow; null until jobs are in). */
   progress: ImportProgress | null;
+  /** v3.5: job whose CryoSmart page the capture script ran on — the app
+   * auto-fills Start Job with it and auto-traces when jobs land, so the
+   * manual Trace Lineage setup can be skipped entirely. Sticky (survives
+   * the polling → loaded transition so the suggested Start Job doesn't
+   * flip after the capture completes). */
+  endJobUid: string | null;
 }
 
 interface UseImportedOpts {
@@ -224,6 +238,14 @@ function toLoaded(data: PendingData, token: string): LoadedMetadata {
 
 const POLL_INTERVAL_MS = 700;
 const MAX_WAIT_MS = 5 * 60 * 1000; // staged captures can stream for minutes
+// Once jobs have landed there is no fixed deadline anymore (lineage-scoped
+// captures can legitimately wait many minutes for the user to trace, kept
+// alive by the script's ?hb=1 heartbeat). Instead: a capture is STALLED —
+// and the poller gives up with a clear message — when NOTHING about the
+// session has changed (counters, note, request revision, updated_at) for
+// this long. A dead capture tab stops heartbeating, which stops the
+// session clock, which trips this timeout.
+const STALL_TIMEOUT_MS = 10 * 60 * 1000;
 
 export function useImportedMetadata(opts?: UseImportedOpts) {
   const [state, setState] = useState<ImportState>({
@@ -232,6 +254,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     token: null,
     startedAt: null,
     progress: null,
+    endJobUid: null,
   });
 
   const onLoadedRef = useRef(opts?.onLoaded);
@@ -256,6 +279,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
         token,
         startedAt: Date.now(),
         progress: null,
+        endJobUid: null,
       });
     }, 0);
     return () => clearTimeout(t);
@@ -281,9 +305,18 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     const poll = async () => {
       /** staged-flow state: initial (jobs-only) snapshot already applied? */
       let stagedLoaded = false;
+      /** v3.5: first non-null end_job_uid seen (sticky across iterations). */
+      let endJobUidSeen: string | null = null;
+      /** stall detection: has_data once seen + fingerprint of last activity. */
+      let sawData = false;
+      let lastSig = "";
+      let lastActivity = Date.now();
 
       while (!cancelled) {
-        if (Date.now() - startedAt > MAX_WAIT_MS) {
+        // Hard timeout only applies BEFORE jobs land — after that the
+        // heartbeat-driven stall detector below takes over (a legitimate
+        // capture can run for many minutes).
+        if (!sawData && Date.now() - startedAt > MAX_WAIT_MS) {
           if (!cancelled) {
             setState({
               status: "error",
@@ -291,6 +324,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               token,
               startedAt,
               progress: null,
+              endJobUid: endJobUidSeen,
             });
           }
           return;
@@ -312,6 +346,43 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
         }
 
         if (sessionStatus && sessionStatus.ok) {
+          if (sessionStatus.end_job_uid) endJobUidSeen = sessionStatus.end_job_uid;
+          if (sessionStatus.has_data) sawData = true;
+
+          // Stall detection — the script's heartbeat (?hb=1) keeps bumping
+          // `updated_at` while it waits for the user's trace, and every
+          // log/image batch mutates the counters, so a live capture always
+          // changes this fingerprint.
+          const sig = [
+            sessionStatus.status,
+            sessionStatus.log_jobs_done,
+            sessionStatus.log_jobs_total,
+            sessionStatus.log_images_count,
+            sessionStatus.log_images_uploaded,
+            sessionStatus.note,
+            sessionStatus.updated_at ?? 0,
+            sessionStatus.log_request?.revision ?? 0,
+          ].join("|");
+          if (sig !== lastSig) {
+            lastSig = sig;
+            lastActivity = Date.now();
+          } else if (
+            sawData &&
+            Date.now() - lastActivity > STALL_TIMEOUT_MS
+          ) {
+            if (!cancelled) {
+              setState({
+                status: "error",
+                message:
+                  "Capture stalled — the capture script stopped responding (its tab may have been closed). Re-run it when ready.",
+                token,
+                startedAt,
+                progress: null,
+                endJobUid: endJobUidSeen,
+              });
+            }
+            return;
+          }
 
           // Jobs are in — render the graph immediately (first time only)
           // and keep showing live log-collection progress.
@@ -349,20 +420,28 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   const nLogs = sessionStatus.log_images_count;
                   const withLogs = sessionStatus.log_jobs_with_images;
                   const uploaded = sessionStatus.log_images_uploaded;
+                  const req = sessionStatus.log_request;
+                  const lineageNote =
+                    sessionStatus.lineage_mode && req && req.jobs.length > 0
+                      ? ` (traced lineage — ${req.jobs.length} of ${data.data.jobs.length} jobs scanned)`
+                      : "";
                   setState({
                     status: "loaded",
                     message:
                       nLogs > 0
-                        ? `Captured ${data.data.jobs.length} jobs + ${nLogs} log images from ${withLogs} jobs` +
+                        ? `Captured ${data.data.jobs.length} jobs + ${nLogs} log images from ${withLogs} jobs${lineageNote}` +
                             (uploaded > 0 && uploaded < nLogs
                               ? ` (${uploaded} with previews).`
                               : ".")
                         : sessionStatus.log_jobs_done > 0
                           ? `Captured ${data.data.jobs.length} jobs — no log images readable on this build (see the CryoSmart console diagnostics).`
-                          : `Captured ${data.data.jobs.length} jobs (no log images available).`,
+                          : sessionStatus.lineage_mode && !sessionStatus.log_request
+                            ? `Captured ${data.data.jobs.length} jobs — no Trace Lineage ran during the capture window, so no log images were fetched. Re-run the script and trace (or call __csCaptureAll() in the CryoSmart console).`
+                            : `Captured ${data.data.jobs.length} jobs (no log images available).`,
                     token,
                     startedAt,
                     progress: null,
+                    endJobUid: endJobUidSeen,
                   });
                   cleanUrl();
                   return;
@@ -372,28 +451,53 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               // fall through — retry next tick
             }
           } else if (sessionStatus.has_data) {
-            const uploadedNote =
-              sessionStatus.log_images_uploaded > 0
-                ? ` · ${sessionStatus.log_images_uploaded} image files ready`
-                : "";
-            setState({
-              status: "polling",
-              message:
-                `Loaded ${sessionStatus.total_jobs} jobs — fetching log images ` +
-                `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
-                (sessionStatus.log_images_count > 0
-                  ? ` (${sessionStatus.log_images_count} captured${uploadedNote})`
-                  : "") +
-                "…",
-              token,
-              startedAt,
-              progress: {
-                done: sessionStatus.log_jobs_done,
-                total: Math.max(1, sessionStatus.log_jobs_total),
-                images: sessionStatus.log_images_count,
-                uploaded: sessionStatus.log_images_uploaded,
-              },
-            });
+            const req = sessionStatus.log_request || null;
+            // v3.5 lineage mode BEFORE the first trace: no log work has
+            // happened (and none should until the lineage is known).
+            const waitingForTrace =
+              !!sessionStatus.lineage_mode &&
+              !req &&
+              sessionStatus.log_jobs_done === 0;
+            if (waitingForTrace) {
+              setState({
+                status: "polling",
+                message:
+                  `Loaded ${sessionStatus.total_jobs} jobs — waiting for Trace Lineage (log images are fetched only for the traced lineage)` +
+                  (endJobUidSeen
+                    ? `… auto-tracing from ${endJobUidSeen}.`
+                    : ` — pick a Start Job below and click Trace Lineage.`),
+                token,
+                startedAt,
+                progress: null,
+                endJobUid: endJobUidSeen,
+              });
+            } else {
+              const uploadedNote =
+                sessionStatus.log_images_uploaded > 0
+                  ? ` · ${sessionStatus.log_images_uploaded} image files ready`
+                  : "";
+              const lineageNote =
+                sessionStatus.lineage_mode && req ? " for the traced lineage" : "";
+              setState({
+                status: "polling",
+                message:
+                  `Loaded ${sessionStatus.total_jobs} jobs — fetching log images${lineageNote} ` +
+                  `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
+                  (sessionStatus.log_images_count > 0
+                    ? ` (${sessionStatus.log_images_count} captured${uploadedNote})`
+                    : "") +
+                  "…",
+                token,
+                startedAt,
+                progress: {
+                  done: sessionStatus.log_jobs_done,
+                  total: Math.max(1, sessionStatus.log_jobs_total),
+                  images: sessionStatus.log_images_count,
+                  uploaded: sessionStatus.log_images_uploaded,
+                },
+                endJobUid: endJobUidSeen,
+              });
+            }
           } else {
             setState({
               status: "polling",
@@ -401,6 +505,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               token,
               startedAt,
               progress: null,
+              endJobUid: endJobUidSeen,
             });
           }
 
@@ -428,6 +533,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 token,
                 startedAt,
                 progress: null,
+                endJobUid: endJobUidSeen,
               });
               cleanUrl();
               return;
