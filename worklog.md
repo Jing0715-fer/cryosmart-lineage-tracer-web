@@ -706,3 +706,25 @@ Stage Summary:
 - The capture → configure → trace → preview funnel is now fully guided: popup lands on Configure & Trace, smart prefill means zero typing for the common case, Trace jumps straight to the rendered lineage, and all waiting/error states have clear English affordances.
 - No API or capture-script changes this round (pure web-UI flow work on top of task 11's staged capture).
 - Remaining backlog unchanged (report-html full review + bilingual report decision, nu-refine sharp/half map images, graph polish items).
+
+---
+Task ID: 13
+Agent: main (Z.ai Code)
+Task: Move the live capture progress INTO the Configure & Trace card so the popup landing there never has to scroll anywhere (user: "打开后直接跳转Configure & Trace，我不想再滚上去看进度了").
+
+Work Log:
+- Verified with agent-browser + a live staged session that the old sticky top-14 banner DID stick (top=56px, visible at #configure) — the complaint was a focus/UX issue, not a CSS bug; progress belonged in the card where the user looks.
+- configure-card.tsx: new exported `ImportPanelInfo { message, progress }` prop; renders a teal gradient progress panel at the top of CardContent while `awaitingImport`: spinner + live message + % chip (mono, ring-inset), h-2 animated gradient bar (teal→emerald, transition-[width] duration-500), and mono counters "X/N jobs scanned · M images captured"; contextual reassurance line differs pre-data ("Jobs will appear here automatically — no need to scroll or refresh.") vs post-data ("Lineage is ready to trace — log images keep streaming in as they arrive."). Dark-mode variants included. Old duplicate hint under the Trace button removed (non-awaiting branch kept).
+- page.tsx: passes `importInfo` (message + progress from importState while polling) into ConfigureCard; top banner slimmed to a one-line status (bar block + importProgressPct removed) with the token chip hidden below sm; full progress experience now lives in the card.
+- E2E verified with agent-browser across a full staged session (s6-2b7ae77d, P888, 12 jobs):
+  - Popup URL → auto-scroll → panel visible in-viewport at #configure with NO scrolling: "Capture session established — uploading job metadata…" + hint, no bar; banner 45px single line, no bar.
+  - Jobs upload → panel "Loaded 12 jobs — fetching log images 0/12…", 0% chip, 0/12 scanned, 0 images, bar 0%; Start Job auto-filled J12; Trace enabled.
+  - Log batch (3 with images / 3 empty) → live update: 50%, 6/12 jobs scanned, 4 images captured, bar 50%. VLM screenshot review: panel well-styled, counters legible, no glitches/overlap.
+  - Complete → panel removed, green banner "Captured 12 jobs + 4 log images from 3 jobs.", URL cleaned.
+  - Trace click → #preview lands at top=112px, trace log "Done. 12 nodes, 11 edges."
+  - Mobile 390px: no horizontal scroll; 0 page errors; console clean. lint 0 errors; tsc src/ 0 errors.
+- Committed ec7f2af, pushed main → master.
+
+Stage Summary:
+- The capture popup funnel is now fully self-contained at the landing point: the user stares at Configure & Trace and the live log-fetch progress (numbers, bar, images count) is right there — zero scrolling. The top banner remains as a slim global companion for when the user scrolls elsewhere (e.g. after Trace jumps to Preview).
+- Remaining backlog unchanged (report-html full review + bilingual report decision, nu-refine sharp/half map images, graph polish items, capture-script bookmarklet migration to staged flow).
