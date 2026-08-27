@@ -342,7 +342,9 @@ export function buildConsoleSnippet(appOrigin: string): string {
       '/api/job/get_job_logs?job_uid=' + encodeURIComponent(uid),
       '/api/job/get_logs?job_uid=' + encodeURIComponent(uid),
       '/api/job/get_job_log?job_uid=' + encodeURIComponent(uid),
-      '/api/log/get_logs?job_uid=' + encodeURIComponent(uid)
+      '/api/log/get_logs?job_uid=' + encodeURIComponent(uid),
+      '/api/job/' + encodeURIComponent(uid) + '/logs',
+      '/api/logs?job=' + encodeURIComponent(uid)
     ];
     return paths.reduce(function(chain, p) {
       return chain.then(function(logs) {
@@ -357,6 +359,104 @@ export function buildConsoleSnippet(appOrigin: string): string {
           .catch(function() { return null; });
       });
     }, Promise.resolve(null));
+  }
+
+  // ── v3.2 helpers: deep-scan + timeouts + log coercion ──────────
+  function withTimeout(p, ms) {
+    return Promise.race([
+      p,
+      new Promise(function(resolve) { setTimeout(function() { resolve(undefined); }, ms); })
+    ]);
+  }
+
+  function looksLikeLogs(v) {
+    return Array.isArray(v) && v.length > 0 && v.some(function(x) {
+      return x && ((x.imgfiles && x.imgfiles.length) || x.type === 'image' || x.text || x.files);
+    });
+  }
+
+  function coerceLogs(v) {
+    if (!v) return v;
+    if (Array.isArray(v)) return v;
+    if (Array.isArray(v.data)) return v.data;
+    if (Array.isArray(v.logs)) return v.logs;
+    if (Array.isArray(v.result)) return v.result;
+    return v;
+  }
+
+  // Deep-scan: walk every store's state and collect EVERY array holding
+  // entries with non-empty 'imgfiles' (the image-log signature) — catches
+  // logs that land in shapes other than jobLogs/logs/job_logs maps.
+  function scanForImageLogArrays(storeList) {
+    var results = [];
+    var seen = (typeof WeakSet === 'function') ? new WeakSet() : null;
+    var budget = { n: 0 };
+    function hasImgEntries(arr) {
+      for (var i = 0; i < arr.length; i++) {
+        if (arr[i] && arr[i].imgfiles && arr[i].imgfiles.length) return true;
+      }
+      return false;
+    }
+    function walk(node, path, depth) {
+      if (budget.n > 6000 || depth > 6 || node === null || node === undefined) return;
+      if (typeof node !== 'object') return;
+      if (seen) {
+        if (seen.has(node)) return;
+        try { seen.add(node); } catch (e) {}
+      }
+      budget.n++;
+      if (Array.isArray(node)) {
+        if (node.length > 0 && node.length <= 300 && hasImgEntries(node)) {
+          results.push({ arr: node, path: path });
+        }
+        if (node.length <= 60) {
+          for (var i = 0; i < node.length; i++) walk(node[i], path + '[' + i + ']', depth + 1);
+        }
+        return;
+      }
+      try {
+        var keys = Object.keys(node);
+        for (var k = 0; k < keys.length && k < 80; k++) {
+          walk(node[keys[k]], path + '.' + keys[k], depth + 1);
+        }
+      } catch (e) {}
+    }
+    for (var si = 0; si < storeList.length; si++) {
+      var st = storeList[si];
+      var sid = 'store' + si;
+      try { sid = String(st.$id || sid); } catch (e) {}
+      var root = st;
+      try { if (st.$state) root = st.$state; } catch (e) {}
+      walk(root, sid, 0);
+    }
+    return results;
+  }
+
+  function snapshotLogs(storeList) {
+    return scanForImageLogArrays(storeList).map(function(f) {
+      return { arr: f.arr, path: f.path, len: f.arr.length };
+    });
+  }
+
+  function diffLogs(storeList, base) {
+    var fresh = scanForImageLogArrays(storeList);
+    var out = [];
+    for (var i = 0; i < fresh.length; i++) {
+      var hit = null;
+      for (var b = 0; b < base.length; b++) {
+        if (base[b].arr === fresh[i].arr) { hit = base[b]; break; }
+      }
+      if (!hit || fresh[i].arr.length > hit.len) out.push(fresh[i]);
+    }
+    return out;
+  }
+
+  function pickByUid(fresh, uid) {
+    for (var i = 0; i < fresh.length; i++) {
+      var p = '.' + (fresh[i].path || '') + '.';
+      if (p.indexOf('.' + uid + '.') !== -1) return fresh[i];
+    }
+    return fresh[0];
   }
 
   async function collectLogImages(store, jobs) {
@@ -383,70 +483,153 @@ export function buildConsoleSnippet(appOrigin: string): string {
     console.log('[CryoSmart] Logs already loaded for ' + (jobs.length - pending.length) + ' job(s); ' + pending.length + ' to force-load.');
     if (pending.length === 0) return result;
 
-    // 2. Calibrate the loader call on the first pending job.
+    // 2. v3.2: calibrate the loader call on up to 3 image-rich jobs, with a
+    //    deep state scan that catches logs landing in ANY store shape.
     var actions = findLogActions(store);
     console.log('[CryoSmart] Log loader candidates:', actions.map(function(a) { return a.name; }).join(', ') || 'none');
+    for (var d3 = 0; d3 < actions.length && d3 < 2; d3++) {
+      try {
+        console.log('[CryoSmart] Loader "' + actions[d3].name + '" source (diagnostics):\\n' + String(actions[d3].fn).slice(0, 900));
+      } catch (e) {}
+    }
 
-    var calibUid = pending[0];
-    var winning = null;   // { action, shapeIdx } or { http: true }
-    var shapes = [calibUid, { job_uid: calibUid }, { uid: calibUid }, [calibUid]];
+    var typeByUid = {};
+    for (var t3 = 0; t3 < jobs.length; t3++) typeByUid[jobs[t3].uid] = jobs[t3].job_type || '';
+    var RICH_RE = /refine|class|3d|2d|reconstruct|sharpen|nu|motion|ctf|mask|build/i;
+    var calibPool = pending.slice().sort(function(x, y) {
+      return (RICH_RE.test(typeByUid[y] || '') ? 1 : 0) - (RICH_RE.test(typeByUid[x] || '') ? 1 : 0);
+    });
+    var calibTries = Math.min(3, calibPool.length);
+
+    function shapesFor(uid) {
+      var row = null;
+      for (var i = 0; i < jobs.length; i++) if (jobs[i].uid === uid) { row = jobs[i]; break; }
+      var sh = [uid, { job_uid: uid }, { uid: uid }, [uid]];
+      if (row) sh.push(row);
+      sh.push({ uid: uid, project_uid: pid });
+      return sh;
+    }
+
+    var scanned = {};
+    var winning = null;   // { action, shapeIdx, mode } or { http: true }
 
     outer:
-    for (var a = 0; a < actions.length; a++) {
-      for (var s = 0; s < shapes.length; s++) {
-        try {
-          var r = actions[a].fn.call(store, shapes[s]);
-          if (r && typeof r.then === 'function') r.catch(function() {});
-        } catch (e) {}
-        var logs = await waitForLogs(store, calibUid, 800);
-        if (logs) {
-          winning = { action: actions[a], shapeIdx: s };
-          var cImgs = extractLogImages(logs);
-          if (cImgs.length) result[calibUid] = cImgs;
-          break outer;
+    for (var ci = 0; ci < calibTries && !winning; ci++) {
+      var calibUid = calibPool[ci];
+      var shapes = shapesFor(calibUid);
+      for (var a = 0; a < actions.length; a++) {
+        for (var s = 0; s < shapes.length; s++) {
+          var base = snapshotLogs([store]);
+          var ret = null;
+          try {
+            ret = actions[a].fn.call(store, shapes[s]);
+          } catch (e) {}
+          if (ret && typeof ret.then === 'function') {
+            var resolved = coerceLogs(await withTimeout(ret.catch(function() {}), 1500));
+            if (looksLikeLogs(resolved)) {
+              winning = { action: actions[a], shapeIdx: s, mode: 'return' };
+              var rImgs = extractLogImages(resolved);
+              if (rImgs.length) result[calibUid] = rImgs;
+              scanned[calibUid] = true;
+              break outer;
+            }
+          } else if (looksLikeLogs(coerceLogs(ret))) {
+            winning = { action: actions[a], shapeIdx: s, mode: 'return' };
+            var rImgs2 = extractLogImages(coerceLogs(ret));
+            if (rImgs2.length) result[calibUid] = rImgs2;
+            scanned[calibUid] = true;
+            break outer;
+          }
+          var deadline = Date.now() + 1400;
+          while (Date.now() < deadline) {
+            var fresh = diffLogs([store], base);
+            if (fresh.length) {
+              var pick = pickByUid(fresh, calibUid);
+              winning = { action: actions[a], shapeIdx: s, mode: 'diff' };
+              var fImgs = extractLogImages(pick.arr);
+              if (fImgs.length) result[calibUid] = fImgs;
+              scanned[calibUid] = true;
+              console.log('[CryoSmart] Logs landed in state at "' + pick.path + '" — deep-scan mode.');
+              break outer;
+            }
+            var logs = await waitForLogs(store, calibUid, 300);
+            if (logs) {
+              winning = { action: actions[a], shapeIdx: s, mode: 'state' };
+              var cImgs = extractLogImages(logs);
+              if (cImgs.length) result[calibUid] = cImgs;
+              scanned[calibUid] = true;
+              break outer;
+            }
+            await new Promise(function(r) { setTimeout(r, 120); });
+          }
         }
       }
     }
 
     if (!winning) {
-      var probe = await httpLogProbe(calibUid);
-      if (probe) {
-        winning = { http: true };
-        var pImgs = extractLogImages(probe);
-        if (pImgs.length) result[calibUid] = pImgs;
+      for (var pi = 0; pi < calibTries && !winning; pi++) {
+        var probe = await httpLogProbe(calibPool[pi]);
+        if (probe) {
+          winning = { http: true };
+          var pImgs = extractLogImages(probe);
+          if (pImgs.length) result[calibPool[pi]] = pImgs;
+          scanned[calibPool[pi]] = true;
+        }
       }
     }
 
     if (!winning) {
       console.log('[CryoSmart] Could not trigger lazy log loading on this build — capturing without log images. ' +
         '(Tip: open one job detail view in CryoSmart, then re-run the script.)');
+      console.log('[CryoSmart] ── Diagnostics (paste this whole block back to the maintainer) ──');
+      try { console.log('store state keys: [' + Object.keys(store.$state || store).slice(0, 40).join(', ') + ']'); } catch (e) {}
       return result;
     }
-    console.log('[CryoSmart] Log loading works via ' + (winning.http ? 'HTTP endpoint' : 'store action "' + winning.action.name + '"') + ' — collecting...');
+    console.log('[CryoSmart] Log loading works via ' +
+      (winning.http ? 'HTTP endpoint' : 'store action "' + winning.action.name + '" (' + winning.mode + ')') +
+      ' — collecting...');
 
     // 3. Replay for every remaining job (time-boxed, progress logged).
     var t0 = Date.now(), BUDGET_MS = 60000;
-    for (var j2 = 1; j2 < pending.length; j2++) {
+    for (var j2 = 0; j2 < pending.length; j2++) {
       var uid2 = pending[j2];
-      if (result[uid2]) continue;
+      if (scanned[uid2] || result[uid2]) continue;
       if (Date.now() - t0 > BUDGET_MS) {
-        console.log('[CryoSmart] Log collection time budget reached — stopping after ' + j2 + ' job(s).');
+        console.log('[CryoSmart] Log collection time budget reached — stopping after ' + j2 + '/' + pending.length + ' job(s).');
         break;
       }
       var logs2 = null;
-      var cached = store.jobLogs && store.jobLogs[uid2];
-      if (cached && cached.length) {
-        logs2 = cached;
-      } else if (winning.http) {
-        logs2 = await httpLogProbe(uid2);
-      } else {
-        var arg = [uid2, { job_uid: uid2 }, { uid: uid2 }, [uid2]][winning.shapeIdx];
-        try {
-          var rr = winning.action.fn.call(store, arg);
-          if (rr && typeof rr.then === 'function') rr.catch(function() {});
-        } catch (e) {}
-        logs2 = await waitForLogs(store, uid2, 1200);
-        if (!logs2) logs2 = await httpLogProbe(uid2);   // per-job HTTP fallback
+      try {
+        if (store.jobLogs && store.jobLogs[uid2] && store.jobLogs[uid2].length) logs2 = store.jobLogs[uid2];
+      } catch (e) {}
+      if (!logs2) {
+        if (winning.http) {
+          logs2 = await httpLogProbe(uid2);
+        } else {
+          var arg = shapesFor(uid2)[winning.shapeIdx];
+          var base2 = snapshotLogs([store]);
+          try {
+            var rr = winning.action.fn.call(store, arg);
+            if (rr && typeof rr.then === 'function') {
+              var rv = coerceLogs(await withTimeout(rr.catch(function() {}), 1500));
+              if (looksLikeLogs(rv)) logs2 = rv;
+            } else if (looksLikeLogs(coerceLogs(rr))) {
+              logs2 = coerceLogs(rr);
+            }
+          } catch (e) {}
+          if (!logs2) {
+            var deadline2 = Date.now() + 1300;
+            while (Date.now() < deadline2) {
+              var fresh2 = diffLogs([store], base2);
+              if (fresh2.length) { logs2 = pickByUid(fresh2, uid2).arr; break; }
+              try {
+                if (store.jobLogs && store.jobLogs[uid2] && store.jobLogs[uid2].length) { logs2 = store.jobLogs[uid2]; break; }
+              } catch (e) {}
+              await new Promise(function(r) { setTimeout(r, 120); });
+            }
+          }
+          if (!logs2) logs2 = await httpLogProbe(uid2);   // per-job HTTP fallback
+        }
       }
       if (logs2) {
         var imgs2 = extractLogImages(logs2);

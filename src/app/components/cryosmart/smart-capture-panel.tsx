@@ -64,7 +64,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.1 — safe log-action calibration (auth/destructive store actions excluded)
+// CryoSmart Smart Capture v3.2 — deep-scan log calibration: finds logs in ANY store
+// state shape (incl. WebSocket-delivered logs), calibrates on image-rich jobs
+// first, sniffs socket messages, and prints console diagnostics if it cannot auto-load.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -349,6 +351,109 @@ export function SmartCapturePanel({ onCapture }: Props) {
     ]);
   }
 
+  // ── v3.2 deep-scan helpers ───────────────────────────────────────
+  // Some builds deliver logs over WebSocket into state shapes OTHER than
+  // the classic jobLogs/logs/job_logs maps. The deep scan walks every pinia
+  // store and collects EVERY array holding entries with non-empty
+  // 'imgfiles' (the image-log signature), wherever it lives.
+  function coerceLogs(v) {
+    if (!v) return v;
+    if (Array.isArray(v)) return v;
+    if (Array.isArray(v.data)) return v.data;
+    if (Array.isArray(v.logs)) return v.logs;
+    if (Array.isArray(v.result)) return v.result;
+    return v;
+  }
+
+  function scanForImageLogArrays(storeList) {
+    var results = [];
+    var seen = (typeof WeakSet === 'function') ? new WeakSet() : null;
+    var budget = { n: 0 };
+    function hasImgEntries(arr) {
+      for (var i = 0; i < arr.length; i++) {
+        if (arr[i] && arr[i].imgfiles && arr[i].imgfiles.length) return true;
+      }
+      return false;
+    }
+    function walk(node, path, depth) {
+      if (budget.n > 6000 || depth > 6 || node === null || node === undefined) return;
+      if (typeof node !== 'object') return;
+      if (seen) {
+        if (seen.has(node)) return;
+        try { seen.add(node); } catch (e) {}
+      }
+      budget.n++;
+      if (Array.isArray(node)) {
+        if (node.length > 0 && node.length <= 300 && hasImgEntries(node)) {
+          results.push({ arr: node, path: path });
+        }
+        if (node.length <= 60) {
+          for (var i = 0; i < node.length; i++) walk(node[i], path + '[' + i + ']', depth + 1);
+        }
+        return;
+      }
+      try {
+        var keys = Object.keys(node);
+        for (var k = 0; k < keys.length && k < 80; k++) {
+          walk(node[keys[k]], path + '.' + keys[k], depth + 1);
+        }
+      } catch (e) {}
+    }
+    for (var si = 0; si < storeList.length; si++) {
+      var st = storeList[si];
+      var sid = 'store' + si;
+      try { sid = String(st.$id || sid); } catch (e) {}
+      var root = st;
+      try { if (st.$state) root = st.$state; } catch (e) {}
+      walk(root, sid, 0);
+    }
+    return results;
+  }
+
+  function snapshotLogs(storeList) {
+    return scanForImageLogArrays(storeList).map(function(f) {
+      return { arr: f.arr, path: f.path, len: f.arr.length };
+    });
+  }
+
+  // Arrays that are new or have GROWN vs the baseline — catches both
+  // replaced arrays and in-place pushes.
+  function diffLogs(storeList, base) {
+    var fresh = scanForImageLogArrays(storeList);
+    var out = [];
+    for (var i = 0; i < fresh.length; i++) {
+      var hit = null;
+      for (var b = 0; b < base.length; b++) {
+        if (base[b].arr === fresh[i].arr) { hit = base[b]; break; }
+      }
+      if (!hit || fresh[i].arr.length > hit.len) out.push(fresh[i]);
+    }
+    return out;
+  }
+
+  // Prefer a fresh array whose state path contains the job uid as a segment
+  // (e.g. "logStore.logs.J12") when attributing logs to a job.
+  function pickByUid(fresh, uid) {
+    for (var i = 0; i < fresh.length; i++) {
+      var p = '.' + (fresh[i].path || '') + '.';
+      if (p.indexOf('.' + uid + '.') !== -1) return fresh[i];
+    }
+    return fresh[0];
+  }
+
+  function storeSummary(storeList) {
+    var lines = [];
+    for (var i = 0; i < storeList.length; i++) {
+      var st = storeList[i];
+      var sid = 'store' + i;
+      try { sid = String(st.$id || sid); } catch (e) {}
+      var keys = [];
+      try { keys = Object.keys(st.$state || st).slice(0, 30); } catch (e) {}
+      lines.push(sid + ': [' + keys.join(', ') + ']');
+    }
+    return lines.join('\\n');
+  }
+
   function httpLogProbe(uid) {
     var paths = [
       '/api/job/get_job_logs?job_uid=' + encodeURIComponent(uid),
@@ -356,7 +461,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
       '/api/job/get_job_log?job_uid=' + encodeURIComponent(uid),
       '/api/job/logs?job_uid=' + encodeURIComponent(uid),
       '/api/logs?job_uid=' + encodeURIComponent(uid),
-      '/api/log/get_logs?job_uid=' + encodeURIComponent(uid)
+      '/api/log/get_logs?job_uid=' + encodeURIComponent(uid),
+      '/api/job/' + encodeURIComponent(uid) + '/logs',
+      '/api/logs?job=' + encodeURIComponent(uid)
     ];
     return paths.reduce(function(chain, p) {
       return chain.then(function(logs) {
@@ -457,51 +564,135 @@ export function SmartCapturePanel({ onCapture }: Props) {
     var actions = findLogActions();
     console.log('[CryoSmart] Log loader candidates:', actions.map(function(a) { return a.name; }).join(', ') || 'none');
 
-    var calibUid = pending[0];
-    var winning = null;   // {action, shapeIdx, mode:'state'|'return'} or {http:true}
-    var shapes = [calibUid, { job_uid: calibUid }, { uid: calibUid }, [calibUid]];
+    // v3.2: sniff WebSocket message types while scanning — on some builds
+    // the logs arrive via WS (e.g. insert_events); this shows what actually
+    // flows when the loader is called.
+    var socketMsgs = [];
+    var unsniff = null;
+    try {
+      var sm = socketStore && socketStore.socketManager;
+      var wsx = sm && sm.ws;
+      if (wsx && typeof wsx.addEventListener === 'function') {
+        var onWs = function(ev) {
+          try {
+            var d = ev.data;
+            if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) {} }
+            var t = (d && (d.type || d.event || d.cmd || d.msg_type)) || String(d).slice(0, 40);
+            socketMsgs.push(String(t));
+            if (socketMsgs.length > 300) socketMsgs.shift();
+          } catch (e) {}
+        };
+        wsx.addEventListener('message', onWs);
+        unsniff = function() { try { wsx.removeEventListener('message', onWs); } catch (e) {} };
+      }
+    } catch (e) {}
+
+    // v3.2 diagnostics: print the loader source — if auto-calibration still
+    // fails, paste the console output back to the maintainer for an exact fix.
+    for (var d2 = 0; d2 < actions.length && d2 < 2; d2++) {
+      try {
+        console.log('[CryoSmart] Loader "' + actions[d2].name + '" source (diagnostics):\\n' + String(actions[d2].fn).slice(0, 900));
+      } catch (e) {}
+    }
+
+    // v3.2: calibrate on up to 3 jobs, image-rich job types FIRST. The old
+    // script calibrated on J1 (import movies), which often has no image logs
+    // at all — making a perfectly working loader look broken.
+    var typeByUid = {};
+    for (var t2 = 0; t2 < jobs.length; t2++) typeByUid[jobs[t2].uid] = jobs[t2].job_type || '';
+    var RICH_RE = /refine|class|3d|2d|reconstruct|sharpen|nu|motion|ctf|mask|build/i;
+    var calibPool = pending.slice().sort(function(x, y) {
+      return (RICH_RE.test(typeByUid[y] || '') ? 1 : 0) - (RICH_RE.test(typeByUid[x] || '') ? 1 : 0);
+    });
+    var calibTries = Math.min(3, calibPool.length);
+    if (calibTries > 0) {
+      console.log('[CryoSmart] Calibrating on job(s): ' + calibPool.slice(0, calibTries).join(', ') + ' (image-rich types first)');
+    }
+
+    function shapesFor(uid) {
+      var row = null;
+      for (var i = 0; i < jobs.length; i++) if (jobs[i].uid === uid) { row = jobs[i]; break; }
+      var sh = [uid, { job_uid: uid }, { uid: uid }, [uid]];
+      if (row) sh.push(row);
+      sh.push({ uid: uid, project_uid: projectId });
+      return sh;
+    }
+
+    var scanned = {};
+    var winning = null;   // {action, shapeIdx, mode:'state'|'return'|'diff'} or {http:true}
 
     outer:
-    for (var a = 0; a < actions.length; a++) {
-      for (var s = 0; s < shapes.length; s++) {
-        var ret = null;
-        try {
-          ret = actions[a].fn.call(actions[a].store, shapes[s]);
-        } catch (e) {}
-        // (a) the call RESOLVES to the logs directly (return value)
-        if (ret && typeof ret.then === 'function') {
-          var resolved = await withTimeout(ret.catch(function() {}), 1500);
-          if (looksLikeLogs(resolved)) {
+    for (var ci = 0; ci < calibTries && !winning; ci++) {
+      var calibUid = calibPool[ci];
+      var shapes = shapesFor(calibUid);
+      for (var a = 0; a < actions.length; a++) {
+        for (var s = 0; s < shapes.length; s++) {
+          var base = snapshotLogs(stores);
+          var ret = null;
+          try {
+            ret = actions[a].fn.call(actions[a].store, shapes[s]);
+          } catch (e) {}
+          // (a) the call RESOLVES to the logs directly (return value)
+          if (ret && typeof ret.then === 'function') {
+            var resolved = coerceLogs(await withTimeout(ret.catch(function() {}), 1500));
+            if (looksLikeLogs(resolved)) {
+              winning = { action: actions[a], shapeIdx: s, mode: 'return' };
+              batch.push({ uid: calibUid, images: extractLogImages(resolved) });
+              scanned[calibUid] = true;
+              break outer;
+            }
+          } else if (looksLikeLogs(coerceLogs(ret))) {
             winning = { action: actions[a], shapeIdx: s, mode: 'return' };
-            batch.push({ uid: calibUid, images: extractLogImages(resolved) });
+            batch.push({ uid: calibUid, images: extractLogImages(coerceLogs(ret)) });
+            scanned[calibUid] = true;
             break outer;
           }
-        } else if (looksLikeLogs(ret)) {
-          winning = { action: actions[a], shapeIdx: s, mode: 'return' };
-          batch.push({ uid: calibUid, images: extractLogImages(ret) });
-          break outer;
-        }
-        // (b) the call POPULATES a log-shaped state keyed by uid
-        var logs = await waitForLogs(calibUid, 800);
-        if (logs) {
-          winning = { action: actions[a], shapeIdx: s, mode: 'state' };
-          batch.push({ uid: calibUid, images: extractLogImages(logs) });
-          break outer;
+          // (b) v3.2 deep-scan: logs landed in ANY store state shape (this
+          //     build may deliver logs over WebSocket), plus the classic
+          //     jobLogs/logs/job_logs keyed maps.
+          var deadline = Date.now() + 1400;
+          while (Date.now() < deadline) {
+            var fresh = diffLogs(stores, base);
+            if (fresh.length) {
+              var pick = pickByUid(fresh, calibUid);
+              winning = { action: actions[a], shapeIdx: s, mode: 'diff' };
+              batch.push({ uid: calibUid, images: extractLogImages(pick.arr) });
+              scanned[calibUid] = true;
+              console.log('[CryoSmart] Logs landed in state at "' + pick.path + '" — deep-scan mode.');
+              break outer;
+            }
+            var logs = readLogState(calibUid);
+            if (logs) {
+              winning = { action: actions[a], shapeIdx: s, mode: 'state' };
+              batch.push({ uid: calibUid, images: extractLogImages(logs) });
+              scanned[calibUid] = true;
+              break outer;
+            }
+            await new Promise(function(r) { setTimeout(r, 140); });
+          }
         }
       }
     }
 
     if (!winning) {
-      var probe = await httpLogProbe(calibUid);
-      if (probe) {
-        winning = { http: true };
-        batch.push({ uid: calibUid, images: extractLogImages(probe) });
+      // HTTP fallback against every calibration candidate.
+      for (var pi = 0; pi < calibTries && !winning; pi++) {
+        var probe = await httpLogProbe(calibPool[pi]);
+        if (probe) {
+          winning = { http: true };
+          batch.push({ uid: calibPool[pi], images: extractLogImages(probe) });
+          scanned[calibPool[pi]] = true;
+        }
       }
     }
 
     if (!winning) {
       console.log('[CryoSmart] Could not trigger lazy log loading on this build — finishing without per-job log images. ' +
         '(Tip: open one job detail view in CryoSmart, then re-run the script to harvest its cached logs.)');
+      console.log('[CryoSmart] ── Diagnostics (paste this whole block back to the maintainer) ──');
+      try { console.log('pinia stores:\\n' + storeSummary(stores)); } catch (e) {}
+      console.log('socket messages during scan (' + socketMsgs.length + '): ' + socketMsgs.slice(-60).join(', '));
+      if (unsniff) unsniff();
       return;
     }
     await flushLogs(true);
@@ -510,11 +701,14 @@ export function SmartCapturePanel({ onCapture }: Props) {
       ' — scanning ' + pending.length + ' job(s)...');
 
     // Replay for every remaining job (time-boxed, streamed to the UI).
+    // Unified retrieval: try the return value, then watch ALL store state
+    // (deep-scan + classic maps), then the HTTP probe as a per-job fallback.
     var t0 = Date.now(), BUDGET_MS = 120000;
-    for (var j = 1; j < pending.length; j++) {
+    for (var j = 0; j < pending.length; j++) {
       var uid2 = pending[j];
+      if (scanned[uid2]) continue;
       if (Date.now() - t0 > BUDGET_MS) {
-        console.log('[CryoSmart] Log collection time budget reached — stopping after ' + j + ' job(s).');
+        console.log('[CryoSmart] Log collection time budget reached — stopping after ' + j + '/' + pending.length + ' job(s).');
         break;
       }
       var logs2 = readLogState(uid2);
@@ -522,15 +716,27 @@ export function SmartCapturePanel({ onCapture }: Props) {
         if (winning.http) {
           logs2 = await httpLogProbe(uid2);
         } else {
-          var arg = [uid2, { job_uid: uid2 }, { uid: uid2 }, [uid2]][winning.shapeIdx];
+          var arg = shapesFor(uid2)[winning.shapeIdx];
+          var base2 = snapshotLogs(stores);
           try {
             var rr = winning.action.fn.call(winning.action.store, arg);
             if (rr && typeof rr.then === 'function') {
-              var rv = await withTimeout(rr.catch(function() {}), 1500);
+              var rv = coerceLogs(await withTimeout(rr.catch(function() {}), 1500));
               if (looksLikeLogs(rv)) logs2 = rv;
+            } else if (looksLikeLogs(coerceLogs(rr))) {
+              logs2 = coerceLogs(rr);
             }
           } catch (e) {}
-          if (!logs2) logs2 = await waitForLogs(uid2, 1200);
+          if (!logs2) {
+            var deadline2 = Date.now() + 1300;
+            while (Date.now() < deadline2) {
+              var fresh2 = diffLogs(stores, base2);
+              if (fresh2.length) { logs2 = pickByUid(fresh2, uid2).arr; break; }
+              var st2 = readLogState(uid2);
+              if (st2) { logs2 = st2; break; }
+              await new Promise(function(r) { setTimeout(r, 140); });
+            }
+          }
           if (!logs2) logs2 = await httpLogProbe(uid2);   // per-job HTTP fallback
         }
       }
@@ -539,6 +745,8 @@ export function SmartCapturePanel({ onCapture }: Props) {
       if ((j + 1) % 20 === 0) console.log('[CryoSmart] Log scan progress: ' + (j + 1) + '/' + pending.length + ' job(s)...');
     }
     await flushLogs(true);
+    if (unsniff) unsniff();
+    console.log('[CryoSmart] Socket messages during scan: ' + socketMsgs.slice(-60).join(', '));
   }
 
   try {

@@ -254,7 +254,9 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                     message:
                       nLogs > 0
                         ? `Captured ${data.data.jobs.length} jobs + ${nLogs} log images from ${withLogs} jobs.`
-                        : `Captured ${data.data.jobs.length} jobs (no log images available on this CryoSmart build).`,
+                        : sessionStatus.log_jobs_done > 0
+                          ? `Captured ${data.data.jobs.length} jobs — no log images readable on this build (see the CryoSmart console diagnostics).`
+                          : `Captured ${data.data.jobs.length} jobs (no log images available).`,
                     token,
                     startedAt,
                     progress: null,
