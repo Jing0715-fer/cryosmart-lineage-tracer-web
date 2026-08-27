@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "Based on the provided image, here is the verification of the 'Map / MRC' section:\n\n1.  **Grid Arrangement (3 per row):** **No / Not visible.** The current view shows the **\"MICROGRAPHS\"** tab is active. The **\"MAP\"** tab is visible in the top right of the \"Lineage Outline\" section but has not been selected/clicked to reveal its content.\n2.  **Cell Components (Preview, Label, Download):** **Not verifiable.** Since the MAP tab is not active, no map preview cells are displayed in the current view.\n3.  **'一键下载 map' Button:** **Not visible.** This button is not present in the current view of the Micrographs tab.\n4.  **Layout Problems:** **None observed in the current view.** The layout for the active \"MICROGRAPHS\" tab appears clean and well-structured with clear node boxes and labels.\n\n**Conclusion:** To verify the specific requirements for the Map section, you would need to click on the **\"MAP\"** button located at the top right of the white card area.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1787819410,
+  "id": "20260827163005b825cdee6d7141b6",
+  "model": "glm-5v-turbo",
+  "object": "chat.completion",
+  "request_id": "20260827163005b825cdee6d7141b6",
+  "usage": {
+    "completion_tokens": 242,
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "prompt_tokens": 1493,
+    "prompt_tokens_details": {
+      "cached_tokens": 2
+    },
+    "total_tokens": 1735
+  }
+}

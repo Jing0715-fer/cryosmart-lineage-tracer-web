@@ -1,0 +1,6 @@
+TOKEN=s8-9bfdb73f
+jobs posted
+logs batch 1 (J2, dup-title rounds)
+logs batch 2 (J3, dup-title rounds)
+image bytes posted
+complete
