@@ -25,6 +25,13 @@
  * of refs + bytes re-renders the graph and report live — no more waiting
  * for the final /complete snapshot), and /complete itself is retried so a
  * single failed POST can no longer leave the UI polling forever.
+ *
+ * v3.9: re-running the script in the same CryoSmart tab no longer loses
+ * log images — the store's loader CACHE-HITS on jobs a previous run
+ * already loaded (no new state, no diff), so v3.8 streamed "N/N jobs
+ * scanned · 0 images". The deep-scan now attributes ALREADY-CACHED log
+ * arrays to their jobs (state-path segment match, then entry job_uid),
+ * harvesting them without a single extra API call.
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -78,7 +85,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.8 — LAST-ROUND log images. Job metadata
+// CryoSmart Smart Capture v3.9 — LAST-ROUND log images. Job metadata
 // uploads for the WHOLE project immediately (fast), but log images are
 // fetched ONLY for the jobs the traced lineage needs: the script waits for
 // the web app's Trace Lineage action to publish the lineage job list to
@@ -98,6 +105,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
 // app refreshes the graph + report LIVE as images stream in (no more
 // "captured 320 but nothing shows" while the script waits to complete),
 // and /complete is retried so one lost POST cannot strand the session.
+// v3.9: logs already cached in ANY store state shape (a previous script
+// run, an opened job view) are attributed to their jobs by the deep scan
+// — re-running in the same tab no longer yields "0 images captured".
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -563,6 +573,36 @@ export function SmartCapturePanel({ onCapture }: Props) {
     return fresh[0];
   }
 
+  // v3.9: attribute ALREADY-CACHED logs to a job, wherever they live.
+  // Re-running this script in the same CryoSmart tab finds every array the
+  // previous run loaded — but the store's loader then CACHE-HITS (returns
+  // nothing, state unchanged), the diff-based calibration sees "no new
+  // logs", and v3.8 shipped "N/N jobs scanned · 0 images". Match by state
+  // path segment first ("logStore.logsByJob.J12"), then by the entries'
+  // own job_uid field — single-uid arrays only, so a shared event stream
+  // is never misattributed to every job.
+  function deepLogsFor(uid) {
+    var all = scanForImageLogArrays(stores);
+    var i, e, en, eu;
+    for (i = 0; i < all.length; i++) {
+      var p = '.' + (all[i].path || '') + '.';
+      if (p.indexOf('.' + uid + '.') !== -1) return all[i].arr;
+    }
+    for (i = 0; i < all.length; i++) {
+      var arr = all[i].arr, one = null, mixed = false;
+      for (e = 0; e < arr.length; e++) {
+        en = arr[e];
+        if (!en || typeof en !== 'object') continue;
+        eu = en.job_uid || en.jobUid || en.uid;
+        if (eu === undefined || eu === null || eu === '') continue;
+        if (one === null) one = String(eu);
+        else if (one !== String(eu)) { mixed = true; break; }
+      }
+      if (one !== null && !mixed && one === uid) return arr;
+    }
+    return null;
+  }
+
   function storeSummary(storeList) {
     var lines = [];
     for (var i = 0; i < storeList.length; i++) {
@@ -866,6 +906,11 @@ export function SmartCapturePanel({ onCapture }: Props) {
           return jobs[ii].image_logs;
         }
       }
+      // v3.9: cached in ANY state shape — a previous script run or an
+      // opened job view may hold logs the classic keys never expose
+      // (the re-run "0 images" regression).
+      var deep = deepLogsFor(uid);
+      if (deep && deep.length) return deep;
       return null;
     }
     function shapesFor(uid) {
@@ -1007,6 +1052,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
       console.log('[CryoSmart] Log loading works via ' +
         (winning.http ? 'HTTP endpoint' : 'store action "' + winning.action.name + '" (' + winning.mode + ')') +
         ' — scanning ' + pending.length + ' job(s)...');
+    } else if (pending.length - lazy.length > 0) {
+      console.log('[CryoSmart] ' + (pending.length - lazy.length) + ' job(s) already have logs cached in memory (previous run or opened views)' +
+        ' — harvesting them without extra API calls.');
     } else {
       console.log('[CryoSmart] Harvesting in-memory logs for ' + pending.length + ' job(s)...');
     }
@@ -1052,6 +1100,14 @@ export function SmartCapturePanel({ onCapture }: Props) {
           }
           if (!logs2) logs2 = await httpLogProbe(uid2);   // per-job HTTP fallback
         }
+      }
+      // v3.9 last chance: the loader may have populated state just after
+      // the diff window expired, or the job's logs were cached by an
+      // earlier run in a shape only the deep scan can see. Never stream an
+      // empty batch while a matching array sits in memory.
+      if (!logs2) {
+        var lateLogs = deepLogsFor(uid2);
+        if (lateLogs && lateLogs.length) logs2 = lateLogs;
       }
       scanned[uid2] = true;
       batch.push({ uid: uid2, images: logs2 ? extractLogImages(logs2) : [] });
@@ -1141,6 +1197,11 @@ export function SmartCapturePanel({ onCapture }: Props) {
     console.warn('[CryoSmart] ⚠ ' + logRefsStreamed + ' log-image refs were captured but ZERO image bytes uploaded —' +
       '\\n   previews will be missing. The CryoSmart /api/log_image/ endpoint rejected every fetch' +
       '\\n   (expired session or removed files). Re-login to CryoSmart and re-run the script.');
+  } else if ((logRefsStreamed || 0) === 0 && knownRequested) {
+    console.warn('[CryoSmart] ⚠ ZERO log images were found for the ' + knownRequested.length + ' traced job(s).' +
+      '\\n   Those jobs may genuinely have no image logs — or this build keeps them where the' +
+      '\\n   script cannot read them. Tip: open ONE job detail view in CryoSmart, then re-run' +
+      '\\n   the script (v3.9 harvests logs cached by earlier runs and views).');
   }
   console.log('[CryoSmart] Capture complete' +
     (LINEAGE_MODE && knownRequested && !CAPTURE_ALL_LATE
