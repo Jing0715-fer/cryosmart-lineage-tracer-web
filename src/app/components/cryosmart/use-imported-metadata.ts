@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useRef, useState } from "react";
 import type { LoadedMetadata } from "@/app/components/cryosmart/data-source-card";
@@ -25,11 +25,37 @@ interface PendingData {
   };
 }
 
+/** Progress snapshot from GET /api/cryosmart/import/session/<token> */
+interface SessionStatus {
+  ok: boolean;
+  token: string;
+  status: "awaiting_jobs" | "collecting_logs" | "complete";
+  has_data: boolean;
+  project_uid: string | null;
+  total_jobs: number;
+  log_jobs_total: number;
+  log_jobs_done: number;
+  log_images_count: number;
+  log_jobs_with_images: number;
+  note: string;
+}
+
+export interface ImportProgress {
+  /** Jobs scanned for log images so far (staged flow only). */
+  done: number;
+  /** Jobs the capture script plans to scan. */
+  total: number;
+  /** Log image refs received so far. */
+  images: number;
+}
+
 export interface ImportState {
   status: "idle" | "polling" | "loaded" | "error" | "expired" | "not-found";
   message: string;
   token: string | null;
   startedAt: number | null;
+  /** Live log-collection progress (staged flow; null until jobs are in). */
+  progress: ImportProgress | null;
 }
 
 interface UseImportedOpts {
@@ -82,12 +108,31 @@ function mergeLogImagesIntoRaw(
   return raw;
 }
 
+function toLoaded(data: PendingData, token: string): LoadedMetadata {
+  const session = buildSessionFromPending(data.data);
+  const mergedRaw = mergeLogImagesIntoRaw(
+    data.data.raw || { jobs: data.data.jobs },
+    data.data.job_log_images
+  );
+  return {
+    raw: mergedRaw,
+    projectUid: data.data.project_uid || "P",
+    jobCount: (data.data.jobs || []).length,
+    source: "upload",
+    session,
+  };
+}
+
+const POLL_INTERVAL_MS = 700;
+const MAX_WAIT_MS = 5 * 60 * 1000; // staged captures can stream for minutes
+
 export function useImportedMetadata(opts?: UseImportedOpts) {
   const [state, setState] = useState<ImportState>({
     status: "idle",
     message: "",
     token: null,
     startedAt: null,
+    progress: null,
   });
 
   const onLoadedRef = useRef(opts?.onLoaded);
@@ -100,17 +145,21 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     const u = new URL(window.location.href);
     const token = u.searchParams.get("imported");
     if (!token) return;
-    // Synchronous setState here is intentional: we're transitioning from
-    // "idle" (initial mount state) to "polling" once we detect an ?imported=
-    // query param. This is a one-time mount-time transition driven by an
-    // external value (URL), not a cascading render.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState({
-      status: "polling",
-      message: "Waiting for CryoSmart metadata to arrive...",
-      token,
-      startedAt: Date.now(),
-    });
+    // Transition from "idle" (initial mount state) to "polling" once we
+    // detect an ?imported= query param. Deferred by one tick so the
+    // setState is not synchronous inside the effect body (react-compiler
+    // restriction) — the polling effect below starts a tick later, which
+    // is imperceptible.
+    const t = setTimeout(() => {
+      setState({
+        status: "polling",
+        message: "Connected to capture script — waiting for data…",
+        token,
+        startedAt: Date.now(),
+        progress: null,
+      });
+    }, 0);
+    return () => clearTimeout(t);
   }, []);
 
   useEffect(() => {
@@ -119,36 +168,148 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     const token = state.token;
     const startedAt = state.startedAt || Date.now();
 
+    const cleanUrl = () => {
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("imported");
+        url.searchParams.delete("pid");
+        window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
+      } catch {
+        // ignore
+      }
+    };
+
     const poll = async () => {
-      let attempt = 0;
-      const MAX_ATTEMPTS = 40;
-      while (!cancelled && attempt < MAX_ATTEMPTS) {
-        attempt++;
+      /** staged-flow state: initial (jobs-only) snapshot already applied? */
+      let stagedLoaded = false;
+
+      while (!cancelled) {
+        if (Date.now() - startedAt > MAX_WAIT_MS) {
+          if (!cancelled) {
+            setState({
+              status: "error",
+              message: "Timed out waiting for CryoSmart data — please re-run the capture script.",
+              token,
+              startedAt,
+              progress: null,
+            });
+          }
+          return;
+        }
+
+        // ── Staged flow: GET /api/cryosmart/import/session/<token> ──
+        let sessionStatus: SessionStatus | null = null;
         try {
-          const resp = await fetch(`/api/cryosmart/pending?token=${encodeURIComponent(token)}`, {
-            method: "GET",
-            credentials: "same-origin",
-            cache: "no-store",
-          });
+          const resp = await fetch(
+            `/api/cryosmart/import/session/${encodeURIComponent(token)}`,
+            { credentials: "same-origin", cache: "no-store" }
+          );
+          if (cancelled) return;
+          if (resp.ok) {
+            sessionStatus = (await resp.json()) as SessionStatus;
+          }
+        } catch {
+          // network hiccup — fall through to legacy probe
+        }
+
+        if (sessionStatus && sessionStatus.ok) {
+
+          // Jobs are in — render the graph immediately (first time only)
+          // and keep showing live log-collection progress.
+          if (sessionStatus.has_data && !stagedLoaded) {
+            stagedLoaded = true;
+            try {
+              const dataResp = await fetch(
+                `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
+                { credentials: "same-origin", cache: "no-store" }
+              );
+              if (cancelled) return;
+              if (dataResp.ok) {
+                const data = (await dataResp.json()) as PendingData;
+                if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
+                  onLoadedRef.current?.(toLoaded(data, token));
+                }
+              }
+            } catch {
+              // non-fatal: retried on the complete pass
+            }
+          }
+
+          if (sessionStatus.status === "complete") {
+            // Final snapshot (includes every streamed log image).
+            try {
+              const dataResp = await fetch(
+                `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
+                { credentials: "same-origin", cache: "no-store" }
+              );
+              if (cancelled) return;
+              if (dataResp.ok) {
+                const data = (await dataResp.json()) as PendingData;
+                if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
+                  onLoadedRef.current?.(toLoaded(data, token));
+                  const nLogs = sessionStatus.log_images_count;
+                  const withLogs = sessionStatus.log_jobs_with_images;
+                  setState({
+                    status: "loaded",
+                    message:
+                      nLogs > 0
+                        ? `Captured ${data.data.jobs.length} jobs + ${nLogs} log images from ${withLogs} jobs.`
+                        : `Captured ${data.data.jobs.length} jobs (no log images available on this CryoSmart build).`,
+                    token,
+                    startedAt,
+                    progress: null,
+                  });
+                  cleanUrl();
+                  return;
+                }
+              }
+            } catch {
+              // fall through — retry next tick
+            }
+          } else if (sessionStatus.has_data) {
+            setState({
+              status: "polling",
+              message:
+                `Loaded ${sessionStatus.total_jobs} jobs — fetching log images ` +
+                `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
+                (sessionStatus.log_images_count > 0
+                  ? ` (${sessionStatus.log_images_count} captured)`
+                  : "") +
+                "…",
+              token,
+              startedAt,
+              progress: {
+                done: sessionStatus.log_jobs_done,
+                total: Math.max(1, sessionStatus.log_jobs_total),
+                images: sessionStatus.log_images_count,
+              },
+            });
+          } else {
+            setState({
+              status: "polling",
+              message: "Capture session established — uploading job metadata…",
+              token,
+              startedAt,
+              progress: null,
+            });
+          }
+
+          await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+          continue;
+        }
+
+        // ── Legacy flow: GET /api/cryosmart/pending?token= (single-use) ──
+        try {
+          const resp = await fetch(
+            `/api/cryosmart/pending?token=${encodeURIComponent(token)}`,
+            { method: "GET", credentials: "same-origin", cache: "no-store" }
+          );
           if (cancelled) return;
           if (resp.ok) {
             const data = (await resp.json()) as PendingData;
             if (data.ok && data.data && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
               const session = buildSessionFromPending(data.data);
-
-              const mergedRaw = mergeLogImagesIntoRaw(
-                data.data.raw || { jobs: data.data.jobs },
-                data.data.job_log_images
-              );
-
-              const loaded: LoadedMetadata = {
-                raw: mergedRaw,
-                projectUid: data.data.project_uid || "P",
-                jobCount: data.data.jobs.length,
-                source: "upload",
-                session,
-              };
-              onLoadedRef.current?.(loaded);
+              onLoadedRef.current?.(toLoaded(data, token));
               setState({
                 status: "loaded",
                 message: session
@@ -156,42 +317,18 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   : `Loaded ${data.data.jobs.length} jobs from CryoSmart.`,
                 token,
                 startedAt,
+                progress: null,
               });
-              
-              // Clean URL
-              try {
-                const url = new URL(window.location.href);
-                url.searchParams.delete("imported");
-                url.searchParams.delete("pid");
-                window.history.replaceState({}, "", url.pathname + (url.search ? url.search : ""));
-              } catch {
-                // ignore
-              }
+              cleanUrl();
               return;
             }
-          } else if (resp.status === 404) {
-            // Keep polling
-          } else if (resp.status === 410) {
-            setState({
-              status: "expired",
-              message: "Import token expired. Please re-run the CryoSmart capture.",
-              token,
-              startedAt,
-            });
-            return;
           }
+          // 404 on both endpoints → data not uploaded yet; keep polling.
         } catch {
-          // Network error — keep polling
+          // network error — keep polling
         }
-        await new Promise((r) => setTimeout(r, 500));
-      }
-      if (!cancelled) {
-        setState({
-          status: "error",
-          message: "Timed out waiting for CryoSmart metadata. Please try again.",
-          token,
-          startedAt,
-        });
+
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       }
     };
 

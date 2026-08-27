@@ -104,6 +104,10 @@ export default function Home() {
     if (importState.status === "error" || importState.status === "expired") return "mt-2 flex items-center gap-2.5 rounded-lg border border-rose-300 bg-rose-50/90 text-rose-900 px-3 py-2 text-[12.5px] shadow-sm backdrop-blur";
     return "mt-2 flex items-center gap-2.5 rounded-lg border border-teal-300 bg-teal-50/90 text-teal-900 px-3 py-2 text-[12.5px] shadow-sm backdrop-blur";
   }
+
+  const importProgressPct = importState.progress
+    ? Math.min(100, Math.round((importState.progress.done / Math.max(1, importState.progress.total)) * 100))
+    : null;
   
 
   return (
@@ -170,11 +174,26 @@ export default function Home() {
 
       {importState.status !== "idle" && (
         <div className="sticky top-14 z-30 mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
-          <div className={getBannerClass()}>
-            {importState.status === "polling" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            {importState.status === "loaded" && <CheckCircle2 className="h-3.5 w-3.5" />}
-            {(importState.status === "error" || importState.status === "expired") && <AlertCircle className="h-3.5 w-3.5" />}
-            <span className="flex-1">{importState.message}</span>
+          <div
+            className={getBannerClass()}
+            role="status"
+            aria-live="polite"
+            aria-label={importState.message}
+          >
+            {importState.status === "polling" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />}
+            {importState.status === "loaded" && <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />}
+            {(importState.status === "error" || importState.status === "expired") && <AlertCircle className="h-3.5 w-3.5 shrink-0" />}
+            <div className="min-w-0 flex-1">
+              <span className="block truncate">{importState.message}</span>
+              {importState.progress && importProgressPct !== null && (
+                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/80">
+                  <div
+                    className="h-full rounded-full bg-teal-600 transition-[width] duration-500 ease-out"
+                    style={{ width: `${importProgressPct}%` }}
+                  />
+                </div>
+              )}
+            </div>
             {importState.token && <code className="rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] opacity-70">{importState.token}</code>}
           </div>
         </div>
