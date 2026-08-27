@@ -985,6 +985,10 @@ export function LineageGraph({ summary, session }: Props) {
     }
     let cancelled = false;
     const thumbs: Record<string, string> = {};
+    // Capture the narrowed (non-null) session — the early-return guard above
+    // narrows `session`, but that narrowing doesn't survive into the worker
+    // closure below.
+    const sess = session;
     (async () => {
       // Dynamic import to keep the lib out of the server bundle.
       const { imageToBase64 } = await import("@/lib/cryosmart/image-embed");
@@ -998,7 +1002,7 @@ export function LineageGraph({ summary, session }: Props) {
           const img = pickPreviewImage(n);
           if (!img) continue;
           try {
-            const b64 = await imageToBase64(session, img.src);
+            const b64 = await imageToBase64(sess, img.src);
             if (!cancelled && b64) thumbs[n.uid] = b64;
           } catch {
             // ignore — fallback to remote URL in render
@@ -1745,7 +1749,11 @@ export function LineageGraph({ summary, session }: Props) {
                     width={NODE_W - 28}
                     height={NODE_H - 88}
                     preserveAspectRatio="xMidYMid meet"
-                    referrerPolicy="no-referrer"
+                    // referrerpolicy is honored on SVG <image> by Chromium
+                    // (and mirrors the report's <meta name="referrer">), but
+                    // React's SVGProps doesn't model it — cast to keep tsc
+                    // happy while preserving the runtime attribute.
+                    {...({ referrerPolicy: "no-referrer" } as React.SVGProps<SVGImageElement>)}
                     onError={
                       imgProxyFallback
                         ? (e) => {
@@ -2018,6 +2026,8 @@ function NodeDetailModal({
       return;
     }
     let cancelled = false;
+    // Capture the narrowed (non-null) session for the worker closure.
+    const sess = session;
     (async () => {
       const { imageToBase64 } = await import("@/lib/cryosmart/image-embed");
       const out: Record<string, string> = {};
@@ -2028,7 +2038,7 @@ function NodeDetailModal({
           const idx = cursor++;
           const img = allImages[idx];
           try {
-            const b64 = await imageToBase64(session, img.src);
+            const b64 = await imageToBase64(sess, img.src);
             if (!cancelled && b64) out[img.src] = b64;
           } catch {
             // ignore

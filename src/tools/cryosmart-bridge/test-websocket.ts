@@ -36,7 +36,7 @@
        console.log(`  ${key}: ${String(value).slice(0, 50)}...`);
      }
    } catch (e) {
-     console.log('Cannot access localStorage:', e.message);
+     console.log('Cannot access localStorage:', (e as Error).message);
    }
    
    // 2. 尝试 WebSocket 连接
@@ -55,7 +55,7 @@
    const wsUrl = `ws://192.168.202.11:8080/ws/${token}`;
    console.log('Connecting to:', wsUrl);
    
-   return new Promise((resolve) => {
+   return new Promise<void>((resolve) => {
      const ws = new WebSocket(wsUrl);
      
      ws.onopen = () => {

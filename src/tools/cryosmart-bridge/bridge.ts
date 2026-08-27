@@ -261,4 +261,3 @@
  
  process.on('SIGINT', () => { bridge.stop(); process.exit(0); });
  process.on('SIGTERM', () => { bridge.stop(); process.exit(0); });
- const CRYOSMART_WS_PATH = '/ws';
