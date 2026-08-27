@@ -71,6 +71,10 @@ import {
   reportPictureParticleMetricText,
   reportRoundNodes,
   reportRoundParticleNodes,
+  safePart,
+  localImageFilename,
+  reportFirstMicrographNode,
+  reportSelectedClassIndices,
 } from "./report-html";
 
 /* ================================================================== */
@@ -87,49 +91,10 @@ function escHtml(value: unknown): string {
     .replace(/'/g, "&#39;");
 }
 
-/** Sanitize a value for use as a filename path segment. */
-function safePart(value: unknown): string {
-  return String(value || "item")
-    .replace(/[\\/:*?"<>|#%&{}$!'@+`=]/g, "_")
-    .replace(/\s+/g, "_")
-    .slice(0, 100);
-}
-
-/** Relative path used for an image file inside the downloaded bundle. */
-function localImageFilename(nodeUid: string, name: string): string {
-  return `images/${safePart(nodeUid)}/${safePart(name)}.png`;
-}
-
 /** Stable key for a (uid, name) image — used by the PPTX image XML and
  *  by the SVG renderer when matching `imageDataMap` entries. */
 function pptImageKey(nodeUid: string, name: string): string {
   return `${safePart(nodeUid)}/${safePart(name)}`;
-}
-
-/** Find the first `import_micrographs` node (or any micrograph-ish node). */
-function reportFirstMicrographNode(summary: LineageSummary): LineageNode | undefined {
-  return (
-    (summary.nodes || []).find(
-      (node) => node.job_type === "import_micrographs" && node.micrograph_count !== null,
-    ) || (summary.nodes || []).find((node) => /micrograph/i.test(node.job_type || ""))
-  );
-}
-
-/** Resolve which class indices are "selected" downstream of `nodeUid`. */
-function reportSelectedClassIndices(
-  nodeUid: string,
-  _summary: LineageSummary,
-  state: LineageReportState,
-): Set<number> {
-  const selected = new Set<number>();
-  for (const edge of state.edges.filter((item) => item.source === nodeUid)) {
-    const group = edge.group || "";
-    const idx = parseClassIndex(group);
-    if (idx !== null && (edge.family === "particle" || edge.family === "volume")) {
-      selected.add(idx);
-    }
-  }
-  return selected;
 }
 
 /* ================================================================== */

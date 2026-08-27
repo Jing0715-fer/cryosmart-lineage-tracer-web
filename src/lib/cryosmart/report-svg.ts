@@ -16,10 +16,10 @@
  * `href` falls back to the relative path `images/<uid>/<name>.png` that
  * the bundled download lays out on disk.
  *
- * All `report*` / `html*` helpers that `buildPictureFlowSvg` calls are
- * defined locally with `// duplicated` comments. They mirror the versions
- * in `./lineage.ts`; once that module exports them, these copies can be
- * removed in favor of imports.
+ * All shared `report*` / `html*` helpers that `buildPictureFlowSvg` calls
+ * are imported from `./report-html.ts` (which itself imports the data-layer
+ * helpers from `./lineage.ts`) — the historical local duplicates with
+ * `// duplicated` comments have been removed.
  */
 
 import type {
@@ -32,6 +32,40 @@ import type {
   MapAsset,
   NormalizedLineageEdge,
 } from "./types";
+import {
+  fmt,
+  summaryNodeMap,
+  edgeKind,
+  reportKindFamily,
+  pixelSizeText,
+  resolutionText,
+  extractionBinText,
+  safePart,
+  localImageFilename,
+  reportIsRepickParticleProducer,
+  reportIsVolumeSourceNode,
+  reportIsParticlePipelineNode,
+  reportNodeIsMajor,
+  reportPictureParticleMetricText,
+  reportRoundNodes,
+  normalMapAssets,
+  reportFirstMicrographNode,
+  reportSelectedClassIndices,
+} from "./report-html";
+// Data-layer helpers shared via lineage.ts (report-html imports these too).
+// (reportRepickSeedSourceRounds / reportParticleSourceRound stay local —
+// see the LineageRoundState comment below.)
+import {
+  reportJobNum,
+  pixelSizeNumber,
+  formatPixelSize,
+  resolutionNumber,
+  formatBinFactor,
+  parseClassIndex,
+  mapPreviewImageName,
+  reportEdgeKind,
+  htmlGroupLabel,
+} from "./lineage";
 import {
   MAJOR_JOB_TYPES,
   PARTICLE_AUX_JOB_TYPES,
@@ -57,118 +91,9 @@ function escHtml(value: unknown): string {
     .replace(/'/g, "&#39;");
 }
 
-/** Format an integer with thousands separators; pass strings through escaped. */
-function fmt(value: unknown): string {
-  return Number.isInteger(value)
-    ? (value as number).toLocaleString("en-US")
-    : escHtml(value);
-}
-
-/** Pull a numeric job index out of a uid like `J427`. */
-function reportJobNum(uid: string | null | undefined): number {
-  const match = String(uid || "").match(/J(\d+)/i);
-  return match ? Number(match[1]) : 0;
-}
-
-/** Map of uid → node, used by many `report*` helpers. */
-function summaryNodeMap(summary: LineageSummary): Map<string, LineageNode> {
-  return new Map((summary.nodes || []).map((node) => [node.uid, node]));
-}
-
-/** Sanitize a value for use as a filename path segment. */
-function safePart(value: unknown): string {
-  return String(value || "item")
-    .replace(/[\\/:*?"<>|#%&{}$!'@+`=]/g, "_")
-    .replace(/\s+/g, "_")
-    .slice(0, 100);
-}
-
-/** Relative path used for an image file inside the downloaded bundle. */
-function localImageFilename(nodeUid: string, name: string): string {
-  return `images/${safePart(nodeUid)}/${safePart(name)}.png`;
-}
-
 /** Stable key for a (uid, name) image — used by the PPTX and SVG flows. */
 function pptImageKey(nodeUid: string, name: string): string {
   return `${safePart(nodeUid)}/${safePart(name)}`;
-}
-
-/** Extract the numeric class index from a group name like `class_2`. */
-function parseClassIndex(name: string | null | undefined): number | null {
-  const match = String(name || "").match(/class[_-](\d+)/);
-  return match ? Number(match[1]) : null;
-}
-
-/** Choose the image-name segment for a map preview group (`volume.map` → `volume`). */
-function mapPreviewImageName(group: string | null | undefined): string {
-  const value = String(group || "volume");
-  if (/^(volume|map)$/i.test(value)) return "volume";
-  return value.replace(/\.map$/i, "");
-}
-
-/* ------------------------------------------------------------------ */
-/* Pixel / resolution / extraction formatting                          */
-/* ------------------------------------------------------------------ */
-
-function pixelSizeNumber(value: unknown): number | null {
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 && number < 100
-    ? Math.round(number * 10000) / 10000
-    : null;
-}
-
-function formatPixelSize(value: unknown): string {
-  const number = pixelSizeNumber(value);
-  if (!number) return "";
-  return Number.isInteger(number)
-    ? String(number)
-    : number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
-}
-
-function pixelSizeText(node: LineageNode | null | undefined): string {
-  const text = formatPixelSize(node && node.pixel_size_A);
-  return text ? `${text} Å/px` : "";
-}
-
-function resolutionNumber(value: unknown): number | null {
-  const number = Number(value);
-  return Number.isFinite(number) && number >= 1 && number <= 20
-    ? Math.round(number * 100) / 100
-    : null;
-}
-
-function formatBinFactor(value: number): string {
-  if (!Number.isFinite(value)) return "";
-  const rounded = Math.round(value);
-  return Math.abs(value - rounded) < 0.01
-    ? String(rounded)
-    : value.toFixed(2).replace(/\.?0+$/, "");
-}
-
-function resolutionText(node: LineageNode | null | undefined): string {
-  const value = node && resolutionNumber(node.resolution_A);
-  return value ? `${formatBinFactor(value)} Å` : "";
-}
-
-function extractionBinText(node: LineageNode | null | undefined): string {
-  const p = node && node.extraction_params;
-  if (!p || !p.bin_factor) return "";
-  return `bin ${formatBinFactor(p.bin_factor)}`;
-}
-
-/* ------------------------------------------------------------------ */
-/* Edge kind / family helpers                                          */
-/* ------------------------------------------------------------------ */
-
-function edgeKind(edge: LineageEdge): string {
-  if (["particle", "volume", "mask", "template", "exposure"].includes(edge.input_type)) {
-    return edge.input_type;
-  }
-  const types = (edge.slots || []).map((slot) => slot.result_type || "").join(" ");
-  for (const kind of ["particle", "volume", "mask", "template", "exposure"]) {
-    if (types.includes(kind)) return kind;
-  }
-  return edge.input_type || "parent";
 }
 
 function summaryKind(edge: LineageEdge): string {
@@ -176,23 +101,6 @@ function summaryKind(edge: LineageEdge): string {
   if (edge.input_type) return edgeKind({ ...edge, slots: edge.slots || [] });
   if (Array.isArray(edge.kinds) && edge.kinds.length) return edge.kinds[0];
   return "parent";
-}
-
-function reportEdgeKind(edge: LineageEdge): string {
-  return summaryKind(edge);
-}
-
-function reportKindFamily(kind: string): string {
-  if (kind === "mask") return "volume";
-  if (kind === "exposure") return "exposure";
-  if (kind === "particle") return "particle";
-  if (kind === "volume") return "volume";
-  if (kind === "template" || kind === "ml_model" || kind === "model") return "template";
-  return kind || "other";
-}
-
-function htmlGroupLabel(edge: LineageEdge): string {
-  return edge.source_group || edge.input_name || "";
 }
 
 /* ------------------------------------------------------------------ */
@@ -203,41 +111,12 @@ function reportIsPickingNode(node: LineageNode | null | undefined): boolean {
   return PICKING_JOB_TYPES.has((node && node.job_type) as string);
 }
 
-function reportIsRepickParticleProducer(
-  node: LineageNode | null | undefined,
-): boolean {
-  return Boolean(
-    node &&
-      REPICK_PARTICLE_PRODUCER_TYPES.has(node.job_type) &&
-      node.particle_count !== null &&
-      node.particle_count !== undefined,
-  );
-}
-
 function reportIsRepickSetupNode(node: LineageNode | null | undefined): boolean {
   return REPICK_SETUP_JOB_TYPES.has((node && node.job_type) as string);
 }
 
 function reportIsParticleAuxNode(node: LineageNode | null | undefined): boolean {
   return PARTICLE_AUX_JOB_TYPES.has((node && node.job_type) as string);
-}
-
-function reportIsVolumeSourceNode(node: LineageNode | null | undefined): boolean {
-  const type = (node && node.job_type) || "";
-  return Boolean(
-    node &&
-      ((node.volume_count !== null && node.volume_count !== undefined) ||
-        /homo_abinit|hetero|nonuniform|homo_refine|local_refine|class_3D|var_3D|volume|map|align_3D|homo_reconstruct|sym_expand|particle_subtract/i.test(
-          type,
-        )),
-  );
-}
-
-function reportIsParticlePipelineNode(node: LineageNode | null | undefined): boolean {
-  const type = (node && node.job_type) || "";
-  return /import_particles|picker|topaz|extract_micrographs|remove_duplicate|particle_sets|downsample|standardize_particle|check_corrupt|reassign_particles/i.test(
-    type,
-  );
 }
 
 function reportIsSelect2DNode(node: LineageNode | null | undefined): boolean {
@@ -272,6 +151,44 @@ interface LineageRoundState {
   outgoingBySource: Map<string, NormalizedLineageEdge[]>;
   roundMemo: Map<string, number>;
   repickSeedMemo: Map<string, boolean>;
+}
+
+/* The two helpers below are byte-identical to the lineage.ts / report-html.ts
+ * exports EXCEPT for their state parameter type: this module's round
+ * computation builds a narrower LineageRoundState (no edges / outlineNodes /
+ * visible), so the shared LineageReportState-typed imports don't fit here.
+ * Kept local deliberately — do NOT "deduplicate" without unifying the state
+ * types first. */
+
+function reportRepickSeedSourceRounds(
+  incoming: NormalizedLineageEdge[],
+  state: LineageRoundState,
+  visited: Set<string>,
+): number[] {
+  return incoming
+    .map((edge) => {
+      const sourceNode = state.nodeMap.get(edge.source);
+      const directSeed =
+        edge.family === "volume" ||
+        edge.kind === "mask" ||
+        (edge.family === "particle" && reportIsVolumeSourceNode(sourceNode));
+      const inheritedSeed =
+        reportIsRepickSetupNode(sourceNode) && reportHasRepickSeed(edge.source, state);
+      if (!directSeed && !inheritedSeed) return null;
+      return reportLineageRound(edge.source, state, new Set(visited));
+    })
+    .filter((value): value is number => Number.isInteger(value));
+}
+
+function reportParticleSourceRound(
+  incoming: NormalizedLineageEdge[],
+  state: LineageRoundState,
+  visited: Set<string>,
+): number | null {
+  const particleIncoming = incoming.filter((edge) => edge.family === "particle");
+  return particleIncoming.length
+    ? reportMaxRoundFromEdges(particleIncoming, state, visited)
+    : null;
 }
 
 function reportHasRepickSeed(
@@ -339,26 +256,6 @@ function reportFeedsVolumeMainline(
   return false;
 }
 
-function reportRepickSeedSourceRounds(
-  incoming: NormalizedLineageEdge[],
-  state: LineageRoundState,
-  visited: Set<string>,
-): number[] {
-  return incoming
-    .map((edge) => {
-      const sourceNode = state.nodeMap.get(edge.source);
-      const directSeed =
-        edge.family === "volume" ||
-        edge.kind === "mask" ||
-        (edge.family === "particle" && reportIsVolumeSourceNode(sourceNode));
-      const inheritedSeed =
-        reportIsRepickSetupNode(sourceNode) && reportHasRepickSeed(edge.source, state);
-      if (!directSeed && !inheritedSeed) return null;
-      return reportLineageRound(edge.source, state, new Set(visited));
-    })
-    .filter((value): value is number => Number.isInteger(value));
-}
-
 function reportMaxRoundFromEdges(
   edges: NormalizedLineageEdge[],
   state: LineageRoundState,
@@ -368,17 +265,6 @@ function reportMaxRoundFromEdges(
     reportLineageRound(edge.source, state, new Set(visited)),
   );
   return rounds.length ? Math.max(...rounds) : 0;
-}
-
-function reportParticleSourceRound(
-  incoming: NormalizedLineageEdge[],
-  state: LineageRoundState,
-  visited: Set<string>,
-): number | null {
-  const particleIncoming = incoming.filter((edge) => edge.family === "particle");
-  return particleIncoming.length
-    ? reportMaxRoundFromEdges(particleIncoming, state, visited)
-    : null;
 }
 
 function reportLineageRound(
@@ -479,16 +365,6 @@ function reportNormalizedEdges(summary: LineageSummary): NormalizedLineageEdge[]
   return edges;
 }
 
-function reportNodeIsMajor(node: LineageNode, summary: LineageSummary): boolean {
-  const type = node.job_type || "";
-  if (node.uid === summary.start_uid) return true;
-  if (MAJOR_JOB_TYPES.has(type)) return true;
-  if (/local_refine|topaz_train|topaz_extract/i.test(type)) return true;
-  if (node.particle_count !== null && node.particle_count !== undefined) return true;
-  if (node.volume_count !== null && node.volume_count !== undefined) return true;
-  return false;
-}
-
 function reportVisibleOutlineNodes(
   summary: LineageSummary,
   nodeMap: Map<string, LineageNode>,
@@ -530,22 +406,6 @@ function reportBuildLineageState(summary: LineageSummary): LineageReportState {
     roundMemo: new Map(),
     repickSeedMemo: new Map(),
   };
-}
-
-/* ------------------------------------------------------------------ */
-/* Round / particle-node selectors                                     */
-/* ------------------------------------------------------------------ */
-
-function reportRoundNodes(
-  summary: LineageSummary,
-  state: LineageReportState,
-  round: number,
-  predicate: (node: LineageNode) => boolean,
-): LineageNode[] {
-  return (summary.nodes || [])
-    .filter((node) => reportLineageRound(node.uid, state) === round)
-    .filter(predicate)
-    .sort((a, b) => reportJobNum(a.uid) - reportJobNum(b.uid));
 }
 
 function reportHasUpstreamSelectInSameRound(
@@ -591,47 +451,6 @@ function reportRoundParticleNodes(
   );
 }
 
-function reportFirstMicrographNode(summary: LineageSummary): LineageNode | undefined {
-  return (
-    (summary.nodes || []).find(
-      (node) => node.job_type === "import_micrographs" && node.micrograph_count !== null,
-    ) || (summary.nodes || []).find((node) => /micrograph/i.test(node.job_type || ""))
-  );
-}
-
-function reportSelectedClassIndices(
-  nodeUid: string,
-  _summary: LineageSummary,
-  state: LineageReportState,
-): Set<number> {
-  const selected = new Set<number>();
-  for (const edge of state.edges.filter((item) => item.source === nodeUid)) {
-    const group = edge.group || "";
-    const idx = parseClassIndex(group);
-    if (idx !== null && (edge.family === "particle" || edge.family === "volume")) {
-      selected.add(idx);
-    }
-  }
-  return selected;
-}
-
-/* ------------------------------------------------------------------ */
-/* Map / metric helpers                                               */
-/* ------------------------------------------------------------------ */
-
-/** Filter a node's `maps` to the normal (non-mask) map files. Includes
- *  every non-mask volume blob — sharp maps and half maps included (see
- *  the canonical copy in lineage.ts for the full rationale). */
-function normalMapAssets(node: LineageNode): MapAsset[] {
-  return (node.maps || []).filter((item) => {
-    const group = String(item.group || "");
-    const result = String(item.result_name || "");
-    const volumeGroup = item.group_type ? item.group_type === "volume" : !/mask/i.test(group);
-    const isMask = /mask/i.test(group) || /mask/i.test(result);
-    return volumeGroup && !isMask;
-  });
-}
-
 function reportMetricText(node: LineageNode, compact = false): string {
   const parts: string[] = [];
   if (node.micrograph_count !== null && node.micrograph_count !== undefined) {
@@ -652,19 +471,6 @@ function reportMetricText(node: LineageNode, compact = false): string {
   const bin = extractionBinText(node);
   if (bin) parts.push(bin);
   return compact ? parts.join(" · ") : parts.join(" · ");
-}
-
-function reportPictureParticleMetricText(node: LineageNode): string {
-  const parts: string[] = [];
-  if (node.particle_count !== null && node.particle_count !== undefined) {
-    parts.push(`颗粒 ${fmt(node.particle_count)}`);
-  }
-  if (node.micrograph_count !== null && node.micrograph_count !== undefined) {
-    parts.push(`照片 ${fmt(node.micrograph_count)}`);
-  }
-  const bin = extractionBinText(node);
-  if (bin) parts.push(bin);
-  return parts.join(" · ");
 }
 
 /* ================================================================== */

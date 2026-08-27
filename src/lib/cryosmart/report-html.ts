@@ -48,7 +48,22 @@ import {
   REPICK_SETUP_JOB_TYPES,
   SMALL_JOB_TYPES,
 } from "./constants";
-
+// Shared data-layer helpers. Historically these were duplicated locally
+// ("to avoid circular import") but lineage.ts only imports constants/types,
+// so no cycle exists — report-pptx.ts already follows this import pattern.
+import {
+  reportJobNum,
+  pixelSizeNumber,
+  formatPixelSize,
+  resolutionNumber,
+  parseClassIndex,
+  mapPreviewImageName,
+  reportFeedsVolumeMainline,
+  reportRepickSeedSourceRounds,
+  reportParticleSourceRound,
+  reportEdgeKind,
+  htmlGroupLabel,
+} from "./lineage";
 
 export interface ReportHtmlOptions {
   /** { remoteUrl -> base64 data-URL } map from prefetchImagesForReport() */
@@ -74,7 +89,6 @@ export interface ReportHtmlOptions {
     cookie?: string;
   } | null;
 }
-
 
 /* ================================================================== */
   /*  Small helpers (HTML / formatting)                                 */
@@ -105,13 +119,6 @@ export interface ReportHtmlOptions {
   // duplicated from lineage.ts to avoid circular import
   export function summaryNodeMap(summary: LineageSummary): Map<string, LineageNode> {
     return new Map((summary.nodes || []).map((node) => [node.uid, node]));
-  }
-
-  /** Sort key for "J123" style uids — returns the numeric portion, or 0. */
-  // duplicated from lineage.ts to avoid circular import
-  export function reportJobNum(uid: string): number {
-    const match = String(uid || "").match(/J(\d+)/i);
-    return match ? Number(match[1]) : 0;
   }
 
   /** Sort nodes by their numeric uid. */
@@ -210,37 +217,11 @@ export interface ReportHtmlOptions {
     return "other";
   }
 
-  /* ================================================================== */
-  /*  Domain helpers (pixel size / resolution / extraction)              */
-  /* ================================================================== */
-
-  function pixelSizeNumber(value: unknown): number | null {
-    const number = Number(value);
-    return Number.isFinite(number) && number > 0 && number < 100
-      ? Math.round(number * 10000) / 10000
-      : null;
-  }
-
-  function formatPixelSize(value: unknown): string {
-    const number = pixelSizeNumber(value);
-    if (!number) return "";
-    return Number.isInteger(number)
-      ? String(number)
-      : number.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
-  }
-
   /** "1.24 Å/px" or empty string. */
   // duplicated from lineage.ts to avoid circular import
   export function pixelSizeText(node: LineageNode | null | undefined): string {
     const text = formatPixelSize(node && node.pixel_size_A);
     return text ? `${text} Å/px` : "";
-  }
-
-  function resolutionNumber(value: unknown): number | null {
-    const number = Number(value);
-    return Number.isFinite(number) && number >= 1 && number <= 20
-      ? Math.round(number * 100) / 100
-      : null;
   }
 
   function formatBinFactor(value: number): string {
@@ -276,13 +257,6 @@ export interface ReportHtmlOptions {
     if (p.extracted_box_size_pix) parts.push(`提取 box ${formatBinFactor(p.extracted_box_size_pix)} px`);
     if (p.bin_factor) parts.push(`bin ${formatBinFactor(p.bin_factor)}${p.bin_inferred ? " (推断)" : ""}`);
     return parts.join(" · ");
-  }
-
-  /** Parse "class_12" → 12 (or null). */
-  // duplicated from lineage.ts to avoid circular import
-  export function parseClassIndex(name: unknown): number | null {
-    const match = String(name || "").match(/class[_-](\d+)/);
-    return match ? Number(match[1]) : null;
   }
 
   /** Sanitize a string for use as a path component.
@@ -322,14 +296,6 @@ export interface ReportHtmlOptions {
     if (session?.cookie) params.push(`cookie=${encodeURIComponent(session.cookie)}`);
     if (session?.auth) params.push(`auth=${encodeURIComponent(session.auth)}`);
     return `/api/proxy-image/${fileid}?${params.join("&")}`;
-  }
-
-  /** Map preview image name for a volume group ("volume.map" → "volume"). */
-  // duplicated from lineage.ts to avoid circular import
-  export function mapPreviewImageName(group: unknown): string {
-    const value = String(group || "volume");
-    if (/^(volume|map)$/i.test(value)) return "volume";
-    return value.replace(/\.map$/i, "");
   }
 
   /** Preview image name for one row of the map download table.
@@ -453,54 +419,6 @@ export interface ReportHtmlOptions {
   }
 
   // duplicated from lineage.ts to avoid circular import
-  export function reportFeedsVolumeMainline(
-    uid: string,
-    state: LineageReportState,
-    visited: Set<string> = new Set(),
-    depth = 0,
-  ): boolean {
-    if (!uid || visited.has(uid) || depth > 10) return false;
-    visited.add(uid);
-    const node = state.nodeMap.get(uid);
-    if (!node) return false;
-    if (depth > 0 && reportIsVolumeSourceNode(node)) return true;
-    const outgoing = state.outgoingBySource ? state.outgoingBySource.get(uid) || [] : [];
-    for (const edge of outgoing) {
-      const target = state.nodeMap.get(edge.target);
-      if (!target) continue;
-      if (
-        edge.family === "particle" ||
-        edge.family === "volume" ||
-        edge.family === "template" ||
-        /model/i.test(edge.kind || "")
-      ) {
-        if (reportFeedsVolumeMainline(edge.target, state, new Set(visited), depth + 1)) return true;
-  }
-  }
-    return false;
-  }
-
-  // duplicated from lineage.ts to avoid circular import
-  function reportRepickSeedSourceRounds(
-    incoming: NormalizedLineageEdge[],
-    state: LineageReportState,
-    visited: Set<string> = new Set(),
-  ): number[] {
-    return incoming
-      .map((edge) => {
-        const sourceNode = state.nodeMap.get(edge.source);
-        const directSeed =
-          edge.family === "volume" ||
-          edge.kind === "mask" ||
-          (edge.family === "particle" && reportIsVolumeSourceNode(sourceNode));
-        const inheritedSeed = reportIsRepickSetupNode(sourceNode) && reportHasRepickSeed(edge.source, state);
-        if (!directSeed && !inheritedSeed) return null;
-        return reportLineageRound(edge.source, state, new Set(visited));
-      })
-      .filter((value): value is number => Number.isInteger(value));
-  }
-
-  // duplicated from lineage.ts to avoid circular import
   function reportMaxRoundFromEdges(
     edges: NormalizedLineageEdge[],
     state: LineageReportState,
@@ -508,17 +426,6 @@ export interface ReportHtmlOptions {
   ): number {
     const rounds = edges.map((edge) => reportLineageRound(edge.source, state, new Set(visited)));
     return rounds.length ? Math.max(...rounds) : 0;
-  }
-
-  function reportParticleSourceRound(
-    incoming: NormalizedLineageEdge[],
-    state: LineageReportState,
-    visited: Set<string>,
-  ): number | null {
-    const particleIncoming = incoming.filter((edge) => edge.family === "particle");
-    return particleIncoming.length
-      ? reportMaxRoundFromEdges(particleIncoming, state, visited)
-      : null;
   }
 
   /**
@@ -756,11 +663,6 @@ export interface ReportHtmlOptions {
     NormalizedLineageEdge[]
   >();
 
-  // duplicated from lineage.ts to avoid circular import
-  export function reportEdgeKind(edge: LineageEdge): string {
-    return summaryKind(edge);
-  }
-
   /** Normalised edges: every edge has `kind` / `family` / `group` filled. */
   // duplicated from lineage.ts to avoid circular import
   export function reportNormalizedEdges(summary: LineageSummary): NormalizedLineageEdge[] {
@@ -778,11 +680,6 @@ export interface ReportHtmlOptions {
     });
     if (summary) REPORT_NORMALIZED_EDGES_CACHE.set(summary, edges);
     return edges;
-  }
-
-  /** Group label used on edge pills (source_group → input_name → ""). */
-  export function htmlGroupLabel(edge: LineageEdge): string {
-    return edge.source_group || edge.input_name || "";
   }
 
   interface GroupedIncomingItem {
@@ -1691,7 +1588,7 @@ export interface ReportHtmlOptions {
   /*  pane, rendered as HTML)                                            */
   /* ================================================================== */
 
-  function reportFirstMicrographNode(summary: LineageSummary): LineageNode | undefined {
+  export function reportFirstMicrographNode(summary: LineageSummary): LineageNode | undefined {
     return (
       (summary.nodes || []).find(
         (node) => node.job_type === "import_micrographs" && node.micrograph_count !== null,
@@ -1699,7 +1596,7 @@ export interface ReportHtmlOptions {
     );
   }
 
-  function reportSelectedClassIndices(
+  export function reportSelectedClassIndices(
     nodeUid: string,
     summary: LineageSummary,
     state: LineageReportState,
