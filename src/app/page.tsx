@@ -222,6 +222,7 @@ export default function Home() {
                 : { message: importState.message, progress: importState.progress }
             }
             importStatus={importState.status}
+            stagedImport={importState.token !== null}
           />
           <DownloadCard summary={summary} options={traceOptions} loaded={loaded} />
           <HelpCard />

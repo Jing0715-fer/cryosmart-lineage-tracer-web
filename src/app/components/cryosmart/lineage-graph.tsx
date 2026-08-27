@@ -91,6 +91,11 @@ interface Props {
    *  "no-referrer" (works in the browser, may fail inside sandboxed
    *  iframes but is fine for the modal which renders in the top window). */
   session?: CryoSmartSession | null;
+  /** A staged Smart-Capture session produced the current data — the modal
+   *  gallery's base64 prefetch then skips direct intranet image URLs (the
+   *  capture script delivers bytes via the session-image channel; proxying
+   *  them from the app server only grinds 10s timeouts per image). */
+  stagedImport?: boolean;
 }
 
 /* ── Layout constants ───────────────────────────────────────────────────
@@ -675,7 +680,7 @@ function routeEdgeLane(
 
 
 /* ── Component ────────────────────────────────────────────────────────── */
-export function LineageGraph({ summary, session }: Props) {
+export function LineageGraph({ summary, session, stagedImport }: Props) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
 
@@ -2058,6 +2063,7 @@ export function LineageGraph({ summary, session }: Props) {
           node={modalNode}
           summary={summary}
           session={session ?? null}
+          stagedImport={stagedImport}
           isTarget={modalNode.uid === summary.start_uid}
           isLeaf={leafSet.has(modalNode.uid)}
           depth={depthMap.get(modalNode.uid) ?? null}
@@ -2175,6 +2181,9 @@ interface NodeDetailModalProps {
   node: LineageNode;
   summary: LineageSummary;
   session: CryoSmartSession | null;
+  /** Staged capture active — the gallery prefetch skips direct intranet
+   *  URLs (bytes arrive via the session-image channel instead). */
+  stagedImport?: boolean;
   isTarget: boolean;
   isLeaf: boolean;
   depth: number | null;
@@ -2193,7 +2202,7 @@ interface NodeDetailModalProps {
 }
 
 function NodeDetailModal({
-  node, summary, session,
+  node, summary, session, stagedImport,
   isTarget, isLeaf, depth,
   upstreamCount, downstreamCount,
   incomingEdges, outgoingEdges,
@@ -2238,7 +2247,9 @@ function NodeDetailModal({
           const idx = cursor++;
           const img = targets[idx];
           try {
-            const b64 = await imageToBase64(sess, img.src);
+            const b64 = await imageToBase64(sess, img.src, {
+              skipDirectCryosmart: stagedImport === true,
+            });
             if (!cancelled && b64) out[img.src] = b64;
           } catch {
             // ignore
@@ -2249,7 +2260,7 @@ function NodeDetailModal({
       if (!cancelled) setEmbeddedGallery(out);
     })();
     return () => { cancelled = true; };
-  }, [session, allImages]);
+  }, [session, allImages, stagedImport]);
 
   const nodeMap = useMemo(() => {
     const m = new Map<string, LineageNode>();

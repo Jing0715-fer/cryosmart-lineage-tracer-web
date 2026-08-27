@@ -238,6 +238,78 @@ function toLoaded(data: PendingData, token: string): LoadedMetadata {
 
 const POLL_INTERVAL_MS = 700;
 const MAX_WAIT_MS = 5 * 60 * 1000; // staged captures can stream for minutes
+
+/** localStorage key for the ACTIVE import token. The staged-capture poller
+ * runs inside the preview tab, which the browser aggressively throttles when
+ * backgrounded (timers stretched to ~1/min, then frozen entirely) — a capture
+ * that completes while the tab is in the background then NEVER applies its
+ * final data: the page keeps rendering the stale mid-capture snapshot where
+ * images uploaded after the last poll still carry direct `http://<cryosmart>`
+ * URLs (mixed-content-blocked on the HTTPS preview → hidden), while the
+ * "打开" link works in a new tab. The token is persisted so a reload (or a
+ * preview-panel refresh that drops the ?imported= query) re-attaches to the
+ * session and applies the final snapshot. Cleared once the final data is
+ * applied (or the session is gone) so later reloads start clean. */
+const IMPORT_TOKEN_KEY = "cryosmart_import_token_v1";
+
+function persistImportToken(token: string): void {
+  try {
+    localStorage.setItem(IMPORT_TOKEN_KEY, JSON.stringify({ token, at: Date.now() }));
+  } catch {
+    // private mode / storage disabled — resume support is best-effort
+  }
+}
+
+function clearPersistedImportToken(): void {
+  try {
+    localStorage.removeItem(IMPORT_TOKEN_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/** Read a persisted import token (null when absent or unreadable). */
+function readPersistedImportToken(): string | null {
+  try {
+    const raw = localStorage.getItem(IMPORT_TOKEN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { token?: unknown; at?: unknown };
+    if (parsed && typeof parsed.token === "string" && parsed.token) return parsed.token;
+  } catch {
+    // corrupt entry — treat as absent
+  }
+  return null;
+}
+
+/** Sleep `ms`, but wake IMMEDIATELY when the tab becomes visible or gains
+ * focus. Background tabs get their timers throttled (Chrome: chains limited
+ * to 1/min after 5 min, then frozen) — without this wake, a capture that
+ * completes while the tab is hidden applies its final data only when the
+ * browser eventually runs the next queued timer, which can be never for a
+ * frozen tab. visibilitychange/focus are delivered the moment the user looks
+ * at the tab again, so the next poll — and the final /data apply — fires
+ * instantly. */
+function sleepWithWake(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    const onWake = () => {
+      // Only cut the sleep short when the wake actually makes the tab ACTIVE —
+      // a visibilitychange to `hidden` must not accelerate the loop.
+      if (document.visibilityState === "visible") finish();
+    };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+  });
+}
 // Once jobs have landed there is no fixed deadline anymore (lineage-scoped
 // captures can legitimately wait many minutes for the user to trace, kept
 // alive by the script's ?hb=1 heartbeat). Instead: a capture is STALLED —
@@ -265,13 +337,21 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const u = new URL(window.location.href);
-    const token = u.searchParams.get("imported");
+    const urlToken = u.searchParams.get("imported");
+    if (urlToken) {
+      persistImportToken(urlToken);
+    }
+    // Re-attach to a capture whose progress tab was reloaded/navigated away
+    // (the preview panel refreshes can drop the ?imported= query) — the
+    // persisted token keeps the final apply reachable. Only used when the
+    // URL itself carries no token; an explicit ?imported= always wins.
+    const token = urlToken || readPersistedImportToken();
     if (!token) return;
     // Transition from "idle" (initial mount state) to "polling" once we
-    // detect an ?imported= query param. Deferred by one tick so the
-    // setState is not synchronous inside the effect body (react-compiler
-    // restriction) — the polling effect below starts a tick later, which
-    // is imperceptible.
+    // detect an ?imported= query param (or a persisted one). Deferred by one
+    // tick so the setState is not synchronous inside the effect body
+    // (react-compiler restriction) — the polling effect below starts a tick
+    // later, which is imperceptible.
     const t = setTimeout(() => {
       setState({
         status: "polling",
@@ -301,6 +381,19 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
         // ignore
       }
     };
+
+    // A "resumed" poller re-attaches to a STAGED session from localStorage
+    // (no ?imported= in the URL — the progress tab was reloaded/navigated).
+    // Two consequences: the legacy /pending probe is pointless (staged tokens
+    // never live there), and a 404 must end SILENTLY — the session simply
+    // expired after its 45-min TTL, which is not an error worth surfacing to
+    // a user who just reloaded the page.
+    let isResume = false;
+    try {
+      isResume = !new URL(window.location.href).searchParams.get("imported");
+    } catch {
+      // keep false
+    }
 
     const poll = async () => {
       /** staged-flow state: initial (jobs-only) snapshot already applied? */
@@ -359,6 +452,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
         // capture can run for many minutes).
         if (!sawData && Date.now() - startedAt > MAX_WAIT_MS) {
           if (!cancelled) {
+            clearPersistedImportToken();
             setState({
               status: "error",
               message: "Timed out waiting for CryoSmart data — please re-run the capture script.",
@@ -373,6 +467,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
 
         // ── Staged flow: GET /api/cryosmart/import/session/<token> ──
         let sessionStatus: SessionStatus | null = null;
+        let stagedNotFound = false;
         try {
           const resp = await fetch(
             `/api/cryosmart/import/session/${encodeURIComponent(token)}`,
@@ -381,9 +476,29 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
           if (cancelled) return;
           if (resp.ok) {
             sessionStatus = (await resp.json()) as SessionStatus;
+          } else if (resp.status === 404) {
+            stagedNotFound = true;
           }
         } catch {
           // network hiccup — fall through to legacy probe
+        }
+
+        // Resumed re-attach to a session that has since expired: stop
+        // silently instead of showing an error (and stop the legacy probe —
+        // a staged token can never appear in /pending).
+        if (!sessionStatus && stagedNotFound && isResume) {
+          clearPersistedImportToken();
+          if (!cancelled) {
+            setState({
+              status: "idle",
+              message: "",
+              token: null,
+              startedAt: null,
+              progress: null,
+              endJobUid: null,
+            });
+          }
+          return;
         }
 
         if (sessionStatus && sessionStatus.ok) {
@@ -423,6 +538,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 // nothing to rescue
               }
               if (cancelled) return;
+              clearPersistedImportToken();
               setState({
                 status: "error",
                 message:
@@ -501,6 +617,9 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   progress: null,
                   endJobUid: endJobUidSeen,
                 });
+                // Final snapshot applied — a later reload must NOT resurrect
+                // this capture over whatever the user does next.
+                clearPersistedImportToken();
                 cleanUrl();
                 return;
               }
@@ -574,7 +693,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             });
           }
 
-          await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+          await sleepWithWake(POLL_INTERVAL_MS);
           continue;
         }
 
@@ -601,6 +720,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 endJobUid: endJobUidSeen,
               });
               cleanUrl();
+              clearPersistedImportToken();
               return;
             }
           }
@@ -609,7 +729,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
           // network error — keep polling
         }
 
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        await sleepWithWake(POLL_INTERVAL_MS);
       }
     };
 

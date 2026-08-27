@@ -27,9 +27,20 @@ import { cryoSmartFetch, type CryoSmartSession } from "./proxy-client";
  */
 const FETCH_TIMEOUT_MS = 10_000;
 
+export interface ImageEmbedOptions {
+  /** Skip fetching DIRECT CryoSmart URLs (`http://<intranet>/api/log_image/…`)
+   *  entirely — return null without a request. Used while a STAGED capture is
+   *  active: those URLs route through the app server's proxy, which usually
+   *  cannot reach the user's intranet (10s abort each), and the bytes are
+   *  about to arrive via the capture script's own uploads anyway — grinding
+   *  the proxy only stalls the report/modal embed behind a wall of 502s. */
+  skipDirectCryosmart?: boolean;
+}
+
 export async function imageToBase64(
   session: CryoSmartSession,
-  cryosmartPath: string
+  cryosmartPath: string,
+  opts?: ImageEmbedOptions
 ): Promise<string | null> {
   try {
     if (!cryosmartPath) return null;
@@ -98,6 +109,11 @@ export async function imageToBase64(
     // Skip empty paths.
     if (!pathOnly) return null;
 
+    // Staged-capture mode: direct intranet URLs are not worth fetching (see
+    // ImageEmbedOptions.skipDirectCryosmart) — the capture script will
+    // deliver the bytes via the session-image channel instead.
+    if (opts?.skipDirectCryosmart) return null;
+
     // Re-attach the query so cryoSmartFetch can merge it with base/auth/cookie.
     const relativePath = existingQuery ? `${pathOnly}?${existingQuery}` : pathOnly;
 
@@ -154,10 +170,21 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
  */
 const REPORT_LOG_IMAGE_LIMIT = 12;
 
+export interface PrefetchImagesOptions {
+  /** A staged Smart-Capture session is ACTIVE for this summary — the capture
+   *  script is (or was) streaming image BYTES into the session store, so
+   *  direct `http://<cryosmart>/api/log_image/...` URLs are skipped from the
+   *  prefetch entirely (see ImageEmbedOptions.skipDirectCryosmart): they
+   *  grind 10s proxy timeouts while their bytes are already on the way via
+   *  the session-image channel. */
+  stagedImport?: boolean;
+}
+
 export async function prefetchImagesForReport(
   session: CryoSmartSession,
   summary: import("./types").LineageSummary,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  opts?: PrefetchImagesOptions
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   const urls = new Set<string>();
@@ -224,6 +251,35 @@ export async function prefetchImagesForReport(
     return out;
   }
 
+  // Staged-capture short-circuit: skip direct CryoSmart http(s) URLs when a
+  // staged capture is active (explicit flag — covers the refs-only phase
+  // BEFORE the first bytes land, when no session-image URLs exist yet for
+  // the heuristic below to detect) or when ANY URL is a session-image URL
+  // (bytes uploaded by the capture script). In that mode the direct
+  // `http://<cryosmart>/api/log_image/...` URLs are near-worthless to
+  // prefetch: they route through the app server's proxy (10s abort each)
+  // which usually cannot reach the user's intranet at all, so a capture with
+  // a handful of not-yet-uploaded previews used to spend MINUTES grinding
+  // 502s while the already-uploaded session images waited behind them. An
+  // asset with BOTH variants embeds via its session URL (same picture), and
+  // an asset with ONLY a direct URL renders via the report's own src +
+  // proxy-fallback chain (hidden cleanly when unreachable) and upgrades to
+  // a session URL when its bytes land and the summary refreshes.
+  const isSessionImageUrl = (u: string) =>
+    /\/api\/cryosmart\/import\/session\/[^/?#]+\/image\//.test(u);
+  const isDirectCryosmartUrl = (u: string) =>
+    /^https?:\/\//i.test(u) && u.includes("/api/log_image/");
+  if (opts?.stagedImport || urlList.some(isSessionImageUrl)) {
+    const before = urlList.length;
+    const kept = Array.from(new Set(urlList.filter((u) => !isDirectCryosmartUrl(u))));
+    const skipped = before - kept.length;
+    urlList.length = 0;
+    urlList.push(...kept);
+    if (skipped > 0) {
+      onProgress?.(`Skipping ${skipped} intranet-only image URL${skipped === 1 ? "" : "s"} (bytes not uploaded yet)…`);
+    }
+  }
+
   // Fetch with limited concurrency (8 at a time). Session-image URLs are
   // same-origin in-memory serves — fast; remote/proxied URLs are bounded by
   // the 10s abort timeout inside imageToBase64 so nothing hangs the pool.
@@ -237,7 +293,9 @@ export async function prefetchImagesForReport(
       const myIndex = index++;
       const url = urlList[myIndex];
       onProgress?.(`Embedding image ${done + 1}/${urlList.length}…`);
-      const dataUrl = await imageToBase64(session, url);
+      const dataUrl = await imageToBase64(session, url, {
+        skipDirectCryosmart: opts?.stagedImport === true,
+      });
       if (dataUrl) {
         out[url] = dataUrl;
         embedded++;

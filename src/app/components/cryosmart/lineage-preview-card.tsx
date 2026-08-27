@@ -37,9 +37,14 @@ interface Props {
   /** Capture lifecycle state — "polling" renders the live strip;
    *  "loaded"/"error"/"expired" render the final message (dismissable). */
   importStatus?: ImportStatusKind;
+  /** A staged Smart-Capture session produced the current data — the report
+   *  prefetch (and the graph modal's) then SKIPS direct intranet image URLs
+   *  (the capture script delivers bytes via the session-image channel;
+   *  proxying direct URLs from the app server only grinds 10s timeouts). */
+  stagedImport?: boolean;
 }
 
-export function LineagePreviewCard({ summary, session, onLoadDemo, importInfo, importStatus }: Props) {
+export function LineagePreviewCard({ summary, session, onLoadDemo, importInfo, importStatus, stagedImport }: Props) {
   const [reportTab, setReportTab] = useState("stats");
   const { resolvedTheme } = useTheme();
 
@@ -115,7 +120,7 @@ export function LineagePreviewCard({ summary, session, onLoadDemo, importInfo, i
     setEmbeddingProgress("Prefetching images for report preview…");
     prefetchImagesForReport(session, summary, (msg) => {
       if (!cancelled) setEmbeddingProgress(msg);
-    })
+    }, { stagedImport })
       .then((map) => {
         if (cancelled) return;
         const count = Object.keys(map).length;
@@ -131,16 +136,25 @@ export function LineagePreviewCard({ summary, session, onLoadDemo, importInfo, i
     return () => {
       cancelled = true;
     };
-  }, [summary, session]);
+  }, [summary, session, stagedImport]);
 
   const reportHtml = useMemo(() => {
     if (!summary) return "";
     try {
+      // The app's own origin — session-image URLs in the report become
+      // ABSOLUTE so they survive the blob: context of the "Open" button
+      // (relative srcs resolve fine in the srcdoc iframe but NOT against a
+      // blob: opaque path). Undefined during SSR / non-browser prerender,
+      // where the report is never actually rendered anyway.
+      const webAppOrigin =
+        typeof window !== "undefined" ? window.location.origin : undefined;
       const opts: ReportHtmlOptions | undefined = embeddedImages
-        ? { embeddedImages, session: session ?? undefined }
+        ? { embeddedImages, session: session ?? undefined, webAppOrigin }
         : session
-          ? { session }
-          : undefined;
+          ? { session, webAppOrigin }
+          : webAppOrigin
+            ? { webAppOrigin }
+            : undefined;
       return buildLineageHtmlV2(summary, opts);
     } catch (err) {
       return `<!doctype html><body style="font-family:monospace;padding:2rem;color:#b91c1c;">Failed to build report: ${(err as Error).message}</body>`;
@@ -286,7 +300,7 @@ export function LineagePreviewCard({ summary, session, onLoadDemo, importInfo, i
           </TabsContent>
 
           <TabsContent value="graph" className="mt-3">
-            <LineageGraph summary={summary} session={session ?? null} />
+            <LineageGraph summary={summary} session={session ?? null} stagedImport={stagedImport} />
           </TabsContent>
 
           <TabsContent value="fsc" className="mt-3">

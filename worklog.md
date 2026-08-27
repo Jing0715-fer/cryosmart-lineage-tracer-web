@@ -1017,3 +1017,31 @@ Stage Summary:
 - User action: re-copy the capture script from the Smart Capture panel (v3.12 header) and re-run — same tab or fresh tab both work. Even a stale v3.11 re-run now stores bytes thanks to the server-side sniffing.
 - The old dev.log evidence (proxy 502 storms for map fileids) confirmed the maps were also silently broken for every prior real run — now covered.
 - Remaining backlog unchanged (report-html full review + bilingual decision, nu-refine sharp/half map images, graph parallel-edge offset/compact spacing, bookmarklet-vs-panel script consolidation).
+
+---
+Task ID: 16
+Agent: main (Z.ai Code)
+Task: Fix "images captured successfully (128 uploaded, 100%) but nothing renders in graph/report; opening the image URL in a new tab works".
+
+Work Log:
+- Reproduced with the user's LIVE completed session s60-68c250c9 (46 jobs, 128 refs, 127 byte-uploads still in memory): a fresh page load + fresh trace renders ALL images fine (graph modal 34/34, report 151/152 embedded base64) — proving the render path and image bytes are healthy POST-complete.
+- Root-caused via dev.log forensics of the user's actual capture run:
+  1. The live progress page's status polls went from 700ms-cadence to sparse, then STOPPED entirely ~70 log lines before POST /complete (background-tab timer throttling froze the poller) → the final /data apply NEVER happened → the page kept rendering the stale mid-capture snapshot.
+  2. In that stale snapshot, images whose bytes streamed in after the last apply still carried direct `http://192.168.202.11:8080/api/log_image/…` URLs → mixed-content-blocked inside the HTTPS preview → onError → proxy fallback (10s timeout, 502 — app server cannot reach the intranet) → figure hidden. The "打开" links are top-level navigations, which is exactly why new-tab worked while inline <img> did not.
+  3. A page reload mid-capture (preview panel) loaded `/?imported=…` but produced ZERO status polls (tab closed/panel churn) — the token lived only in the URL, so the app state was lost.
+  4. During the capture, every progressive data apply restarted the report/modal image prefetch, which ground 10s-timeout proxy fetches for every direct intranet URL (~1300 requests in the user's log) — the "storm" that made the report feel frozen.
+- Fixes (all browser-verified with 3 fresh end-to-end capture simulations):
+  1. use-imported-metadata.ts: `sleepWithWake()` races the 700ms poll sleep against visibilitychange/focus so a throttled/backgrounded tab polls INSTANTLY when the user looks at it again; the active import token is persisted to localStorage (`cryosmart_import_token_v1`) and a bare `/` load resumes polling from it (silent idle on 404/expired); token cleared on final apply / timeout / stall.
+  2. image-embed.ts: `imageToBase64(session, path, { skipDirectCryosmart })` returns null without a request for direct CryoSmart URLs; `prefetchImagesForReport(…, { stagedImport })` drops direct URLs from the prefetch when a staged capture is active (explicit flag covers the refs-only phase BEFORE first bytes land; session-URL presence heuristic covers everything else). Plumbed `stagedImport={importState.token !== null}` from page.tsx → LineagePreviewCard → report prefetch + LineageGraph → NodeDetailModal gallery prefetch. Storm: 12→0 requests in sim.
+  3. report-html.ts + lineage-preview-card.tsx: new `webAppOrigin` option absolutizes session-image srcs (`/api/cryosmart/import/session/…/image/…`) so they also render in the blob:-opened report (relative resolution against a blob: opaque path fails); preview card passes `window.location.origin`.
+  4. configure-card.tsx: last successful trace {project, startUid} persisted (`cryosmart_last_trace_v1`); restored as the pre-filled Start Job suggestion for the same project after a reload.
+- Verification (agent-browser, dev server port 3000):
+  - Sim 2 (full live capture, unreachable intranet origin): 0 storm proxy requests (was 12), 6/6 report images embedded+loaded, modal 5/5, final data applied live without reload.
+  - Sim 3 (reload-to-bare-`/` MID-capture, the user's exact failure mode): page resumed from localStorage, live progress strip shown, capture completed → page updated LIVE to "Captured 3 jobs + 3 log images…", token auto-cleared, report 3/3 images, 0 hidden.
+  - User's real session re-test: fresh trace → modal 34/34, report 151/152 (1 not-uploaded image honestly hidden after fallbacks), lazy images load on scroll.
+  - lint clean; no browser console errors; no horizontal overflow at 390px/1440px; footer present.
+
+Stage Summary:
+- The "images captured but not rendered" bug was a RENDER-TIMING problem, not a capture problem: the live page froze on a stale snapshot (background-throttled poller missing /complete; reload losing the token), and its not-yet-uploaded images fell back to direct intranet URLs that HTTPS mixed-content blocks (new tab worked because top-level navigation has no mixed-content rule).
+- The report/modal embed now never grinds the unreachable intranet proxy during staged captures (was ~1300×10s requests in one user run); session-image bytes are the only embed channel.
+- Reload resilience: import token + last-trace persist and resume; expired sessions end silently.

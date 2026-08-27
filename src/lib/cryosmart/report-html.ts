@@ -69,6 +69,18 @@ export interface ReportHtmlOptions {
   /** { remoteUrl -> base64 data-URL } map from prefetchImagesForReport() */
   embeddedImages?: Record<string, string>;
   /**
+   * The web app's own origin (e.g. "https://preview-….space-z.ai"), used to
+   * ABSOLUTIZE same-origin session-image URLs (`/api/cryosmart/import/
+   * session/<token>/image/<fileid>`) emitted as `<img src>`. Relative srcs
+   * resolve fine inside the preview iframe (srcdoc inherits the parent base
+   * URL), but the "Open" button serves the report from a `blob:` URL — and
+   * relative resolution against a blob: opaque path FAILS, so those images
+   * would all break in the opened report. With the origin provided they
+   * become absolute and load from the live session (until its TTL expires;
+   * failed loads then hide via the standard onerror chain).
+   */
+  webAppOrigin?: string;
+  /**
    * Bundle mode: when true, image tags use a local filename
    * (`images/<uid>/<name>.png`) with an onerror fallback to the remote URL.
    * This is appropriate for the downloadable ZIP bundle, where the `images/`
@@ -296,6 +308,23 @@ export interface ReportHtmlOptions {
     if (session?.cookie) params.push(`cookie=${encodeURIComponent(session.cookie)}`);
     if (session?.auth) params.push(`auth=${encodeURIComponent(session.auth)}`);
     return `/api/proxy-image/${fileid}?${params.join("&")}`;
+  }
+
+  /** Absolutize a same-origin session-image URL for contexts whose base URL
+   *  cannot resolve relative paths (the blob: URL the report's "Open" button
+   *  navigates to). Non-session URLs are returned unchanged. */
+  function absolutizeSessionUrl(
+    url: string,
+    webAppOrigin?: string
+  ): string {
+    if (
+      webAppOrigin &&
+      url.startsWith("/") &&
+      /\/api\/cryosmart\/import\/session\/[^/?#]+\/image\//.test(url)
+    ) {
+      return `${String(webAppOrigin).replace(/\/$/, "")}${url}`;
+    }
+    return url;
   }
 
   /** Preview image name for one row of the map download table.
@@ -1364,11 +1393,18 @@ export interface ReportHtmlOptions {
     // (proxyUrl + markFailed stay RAW here; the single escHtml() below
     // escapes the whole handler exactly once, so the browser's attribute
     // decoding yields valid JS.)
+    //
+    // Session-image URLs (staged capture, same-origin relative paths) are
+    // ABSOLUTIZED with the web app's origin when provided — inside the
+    // preview iframe they'd resolve against the parent base URL anyway, but
+    // the "Open" button serves this same HTML from a blob: URL where
+    // relative resolution fails outright.
+    const renderSrc = absolutizeSessionUrl(remoteSrc, opts?.webAppOrigin);
     const proxyUrl = buildProxyFallbackUrl(remoteSrc, opts?.session);
     const onerror = proxyUrl
       ? `if(!this.dataset.tried){this.dataset.tried='1';this.src="${proxyUrl}";}else{${markFailed}}`
       : `if(!this.dataset.tried){this.dataset.tried='1';${markFailed}}`;
-    return `<img${cls} src="${escHtml(remoteSrc)}" referrerpolicy="no-referrer" loading="lazy" decoding="async" onerror="${escHtml(onerror)}" alt="${escHtml(alt)}">`;
+    return `<img${cls} src="${escHtml(renderSrc)}" referrerpolicy="no-referrer" loading="lazy" decoding="async" onerror="${escHtml(onerror)}" alt="${escHtml(alt)}">`;
   }
 
   /** Grid of image boxes (used by media block). */

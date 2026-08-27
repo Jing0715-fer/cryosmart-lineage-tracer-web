@@ -15,6 +15,44 @@ import { buildSummary, normalizeLineageSummary, normalizeJobUid } from "@/lib/cr
 import { DEFAULT_BASE_URL } from "@/lib/cryosmart/constants";
 import type { JobMetadata, LineageSummary } from "@/lib/cryosmart/types";
 
+/** localStorage key for the last successful trace (project + start uid).
+ * The staged-capture progress tab can be reloaded mid- or post-capture
+ * (preview-panel refresh, accidental navigation) — with the import token
+ * now persisted and re-attached, the DATA comes back automatically, but
+ * the traced lineage itself lived only in memory. Restoring the last
+ * start job as the pre-filled suggestion turns a full re-setup into one
+ * Trace click. Only used when the loaded dataset's project matches. */
+const LAST_TRACE_KEY = "cryosmart_last_trace_v1";
+
+function persistLastTrace(project: string, start: string): void {
+  try {
+    localStorage.setItem(LAST_TRACE_KEY, JSON.stringify({ project, start, at: Date.now() }));
+  } catch {
+    // storage disabled — best-effort
+  }
+}
+
+function readLastTraceStart(project?: string | null): string | null {
+  if (!project) return null;
+  try {
+    const raw = localStorage.getItem(LAST_TRACE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { project?: unknown; start?: unknown };
+    if (
+      parsed &&
+      typeof parsed.project === "string" &&
+      parsed.project === project &&
+      typeof parsed.start === "string" &&
+      parsed.start
+    ) {
+      return parsed.start;
+    }
+  } catch {
+    // corrupt entry — ignore
+  }
+  return null;
+}
+
 interface Props {
   loaded: LoadedMetadata | null;
   summary: LineageSummary | null;
@@ -103,10 +141,23 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
       : null;
   }, [autoTraceJobUid, loadedJobs]);
 
-  const suggestedStartJob = useMemo(
-    () => autoAnchorUid || (loadedJobs.length ? suggestStartJob(loadedJobs) : ""),
-    [autoAnchorUid, loadedJobs, suggestStartJob]
-  );
+  const suggestedStartJob = useMemo(() => {
+    if (autoAnchorUid) return autoAnchorUid;
+    if (loadedJobs.length) {
+      // Prefer the last-traced start job for THIS project (survives reloads
+      // via localStorage — see LAST_TRACE_KEY) over the generic "newest
+      // refinement job" heuristic.
+      const restored = readLastTraceStart(loaded?.projectUid);
+      if (
+        restored &&
+        loadedJobs.some((j) => normalizeJobUid(String(j.uid || "")) === normalizeJobUid(restored))
+      ) {
+        return restored;
+      }
+      return suggestStartJob(loadedJobs);
+    }
+    return "";
+  }, [autoAnchorUid, loadedJobs, loaded, suggestStartJob]);
   // Derived value: the user's typed job wins once they edit the field;
   // until then the smart suggestion auto-fills the input.
   const effectiveStartJob = startJobDirty ? startJob : suggestedStartJob;
@@ -257,6 +308,7 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
       const normalized = normalizeLineageSummary(summary);
       summaryBuiltFromRef.current = dataVersion;
       tracedDatasetKeyRef.current = datasetKey;
+      persistLastTrace(summary.project_uid || effectiveProjectId, startUid);
       onSummary(normalized);
       setTraceLog((l) => [...l, `Done. ${normalized.nodes.length} nodes, ${normalized.edges.length} edges.`]);
       toast.success(`Traced ${normalized.nodes.length} jobs upstream from ${startUid}`);
