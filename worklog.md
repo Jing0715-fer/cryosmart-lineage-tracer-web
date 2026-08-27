@@ -748,3 +748,26 @@ Work Log:
 Stage Summary:
 - The logout incident is fully root-caused and fixed at both script sources. The user must re-login to CryoSmart (the old run invalidated the SPA session client-side), then re-COPY the capture script from the Smart Capture panel (v3.1 header confirms the fix) — the previous pasted copy is still the unsafe one. Note: the P259 capture itself did succeed (46 jobs uploaded; only log images were lost).
 - Remaining backlog unchanged (report-html review, nu-refine images, graph polish, bookmarklet-vs-panel script consolidation candidate).
+
+---
+Task ID: 15
+Agent: main (Z.ai Code)
+Task: v3.2 capture script — log calibration still failed on the real build (P259) despite the v3.1 safety fix: getLogsByJob was called (only safe candidate left) but logs never landed in the 3 fixed state keys; HTTP probes 404; 46 jobs captured with 0 log images.
+
+Work Log:
+- Diagnosed from the user's console: after calling getLogsByJob, socket "insert_events"/"update_events" messages flowed — the loader WORKS and logs arrive over WebSocket, but they land in a state shape other than jobLogs/logs/job_logs (which was all the calibration checked). Secondary bug: calibration used pending[0] = J1 (import movies) — a job type that often has no image logs, so even a working loader looks broken.
+- v3.2 upgrade in BOTH scripts (smart-capture-panel.tsx staged script + bookmarklet.ts):
+  - Deep-scan helpers: scanForImageLogArrays(storeList) walks every store's $state (depth ≤6, 6000-node budget, WeakSet cycle-safe) collecting arrays containing entries with non-empty imgfiles; snapshotLogs/diffLogs (identity + length-growth diff) detect new or grown arrays; pickByUid prefers a path segment match ('.J12.' never matches 'J1'); ambient text-event arrays are excluded by the imgfiles signature.
+  - Multi-job calibration: up to 3 jobs sorted image-rich types first (refine|class|3d|2d|reconstruct|sharpen|nu|motion|ctf|mask|build); shapes expanded to 6 (uid, {job_uid}, {uid}, [uid], full job row, {uid, project_uid}).
+  - coerceLogs accepts {data|logs|result:[...]} return shapes; unified replay retrieval (return → deep-scan diff → classic maps → HTTP probe) is mode-agnostic.
+  - Diagnostics: prints getLogsByJob.toString() (900 chars, from the minified bundle) + WS message-type sniffer on socketManager.ws (addEventListener, removed after scan) + on failure a 'paste this block back to the maintainer' summary (store state keys + socket messages).
+  - httpLogProbe +2 path variants (/api/job/<uid>/logs, /api/logs?job=).
+- CRITICAL escape bug caught by syntax-checking the RENDERED script (new Function): '\n' inside the captureScript template literal evaluates to a real newline — the pasted script was a SyntaxError (would have completely broken the next user run). Fixed to \\n in 4 spots (panel ×3, bookmarklet ×1).
+- use-imported-metadata.ts: zero-image completion message now distinguishes "no log images readable on this build (see the CryoSmart console diagnostics)" (log_jobs_done > 0) from "no log images available".
+- Verification: rendered script extracted from the live page → new Function syntax OK. Behavioral node harness runs the ACTUAL shipped helper code against a simulated build where getLogsByJob resolves with empty .data (return-mode miss, as on the real build) and logs arrive 250ms later in logStore.$state.logsByJob[uid]: 8/8 checks pass (deep-scan finds the array at logStore.logsByJob.J12, path disambiguation J1 vs J12, imgfiles-only noise filter rejects text events, growth detection, circular-reference safety). Staged session regression (create→jobs→logs→complete→popup banner→URL cleanup) green; lint 0 errors; tsc src/ 0 errors.
+- Committed 5b40e52, pushed main → master.
+
+Stage Summary:
+- If the user's build lands logs anywhere reachable in pinia state, v3.2 will now find them automatically. If it still cannot, the console prints the loader's source code + WS message types + store keys — paste that block back and the exact call shape can be derived for a targeted v3.3 fix.
+- User action: re-copy the script from the Smart Capture panel (v3.2 marker in the header comment) and re-run on P259.
+- Remaining backlog unchanged (report-html review, nu-refine images, graph polish, script consolidation).
