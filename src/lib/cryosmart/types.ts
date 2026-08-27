@@ -66,6 +66,15 @@ export interface LogImageRef {
   text?: string | null;
   /** Raw log-entry flags — used to categorize (plots/fsc/slice-*). */
   flags?: string[] | null;
+  /** Preferred image source: a same-origin session-image URL (staged flow
+   *  with uploaded bytes — `/api/cryosmart/import/session/<token>/image/<fileid>`)
+   *  or an inline `data:` URL (legacy console snippet). Takes precedence over
+   *  building a direct `http://<cryosmart>/api/log_image/<fileid>` URL, which
+   *  is mixed-content-blocked when the app is viewed over HTTPS. */
+  src?: string | null;
+  /** Inline image bytes (`data:image/...;base64,...`) embedded by the legacy
+   *  console snippet. Same purpose as `src`. */
+  data?: string | null;
   [key: string]: unknown;
 }
 

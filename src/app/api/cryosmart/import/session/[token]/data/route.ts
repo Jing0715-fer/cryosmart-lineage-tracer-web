@@ -36,6 +36,7 @@ export async function GET(
       log_jobs_done: session.logJobsDone,
       log_jobs_total: session.logJobsTotal,
       log_images_count: session.logImagesCount,
+      log_images_uploaded: session.logImagesUploaded,
       data: {
         project_uid: d.project_uid,
         experiment_uid: d.experiment_uid,
@@ -50,6 +51,10 @@ export async function GET(
         cryosmart_cookie: d.cryosmart_cookie || undefined,
         // Log images streamed so far (may still grow until status=complete)
         job_log_images: session.jobLogImages,
+        // Fileids whose BYTES were uploaded — the UI points these at the
+        // same-origin /image/<fileid> endpoint instead of the (usually
+        // mixed-content-blocked) direct CryoSmart URL.
+        uploaded_image_ids: Array.from(session.imageStore.keys()),
       },
     },
     { headers: IMPORT_SESSION_CORS }

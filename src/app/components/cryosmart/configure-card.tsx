@@ -103,6 +103,22 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
   // until then the smart suggestion auto-fills the input.
   const effectiveStartJob = startJobDirty ? startJob : suggestedStartJob;
 
+  /** Total log-image refs across the loaded jobs — the staged capture
+   * streams these in AFTER the first snapshot, so this count is the
+   * "data freshness" signal for the summary auto-refresh below. */
+  const loadedLogImageCount = useMemo(
+    () =>
+      loadedJobs.reduce(
+        (n, j) => n + ((j as { log_images?: unknown[] }).log_images?.length || 0),
+        0
+      ),
+    [loadedJobs]
+  );
+  const dataVersion = loaded ? `${datasetKey}#${loadedLogImageCount}` : "";
+  /** dataVersion the CURRENT summary was built from (set by handleTrace;
+  * compared by the auto-refresh effect below). */
+  const summaryBuiltFromRef = useRef("");
+
   useEffect(() => {
     if (!loaded) {
       prevDatasetKeyRef.current = "";
@@ -171,6 +187,7 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
       setTraceLog((l) => [...l, `Tracing upstream lineage from ${startUid}…`]);
       const summary = buildSummary(jobMetadata, effectiveProjectId, startUid, baseUrl);
       const normalized = normalizeLineageSummary(summary);
+      summaryBuiltFromRef.current = dataVersion;
       onSummary(normalized);
       setTraceLog((l) => [...l, `Done. ${normalized.nodes.length} nodes, ${normalized.edges.length} edges.`]);
       toast.success(`Traced ${normalized.nodes.length} jobs upstream from ${startUid}`);
@@ -185,7 +202,34 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
     } finally {
       setTracing(false);
     }
-  }, [loaded, effectiveStartJob, loadedJobs, effectiveProjectId, suggestStartJob, onSummary]);
+  }, [loaded, effectiveStartJob, loadedJobs, effectiveProjectId, suggestStartJob, onSummary, dataVersion]);
+
+  /** Auto-refresh a summary that was traced DURING a staged capture: the
+   *  final snapshot (with every streamed log image + uploaded byte) replaces
+   *  `loaded`, but the already-built summary would otherwise stay stale —
+   *  the user would see "Captured N images" yet no images in the graph or
+   *  report. Rebuild silently with the SAME start_uid whenever the loaded
+   *  data's log-image count grows past what the summary was built from. */
+  useEffect(() => {
+    if (!summary || !loaded || !summary.start_uid) return;
+    if (!summaryBuiltFromRef.current) return; // nothing traced from THIS load yet
+    if (summaryBuiltFromRef.current === dataVersion) return;
+    summaryBuiltFromRef.current = dataVersion;
+    try {
+      const jobMetadata = loadedJobs as JobMetadata[];
+      const baseUrl = loaded.session?.baseUrl || DEFAULT_BASE_URL;
+      const next = normalizeLineageSummary(
+        buildSummary(jobMetadata, summary.project_uid || effectiveProjectId, summary.start_uid, baseUrl)
+      );
+      onSummary(next);
+      setTraceLog((l) => [
+        ...l,
+        `Log images finished arriving — refreshed lineage (${loadedLogImageCount} image refs attached).`,
+      ]);
+    } catch {
+      // keep the previous summary — the manual Trace button still works
+    }
+  }, [loaded, summary, dataVersion, loadedJobs, loadedLogImageCount, effectiveProjectId, onSummary]);
 
   const importPct = importInfo?.progress
     ? Math.min(100, Math.round((importInfo.progress.done / Math.max(1, importInfo.progress.total)) * 100))
@@ -247,10 +291,13 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
                     style={{ width: `${importPct}%` }}
                   />
                 </div>
-                <div className="mt-1.5 flex items-center justify-between font-mono text-[10.5px] text-teal-800/75 dark:text-teal-300/70">
+                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 font-mono text-[10.5px] text-teal-800/75 dark:text-teal-300/70">
                   <span>{importInfo.progress.done}/{importInfo.progress.total} jobs scanned</span>
                   <span>
                     {importInfo.progress.images} {importInfo.progress.images === 1 ? "image" : "images"} captured
+                    {importInfo.progress.uploaded > 0
+                      ? ` · ${importInfo.progress.uploaded} ready`
+                      : ""}
                   </span>
                 </div>
               </div>

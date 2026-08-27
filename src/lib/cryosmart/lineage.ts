@@ -795,9 +795,18 @@ export function imageAssets(
   };
   for (const item of job.log_images || []) {
     const fileid = item?.fileid || "";
-    const url = logImageUrl(baseUrl, fileid);
+    // Prefer an explicit src: a same-origin session-image URL (staged flow,
+    // bytes uploaded by the capture script) or an inline data: URL (legacy
+    // console snippet). Both work from an HTTPS page, unlike the direct
+    // `http://<cryosmart>/api/log_image/<fileid>` URL, which browsers
+    // mixed-content-block.
+    const explicitSrc =
+      (typeof item.src === "string" && item.src) ||
+      (typeof item.data === "string" && item.data) ||
+      "";
+    const url = explicitSrc || logImageUrl(baseUrl, fileid);
     if (!url || logSeen.has(fileid)) continue;
-    logSeen.add(fileid);
+    if (fileid) logSeen.add(fileid);
     const flags = logFlags(item.flags);
     assets.push({
       kind: "log_image",

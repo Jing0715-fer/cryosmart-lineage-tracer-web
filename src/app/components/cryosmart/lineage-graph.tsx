@@ -701,7 +701,6 @@ export function LineageGraph({ summary, session }: Props) {
   const cardShadow     = isDark ? "rgba(0,0,0,0.45)" : "rgba(15,23,42,0.08)";
   const startColor     = "#0d9488"; // teal-600 — SOURCE / upstream-most
   const targetColor    = "#dc2626"; // red-600 — TARGET / trace destination
-  const selectionColor = "#0ea5e9"; // sky-500
 
   const [detailMode, setDetailMode] = useState(false);
   const NODE_H = detailMode ? NODE_H_DETAIL : NODE_H_COMPACT;
@@ -1620,37 +1619,57 @@ export function LineageGraph({ summary, session }: Props) {
                     SOURCE/TARGET glow treatment so it feels native.
                     Drawn BEFORE the card body so the card sits on top.
                     Tightened to x=-3 (matches SOURCE/TARGET halos) so
-                    there's no gap between the glow and the card body. */}
+                    there's no gap between the glow and the card body.
+                    Family-colored so it matches the card's own accent. */}
                 {isHoveredEdgeEndpoint && !isSelected && (
                   <rect
                     x={-3} y={-3}
                     width={NODE_W + 6} height={NODE_H + 6}
                     rx={11}
-                    fill={selectionColor}
-                    opacity={0.22}
+                    fill={color}
+                    opacity={0.2}
+                    filter="url(#start-glow)"
+                    pointerEvents="none"
+                  />
+                )}
+                {/* SELECTED glow halo — same soft treatment, family-colored,
+                    so a selected card reads as "lit up" in its own color
+                    (and stays distinguishable from the thinner hover border). */}
+                {isSelected && (
+                  <rect
+                    x={-3} y={-3}
+                    width={NODE_W + 6} height={NODE_H + 6}
+                    rx={11}
+                    fill={color}
+                    opacity={0.26}
                     filter="url(#start-glow)"
                     pointerEvents="none"
                   />
                 )}
                 {/* Card body — the stroke IS the selection/hover/SOURCE/
                     TARGET border. No separate ring `<rect>` elements → no
-                    gap between border and body. The LEFT ACCENT BAR below
-                    starts exactly at strokeWidth/2 (the stroke's inner
-                    edge), so it sits flush against the border at EVERY
-                    border width (1 / 1.5 / 2 / 2.5 / 3) — previously it
-                    was fixed at x=1.5, which left a visible sliver of
-                    card-gradient between the border and the bar whenever
-                    the card was selected/hovered (2–3px strokes).
+                    gap between border and body. Hover/selection borders use
+                    the card's FAMILY color — the same color as the left
+                    accent bar — so border and bar merge into one seamless
+                    band (user request: "悬停/选中框颜色和左边条一致，且
+                    与左边条之间不留空隙").
+                    The LEFT ACCENT BAR below starts at x=0 — the stroke's
+                    CENTERLINE — and paints OVER the stroke's inner half,
+                    so there is no card-gradient sliver between the border
+                    and the bar at ANY border width (previously the bar sat
+                    at x=borderW/2, the stroke's inner edge, and the two
+                    anti-aliased edges produced a visible ~1px gap).
                     Priority: isSelected > isHoveredEdgeEndpoint > isHovered
                     > isTarget/isLeaf. */}
                 {(() => {
                   const borderCol =
-                    isSelected ? selectionColor
-                    : isHoveredEdgeEndpoint ? selectionColor
-                    : isHovered ? color
-                    : isTarget ? targetColor
-                    : isLeaf ? startColor
-                    : borderColor;
+                    isSelected || isHoveredEdgeEndpoint || isHovered
+                      ? color
+                      : isTarget
+                        ? targetColor
+                        : isLeaf
+                          ? startColor
+                          : borderColor;
                   const borderW =
                     isSelected ? 3
                     : isHoveredEdgeEndpoint ? 2.5
@@ -1668,12 +1687,13 @@ export function LineageGraph({ summary, session }: Props) {
                         strokeWidth={borderW}
                         filter="url(#card-shadow)"
                       />
-                      {/* Left color bar — x = borderW/2 = the stroke's inner
-                          edge → flush with the border, no gap, and clipped
-                          to the card's rounded outline so the bar never
-                          protrudes outside the card frame. */}
+                      {/* Left color bar — x=0 = the stroke's CENTERLINE, so
+                          the bar covers the stroke's inner half and merges
+                          flush with the border (zero gap by construction).
+                          Still clipped to the card's rounded outline so the
+                          bar never protrudes outside the card frame. */}
                       <rect
-                        x={borderW / 2} y={0}
+                        x={0} y={0}
                         width={4} height={NODE_H}
                         fill={color}
                         clipPath="url(#card-clip)"

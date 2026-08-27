@@ -1393,14 +1393,20 @@ export interface ReportHtmlOptions {
     // Log images — captured from the SPA's lazy jobLogs state by the Smart
     // Capture script (force-loaded via the store's log-loading action).
     // Rendered whenever present so runtime log previews make it into the
-    // report alongside the tile/select-2D images.
+    // report alongside the tile/select-2D images. Capped at 12 per job to
+    // keep the report printable; the count in the heading tells the reader
+    // when more exist (the graph's job-detail modal shows every one).
     const logImages = (node.images || []).filter((item) => item.kind === "log_image");
     if (logImages.length > 0) {
-      const html = reportImageBoxes(node.uid, logImages, 6, opts);
+      const LIMIT = 12;
+      const shown = logImages.slice(0, LIMIT);
+      const html = reportImageBoxes(node.uid, shown, LIMIT, opts);
       if (html) {
-        chunks.push(
-          `<div class="media-block"><h3>Log images (${logImages.length})</h3>${html}</div>`,
-        );
+        const heading =
+          logImages.length > LIMIT
+            ? `Log images (${shown.length} / ${logImages.length})`
+            : `Log images (${logImages.length})`;
+        chunks.push(`<div class="media-block"><h3>${escHtml(heading)}</h3>${html}</div>`);
       }
     }
 

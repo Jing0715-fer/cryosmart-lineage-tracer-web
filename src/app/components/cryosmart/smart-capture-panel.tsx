@@ -64,9 +64,11 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.2 — deep-scan log calibration: finds logs in ANY store
-// state shape (incl. WebSocket-delivered logs), calibrates on image-rich jobs
-// first, sniffs socket messages, and prints console diagnostics if it cannot auto-load.
+// CryoSmart Smart Capture v3.3 — uploads log-image BYTES (the script runs
+// same-origin with CryoSmart, so it is the only party that can fetch them;
+// the web app is usually viewed over HTTPS where direct http://<cryosmart>
+// images are mixed-content blocked). Also: deep-scan log calibration that
+// finds logs in ANY store state shape (incl. WebSocket-delivered logs).
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -488,8 +490,95 @@ export function SmartCapturePanel({ onCapture }: Props) {
     if (!force && batch.length < 5 && Date.now() - lastFlush < 2500) return Promise.resolve();
     var items = batch; batch = [];
     lastFlush = Date.now();
+    queueImageUploads(items);
     return post('/logs', { items: items }).catch(function(e) {
       console.warn('[CryoSmart] Log batch upload failed (non-fatal):', e && e.message);
+    });
+  }
+
+  // ── Image-BYTE upload (v3.3) ─────────────────────────────────────
+  // The web app is typically opened over HTTPS; direct
+  // http://<cryosmart>/api/log_image/<fileid> <img> loads are then
+  // mixed-content blocked, and the app's server cannot reach this
+  // intranet either. THIS tab is same-origin with CryoSmart, so we fetch
+  // each image's bytes here and upload them to the session — the app then
+  // serves them same-origin and they render everywhere (graph job detail,
+  // HTML report, downloads).
+  var IMG_MAX_BYTES = 4 * 1024 * 1024;      // skip images larger than ~4MB
+  var imgQueue = [];                          // pending refs
+  var imgBatch = [];                          // fetched, awaiting POST
+  var imgWorkers = 0;
+  var imgPosted = 0;                          // in-flight POSTs
+  var imgUploaded = 0, imgFailed = 0;
+  var imgDone = false;
+
+  function fetchImageData(ref) {
+    if (!ref || !ref.fileid) return Promise.resolve(null);
+    return fetch('/api/log_image/' + encodeURIComponent(ref.fileid), { credentials: 'include' })
+      .then(function(r) { return r.ok ? r.blob() : null; })
+      .then(function(b) {
+        if (!b || b.size === 0 || b.size > IMG_MAX_BYTES) return null;
+        if (b.type && b.type !== '' && b.type.indexOf('image/') !== 0) return null;
+        return new Promise(function(res) {
+          var fr = new FileReader();
+          fr.onload = function() { res(String(fr.result) || null); };
+          fr.onerror = function() { res(null); };
+          fr.readAsDataURL(b);
+        });
+      })
+      .catch(function() { return null; });
+  }
+
+  function flushImageBatch() {
+    if (!imgBatch.length) return;
+    var items = imgBatch; imgBatch = [];
+    imgPosted++;
+    post('/images', { items: items })
+      .then(function(r) {
+        if (r && r.ok) imgUploaded += (r.stored || items.length);
+        else imgFailed += items.length;
+      })
+      .catch(function() { imgFailed += items.length; })
+      .then(function() { imgPosted--; });
+  }
+
+  function imgWorker() {
+    var ref = imgQueue.shift();
+    if (!ref) { imgWorkers--; return; }
+    fetchImageData(ref).then(function(data) {
+      if (data) {
+        imgBatch.push({ fileid: ref.fileid, data: data, name: ref.name || null });
+        if (imgBatch.length >= 6) flushImageBatch();
+      } else {
+        imgFailed++;
+      }
+      imgWorker();
+    });
+  }
+
+  function queueImageUploads(items) {
+    for (var i = 0; i < items.length; i++) {
+      var imgs = items[i] && items[i].images;
+      if (!imgs) continue;
+      for (var k = 0; k < imgs.length; k++) imgQueue.push(imgs[k]);
+    }
+    while (imgWorkers < 3 && imgQueue.length) { imgWorkers++; imgWorker(); }
+  }
+
+  // Wait (bounded) for every queued image to be fetched + posted.
+  function drainImageUploads(budgetMs) {
+    imgDone = true;
+    var deadline = Date.now() + (budgetMs || 90000);
+    return new Promise(function(resolve) {
+      (function check() {
+        flushImageBatch();
+        if ((imgQueue.length === 0 && imgWorkers === 0 && imgPosted === 0) || Date.now() > deadline) {
+          console.log('[CryoSmart] Image bytes uploaded: ' + imgUploaded + ' ok, ' + imgFailed + ' failed/skipped.');
+          resolve();
+          return;
+        }
+        setTimeout(check, 250);
+      })();
     });
   }
 
@@ -754,6 +843,11 @@ export function SmartCapturePanel({ onCapture }: Props) {
   } catch (e) {
     console.warn('[CryoSmart] Log collection failed (non-fatal):', e && e.message);
   }
+
+  // ── STEP 3.5: wait for the image-byte uploads to land ──────────────
+  // Refs are already streamed; the BYTES upload concurrently with the scan.
+  // Give them a bounded extra window so the final snapshot includes them.
+  await drainImageUploads(90000);
 
   // ── STEP 4: mark the session complete ──────────────────────────────
   // The web UI stops polling and refreshes with the final data snapshot.

@@ -771,3 +771,37 @@ Stage Summary:
 - If the user's build lands logs anywhere reachable in pinia state, v3.2 will now find them automatically. If it still cannot, the console prints the loader's source code + WS message types + store keys — paste that block back and the exact call shape can be derived for a targeted v3.3 fix.
 - User action: re-copy the script from the Smart Capture panel (v3.2 marker in the header comment) and re-run on P259.
 - Remaining backlog unchanged (report-html review, nu-refine images, graph polish, script consolidation).
+
+---
+Task ID: 16
+Agent: main (Z.ai Code)
+Task: Two fixes from the user's real P259 run (46 jobs + 903 log images from 15 jobs captured successfully): (1) the captured log images did not appear in the graph job detail or the report; (2) graph card hover/selection border should match the left accent bar color and leave no gap against it.
+
+Work Log:
+- Root-caused (1) as TWO independent bugs:
+  - Stale summary: the staged capture popup lands on Configure & Trace and the user traces while log images are still streaming; the final /data snapshot replaces `loaded` but the already-built summary (graph + report) kept the old node set with zero/partial log images.
+  - Unrenderable images: log-image assets pointed at direct `http://192.168.202.11:8080/api/log_image/<fileid>` URLs; the app is viewed over HTTPS (preview URL) so Chrome auto-upgrades + blocks them as mixed content, and the /api/proxy-image fallback needs the app SERVER to reach the user's intranet, which it cannot. Only the capture script tab (same-origin with CryoSmart) can fetch those bytes.
+- Image-byte pipeline (staged flow):
+  - import-session-store.ts: session gains imageStore: Map<fileid,{mime,b64,name}>, imageStoreBytes (cap ~192MB total, ~4MB per image), logImagesUploaded; addImagesToSession() validates `data:image/*;base64` URLs; sessionImageResponse() serves bytes with 5-min cache + CORS.
+  - New routes: POST /api/cryosmart/import/session/[token]/images (batches of {fileid,data,name}) and GET .../image/[fileid] (same-origin byte serving; 404 after session TTL).
+  - Status/data routes now expose log_images_uploaded + uploaded_image_ids.
+- Capture script v3.3 (panel copy): fetchImageData() fetches each log image same-origin (credentials included, ≤4MB, image/* only) → data URL; queueImageUploads() runs 3 concurrent workers off every flushed /logs batch, flushImageBatch() POSTs ≤6 images per request; drainImageUploads(90s budget) before /complete so the final snapshot includes all bytes. Caught + avoided the template-literal escape trap (regex `\/` renders broken — used indexOf('image/') instead); rendered-script syntax verified via new Function.
+- Console snippet (bookmarklet.ts copy): legacy one-shot path embeds bytes as `data` fields directly on refs, budget-capped (600 images / 60MB) so the single POST stays sane; refs flow through /api/cryosmart/import → pending → merge unchanged.
+- UI plumbing: LogImageRef gains src?/data?; imageAssets() prefers explicit src/data over building the direct CryoSmart URL; mergeLogImagesIntoRaw() decorates refs whose fileid is in uploaded_image_ids with `/api/cryosmart/import/session/<token>/image/<fileid>` (encodeURIComponent'd); image-embed.ts imageToBase64() gained a same-origin carve-out for /api/cryosmart/import/session/.../image/ paths so the modal pre-fetch AND report prefetchImagesForReport() embed session images as base64 (report becomes self-contained for log images).
+- Stale-summary fix: configure-card tracks dataVersion = `project:jobCount#logImageRefs`; handleTrace records it; a new effect silently rebuilds the summary with summary.start_uid whenever the loaded data's log-image count grows past the traced version ("Log images finished arriving — refreshed lineage (N image refs attached)." in the trace log). Demo/share/legacy flows unaffected (no version recorded → no rebuild).
+- Progress UX: polling message + import panel now show "N images captured · M ready"; final banner shows "(M with previews)" when only some bytes landed. Report per-job log-image limit raised 6 → 12 with "shown / total" heading when capped.
+- Graph card styling (user request): hover/edge-endpoint/selection borders now use the card's FAMILY color (same as the left bar; sky-500 selectionColor removed — also kills the last blue); the left accent bar moved from x=borderW/2 (stroke inner edge — anti-aliasing left a ~1px sliver) to x=0 (stroke centerline, painted OVER the stroke's inner half) so border+bar merge into one seamless band at every border width; selected cards additionally get a soft family-colored glow halo (opacity .26, same start-glow filter as SOURCE/TARGET) so selection stays visually distinct from hover.
+- E2E verified with agent-browser across 4 fresh staged sessions + 1 legacy import:
+  - Full staged (s11, 5 jobs, 4 refs + 4 bytes): banner "Captured 5 jobs + 4 log images from 2 jobs."; J5 modal Images (3) with 4/4 imgs loaded as base64; Report iframe: "Log images (1)" + "Log images (3)" sections, 4/4 <img> loaded, 4 embedded data: URLs.
+  - Mid-capture trace (s12): traced with 0 log images → logs+bytes+complete → auto-refresh line "Log images finished arriving — refreshed lineage (2 image refs attached)." and J2 modal then showed Images (2) with 3/3 loaded.
+  - Live progress (s13): "Loaded 2 jobs — fetching log images 1/2 (1 captured · 1 image files ready)…".
+  - Detail mode (s14): J2 card inline thumbnail = embedded base64 href; endpoint returns 200 image/png; 2028 red-pixel hits confirm the scaled thumbnail paints.
+  - Legacy (P400): refs carrying `data` render 1/1 in the modal via data: URL.
+  - Styling: DOM-verified selected J2 stroke #0d9488@3px == bar #0d9488@x=0; hover J1 stroke #0891b2@2px == bar #0891b2; VLM on zoomed crops: same color, NO gap, "one continuous seamless band" (selected + hover), and the pre-fix target card showed the reported gap → fixed.
+  - Panel renders the v3.3 script (fetchImageData/drainImageUploads/post('/images') present, no escape corruption); demo regression 10 nodes + J10 modal 8/8 images; legacy import regression OK; 390px mobile no horizontal scroll; console + page errors clean after reload; dev.log all 200s; lint 0 problems; tsc src/ clean.
+
+Stage Summary:
+- Log images captured by the script now UPLOAD THEIR BYTES and render everywhere: graph job-detail modal (base64-embedded gallery), detail-mode inline thumbnails, and the HTML report (self-contained base64) — immune to HTTPS mixed-content blocking and to the app server being off-intranet. The summary auto-refreshes when images finish arriving after a mid-capture trace, so "Captured N images" now always equals "N images visible".
+- User action: re-copy the script from the Smart Capture panel (v3.3 header) and re-run on P259 — the 903 images should now appear in job detail + report. Note the previous session's refs (without bytes) are gone (TTL), so a re-capture is needed.
+- Graph cards: hover/selection border = left-bar color, seamless band (no gap), selected cards glow in their family color.
+- Remaining backlog unchanged (report-html full review + bilingual decision, nu-refine sharp/half map images, parallel-edge spacing/compact density, bookmarklet-vs-panel script consolidation).

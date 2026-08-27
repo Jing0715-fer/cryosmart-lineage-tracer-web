@@ -45,6 +45,19 @@ export interface ImportSession {
   data: ImportSessionData;
   /** Log images streamed in batches: { [jobUid]: [{fileid, name, ...}] } */
   jobLogImages: Record<string, LogImageRef[]>;
+  /** Image BYTES uploaded by the capture script (it runs same-origin with
+   * CryoSmart, so it is the only party that can fetch them). Keyed by
+   * fileid; value is a `data:<mime>;base64,...` URL. Served back to the
+   * web UI same-origin via GET .../image/<fileid> — the browser viewing the
+   * app over HTTPS cannot load `http://192.168.x.x` images directly
+   * (mixed content), and the app server usually cannot reach the user's
+   * intranet either, so uploaded bytes are the only universally-working
+   * delivery channel. */
+  imageStore: Map<string, { mime: string; b64: string; name?: string }>;
+  /** Approximate total size of `imageStore` (base64 chars ≈ bytes). */
+  imageStoreBytes: number;
+  /** Log-image refs whose bytes were uploaded successfully. */
+  logImagesUploaded: number;
   /** Jobs scanned for logs so far (progress numerator). */
   logJobsDone: number;
   /** Jobs the capture script plans to scan (set with the jobs upload). */
@@ -109,6 +122,9 @@ export function createImportSession(
     status: "awaiting_jobs",
     data: { ...data, captured_at: data.captured_at || new Date().toISOString() },
     jobLogImages: {},
+    imageStore: new Map(),
+    imageStoreBytes: 0,
+    logImagesUploaded: 0,
     logJobsDone: 0,
     logJobsTotal: 0,
     logImagesCount: 0,
@@ -181,6 +197,71 @@ export function addLogBatchToSession(
   return session;
 }
 
+/** Max base64 chars stored across a session's image store (~192 MB).
+ * When exceeded, further uploads are rejected (refs still flow through). */
+const MAX_IMAGE_STORE_CHARS = 192 * 1024 * 1024;
+
+/** Max base64 chars for a single image (~4 MB binary → ~5.4 MB base64). */
+const MAX_SINGLE_IMAGE_CHARS = 6 * 1024 * 1024;
+
+/**
+ * Merge one batch of uploaded image bytes (data URLs from the capture
+ * script). Items: `{ fileid, data: "data:image/png;base64,...", name? }`.
+ * Duplicates (same fileid) are skipped. Returns the number stored.
+ */
+export function addImagesToSession(
+  session: ImportSession,
+  items: Array<{ fileid?: unknown; data?: unknown; name?: unknown }>
+): number {
+  let stored = 0;
+  for (const item of items || []) {
+    if (!item || typeof item !== "object") continue;
+    const fileid = typeof item.fileid === "string" ? item.fileid : "";
+    const data = typeof item.data === "string" ? item.data : "";
+    if (!fileid || !data) continue;
+    if (session.imageStore.has(fileid)) continue;
+    // Accept only well-formed image data URLs.
+    const m = data.match(/^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i);
+    if (!m) continue;
+    if (m[2].length > MAX_SINGLE_IMAGE_CHARS) continue;
+    if (session.imageStoreBytes + m[2].length > MAX_IMAGE_STORE_CHARS) {
+      // Store is full — stop accepting new bytes (refs remain usable).
+      break;
+    }
+    session.imageStore.set(fileid, {
+      mime: m[1].toLowerCase(),
+      b64: m[2],
+      name: typeof item.name === "string" ? item.name : undefined,
+    });
+    session.imageStoreBytes += m[2].length;
+    session.logImagesUploaded += 1;
+    stored += 1;
+  }
+  if (stored > 0) session.updatedAt = Date.now();
+  return stored;
+}
+
+/** Serve a stored image as a Response (or null when not found). */
+export function sessionImageResponse(
+  session: ImportSession,
+  fileid: string
+): Response | null {
+  const img = session.imageStore.get(fileid);
+  if (!img) return null;
+  const bytes = Buffer.from(img.b64, "base64");
+  return new Response(new Uint8Array(bytes), {
+    status: 200,
+    headers: {
+      "Content-Type": img.mime,
+      "Content-Length": String(bytes.byteLength),
+      // The session TTL is 15 min — cache in the browser for comfortably
+      // less than that so an expired+reused fileid never sticks around.
+      "Cache-Control": "public, max-age=300",
+      ...IMPORT_SESSION_CORS,
+    },
+  });
+}
+
 export function completeImportSession(session: ImportSession): ImportSession {
   session.status = "complete";
   session.note = "capture complete";
@@ -206,6 +287,7 @@ export function sessionProgress(session: ImportSession) {
     log_jobs_total: session.logJobsTotal,
     log_jobs_done: session.logJobsDone,
     log_images_count: session.logImagesCount,
+    log_images_uploaded: session.logImagesUploaded,
     log_jobs_with_images: session.logJobsWithImages,
     note: session.note,
     updated_at: session.updatedAt,

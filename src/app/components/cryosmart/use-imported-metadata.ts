@@ -21,7 +21,10 @@ interface PendingData {
     cryosmart_auth?: string;
     cryosmart_cookie?: string;
     // Log images force-loaded from the SPA's lazy jobLogs state
-    job_log_images?: Record<string, Array<{ fileid?: string; name?: string }>>;
+    job_log_images?: Record<string, Array<{ fileid?: string; name?: string; src?: string; data?: string }>>;
+    // Fileids whose BYTES were uploaded to the session's image store —
+    // these get a same-origin /image/<fileid> src that works over HTTPS.
+    uploaded_image_ids?: string[];
   };
 }
 
@@ -36,6 +39,8 @@ interface SessionStatus {
   log_jobs_total: number;
   log_jobs_done: number;
   log_images_count: number;
+  /** Log images whose BYTES were uploaded (renderable same-origin). */
+  log_images_uploaded: number;
   log_jobs_with_images: number;
   note: string;
 }
@@ -47,6 +52,8 @@ export interface ImportProgress {
   total: number;
   /** Log image refs received so far. */
   images: number;
+  /** Log image bytes uploaded so far (same-origin renderable). */
+  uploaded: number;
 }
 
 export interface ImportState {
@@ -73,16 +80,49 @@ function buildSessionFromPending(data: PendingData["data"]): CryoSmartSession | 
 
 /**
  * Merge captured log images (`job_log_images`, keyed by job uid) onto each
- * job object as `log_images: [{ fileid, name }]`. The lineage builder then
- * turns them into `/api/log_image/<fileid>` preview assets. Handles both
- * `{ jobs: [...] }` and bare-array raw payloads. No-op when the capture
- * didn't include log images.
+ * job object as `log_images: [{ fileid, name, src? }]`. Refs whose bytes
+ * were uploaded to the session image store get a `src` pointing at the
+ * same-origin session-image endpoint (works over HTTPS; the direct
+ * CryoSmart URL is mixed-content-blocked there). Refs carrying inline
+ * `data:` URLs (legacy console snippet) keep them as `src`. The lineage
+ * builder turns each ref into an ImageAsset. Handles both `{ jobs: [...] }`
+ * and bare-array raw payloads. No-op when the capture didn't include log
+ * images.
  */
 function mergeLogImagesIntoRaw(
   raw: unknown,
-  jobLogImages: PendingData["data"]["job_log_images"]
+  jobLogImages: PendingData["data"]["job_log_images"],
+  uploadedImageIds?: string[],
+  token?: string
 ): unknown {
   if (!jobLogImages) return raw;
+  const uploaded = new Set(uploadedImageIds || []);
+  const sessionBase =
+    token && uploaded.size > 0
+      ? `/api/cryosmart/import/session/${encodeURIComponent(token)}/image/`
+      : null;
+  const decorate = (ref: {
+    fileid?: string;
+    name?: string;
+    src?: string;
+    data?: string;
+  }) => {
+    if (ref && typeof ref === "object") {
+      const out = { ...ref };
+      if (!out.src && out.data) out.src = out.data;
+      if (
+        !out.src &&
+        sessionBase &&
+        typeof out.fileid === "string" &&
+        out.fileid &&
+        uploaded.has(out.fileid)
+      ) {
+        out.src = sessionBase + encodeURIComponent(out.fileid);
+      }
+      return out;
+    }
+    return ref;
+  };
   const attach = (j: unknown): unknown => {
     const job = j as { uid?: string } | null;
     if (
@@ -92,7 +132,7 @@ function mergeLogImagesIntoRaw(
       Array.isArray(jobLogImages[job.uid]) &&
       jobLogImages[job.uid].length > 0
     ) {
-      return { ...job, log_images: jobLogImages[job.uid] };
+      return { ...job, log_images: jobLogImages[job.uid].map(decorate) };
     }
     return j;
   };
@@ -112,7 +152,9 @@ function toLoaded(data: PendingData, token: string): LoadedMetadata {
   const session = buildSessionFromPending(data.data);
   const mergedRaw = mergeLogImagesIntoRaw(
     data.data.raw || { jobs: data.data.jobs },
-    data.data.job_log_images
+    data.data.job_log_images,
+    data.data.uploaded_image_ids,
+    token
   );
   return {
     raw: mergedRaw,
@@ -249,11 +291,15 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   onLoadedRef.current?.(toLoaded(data, token));
                   const nLogs = sessionStatus.log_images_count;
                   const withLogs = sessionStatus.log_jobs_with_images;
+                  const uploaded = sessionStatus.log_images_uploaded;
                   setState({
                     status: "loaded",
                     message:
                       nLogs > 0
-                        ? `Captured ${data.data.jobs.length} jobs + ${nLogs} log images from ${withLogs} jobs.`
+                        ? `Captured ${data.data.jobs.length} jobs + ${nLogs} log images from ${withLogs} jobs` +
+                            (uploaded > 0 && uploaded < nLogs
+                              ? ` (${uploaded} with previews).`
+                              : ".")
                         : sessionStatus.log_jobs_done > 0
                           ? `Captured ${data.data.jobs.length} jobs — no log images readable on this build (see the CryoSmart console diagnostics).`
                           : `Captured ${data.data.jobs.length} jobs (no log images available).`,
@@ -269,13 +315,17 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               // fall through — retry next tick
             }
           } else if (sessionStatus.has_data) {
+            const uploadedNote =
+              sessionStatus.log_images_uploaded > 0
+                ? ` · ${sessionStatus.log_images_uploaded} image files ready`
+                : "";
             setState({
               status: "polling",
               message:
                 `Loaded ${sessionStatus.total_jobs} jobs — fetching log images ` +
                 `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
                 (sessionStatus.log_images_count > 0
-                  ? ` (${sessionStatus.log_images_count} captured)`
+                  ? ` (${sessionStatus.log_images_count} captured${uploadedNote})`
                   : "") +
                 "…",
               token,
@@ -284,6 +334,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 done: sessionStatus.log_jobs_done,
                 total: Math.max(1, sessionStatus.log_jobs_total),
                 images: sessionStatus.log_images_count,
+                uploaded: sessionStatus.log_images_uploaded,
               },
             });
           } else {

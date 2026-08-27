@@ -642,6 +642,52 @@ export function buildConsoleSnippet(appOrigin: string): string {
     return result;
   }
 
+  // --- 4c. (v3.3) Embed log-image BYTES as data URLs ---
+  // The web app is usually opened over HTTPS; direct
+  // http://<cryosmart>/api/log_image/<fileid> <img> loads are then
+  // mixed-content blocked. THIS tab is same-origin with CryoSmart, so we
+  // fetch the bytes here and attach them to the refs (budget-capped so the
+  // single legacy one-shot POST stays a sane size). The staged panel script
+  // uploads bytes separately in batches and has no such cap.
+  var IMG_MAX_BYTES = 4 * 1024 * 1024;
+  function fetchImageData(fid) {
+    return fetch('/api/log_image/' + encodeURIComponent(fid), { credentials: 'include' })
+      .then(function(r) { return r.ok ? r.blob() : null; })
+      .then(function(b) {
+        if (!b || b.size === 0 || b.size > IMG_MAX_BYTES) return null;
+        if (b.type && b.type !== '' && b.type.indexOf('image/') !== 0) return null;
+        return new Promise(function(res) {
+          var fr = new FileReader();
+          fr.onload = function() { res(String(fr.result) || null); };
+          fr.onerror = function() { res(null); };
+          fr.readAsDataURL(b);
+        });
+      })
+      .catch(function() { return null; });
+  }
+  async function embedImageBytes(map, maxCount, maxBytes) {
+    var total = 0, count = 0;
+    var uids = Object.keys(map || {});
+    for (var u = 0; u < uids.length; u++) {
+      var refs = map[uids[u]] || [];
+      for (var i = 0; i < refs.length; i++) {
+        if (count >= maxCount || total >= maxBytes) {
+          console.log('[CryoSmart] Image-embed budget reached after ' + count + ' image(s).');
+          return;
+        }
+        var ref = refs[i];
+        if (!ref || !ref.fileid || ref.data) continue;
+        var data = await fetchImageData(ref.fileid);
+        if (!data) continue;
+        ref.data = data;
+        total += data.length;
+        count++;
+        if (count % 25 === 0) console.log('[CryoSmart] Embedded ' + count + ' image byte(s)...');
+      }
+    }
+    console.log('[CryoSmart] Embedded ' + count + ' log image(s) (' + Math.round(total / 1024) + ' KB).');
+  }
+
   // --- 5. Upload to web app (with session: origin + WS token + browser cookie) ---
   // CryoSmart authenticates /api/log_image with the session cookie, not the
   // WS token — so we capture document.cookie too (non-HttpOnly cookies only).
@@ -701,6 +747,11 @@ export function buildConsoleSnippet(appOrigin: string): string {
         logImages = await collectLogImages(store, jobs);
       } catch (e) {
         console.warn('[CryoSmart] Log image collection failed (non-fatal):', e && e.message);
+      }
+      try {
+        await embedImageBytes(logImages, 600, 60 * 1024 * 1024);
+      } catch (e) {
+        console.warn('[CryoSmart] Image byte embedding failed (non-fatal):', e && e.message);
       }
       await upload(jobs, logImages, store);
     } catch (err) {

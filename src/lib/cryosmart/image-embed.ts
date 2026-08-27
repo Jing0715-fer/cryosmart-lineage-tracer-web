@@ -33,6 +33,19 @@ export async function imageToBase64(
     // Data URLs are already self-contained — nothing to fetch.
     if (/^data:/i.test(pathOnly)) return pathOnly;
 
+    // Uploaded session images (`/api/cryosmart/import/session/<token>/image/...`)
+    // are served by THIS app — fetch them directly, NOT through the CryoSmart
+    // proxy (the generic `/api/...` branch below would forward them to the
+    // CryoSmart server, which doesn't have that path → 404).
+    if (/^\/api\/cryosmart\/import\/session\/[^/]+\/image\//i.test(pathOnly)) {
+      const resp = await fetch(pathOnly, { credentials: "same-origin" });
+      if (!resp.ok) return null;
+      const buf = await resp.arrayBuffer();
+      if (!buf || buf.byteLength === 0) return null;
+      const mime = resp.headers.get("content-type") || "image/png";
+      return `data:${mime};base64,${arrayBufferToBase64(buf)}`;
+    }
+
     // Same-origin assets that are NOT CryoSmart API paths (e.g. the bundled
     // /demo/*.png sample images) must not go through the CryoSmart proxy —
     // fetch them directly from this origin instead.
