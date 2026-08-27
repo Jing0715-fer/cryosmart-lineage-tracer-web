@@ -11,9 +11,17 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Play, Loader2, Settings2, FileBox, Boxes, FileCheck2, PresentationIcon } from "lucide-react";
 import type { LoadedMetadata } from "./data-source-card";
+import type { ImportProgress } from "./use-imported-metadata";
 import { buildSummary, normalizeLineageSummary, normalizeJobUid } from "@/lib/cryosmart/lineage";
 import { DEFAULT_BASE_URL } from "@/lib/cryosmart/constants";
 import type { JobMetadata, LineageSummary } from "@/lib/cryosmart/types";
+
+export interface ImportPanelInfo {
+  /** Live status message from the capture session (e.g. "Loaded 12 jobs — fetching log images 3/12…"). */
+  message: string;
+  /** Log-collection counters (null until the jobs array has been uploaded). */
+  progress: ImportProgress | null;
+}
 
 interface Props {
   loaded: LoadedMetadata | null;
@@ -23,6 +31,8 @@ interface Props {
   initialOptions?: TraceOptions;
   /** True while a staged capture session is still streaming data in. */
   awaitingImport?: boolean;
+  /** Live capture status rendered INSIDE this card, so the popup landing here never has to look elsewhere for progress. */
+  importInfo?: ImportPanelInfo;
 }
 
 export interface TraceOptions {
@@ -32,7 +42,7 @@ export interface TraceOptions {
   includeFinalResults: boolean;
 }
 
-export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, initialOptions, awaitingImport }: Props) {
+export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, initialOptions, awaitingImport, importInfo }: Props) {
   const [startJob, setStartJob] = useState("");
   const [startJobDirty, setStartJobDirty] = useState(false);
   const [projectId, setProjectId] = useState("");
@@ -177,6 +187,10 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
     }
   }, [loaded, effectiveStartJob, loadedJobs, effectiveProjectId, suggestStartJob, onSummary]);
 
+  const importPct = importInfo?.progress
+    ? Math.min(100, Math.round((importInfo.progress.done / Math.max(1, importInfo.progress.total)) * 100))
+    : null;
+
   const startJobOptions = useMemo(() => {
     // Sorted newest-last so the browser datalist shows the tail (final jobs)
     // first while the user types.
@@ -202,6 +216,53 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* Live capture progress — embedded here (not just in the top banner)
+            so a popup that auto-lands on this section sees the stream without
+            scrolling anywhere. */}
+        {awaitingImport && importInfo && (
+          <div
+            className="rounded-xl border border-teal-200/80 bg-gradient-to-br from-teal-50/90 via-white/40 to-emerald-50/60 px-4 py-3.5 dark:border-teal-800/60 dark:from-teal-950/40 dark:via-transparent dark:to-emerald-950/30"
+            role="status"
+            aria-live="polite"
+            aria-label="Capture progress"
+          >
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-teal-100 dark:bg-teal-900/60">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-teal-600 dark:text-teal-300" />
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-teal-900 dark:text-teal-100">
+                {importInfo.message}
+              </span>
+              {importInfo.progress && importPct !== null && (
+                <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-teal-700 ring-1 ring-inset ring-teal-200/70 dark:bg-slate-900/70 dark:text-teal-300 dark:ring-teal-800/60">
+                  {importPct}%
+                </span>
+              )}
+            </div>
+            {importInfo.progress && importPct !== null && (
+              <div className="mt-3">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-white/90 ring-1 ring-inset ring-teal-100 dark:bg-slate-800 dark:ring-teal-900/50">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-teal-500 to-emerald-500 transition-[width] duration-500 ease-out"
+                    style={{ width: `${importPct}%` }}
+                  />
+                </div>
+                <div className="mt-1.5 flex items-center justify-between font-mono text-[10.5px] text-teal-800/75 dark:text-teal-300/70">
+                  <span>{importInfo.progress.done}/{importInfo.progress.total} jobs scanned</span>
+                  <span>
+                    {importInfo.progress.images} {importInfo.progress.images === 1 ? "image" : "images"} captured
+                  </span>
+                </div>
+              </div>
+            )}
+            <p className="mt-2 text-[11px] leading-snug text-teal-700/80 dark:text-teal-300/60">
+              {loaded
+                ? "Lineage is ready to trace — log images keep streaming in as they arrive."
+                : "Jobs will appear here automatically — no need to scroll or refresh."}
+            </p>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div className="space-y-1.5">
             <Label htmlFor="project-id" className="text-[12px] text-slate-600">Project ID</Label>
@@ -259,11 +320,9 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
               )}
               {tracing ? "Tracing…" : !loaded && awaitingImport ? "Waiting for data…" : "Trace Lineage"}
             </Button>
-            {!loaded && (
+            {!loaded && !awaitingImport && (
               <p className="text-[10.5px] leading-snug text-slate-400">
-                {awaitingImport
-                  ? "Capture session connected — jobs will appear here automatically."
-                  : "Load data in step 1 (Smart Capture, Upload, or Demo) first."}
+                Load data in step 1 (Smart Capture, Upload, or Demo) first.
               </p>
             )}
           </div>

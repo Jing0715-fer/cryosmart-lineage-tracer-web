@@ -127,11 +127,6 @@ export default function Home() {
     return "mt-2 flex items-center gap-2.5 rounded-lg border border-teal-300 bg-teal-50/90 text-teal-900 px-3 py-2 text-[12.5px] shadow-sm backdrop-blur";
   }
 
-  const importProgressPct = importState.progress
-    ? Math.min(100, Math.round((importState.progress.done / Math.max(1, importState.progress.total)) * 100))
-    : null;
-  
-
   return (
     <div className="flex min-h-screen flex-col bg-slate-50/50">
       <SiteHeader />
@@ -194,6 +189,10 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Slim global status line — the FULL live progress (bar + counters)
+          lives inside the Configure & Trace card where the capture popup
+          lands, so this banner stays a one-line companion for when the
+          user scrolls elsewhere. */}
       {importState.status !== "idle" && (
         <div className="sticky top-14 z-30 mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
           <div
@@ -207,16 +206,8 @@ export default function Home() {
             {(importState.status === "error" || importState.status === "expired") && <AlertCircle className="h-3.5 w-3.5 shrink-0" />}
             <div className="min-w-0 flex-1">
               <span className="block truncate">{importState.message}</span>
-              {importState.progress && importProgressPct !== null && (
-                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/80">
-                  <div
-                    className="h-full rounded-full bg-teal-600 transition-[width] duration-500 ease-out"
-                    style={{ width: `${importProgressPct}%` }}
-                  />
-                </div>
-              )}
             </div>
-            {importState.token && <code className="rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] opacity-70">{importState.token}</code>}
+            {importState.token && <code className="hidden rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] opacity-70 sm:inline">{importState.token}</code>}
           </div>
         </div>
       )}
@@ -224,7 +215,19 @@ export default function Home() {
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
         <div className="space-y-6">
           <DataSourceCard loaded={loaded} onLoad={setLoaded} />
-          <ConfigureCard loaded={loaded} summary={summary} onSummary={setSummary} onOptionsChange={setTraceOptions} initialOptions={traceOptions || undefined} awaitingImport={importState.status === "polling"} />
+          <ConfigureCard
+            loaded={loaded}
+            summary={summary}
+            onSummary={setSummary}
+            onOptionsChange={setTraceOptions}
+            initialOptions={traceOptions || undefined}
+            awaitingImport={importState.status === "polling"}
+            importInfo={
+              importState.status === "polling"
+                ? { message: importState.message, progress: importState.progress }
+                : undefined
+            }
+          />
           <LineagePreviewCard summary={summary} session={loaded?.session ?? null} onLoadDemo={handleLoadDemo} />
           <DownloadCard summary={summary} options={traceOptions} loaded={loaded} />
           <HelpCard />
