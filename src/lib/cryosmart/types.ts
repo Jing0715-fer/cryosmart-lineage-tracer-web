@@ -93,6 +93,9 @@ export interface ImageLogEntry {
   created_at?: string;
   flags?: string[];
   imgfiles?: ImageLogFile[];
+  /** v3.11: some job types (hetero_refine / homo_abinit) deliver their
+   *  images under `files` instead of `imgfiles`. */
+  files?: ImageLogFile[];
   index?: number;
   job_uid?: string;
   project_uid?: string;

@@ -728,6 +728,66 @@ function logTextKey(text: unknown): string | null {
   return t || null;
 }
 
+/** Iteration / round number buried in a log title or file name —
+ *  "Iteration 000", "iter 12", "iter_003.png", "round 2", "cycle 5".
+ *  EXPLICIT markers only: trailing digits without a marker ("class_004.png")
+ *  index classes, not iterations, and must never be treated as rounds
+ *  (that would delete hetero/abinit class galleries). Mirrors the capture
+ *  script's iterNumOf so both sides filter identically. */
+function iterNumOf(text: unknown): number | null {
+  if (typeof text !== "string" || !text) return null;
+  const m = text.match(/(?:^|[^a-z0-9])(?:iter(?:ation)?|round|cycle)[\s_:.\-]*([0-9]{1,4})/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+/** Iteration evidence of a log-image ref / entry: max of the title and any
+ *  file-name hints (name / filename fields). */
+function refIterOf(ref: {
+  text?: unknown;
+  name?: unknown;
+  filename?: unknown;
+  imgfiles?: unknown;
+}): number | null {
+  let best: number | null = null;
+  const consider = (v: unknown) => {
+    const it = iterNumOf(v);
+    if (it !== null && (best === null || it > best)) best = it;
+  };
+  consider(ref?.text);
+  consider(ref?.name);
+  consider(ref?.filename);
+  if (Array.isArray(ref?.imgfiles)) {
+    for (const f of ref.imgfiles as Array<{ filename?: unknown; name?: unknown }>) {
+      consider(f?.filename);
+      consider(f?.name);
+    }
+  }
+  return best;
+}
+
+/** Keep only refs/entries from the HIGHEST iteration seen (refs with no
+ *  iteration evidence — class galleries, final results — always stay).
+ *  Long refinement jobs emit the same plots EVERY iteration and the
+ *  per-title round filter cannot see that (each "Iteration NNN" is a
+ *  distinct title; per-iteration file names differ), so without this a
+ *  nu_refine job shipped 112 images and multi-round jobs showed their
+ *  FIRST (000) iteration's plots. */
+function lastIterationOnly<T extends { text?: unknown; name?: unknown; filename?: unknown; imgfiles?: unknown }>(
+  items: T[]
+): T[] {
+  if (items.length < 2) return items;
+  let maxIter: number | null = null;
+  for (const item of items) {
+    const it = refIterOf(item);
+    if (it !== null && (maxIter === null || it > maxIter)) maxIter = it;
+  }
+  if (maxIter === null) return items;
+  return items.filter((item) => {
+    const it = refIterOf(item);
+    return it === null || it === maxIter;
+  });
+}
+
 /**
  * LAST-ROUND-ONLY filter for RAW jobLogs entries (`image_logs`).
  *
@@ -740,14 +800,18 @@ function logTextKey(text: unknown): string | null {
  * are kept as-is (nothing to key a round on).
  */
 function lastRoundImageLogEntries<T extends { text?: unknown }>(entries: T[]): T[] {
-  if (entries.length < 2) return entries;
+  // v3.11: LAST-ITERATION first — earlier-iteration entries must drop
+  // BEFORE the per-title filter (a newest-first stream would otherwise
+  // keep the FIRST iteration's entry for every title).
+  const pool = lastIterationOnly(entries as Array<T & { text?: unknown; imgfiles?: unknown }>);
+  if (pool.length < 2) return pool;
   const lastIdx = new Map<string, number>();
-  for (let i = 0; i < entries.length; i++) {
-    const key = logTextKey(entries[i]?.text);
+  for (let i = 0; i < pool.length; i++) {
+    const key = logTextKey(pool[i]?.text);
     if (key !== null) lastIdx.set(key, i);
   }
-  if (lastIdx.size === 0) return entries;
-  return entries.filter((entry, i) => {
+  if (lastIdx.size === 0) return pool;
+  return pool.filter((entry, i) => {
     const key = logTextKey(entry?.text);
     return key === null || lastIdx.get(key) === i;
   });
@@ -770,11 +834,15 @@ function lastRoundImageLogEntries<T extends { text?: unknown }>(entries: T[]): T
  * round (class galleries) have distinct names.
  */
 function lastRoundLogImageRefs<T extends { text?: unknown; name?: unknown }>(refs: T[]): T[] {
-  if (refs.length < 2) return refs;
+  // v3.11: LAST-ITERATION first — see lastIterationOnly. Applied before
+  // the run-level filter so a re-run multi-iteration job collapses to its
+  // final round's FINAL iteration.
+  const pool = lastIterationOnly(refs as Array<T & { text?: unknown; name?: unknown }>);
+  if (pool.length < 2) return pool;
   // Build consecutive runs: { key, start, end } (key === null → untitled).
   const runs: Array<{ key: string | null; start: number; end: number }> = [];
-  for (let i = 0; i < refs.length; i++) {
-    const key = logTextKey(refs[i]?.text);
+  for (let i = 0; i < pool.length; i++) {
+    const key = logTextKey(pool[i]?.text);
     const prev = runs[runs.length - 1];
     if (prev && prev.key !== null && prev.key === key) prev.end = i + 1;
     else runs.push({ key, start: i, end: i + 1 });
@@ -783,10 +851,10 @@ function lastRoundLogImageRefs<T extends { text?: unknown; name?: unknown }>(ref
   runs.forEach((run, idx) => {
     if (run.key !== null) lastRunByKey.set(run.key, idx);
   });
-  if (lastRunByKey.size === 0) return refs;
-  const keep = new Array<boolean>(refs.length).fill(false);
+  if (lastRunByKey.size === 0) return pool;
+  const keep = new Array<boolean>(pool.length).fill(false);
   const refName = (i: number): string | null => {
-    const nm = (refs[i] as { name?: unknown })?.name;
+    const nm = (pool[i] as { name?: unknown })?.name;
     return typeof nm === "string" && nm ? nm : null;
   };
   runs.forEach((run, idx) => {
@@ -802,23 +870,36 @@ function lastRoundLogImageRefs<T extends { text?: unknown; name?: unknown }>(ref
       }
     }
   });
-  return refs.filter((_, i) => keep[i]);
+  return pool.filter((_, i) => keep[i]);
 }
 
-/** True for result-PDF files inside log imgfiles / log-image refs.
- *  CryoSmart log entries carry result PDFs alongside the PNG previews;
- *  browsers cannot render a PDF inside an <img>, so without this filter
- *  every PDF ref became a "duplicate title whose twin never loads" box
- *  in the report (v3.10 — the capture script now filters them too; this
- *  is the defense for older captures). */
-function isPdfLogFile(
-  file: { filetype?: unknown; filename?: unknown; name?: unknown } | null | undefined
+/** True for log files that are NOT renderable images. CryoSmart log
+ *  entries carry the job's full result manifest next to the PNG previews
+ *  (PDF / XML / TXT / CSV / even maps) — none of those render in an <img>,
+ *  so each one became a "duplicate title whose twin never loads" box in
+ *  the report (v3.10 only knew PDFs; XML and TXT kept leaking through).
+ *  KEPT only when the evidence says image (image/* filetype or a known
+ *  image extension); no evidence at all → keep (classic numeric-fileid
+ *  refs have always rendered fine). */
+const IMG_EXT_RE = /^(png|jpe?g|gif|svg|bmp|webp|tiff?|ico|avif)$/i;
+function isNonImageLogFile(
+  file: { filetype?: unknown; filename?: unknown; name?: unknown } | string | null | undefined
 ): boolean {
-  if (!file || typeof file !== "object") return false;
+  if (!file) return false;
+  if (typeof file === "string") {
+    const m = file.match(/\.([a-z0-9]{1,6})$/i);
+    return m ? !IMG_EXT_RE.test(m[1]) : false;
+  }
   const ft = file.filetype;
-  if (typeof ft === "string" && ft && /pdf/i.test(ft)) return true;
+  if (typeof ft === "string" && ft) {
+    if (/^image\//i.test(ft)) return false;
+    if (/xml|pdf|json|csv|text|plain|txt|html|markdown|javascript|yaml|zip|gzip|tar/i.test(ft)) return true;
+  }
   for (const s of [file.filename, file.name]) {
-    if (typeof s === "string" && s.trim() && /\.pdf$/i.test(s.trim())) return true;
+    if (typeof s === "string" && s.trim()) {
+      const m = s.trim().match(/\.([a-z0-9]{1,6})$/i);
+      if (m) return !IMG_EXT_RE.test(m[1]);
+    }
   }
   return false;
 }
@@ -901,8 +982,9 @@ export function imageAssets(
   };
   for (const item of lastRoundLogImageRefs(job.log_images || [])) {
     const fileid = item?.fileid || "";
-    // v3.10: skip result-PDF refs — they cannot render in <img>.
-    if (isPdfLogFile(item)) continue;
+    // v3.11: strict image whitelist — skip PDF/XML/TXT/… refs (defense
+    // for older captures; v3.11+ scripts never upload them).
+    if (isNonImageLogFile(item)) continue;
     // Prefer an explicit src: a same-origin session-image URL (staged flow,
     // bytes uploaded by the capture script) or an inline data: URL (legacy
     // console snippet). Both work from an HTTPS page, unlike the direct
@@ -929,11 +1011,14 @@ export function imageAssets(
   }
   const imageLogs = lastRoundImageLogEntries(job.image_logs || []);
   for (const log of imageLogs) {
-    if (log.type !== "image" || !log.imgfiles || log.imgfiles.length === 0) continue;
-    for (const imgFile of log.imgfiles) {
+    // v3.11: accept `files`-shaped entries too (hetero_refine /
+    // homo_abinit deliver their images there on some builds).
+    const logFiles = (log.imgfiles && log.imgfiles.length ? log.imgfiles : log.files) || [];
+    if (logFiles.length === 0) continue;
+    for (const imgFile of logFiles) {
       if (!imgFile.fileid) continue;
-      // v3.10: skip result-PDF files (same reason as the refs above).
-      if (isPdfLogFile(imgFile)) continue;
+      // v3.11: strict image whitelist (same rule as the refs above).
+      if (isNonImageLogFile(imgFile)) continue;
       const url = logImageUrl(baseUrl, imgFile.fileid);
       if (!url || logSeen.has(imgFile.fileid)) continue;
       logSeen.add(imgFile.fileid);

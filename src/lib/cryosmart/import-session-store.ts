@@ -72,8 +72,12 @@ export interface ImportSession {
   imageStoreBytes: number;
   /** Log-image refs whose bytes were uploaded successfully. */
   logImagesUploaded: number;
-  /** Jobs scanned for logs so far (progress numerator). */
+  /** Jobs scanned for logs so far (progress numerator — DISTINCT jobs:
+   *  v3.11 rescue batches re-send a uid that already streamed an empty
+   *  batch, and that must not push the counter past the total). */
   logJobsDone: number;
+  /** Distinct job uids already counted in logJobsDone. */
+  logJobsScanned: Set<string>;
   /** Jobs the capture script plans to scan (set with the jobs upload). */
   logJobsTotal: number;
   /** Total log-image refs received. */
@@ -149,6 +153,7 @@ export function createImportSession(
     imageStoreBytes: 0,
     logImagesUploaded: 0,
     logJobsDone: 0,
+    logJobsScanned: new Set(),
     logJobsTotal: 0,
     logImagesCount: 0,
     logJobsWithImages: 0,
@@ -204,8 +209,15 @@ export function addLogBatchToSession(
   for (const item of items) {
     if (!item || typeof item.uid !== "string") continue;
     const images = Array.isArray(item.images) ? item.images : [];
-    session.logJobsDone += 1;
+    // v3.11: count DISTINCT jobs — a slow-log rescue batch re-sends a uid
+    // that already streamed an (empty) batch; the progress numerator must
+    // stay <= the total or the UI shows "8/7 jobs scanned".
+    if (!session.logJobsScanned.has(item.uid)) {
+      session.logJobsScanned.add(item.uid);
+      session.logJobsDone += 1;
+    }
     if (images.length > 0) {
+      const hadRefs = (session.jobLogImages[item.uid] || []).length > 0;
       const merged = session.jobLogImages[item.uid] || [];
       for (const img of images) {
         if (!img || typeof img.fileid !== "string") continue;
@@ -217,7 +229,9 @@ export function addLogBatchToSession(
       }
       if (merged.length > 0) {
         session.jobLogImages[item.uid] = merged;
-        session.logJobsWithImages += 1;
+        // v3.11: distinct-jobs-with-images must not double-count a rescue
+        // batch that upgrades an empty first batch to refs.
+        if (!hadRefs) session.logJobsWithImages += 1;
       }
     }
   }

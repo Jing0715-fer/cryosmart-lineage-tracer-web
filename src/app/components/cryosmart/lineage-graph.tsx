@@ -2214,7 +2214,11 @@ function NodeDetailModal({
   useEffect(() => { setFailedSrcs({}); setActiveIdx(0); }, [node.uid]);
 
   /* Pre-fetch all gallery images as base64 when a session is available,
-   * so they render self-contained (no remote/referrer/CORS issues). */
+   * so they render self-contained (no remote/referrer/CORS issues).
+   * Capped at MAX_EMBED_PREFETCH — a 112-image job would otherwise fetch
+   * every byte before the user sees anything (v3.11: the last-iteration
+   * filter already shrinks most galleries far below the cap). */
+  const MAX_EMBED_PREFETCH = 48;
   useEffect(() => {
     if (!session || allImages.length === 0) {
       setEmbeddedGallery({});
@@ -2226,12 +2230,13 @@ function NodeDetailModal({
     (async () => {
       const { imageToBase64 } = await import("@/lib/cryosmart/image-embed");
       const out: Record<string, string> = {};
+      const targets = allImages.slice(0, MAX_EMBED_PREFETCH);
       const CONCURRENCY = 4;
       let cursor = 0;
       async function worker() {
-        while (cursor < allImages.length) {
+        while (cursor < targets.length) {
           const idx = cursor++;
-          const img = allImages[idx];
+          const img = targets[idx];
           try {
             const b64 = await imageToBase64(sess, img.src);
             if (!cancelled && b64) out[img.src] = b64;
@@ -2302,9 +2307,14 @@ function NodeDetailModal({
         </DialogHeader>
 
         <ScrollArea className="max-h-[calc(88vh-64px)]">
-          <div className="grid grid-cols-1 gap-4 px-5 py-4 lg:grid-cols-[260px_1fr]">
+          {/* min-w-0 on the grid columns: without it the 1fr track's
+              min-content width is the content's intrinsic width — a long
+              thumbnail strip / table stretched the track past the dialog
+              and the dialog's overflow-hidden CLIPPED the right side
+              (the "宽度撑的很大，右侧显示不全" bug). */}
+          <div className="grid min-w-0 grid-cols-1 gap-4 px-5 py-4 lg:grid-cols-[260px_minmax(0,1fr)]">
             {/* LEFT: facts list + status + position */}
-            <div className="space-y-3">
+            <div className="min-w-0 space-y-3">
               <FactGroup title="Identity">
                 <Fact label="UID" value={node.uid} mono />
                 <Fact label="Job #" value={node.uid_num != null ? String(node.uid_num) : "—"} mono />
@@ -2343,7 +2353,7 @@ function NodeDetailModal({
             </div>
 
             {/* RIGHT: image gallery + output groups + maps + classes + edges */}
-            <div className="space-y-4">
+            <div className="min-w-0 space-y-4">
               {/* Image gallery — LOG images only. UI-tile images render on
                   the graph card, output-group images in the Maps section;
                   each image type has exactly one home (user request). */}
@@ -2419,9 +2429,12 @@ function NodeDetailModal({
                         </div>
                       )}
                     </div>
-                    {/* Thumbnail strip */}
+                    {/* Thumbnail grid — wraps (bounded height, vertical
+                        scroll) so a large gallery never stretches the modal
+                        sideways; the old single-row strip made a 112-image
+                        job's min-content width exceed the dialog. */}
                     {allImages.length > 1 && (
-                      <div className="flex gap-1.5 overflow-x-auto pb-1">
+                      <div className="flex max-h-[168px] flex-wrap gap-1.5 overflow-y-auto pb-1">
                         {allImages.map((img, idx) => {
                           const src = embeddedGallery[img.src] || withSession(img.original_url || img.url, session);
                           const fallback = !embeddedGallery[img.src] ? buildProxyFallback(img.original_url || img.url, session) : null;
@@ -2473,7 +2486,7 @@ function NodeDetailModal({
                       </div>
                     )}
                     {activeImage && (
-                      <div className="text-[10px]" style={{ color: mutedColor }}>
+                      <div className="break-all text-[10px]" style={{ color: mutedColor }}>
                         <span className="font-mono">{activeImage.kind}</span>
                         {" · "}
                         <span>{activeImage.name}</span>
@@ -2590,7 +2603,7 @@ function OutputGroupsTable({
         <Layers className="h-3.5 w-3.5" /> Output groups
         <span className="font-mono text-[10px]" style={{ color: mutedColor }}>({entries.length})</span>
       </h4>
-      <div className="overflow-hidden rounded-md border" style={{ borderColor }}>
+      <div className="overflow-x-auto rounded-md border" style={{ borderColor }}>
         <table className="w-full text-[10.5px]">
           <thead style={{ background: "rgba(148,163,184,0.12)" }}>
             <tr>
@@ -2604,7 +2617,7 @@ function OutputGroupsTable({
           <tbody>
             {entries.map(([name, g]) => (
               <tr key={name} className="border-t" style={{ borderColor }}>
-                <td className="px-2 py-1 font-mono" style={{ color: textColor }}>{name}</td>
+                <td className="break-all px-2 py-1 font-mono" style={{ color: textColor }}>{name}</td>
                 <td className="px-2 py-1" style={{ color: mutedColor }}>{g.type || "—"}</td>
                 <td className="px-2 py-1 text-right font-mono" style={{ color: textColor }}>{g.count ?? "—"}</td>
                 <td className="px-2 py-1 text-right font-mono" style={{ color: textColor }}>{g.class_index ?? "—"}</td>
@@ -2651,7 +2664,7 @@ function ClassesTable({
         <Layers className="h-3.5 w-3.5" /> Classes
         <span className="font-mono text-[10px]" style={{ color: mutedColor }}>({classes.length})</span>
       </h4>
-      <div className="overflow-hidden rounded-md border" style={{ borderColor }}>
+      <div className="overflow-x-auto rounded-md border" style={{ borderColor }}>
         <table className="w-full text-[10.5px]">
           <thead style={{ background: "rgba(148,163,184,0.12)" }}>
             <tr>
@@ -2816,7 +2829,7 @@ function EdgeList({
         {title}
         <span className="font-mono text-[10px]" style={{ color: mutedColor }}>({edges.length})</span>
       </h4>
-      <div className="overflow-hidden rounded-md border" style={{ borderColor }}>
+      <div className="overflow-x-auto rounded-md border" style={{ borderColor }}>
         <table className="w-full text-[10.5px]">
           <thead style={{ background: "rgba(148,163,184,0.12)" }}>
             <tr>
@@ -2832,7 +2845,7 @@ function EdgeList({
               const otherNode = nodeMap.get(otherUid);
               return (
                 <tr key={idx} className="border-t" style={{ borderColor }}>
-                  <td className="px-2 py-1 font-mono" style={{ color: textColor }}>
+                  <td className="break-all px-2 py-1 font-mono" style={{ color: textColor }}>
                     {otherUid}
                     {otherNode && (
                       <span className="ml-1 text-[9.5px]" style={{ color: mutedColor }}>

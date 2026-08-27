@@ -45,6 +45,20 @@
  * call), the scan cap is 2000, and result-PDF files inside imgfiles are
  * skipped (browsers cannot render PDFs in <img> — they were the
  * "duplicate title that never loads" in the report).
+ *
+ * v3.11: LAST-ITERATION + strict image whitelist. (1) Long refinement jobs
+ * emit the same plots EVERY iteration ("Iteration 000" … "Iteration 027"),
+ * and the per-title round filter cannot see that (every "Iteration NNN" is
+ * a distinct title; per-iteration file names differ too) — nu_refine
+ * captured 112 images and multi-round jobs showed their FIRST (000)
+ * iteration's plots. Iteration numbers are now parsed from titles AND file
+ * names, and only the HIGHEST iteration's refs are kept. (2) Result files
+ * of ANY non-image kind (XML / TXT / CSV / JSON / maps …) are filtered by
+ * a strict image whitelist, not just PDFs. (3) hetero_refine / homo_abinit
+ * rescue: entries whose images live in `files` instead of `imgfiles` are
+ * collected too, log maps keyed by the FULL uid ("BJ.P259.J45") are
+ * readable, and huge-payload jobs whose logs land AFTER their scan window
+ * get a bounded slow-delivery re-poll before the session completes.
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -98,38 +112,39 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.10 — LAST-ROUND, PER-JOB log images. Job
-// metadata
-// uploads for the WHOLE project immediately (fast), but log images are
-// fetched ONLY for the jobs the traced lineage needs: the script waits for
-// the web app's Trace Lineage action to publish the lineage job list to
-// the session, then scans just those jobs (a 46-job project with 900+
-// images typically needs only ~10 jobs). Multi-round jobs keep ONLY their
-// latest round's log entries — re-runs re-emit the same titles and the
-// older rounds' files are gone from the server, so fetching them only
-// produced broken report images and wasted time. Run the script from the
-// END JOB's page and the app auto-traces — zero manual setup. Console
-// escape hatches while it waits: __csCaptureAll() (fetch every job's
-// logs) and __csCaptureFinish() (stop now). Still uploads log-image BYTES
-// same-origin (6 workers, 240s drain — v3.4) and keeps the deep-scan log
-// calibration that finds logs in ANY store state shape (v3.2). v3.7:
-// 20-minute wait window + 3-minute re-trace grace (late traces no longer
-// miss the fetch), honest image-byte counters, and a loud zero-image
-// diagnostic so an empty capture is obvious in the console. v3.8: the web
-// app refreshes the graph + report LIVE as images stream in (no more
-// "captured 320 but nothing shows" while the script waits to complete),
-// and /complete is retried so one lost POST cannot strand the session.
-// v3.9: logs already cached in ANY store state shape (a previous script
-// run, an opened job view) are attributed to their jobs by the deep scan
-// — re-running in the same tab no longer yields "0 images captured".
-// v3.10: logs arriving through a SHARED event stream are attributed by
-// EVIDENCE (state-path uid, single-uid content, entry job_uid slicing, or
-// appearance/growth during THIS loader call) — never by "first array the
-// diff saw" — so each job owns ONLY its own images (previously every job
-// showed the same ~16 refs and the last-scanned refine/abinit jobs showed
-// none once the stream passed the old 300-entry cap, now 2000). Result
-// PDFs inside imgfiles are skipped entirely — they cannot render in <img>
-// and were the broken "duplicate" titles in the report.
+// CryoSmart Smart Capture v3.11 — LAST-ITERATION, LAST-ROUND, PER-JOB log
+// images. Job metadata uploads for the WHOLE project immediately (fast),
+// but log images are fetched ONLY for the jobs the traced lineage needs:
+// the script waits for the web app's Trace Lineage action to publish the
+// lineage job list to the session, then scans just those jobs (a 46-job
+// project with 900+ images typically needs only ~10 jobs). Multi-round
+// jobs keep ONLY their latest round's log entries (re-runs re-emit the
+// same titles and the older rounds' files are gone from the server) AND
+// only their FINAL iteration's images (titles/file names carry iteration
+// numbers — "Iteration 000" is the FIRST, previously what you got; only
+// non-image result files that <img> can never render are dropped: PDF /
+// XML / TXT / CSV / maps). Run the script from the END JOB's page and the
+// app auto-traces — zero manual setup. Console escape hatches while it
+// waits: __csCaptureAll() (fetch every job's logs) and __csCaptureFinish()
+// (stop now). Still uploads log-image BYTES same-origin (6 workers, 240s
+// drain — v3.4) and keeps the deep-scan log calibration that finds logs
+// in ANY store state shape (v3.2). v3.7: 20-minute wait window + 3-minute
+// re-trace grace, honest image-byte counters, loud zero-image diagnostics.
+// v3.8: the web app refreshes the graph + report LIVE as images stream
+// in, and /complete is retried so one lost POST cannot strand the session.
+// v3.9: logs already cached in ANY store state shape are attributed to
+// their jobs by the deep scan — re-running in the same tab no longer
+// yields "0 images captured". v3.10: logs arriving through a SHARED
+// event stream are attributed by EVIDENCE (state-path uid, single-uid
+// content, entry job_uid slicing, or appearance/growth during THIS loader
+// call) — never by "first array the diff saw" — so each job owns ONLY its
+// own images. v3.11: iteration-number parsing keeps only the final
+// iteration of long refine runs (nu_refine 112 images -> its last
+// iteration's set), a strict image whitelist drops every non-image result
+// file, and hetero_refine / homo_abinit are rescued three ways: files[]
+// entries are collected (not just imgfiles), full-uid log map keys
+// ("BJ.P259.J45") are readable, and slow huge-payload deliveries get a
+// bounded re-poll before the session completes.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -364,16 +379,62 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // (hetero_refine / homo_abinit / nu_refine — end of the pipeline, end
   // of the scan order) got NOTHING. Attribution now demands EVIDENCE.
 
-  // True for result-PDF files (log entries carry them next to the PNG
-  // previews — browsers cannot render a PDF inside <img>, so they were
-  // the "duplicate title whose twin never loads" in the report).
-  function isPdfFile(file) {
+  // ── v3.11: file-kind whitelist + iteration parsing ────────────────
+
+  // Extension of a file name (lowercased, no dot) or "" when absent.
+  // NOTE: every regex backslash inside this template literal must be
+  // DOUBLE-escaped (\\. in the source → \. in the script) — a single
+  // \. becomes a bare dot and /^image\//i degenerates into a division.
+  function fileExtOf(s) {
+    var m = String(s || '').match(/\\.([a-z0-9]{1,6})$/i);
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  // The image extensions a browser can actually render inside <img>.
+  var IMG_EXT_RE = /^(png|jpe?g|gif|svg|bmp|webp|tiff?|ico|avif)$/;
+
+  // True for result files that are NOT renderable images. CryoSmart log
+  // entries carry the job's full result manifest next to the PNG
+  // previews: PDFs, XML/TXT/CSV data dumps, sometimes even maps. None of
+  // those render in an <img>, so each one became a broken "duplicate
+  // title" box in the report (v3.10 only knew about PDFs — XML and TXT
+  // kept leaking through). A file is KEPT only when its evidence says
+  // image: filetype image/*, or a known image extension. NO evidence at
+  // all (numeric fileid, title-like name) → keep — that is the classic
+  // ref shape that has always worked.
+  function isNonImageFile(file) {
     if (!file) return false;
-    if (typeof file === 'string') return /\.pdf$/i.test(file);
-    var ft = file.filetype || file.file_type || file.type;
-    if (typeof ft === 'string' && ft && /pdf/i.test(ft)) return true;
-    var fn = file.filename || file.name || file.title;
-    return typeof fn === 'string' && /\.pdf$/i.test(fn);
+    var isObj = typeof file === 'object';
+    var ft = isObj ? (file.filetype || file.file_type || file.type) : null;
+    if (typeof ft === 'string' && ft) {
+      if (/^image\\//i.test(ft)) return false;                      // image/png …
+      if (/xml|pdf|json|csv|text|plain|txt|html|markdown|javascript|yaml|zip|gzip|tar/i.test(ft)) return true;
+      // Unknown mime (incl. application/octet-stream) — let the name decide.
+    }
+    var fn = isObj ? (file.filename || file.name || '') : String(file);
+    var ext = fileExtOf(fn);
+    if (!ext) return false;                                        // no evidence → keep
+    return !IMG_EXT_RE.test(ext);
+  }
+
+  // Iteration / round number buried in a title or file name:
+  // "Iteration 000", "iter 12", "iter_003.png", "round 2", "cycle 5".
+  // EXPLICIT markers only — trailing digits without a marker
+  // ("class_004.png") index classes, not iterations, and must never be
+  // treated as rounds (that would delete hetero/abinit class galleries).
+  function iterNumOf(s) {
+    if (typeof s !== 'string' || !s) return null;
+    var m = s.match(/(?:^|[^a-z0-9])(?:iter(?:ation)?|round|cycle)[\\s_:.\\-]*([0-9]{1,4})/i);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  // Iteration evidence of one imgfiles entry: the entry title first,
+  // then the file's own names.
+  function fileIterOf(file) {
+    if (!file) return null;
+    var s = (typeof file === 'object' && (file.filename || file.name)) ||
+            (typeof file === 'string' ? file : '');
+    return iterNumOf(s);
   }
 
   // The job a log entry belongs to (job_uid / jobUid / job_id / jobId).
@@ -416,7 +477,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   function roundKeyOf(log) {
     if (!log) return null;
     if (typeof log.text === 'string' && log.text.trim()) return log.text.trim();
-    var files = log.imgfiles || (log.type === 'image' ? log.files : null);
+    var files = log.imgfiles || log.files;   // v3.11: files[] entries too
     if (files && files.length) {
       var names = [];
       for (var f = 0; f < files.length; f++) {
@@ -425,7 +486,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
         names.push(String(n || ''));
       }
       var joined = names.join('|');
-      if (joined.replace(/\|/g, '')) return '\\u0001files:' + joined;
+      if (joined.replace(/\\|/g, '')) return '\\u0001files:' + joined;
     }
     return null;
   }
@@ -437,43 +498,83 @@ export function SmartCapturePanel({ onCapture }: Props) {
     // from several jobs — keep only this job's entries (uid-less entries
     // stay: the caller already attributed the array by evidence).
     if (uid) logs = filterByUid(logs, uid, true);
-    // v3.6 LAST-ROUND-ONLY: multi-round jobs (re-run in CryoSmart) re-emit
-    // the SAME log entries — same text title ("Selected 21 classes", …) —
-    // once per round, and only the FINAL round's image files still exist on
-    // the server: older rounds' fileids 404. Keep only the LAST entry per
-    // key so neither dead refs nor their bytes are ever fetched/uploaded
-    // (this is also what keeps multi-round log capture FAST).
-    var lastIdxByKey = Object.create(null);
-    var eligible = [];
+
+    // PASS 1 — candidates: entries with at least one renderable IMAGE file
+    // (v3.11 whitelist). Some job types (hetero_refine / homo_abinit on
+    // this build) deliver their images under "files" instead of
+    // "imgfiles", so both are read. Non-image files never produce a ref —
+    // and never cost a byte fetch.
+    var cand = [];
+    var maxIter = null;
     for (var i = 0; i < logs.length; i++) {
       var lg = logs[i];
       if (!lg) continue;
-      var files = lg.imgfiles || (lg.type === 'image' ? lg.files : null);
+      var files = lg.imgfiles || lg.files || null;
       if (!files || !files.length) continue;
-      eligible.push(i);
-      var key = roundKeyOf(lg);
-      if (key !== null) lastIdxByKey[key] = i;
-    }
-    for (var p = 0; p < eligible.length; p++) {
-      var li = eligible[p];
-      var log = logs[li];
-      var key2 = roundKeyOf(log);
-      if (key2 !== null && lastIdxByKey[key2] !== li) continue;   // older round — skip
-      var files2 = log.imgfiles || (log.type === 'image' ? log.files : null);
-      for (var f2 = 0; f2 < files2.length; f2++) {
-        var file2 = files2[f2];
-        var fid = typeof file2 === 'string' ? file2 : (file2 && (file2.fileid || file2.file_id || file2.id));
+      var keep = [];
+      for (var f = 0; f < files.length; f++) {
+        var file = files[f];
+        var fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
         if (!fid) continue;
-        // v3.10 PDF guard — skip result PDFs: no ref, no byte fetch, no
-        // broken report box.
-        if (isPdfFile(file2)) continue;
-        var name = (file2 && (file2.name || file2.filename)) || log.name || log.title || ('log_image_' + out.length);
-        out.push({
-          fileid: fid, name: name, text: log.text || null, flags: log.flags || null,
-          filetype: (file2 && (file2.filetype || file2.type)) || null,
-          filename: (file2 && (file2.filename || file2.name)) || null
-        });
+        if (isNonImageFile(file)) continue;   // PDF / XML / TXT / CSV / …
+        keep.push(file);
       }
+      if (keep.length) {
+        cand.push({ log: lg, files: keep });
+        var ei = iterNumOf(lg.text);
+        for (var f2 = 0; f2 < keep.length; f2++) {
+          var fi = ei !== null ? ei : fileIterOf(keep[f2]);
+          if (fi !== null && (maxIter === null || fi > maxIter)) maxIter = fi;
+        }
+      }
+    }
+
+    // PASS 2 — LAST-ITERATION filter (v3.11). Long refinement jobs emit
+    // the same plots EVERY iteration ("Iteration 000" … "Iteration 027"):
+    // each "Iteration NNN" is a distinct title and per-iteration file
+    // names differ, so the per-title round filter in PASS 3 could not see
+    // them — nu_refine shipped 112 images and the FIRST (000) iteration
+    // was what survived on newest-first streams. Keep only refs from the
+    // HIGHEST iteration seen in this job's logs; refs with no iteration
+    // evidence (class galleries, final results) always stay.
+    var refList = [];
+    for (var p = 0; p < cand.length; p++) {
+      var c = cand[p];
+      var ei2 = iterNumOf(c.log.text);
+      for (var f3 = 0; f3 < c.files.length; f3++) {
+        var file2 = c.files[f3];
+        var it = ei2 !== null ? ei2 : fileIterOf(file2);
+        if (maxIter !== null && it !== null && it < maxIter) continue;
+        refList.push({ ci: p, log: c.log, file: file2 });
+      }
+    }
+
+    // PASS 3 — LAST-ROUND-per-title filter (v3.6): multi-round jobs
+    // (re-run in CryoSmart) re-emit the SAME titles once per round and
+    // only the FINAL round's files still exist on the server — older
+    // rounds' fileids 404, so neither dead refs nor their bytes are ever
+    // fetched/uploaded. Runs AFTER the iteration filter so a re-run
+    // multi-iteration job collapses to its final round's final iteration.
+    // Keyed per ENTRY (ci), never per ref: an entry's whole file set
+    // shares one round, and a per-ref key would keep only the entry's
+    // LAST file.
+    var lastCandByKey = Object.create(null);
+    for (var r = 0; r < refList.length; r++) {
+      var key = roundKeyOf(refList[r].log);
+      if (key !== null) lastCandByKey[key] = refList[r].ci;
+    }
+    for (var q = 0; q < refList.length; q++) {
+      var key2 = roundKeyOf(refList[q].log);
+      if (key2 !== null && lastCandByKey[key2] !== refList[q].ci) continue;   // older round — skip
+      var log = refList[q].log;
+      var file3 = refList[q].file;
+      var fid2 = typeof file3 === 'string' ? file3 : (file3 && (file3.fileid || file3.file_id || file3.id));
+      var name = (file3 && (file3.name || file3.filename)) || log.name || log.title || ('log_image_' + out.length);
+      out.push({
+        fileid: fid2, name: name, text: log.text || null, flags: log.flags || null,
+        filetype: (file3 && (file3.filetype || file3.type)) || null,
+        filename: (file3 && (file3.filename || file3.name)) || null
+      });
     }
     return out;
   }
@@ -481,16 +582,42 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // v3.6: LAST-ROUND-ONLY filter for RAW image-log entries (entry-level).
   // Same rationale as extractLogImages above, applied to the raw entries
   // embedded on jobs (STEP 2) — keep only the last entry per title.
+  // v3.11: earlier-ITERATION entries are dropped first (same rule as
+  // extractLogImages PASS 2 — the title or the imgfiles file names carry
+  // the iteration number).
+  function entryIterOf(entry) {
+    if (!entry) return null;
+    var it = iterNumOf(typeof entry.text === 'string' ? entry.text : '');
+    if (it === null && Array.isArray(entry.imgfiles)) {
+      for (var ef = 0; ef < entry.imgfiles.length; ef++) {
+        var fit = fileIterOf(entry.imgfiles[ef]);
+        if (fit !== null && (it === null || fit > it)) it = fit;
+      }
+    }
+    return it;
+  }
   function lastRoundEntries(arr) {
     if (!Array.isArray(arr) || arr.length < 2) return arr;
-    var lastByText = Object.create(null);
+    var maxIt = null;
     for (var i = 0; i < arr.length; i++) {
-      var t = arr[i] && typeof arr[i].text === 'string' && arr[i].text.trim();
-      if (t) lastByText[t] = i;
+      var it = entryIterOf(arr[i]);
+      if (it !== null && (maxIt === null || it > maxIt)) maxIt = it;
     }
-    return arr.filter(function(entry, i) {
+    var pool = arr;
+    if (maxIt !== null) {
+      pool = arr.filter(function(entry) {
+        var et = entryIterOf(entry);
+        return et === null || et === maxIt;
+      });
+    }
+    var lastByText = Object.create(null);
+    for (var j = 0; j < pool.length; j++) {
+      var t = pool[j] && typeof pool[j].text === 'string' && pool[j].text.trim();
+      if (t) lastByText[t] = j;
+    }
+    return pool.filter(function(entry, k) {
       var t = entry && typeof entry.text === 'string' && entry.text.trim();
-      return !t || lastByText[t] === i;
+      return !t || lastByText[t] === k;
     });
   }
 
@@ -506,13 +633,24 @@ export function SmartCapturePanel({ onCapture }: Props) {
 
   // Read a job's cached logs from any store's log state
   // (jobLogs / logs / job_logs / logsByJob keyed by job uid).
+  // v3.11: some builds key these maps by the FULL uid ("BJ.P259.J45")
+  // while the scan works with "J45" — an exact-key lookup missed them
+  // every time, so those jobs (hetero_refine / homo_abinit on this build)
+  // looked log-less. A suffix match rescues them.
   function readLogState(uid) {
     var stateKeys = ['jobLogs', 'logs', 'job_logs', 'logsByJob'];
     for (var i = 0; i < stores.length; i++) {
       for (var k = 0; k < stateKeys.length; k++) {
         try {
           var m = stores[i][stateKeys[k]];
-          if (m && m[uid] && m[uid].length) return m[uid];
+          if (!m || typeof m !== 'object') continue;
+          if (m[uid] && m[uid].length) return m[uid];
+          for (var key in m) {
+            if (!Object.prototype.hasOwnProperty.call(m, key)) continue;
+            if (typeof key !== 'string' || key === uid || key.length <= uid.length) continue;
+            if (key.slice(-(uid.length + 1)) !== '.' + uid) continue;
+            if (Array.isArray(m[key]) && m[key].length) return m[key];
+          }
         } catch (e) {}
       }
     }
@@ -613,7 +751,13 @@ export function SmartCapturePanel({ onCapture }: Props) {
     var budget = { n: 0 };
     function hasImgEntries(arr) {
       for (var i = 0; i < arr.length; i++) {
-        if (arr[i] && arr[i].imgfiles && arr[i].imgfiles.length) return true;
+        var e = arr[i];
+        if (!e) continue;
+        if (e.imgfiles && e.imgfiles.length) return true;
+        // v3.11: some job types (hetero_refine / homo_abinit) deliver
+        // their image entries with "files" instead of "imgfiles".
+        if (Array.isArray(e.files) && e.files.length &&
+            (e.type === 'image' || typeof e.text === 'string' || e.flags)) return true;
       }
       return false;
     }
@@ -726,7 +870,8 @@ export function SmartCapturePanel({ onCapture }: Props) {
       var imgs = 0;
       for (e = 0; e < cand.length; e++) {
         var c = cand[e];
-        if (c && c.imgfiles && c.imgfiles.length) imgs++;
+        if (c && ((c.imgfiles && c.imgfiles.length) ||
+                  (Array.isArray(c.files) && c.files.length))) imgs++;
       }
       if (imgs > 0 && (!best || imgs > best.imgs)) best = { arr: cand, path: fresh[i].path, imgs: imgs };
     }
@@ -819,6 +964,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   var batch = [];
   var lastFlush = Date.now();
   var logRefsStreamed = 0;   // v3.7: total refs streamed (zero-image diagnostic)
+  var refsByUid = {};         // v3.11: refs streamed per job (zero-ref diagnostics)
   function flushLogs(force) {
     if (!batch.length) return Promise.resolve();
     if (!force && batch.length < 5 && Date.now() - lastFlush < 2500) return Promise.resolve();
@@ -826,7 +972,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
     lastFlush = Date.now();
     queueImageUploads(items);
     for (var q3 = 0; q3 < items.length; q3++) {
-      logRefsStreamed += ((items[q3] && items[q3].images) || []).length;
+      var n3 = ((items[q3] && items[q3].images) || []).length;
+      logRefsStreamed += n3;
+      var u3 = items[q3] && items[q3].uid;
+      if (u3) refsByUid[u3] = (refsByUid[u3] || 0) + n3;
     }
     return post('/logs', { items: items }).catch(function(e) {
       console.warn('[CryoSmart] Log batch upload failed (non-fatal):', e && e.message);
@@ -945,9 +1094,12 @@ export function SmartCapturePanel({ onCapture }: Props) {
       var rawLogs = [];
       for (var c = 0; c < cached.length; c++) {
         var ce = cached[c];
-        if (ce && (ce.type === 'image' || (ce.imgfiles && ce.imgfiles.length))) rawLogs.push(ce);
+        // v3.11: "files"-shaped image entries ride along too.
+        if (ce && (ce.type === 'image' || (ce.imgfiles && ce.imgfiles.length) ||
+                   (Array.isArray(ce.files) && ce.files.length))) rawLogs.push(ce);
       }
-      // v3.6: keep only the LAST round per title (older rounds 404).
+      // v3.6: keep only the LAST round per title (older rounds 404);
+      // v3.11: and only the final ITERATION of multi-iteration runs.
       if (rawLogs.length) jobEntry.image_logs = lastRoundEntries(rawLogs);
     }
   }
@@ -1246,6 +1398,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
     // readable logs still stream an EMPTY batch so the progress count stays
     // exact — and the lineage-scoped total equals the request size.
     var t0 = Date.now(), BUDGET_MS = 180000;
+    var noLog = [];   // v3.11: jobs whose logs never became readable
     for (var j = 0; j < pending.length; j++) {
       var uid2 = pending[j];
       if (scanned[uid2]) continue;
@@ -1298,9 +1451,53 @@ export function SmartCapturePanel({ onCapture }: Props) {
         if (lateLogs && lateLogs.length) logs2 = lateLogs;
       }
       scanned[uid2] = true;
+      if (!logs2 || !logs2.length) noLog.push(uid2);
       batch.push({ uid: uid2, images: logs2 ? extractLogImages(logs2, uid2) : [] });
       await flushLogs(false);
       if ((j + 1) % 20 === 0) console.log('[CryoSmart] Log scan progress: ' + (j + 1) + '/' + pending.length + ' job(s)...');
+    }
+
+    // v3.11: SLOW-LOG RESCUE. Huge-payload jobs (hetero_refine /
+    // homo_abinit with hundreds of class + iteration entries) can
+    // deliver their logs AFTER the per-job 1.3s diff window expired —
+    // the job streamed an empty batch and would show zero log images
+    // forever. Give the loader one more call, then re-poll every store
+    // shape for up to 40s before giving up.
+    if (noLog.length) {
+      console.log('[CryoSmart] ' + noLog.length + ' job(s) had no readable logs yet (large payloads can be slow) — re-checking for up to 40s…');
+      if (winning && !winning.http) {
+        for (var n1 = 0; n1 < noLog.length; n1++) {
+          try {
+            var nret = winning.action.fn.call(winning.action.store, shapesFor(noLog[n1])[winning.shapeIdx]);
+            if (nret && typeof nret.then === 'function') nret.catch(function() {});
+          } catch (e) {}
+        }
+      }
+      var rescueEnd = Date.now() + 40000;
+      while (noLog.length && Date.now() < rescueEnd) {
+        await sleepMs(2000);
+        var stillMissing = [];
+        for (var n2 = 0; n2 < noLog.length; n2++) {
+          var mu = noLog[n2];
+          var ml = readLogState(mu) || deepLogsFor(mu) || cachedLogsFor(mu);
+          if (ml && ml.length) {
+            var mImg = extractLogImages(ml, mu);
+            if (mImg.length) {
+              console.log('[CryoSmart] Late logs arrived for ' + mu + ' (' + mImg.length + ' image ref(s)).');
+              batch.push({ uid: mu, images: mImg });
+              await flushLogs(false);
+              continue;
+            }
+          }
+          stillMissing.push(mu);
+        }
+        noLog = stillMissing;
+      }
+      if (noLog.length) {
+        console.warn('[CryoSmart] No readable logs for: ' + noLog.join(', ') +
+          '. Tip: open ONE of those job detail views in CryoSmart, then re-run the script — its cached logs are harvested without extra API calls.');
+      }
+      await flushLogs(true);
     }
     await flushLogs(true);
     if (unsniff) unsniff();
@@ -1389,14 +1586,24 @@ export function SmartCapturePanel({ onCapture }: Props) {
     console.warn('[CryoSmart] ⚠ ZERO log images were found for the ' + knownRequested.length + ' traced job(s).' +
       '\\n   Those jobs may genuinely have no image logs — or this build keeps them where the' +
       '\\n   script cannot read them. Tip: open ONE job detail view in CryoSmart, then re-run' +
-      '\\n   the script (v3.10 harvests logs cached by earlier runs and views).');
+      '\\n   the script (v3.11 harvests logs cached by earlier runs and views).');
+  }
+  // v3.11: per-job zero-ref list — the hetero/abinit "no log images" class
+  // of bugs is now visible at capture time instead of in the report.
+  var scannedUids = Object.keys(scanned);
+  var zeroRefUids = scannedUids.filter(function(u) { return !((refsByUid[u] || 0) > 0); });
+  if (zeroRefUids.length && knownRequested) {
+    console.log('[CryoSmart] Note: ' + zeroRefUids.length + ' scanned job(s) produced no log images: ' +
+      zeroRefUids.join(', ') + '. (import/ctf-style jobs usually have none; refine/abinit jobs should —' +
+      ' if one of those is listed, open its job view in CryoSmart and re-run the script.)');
   }
   console.log('[CryoSmart] Capture complete' +
     (LINEAGE_MODE && knownRequested && !CAPTURE_ALL_LATE
       ? ' — lineage-scoped: ' + knownRequested.length + ' of ' + ALL_UIDS.length + ' jobs scanned'
       : '') +
     ' · ' + (logRefsStreamed || 0) + ' log image(s) · ' + imgUploaded + ' with bytes' +
-    " · multi-round jobs keep only their latest round's log images" +
+    " · multi-round/multi-iteration jobs keep only their FINAL round + iteration's log images" +
+    ' · non-image result files (pdf/xml/txt/…) are never captured' +
     '. Live page:', appUrl);
 })();
 `.trim();
@@ -1509,9 +1716,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
               progress. The lineage graph renders as soon as job metadata
               lands, auto-traces from your page job, and log images stream in
               <strong> only for the traced lineage</strong> — the other jobs
-              are skipped, and multi-round jobs fetch only their
-              <strong>latest round's</strong> images, saving minutes on
-              large projects.
+              are skipped; multi-round jobs fetch only their
+              <strong>final round + final iteration's</strong> images and
+              non-image result files (pdf/xml/txt) are never fetched,
+              saving minutes on large projects.
             </p>
             <p className="mt-0.5 text-[11px] text-teal-600">
               Maps, tile images and job log images are captured with session credentials (auth + cookie) forwarded for downloads.
