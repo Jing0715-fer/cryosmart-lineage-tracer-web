@@ -728,3 +728,23 @@ Work Log:
 Stage Summary:
 - The capture popup funnel is now fully self-contained at the landing point: the user stares at Configure & Trace and the live log-fetch progress (numbers, bar, images count) is right there — zero scrolling. The top banner remains as a slim global companion for when the user scrolls elsewhere (e.g. after Trace jumps to Preview).
 - Remaining backlog unchanged (report-html full review + bilingual report decision, nu-refine sharp/half map images, graph polish items, capture-script bookmarklet migration to staged flow).
+
+---
+Task ID: 14
+Agent: main (Z.ai Code)
+Task: Root-cause + fix: running the capture script on the real CryoSmart (P259, 46 jobs) LOGGED THE USER OUT of CryoSmart and broke subsequent captures.
+
+Work Log:
+- Diagnosed from the user's console trace: findLogActions() matched /(log|detail)/i, which also matches "login" and "logout" (both CONTAIN "log"). The calibration step then actually CALLED login() (400 Bad Request ×4 shapes) and logout() on the auth store → client-side token cleared, user emptied, socket recreated with token:'' → SPA logged out; the real loader getLogsByJob (also in the candidate list) failed afterwards because the session was already destroyed; clearLogsByJob was also a dangerous candidate.
+- Patched findLogActions() in BOTH script copies — src/app/components/cryosmart/smart-capture-panel.tsx (staged v3.1 script shown in the panel) and src/lib/cryosmart/bookmarklet.ts:
+  - AUTH_RE blocklist (login|logout|signin|sign_out|signout|sign_in|signup|register|auth|token|password|session|permission|role) — never candidates; panel version also skips stores whose $id matches AUTH_RE.
+  - DESTRUCTIVE_RE (clear|reset|remove|delet|drop|purge|wipe|destroy|disconnect) — protects clearLogsByJob and friends.
+  - WRITE_PREFIX_RE (^set|create|update|add|new|init|connect|close|send|post|put|append|push|save|write).
+  - READ_PREFIX_RE (^get|fetch|load|request|query|list|pull|read|show|open) used for sort preference so getLogsByJob is calibrated first.
+  - Script header comment now carries "v3.1 — safe log-action calibration" marker so the user can verify the copied script is the fixed one.
+- Verified: node classification harness over 29 action names (user's real candidates + edge cases): login/logout blocked-auth, clearLogsByJob blocked-destructive, setLogs/updateLog/deleteLogs/initLogSocket/connectLogs/appendLogEntry blocked, getLogsByJob/getJobDetail/loadJobLogs/fetchLogs/queryJobLogs/... allowed and read-first. agent-browser: panel renders the v3.1 script (AUTH_RE + login|logout blocklist present in the copied text), 0 page errors. Staged-flow regression: session create → jobs → complete → popup URL → final banner + URL cleanup, all green. lint 0 errors, tsc src/ 0 errors.
+- Committed d091010, pushed main → master.
+
+Stage Summary:
+- The logout incident is fully root-caused and fixed at both script sources. The user must re-login to CryoSmart (the old run invalidated the SPA session client-side), then re-COPY the capture script from the Smart Capture panel (v3.1 header confirms the fix) — the previous pasted copy is still the unsafe one. Note: the P259 capture itself did succeed (46 jobs uploaded; only log images were lost).
+- Remaining backlog unchanged (report-html review, nu-refine images, graph polish, bookmarklet-vs-panel script consolidation candidate).
