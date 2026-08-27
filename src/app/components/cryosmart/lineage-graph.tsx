@@ -725,9 +725,26 @@ export function LineageGraph({ summary, session }: Props) {
   }, [hoveredEdge]);
 
   /* Layout: longest-path depth columns, oldest upstream LEFT, TARGET RIGHT. */
-  const { nodes, edges, layout, bounds, columns, depthMap, leafSet, wrapRowBounds, edgeLanes, portDy } = useMemo(() => {
+  const { nodes, edges, drawnEdges, layout, bounds, columns, depthMap, leafSet, wrapRowBounds, edgeLanes, portDy } = useMemo(() => {
     const nodes = summary.nodes || [];
     const edges = summary.edges || [];
+    /* ── Parallel-edge dedupe ───────────────────────────────────────────
+     * The same source→target pair can carry SEVERAL edges (one per input
+     * slot — e.g. a job feeding another half_map_A + half_map_B + particles
+     * from the SAME output groups). Drawing each produced multiple lines
+     * between the two cards (user: "多个map连接到下游时会有多条重复的线，
+     * 没有必要重复显示"). Draw ONE line per card pair — the first edge
+     * decides the family color; the full edge list still drives ancestor
+     * highlighting and the detail modal's input tables. */
+    const seenPair = new Set<string>();
+    const drawnEdges: LineageEdge[] = [];
+    for (const e of edges) {
+      if (!e || !e.source || !e.target) continue;
+      const key = `${e.source}\u2192${e.target}`;
+      if (seenPair.has(key)) continue;
+      seenPair.add(key);
+      drawnEdges.push(e);
+    }
     const depthMap = computeLongestPathDepths(edges, summary.start_uid);
 
     let maxDepth = 0;
@@ -879,7 +896,7 @@ export function LineageGraph({ summary, session }: Props) {
     {
       const outLists = new Map<string, number[]>();
       const inLists = new Map<string, number[]>();
-      edges.forEach((e, i) => {
+      drawnEdges.forEach((e, i) => {
         if (!e.source || !e.target) return;
         if (!outLists.has(e.source)) outLists.set(e.source, []);
         outLists.get(e.source)!.push(i);
@@ -934,7 +951,7 @@ export function LineageGraph({ summary, session }: Props) {
       const topLanes: LaneCandidate[] = [];
       const bottomLanes: LaneCandidate[] = [];
       const wrapBands = new Map<number, LaneCandidate[]>();
-      edges.forEach((e, i) => {
+      drawnEdges.forEach((e, i) => {
         if (!e.source || !e.target) return;
         const from = layout.get(e.source);
         const to = layout.get(e.target);
@@ -990,7 +1007,7 @@ export function LineageGraph({ summary, session }: Props) {
     }
 
     return {
-      nodes, edges, layout, bounds: { w: totalWidth, h: totalHeight },
+      nodes, edges, drawnEdges, layout, bounds: { w: totalWidth, h: totalHeight },
       columns: cols, depthMap, leafSet, wrapRowBounds, edgeLanes, portDy,
     };
   }, [summary, detailMode, layoutMode]);
@@ -1230,7 +1247,7 @@ export function LineageGraph({ summary, session }: Props) {
 
   /* Captions. */
   const inCanvasCaption = `Data flows left \u2192 right, converging on the target job \`${summary.start_uid}\`.`;
-  const belowCanvasCaption = `${nodes.length} jobs \u00B7 ${edges.length} data links \u00B7 ${leafSet.size} source node${leafSet.size === 1 ? "" : "s"} \u00B7 hover/click a node to trace its path \u00B7 drag to pan \u00B7 scroll/buttons to zoom \u00B7 click a card for full details`;
+  const belowCanvasCaption = `${nodes.length} jobs \u00B7 ${drawnEdges.length} data links \u00B7 ${leafSet.size} source node${leafSet.size === 1 ? "" : "s"} \u00B7 hover/click a node to trace its path \u00B7 drag to pan \u00B7 scroll/buttons to zoom \u00B7 click a card for full details`;
 
   const selectedNode = selectedUid ? nodeMap.get(selectedUid) ?? null : null;
   const modalNode = modalUid ? nodeMap.get(modalUid) ?? null : null;
@@ -1352,7 +1369,7 @@ export function LineageGraph({ summary, session }: Props) {
         onMouseDown={handleMouseDown}
       >
         <span className="sr-only">
-          Lineage graph: {nodes.length} jobs and {edges.length} data links. Target job is {summary.start_uid}. Data flows from the leftmost (oldest) source jobs rightward, converging on the target job on the far right. Use Tab to focus a node and Enter or Space to open its details.
+          Lineage graph: {nodes.length} jobs and {drawnEdges.length} data links. Target job is {summary.start_uid}. Data flows from the leftmost (oldest) source jobs rightward, converging on the target job on the far right. Use Tab to focus a node and Enter or Space to open its details.
         </span>
         <svg
           ref={svgRef}
@@ -1476,10 +1493,12 @@ export function LineageGraph({ summary, session }: Props) {
               staggered free-lane route (see routeEdgeGap/routeEdgeLane).
               Edges are still drawn before nodes, but no edge ever passes
               under a card, so nothing is ever visually clipped.
-              Port fan-out (portDy) + corridor stagger below keep parallel
-              and hub-converging edges from overprinting into "thick"
-              muddy lines. */}
-          {edges.map((e, i) => {
+              Parallel-edge DEDUPE: one line per source→target pair (the
+              first edge of the pair sets the color) — several input slots
+              between the same two cards no longer stack duplicate lines.
+              Port fan-out (portDy) + corridor stagger keep hub-converging
+              edges from overprinting into "thick" muddy lines. */}
+          {drawnEdges.map((e, i) => {
             const from = layout.get(e.source);
             const to = layout.get(e.target);
             if (!from || !to) return null;
@@ -2726,7 +2745,10 @@ function MapsList({
         <Layers className="h-3.5 w-3.5" /> Maps
         <span className="font-mono text-[10px]" style={{ color: mutedColor }}>({maps.length})</span>
       </h4>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      {/* 3 maps per row (user request — one-per-row wasted vertical space
+          on jobs with sharp/half map sets). Cards stay compact so 3 fit
+          even on narrow viewports. */}
+      <div className="grid grid-cols-3 gap-2">
         {maps.map((m, idx) => {
           const src = m.preview_src ? embedded[m.preview_src] || withSession(m.preview_url, session) : null;
           const fallback = m.preview_src && !embedded[m.preview_src] ? buildProxyFallback(m.preview_url, session) : null;

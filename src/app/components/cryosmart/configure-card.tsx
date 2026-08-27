@@ -11,17 +11,9 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Play, Loader2, Settings2, FileBox, Boxes, FileCheck2, PresentationIcon } from "lucide-react";
 import type { LoadedMetadata } from "./data-source-card";
-import type { ImportProgress } from "./use-imported-metadata";
 import { buildSummary, normalizeLineageSummary, normalizeJobUid } from "@/lib/cryosmart/lineage";
 import { DEFAULT_BASE_URL } from "@/lib/cryosmart/constants";
 import type { JobMetadata, LineageSummary } from "@/lib/cryosmart/types";
-
-export interface ImportPanelInfo {
-  /** Live status message from the capture session (e.g. "Loaded 12 jobs — fetching log images 3/12…"). */
-  message: string;
-  /** Log-collection counters (null until the jobs array has been uploaded). */
-  progress: ImportProgress | null;
-}
 
 interface Props {
   loaded: LoadedMetadata | null;
@@ -31,8 +23,6 @@ interface Props {
   initialOptions?: TraceOptions;
   /** True while a staged capture session is still streaming data in. */
   awaitingImport?: boolean;
-  /** Live capture status rendered INSIDE this card, so the popup landing here never has to look elsewhere for progress. */
-  importInfo?: ImportPanelInfo;
   /** Active staged-capture token — a successful Trace publishes the lineage's
    * job list to the session so the capture script fetches ONLY those jobs'
    * log images (v3.5 lineage-scoped capture). Null when not capturing. */
@@ -50,7 +40,7 @@ export interface TraceOptions {
   includeFinalResults: boolean;
 }
 
-export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, initialOptions, awaitingImport, importInfo, importToken, autoTraceJobUid }: Props) {
+export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, initialOptions, awaitingImport, importToken, autoTraceJobUid }: Props) {
   const [startJob, setStartJob] = useState("");
   const [startJobDirty, setStartJobDirty] = useState(false);
   const [projectId, setProjectId] = useState("");
@@ -327,10 +317,6 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
     }
   }, [loaded, summary, dataVersion, loadedJobs, loadedLogImageCount, loadedLogImageWithBytes, effectiveProjectId, onSummary]);
 
-  const importPct = importInfo?.progress
-    ? Math.min(100, Math.round((importInfo.progress.done / Math.max(1, importInfo.progress.total)) * 100))
-    : null;
-
   const startJobOptions = useMemo(() => {
     // Sorted newest-last so the browser datalist shows the tail (final jobs)
     // first while the user types.
@@ -356,62 +342,6 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Live capture progress — embedded here (not just in the top banner)
-            so a popup that auto-lands on this section sees the stream without
-            scrolling anywhere. */}
-        {awaitingImport && importInfo && (
-          <div
-            className="rounded-xl border border-teal-200/80 bg-gradient-to-br from-teal-50/90 via-white/40 to-emerald-50/60 px-4 py-3.5 dark:border-teal-800/60 dark:from-teal-950/40 dark:via-transparent dark:to-emerald-950/30"
-            role="status"
-            aria-live="polite"
-            aria-label="Capture progress"
-          >
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-teal-100 dark:bg-teal-900/60">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-teal-600 dark:text-teal-300" />
-              </span>
-              <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-teal-900 dark:text-teal-100">
-                {importInfo.message}
-              </span>
-              {importInfo.progress && importPct !== null && (
-                <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-teal-700 ring-1 ring-inset ring-teal-200/70 dark:bg-slate-900/70 dark:text-teal-300 dark:ring-teal-800/60">
-                  {importPct}%
-                </span>
-              )}
-            </div>
-            {importInfo.progress && importPct !== null && (
-              <div className="mt-3">
-                <div className="h-2 w-full overflow-hidden rounded-full bg-white/90 ring-1 ring-inset ring-teal-100 dark:bg-slate-800 dark:ring-teal-900/50">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-teal-500 to-emerald-500 transition-[width] duration-500 ease-out"
-                    style={{ width: `${importPct}%` }}
-                  />
-                </div>
-                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 font-mono text-[10.5px] text-teal-800/75 dark:text-teal-300/70">
-                  <span>{importInfo.progress.done}/{importInfo.progress.total} jobs scanned</span>
-                  <span>
-                    {importInfo.progress.images} {importInfo.progress.images === 1 ? "image" : "images"} captured
-                    {importInfo.progress.uploaded > 0
-                      ? ` · ${importInfo.progress.uploaded} ready`
-                      : ""}
-                  </span>
-                </div>
-              </div>
-            )}
-            <p className="mt-2 text-[11px] leading-snug text-teal-700/80 dark:text-teal-300/60">
-              {loaded
-                ? summary
-                  ? importInfo?.progress
-                    ? "Lineage traced — log images keep streaming in as they arrive."
-                    : "Lineage traced — log images will be fetched for its jobs."
-                  : autoAnchorUid
-                    ? `Auto-tracing from the page job ${autoAnchorUid} — log images are fetched only for the traced lineage.`
-                    : "Click Trace Lineage below — log images are then fetched only for the traced jobs."
-                : "Jobs will appear here automatically — no need to scroll or refresh."}
-            </p>
-          </div>
-        )}
-
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div className="space-y-1.5">
             <Label htmlFor="project-id" className="text-[12px] text-slate-600">Project ID</Label>
@@ -443,6 +373,14 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
               disabled={!loaded && awaitingImport}
               onKeyDown={(e) => { if (e.key === "Enter" && !tracing && loaded) handleTrace(); }}
             />
+            {/* Live-capture hint under the Start Job field — the full progress
+                bar lives in the Lineage Preview card now (single source of
+                truth), this one-liner just explains the disabled state. */}
+            {!loaded && awaitingImport && (
+              <p className="text-[10.5px] leading-snug text-teal-600 dark:text-teal-400">
+                Jobs stream in automatically — then click Trace Lineage (log images are fetched only for the traced jobs; progress shows in Lineage Preview below).
+              </p>
+            )}
             <datalist id="start-job-options">
               {startJobOptions.map((j) => (
                 <option key={String(j.uid)} value={String(j.uid)}>

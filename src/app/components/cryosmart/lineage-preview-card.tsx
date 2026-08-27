@@ -7,7 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2, ImageIcon, Loader2, FlaskConical } from "lucide-react";
+import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2, ImageIcon, Loader2, FlaskConical, CheckCircle2, AlertCircle, X } from "lucide-react";
 import { toast } from "sonner";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildLineageHtmlV2, type ReportHtmlOptions } from "@/lib/cryosmart/report-html";
@@ -17,6 +17,9 @@ import { makePreview } from "@/lib/cryosmart/lineage";
 import { LineageGraph } from "./lineage-graph";
 import { ShareLineageButton } from "./share-lineage-button";
 import { FscPlotViewer } from "./fsc-plot-viewer";
+import type { ImportProgress } from "./use-imported-metadata";
+
+export type ImportStatusKind = "idle" | "polling" | "loaded" | "error" | "expired" | "not-found";
 
 interface Props {
   summary: LineageSummary | null;
@@ -27,11 +30,36 @@ interface Props {
   /** Fires the one-click demo: loads the bundled synthetic workflow and
    *  traces it from J10 so this card fills in immediately. Wired in page.tsx. */
   onLoadDemo?: () => void;
+  /** Live capture progress — THE single progress bar of the whole app
+   *  (user request: it lives here, next to the lineage it is filling in,
+   *  instead of being duplicated in the banner and the Configure card). */
+  importInfo?: { message: string; progress: ImportProgress | null } | null;
+  /** Capture lifecycle state — "polling" renders the live strip;
+   *  "loaded"/"error"/"expired" render the final message (dismissable). */
+  importStatus?: ImportStatusKind;
 }
 
-export function LineagePreviewCard({ summary, session, onLoadDemo }: Props) {
+export function LineagePreviewCard({ summary, session, onLoadDemo, importInfo, importStatus }: Props) {
   const [reportTab, setReportTab] = useState("stats");
   const { resolvedTheme } = useTheme();
+
+  /* ── Live capture progress strip ───────────────────────────────────
+   * The ONE progress UI in the app (banner + configure-card copies were
+   * removed as duplicates). Shown while a staged capture streams, plus a
+   * dismissable final message once it completes/fails. */
+  const stripVisible =
+    importStatus === "polling" ||
+    ((importStatus === "loaded" || importStatus === "error" || importStatus === "expired") && !!importInfo?.message);
+  const [dismissedKey, setDismissedKey] = useState<string | null>(null);
+  // Derived dismissal (no effect needed): a dismissal applies to exactly
+  // one (status, message) pair — a NEW capture (polling) or any changed
+  // message always re-opens the strip.
+  const stripKey = `${importStatus}:${importInfo?.message || ""}`;
+  const stripDismissed = dismissedKey === stripKey && importStatus !== "polling";
+  const progress = importInfo?.progress || null;
+  const importPct = progress
+    ? Math.min(100, Math.round((progress.done / Math.max(1, progress.total)) * 100))
+    : null;
 
   // Auto-resize the report iframe to fit its content. The report HTML
   // posts { type: 'cryosmart-report-height', height } via postMessage once
@@ -143,6 +171,14 @@ export function LineagePreviewCard({ summary, session, onLoadDemo }: Props) {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <ImportProgressStrip
+            visible={stripVisible && !stripDismissed}
+            status={importStatus}
+            message={importInfo?.message || ""}
+            progress={progress}
+            pct={importPct}
+            onDismiss={() => setDismissedKey(stripKey)}
+          />
           {/* Skeleton stat cards */}
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {[0, 1, 2, 3].map((i) => (
@@ -199,6 +235,14 @@ export function LineagePreviewCard({ summary, session, onLoadDemo }: Props) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        <ImportProgressStrip
+          visible={stripVisible && !stripDismissed}
+          status={importStatus}
+          message={importInfo?.message || ""}
+          progress={progress}
+          pct={importPct}
+          onDismiss={() => setDismissedKey(stripKey)}
+        />
         {/* Stats row */}
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           <StatCard
@@ -381,6 +425,105 @@ export function LineagePreviewCard({ summary, session, onLoadDemo }: Props) {
         </Tabs>
       </CardContent>
     </Card>
+  );
+}
+
+/* ── Live capture progress strip ────────────────────────────────────────
+ * The app's SINGLE progress UI for staged Smart Capture sessions. Lives in
+ * the Lineage Preview card (right next to the lineage it is filling in) —
+ * the old duplicates (page-level sticky banner + Configure-card panel) were
+ * removed at the user's request.
+ *   polling → teal live strip: spinner + message + progress bar + counters
+ *   loaded → emerald final summary (dismissable)
+ *   error/expired → rose message (dismissable) */
+function ImportProgressStrip({
+  visible,
+  status,
+  message,
+  progress,
+  pct,
+  onDismiss,
+}: {
+  visible: boolean;
+  status?: ImportStatusKind;
+  message: string;
+  progress: ImportProgress | null;
+  pct: number | null;
+  onDismiss: () => void;
+}) {
+  if (!visible || !message) return null;
+  const done = status === "loaded";
+  const failed = status === "error" || status === "expired";
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-label="Capture progress"
+      className={
+        failed
+          ? "rounded-xl border border-rose-200 bg-rose-50/80 px-4 py-3 dark:border-rose-900/60 dark:bg-rose-950/30"
+          : done
+            ? "rounded-xl border border-emerald-200 bg-emerald-50/80 px-4 py-3 dark:border-emerald-900/60 dark:bg-emerald-950/30"
+            : "rounded-xl border border-teal-200/80 bg-gradient-to-br from-teal-50/90 via-white/40 to-emerald-50/60 px-4 py-3 dark:border-teal-800/60 dark:from-teal-950/40 dark:via-transparent dark:to-emerald-950/30"
+      }
+    >
+      <div className="flex items-center gap-2.5">
+        {status === "polling" ? (
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-teal-100 dark:bg-teal-900/60">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-teal-600 dark:text-teal-300" />
+          </span>
+        ) : failed ? (
+          <AlertCircle className="h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
+        ) : (
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+        )}
+        <span
+          className={`min-w-0 flex-1 truncate text-[12.5px] font-medium ${
+            failed
+              ? "text-rose-900 dark:text-rose-100"
+              : done
+                ? "text-emerald-900 dark:text-emerald-100"
+                : "text-teal-900 dark:text-teal-100"
+          }`}
+        >
+          {message}
+        </span>
+        {progress && pct !== null && (
+          <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-teal-700 ring-1 ring-inset ring-teal-200/70 dark:bg-slate-900/70 dark:text-teal-300 dark:ring-teal-800/60">
+            {pct}%
+          </span>
+        )}
+        {status !== "polling" && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="Dismiss capture message"
+            className="shrink-0 rounded-md p-1 text-slate-400 transition-colors hover:bg-slate-200/60 hover:text-slate-600 dark:hover:bg-slate-800/60 dark:hover:text-slate-300"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+      {progress && pct !== null && (
+        <div className="mt-2.5">
+          <div className="h-2 w-full overflow-hidden rounded-full bg-white/90 ring-1 ring-inset ring-teal-100 dark:bg-slate-800 dark:ring-teal-900/50">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-teal-500 to-emerald-500 transition-[width] duration-500 ease-out"
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 font-mono text-[10.5px] text-teal-800/75 dark:text-teal-300/70">
+            <span>
+              {progress.done}/{progress.total} jobs scanned
+            </span>
+            <span>
+              {progress.images} {progress.images === 1 ? "image" : "images"} captured
+              {progress.uploaded > 0 ? ` · ${progress.uploaded} ready` : ""}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

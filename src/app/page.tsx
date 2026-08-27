@@ -18,7 +18,7 @@ import { DEFAULT_BASE_URL } from "@/lib/cryosmart/constants";
 import type { JobMetadata, LineageSummary } from "@/lib/cryosmart/types";
 import { toast } from "sonner";
 import { saveSession } from "@/lib/cryosmart/proxy-client";
-import { ShieldCheck, Globe, Zap, FileCheck2, Loader2, CheckCircle2, AlertCircle, ArrowRight, Keyboard } from "lucide-react";
+import { ShieldCheck, Globe, Zap, FileCheck2, ArrowRight, Keyboard } from "lucide-react";
 
 export default function Home() {
   const [loaded, setLoaded] = useState<LoadedMetadata | null>(null);
@@ -69,18 +69,34 @@ export default function Home() {
   });
 
   // When the page is opened as a capture popup (/?imported=<token>), jump
-  // straight to the Configure & Trace section so the user lands where the
-  // next action happens — data (and progress) streams in while they wait.
+  // to where the next action happens:
+  //   - script ran on a JOB page (endJobUid) → everything is automatic
+  //     (auto-trace + log-image streaming), so land on Lineage Preview
+  //     where the single live progress strip + the filling-in graph live;
+  //   - script ran on a project page → land on Configure & Trace, the
+  //     manual Start Job + Trace step the user must complete.
+  // The end_job_uid only arrives with the FIRST status poll (~1s), so the
+  // landing decision waits for it — with a 2.5s fallback so a legacy
+  // capture (no end_job_uid field at all) still lands somewhere promptly.
   const importScrolledRef = useRef(false);
   useEffect(() => {
     if (importScrolledRef.current) return;
     if (importState.status !== "polling" || !importState.token) return;
-    importScrolledRef.current = true;
-    const t = setTimeout(() => {
-      document.getElementById("configure")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 300);
+    let decided = false;
+    const decide = (anchor: string | null) => {
+      if (decided || importScrolledRef.current) return;
+      decided = true;
+      importScrolledRef.current = true;
+      const target = anchor ? "preview" : "configure";
+      document.getElementById(target)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
+    if (importState.endJobUid) {
+      decide(importState.endJobUid);
+      return;
+    }
+    const t = setTimeout(() => decide(importState.endJobUid), 2500);
     return () => clearTimeout(t);
-  }, [importState.status, importState.token]);
+  }, [importState.status, importState.token, importState.endJobUid]);
 
   // One-click demo: load the bundled synthetic cryo-EM workflow (P52, J1..J10)
   // AND immediately trace the upstream lineage from J10 so the user sees the
@@ -120,12 +136,6 @@ export default function Home() {
       cryosmartOrigin: loaded.cryosmartOrigin,
     });
   }, [summary, loaded]);
-
-  const getBannerClass = () => {
-    if (importState.status === "loaded") return "mt-2 flex items-center gap-2.5 rounded-lg border border-emerald-300 bg-emerald-50/90 text-emerald-900 px-3 py-2 text-[12.5px] shadow-sm backdrop-blur";
-    if (importState.status === "error" || importState.status === "expired") return "mt-2 flex items-center gap-2.5 rounded-lg border border-rose-300 bg-rose-50/90 text-rose-900 px-3 py-2 text-[12.5px] shadow-sm backdrop-blur";
-    return "mt-2 flex items-center gap-2.5 rounded-lg border border-teal-300 bg-teal-50/90 text-teal-900 px-3 py-2 text-[12.5px] shadow-sm backdrop-blur";
-  }
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-50/50">
@@ -189,29 +199,6 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Slim global status line — the FULL live progress (bar + counters)
-          lives inside the Configure & Trace card where the capture popup
-          lands, so this banner stays a one-line companion for when the
-          user scrolls elsewhere. */}
-      {importState.status !== "idle" && (
-        <div className="sticky top-14 z-30 mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8">
-          <div
-            className={getBannerClass()}
-            role="status"
-            aria-live="polite"
-            aria-label={importState.message}
-          >
-            {importState.status === "polling" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />}
-            {importState.status === "loaded" && <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />}
-            {(importState.status === "error" || importState.status === "expired") && <AlertCircle className="h-3.5 w-3.5 shrink-0" />}
-            <div className="min-w-0 flex-1">
-              <span className="block truncate">{importState.message}</span>
-            </div>
-            {importState.token && <code className="hidden rounded bg-white/70 px-1.5 py-0.5 font-mono text-[10px] opacity-70 sm:inline">{importState.token}</code>}
-          </div>
-        </div>
-      )}
-
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
         <div className="space-y-6">
           <DataSourceCard loaded={loaded} onLoad={setLoaded} />
@@ -222,15 +209,20 @@ export default function Home() {
             onOptionsChange={setTraceOptions}
             initialOptions={traceOptions || undefined}
             awaitingImport={importState.status === "polling"}
-            importInfo={
-              importState.status === "polling"
-                ? { message: importState.message, progress: importState.progress }
-                : undefined
-            }
             importToken={importState.status === "polling" ? importState.token : null}
             autoTraceJobUid={importState.endJobUid}
           />
-          <LineagePreviewCard summary={summary} session={loaded?.session ?? null} onLoadDemo={handleLoadDemo} />
+          <LineagePreviewCard
+            summary={summary}
+            session={loaded?.session ?? null}
+            onLoadDemo={handleLoadDemo}
+            importInfo={
+              importState.status === "idle" || importState.status === "not-found"
+                ? null
+                : { message: importState.message, progress: importState.progress }
+            }
+            importStatus={importState.status}
+          />
           <DownloadCard summary={summary} options={traceOptions} loaded={loaded} />
           <HelpCard />
         </div>

@@ -15,6 +15,11 @@
  *      (ONLY for the requested lineage jobs, and ONLY the LAST round of
  *       multi-round jobs — older rounds' files no longer exist)
  *   4. POST .../complete → UI stops polling and refreshes with final data
+ *
+ * v3.7: the wait window for Trace Lineage is 20 minutes and re-traces are
+ * picked up for 3 minutes after each scan (late traces no longer miss the
+ * fetch); the final console line reports refs + uploaded bytes honestly
+ * and a zero-image capture prints a loud warning with the fix.
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -68,7 +73,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.6 — LAST-ROUND log images. Job metadata
+// CryoSmart Smart Capture v3.7 — LAST-ROUND log images. Job metadata
 // uploads for the WHOLE project immediately (fast), but log images are
 // fetched ONLY for the jobs the traced lineage needs: the script waits for
 // the web app's Trace Lineage action to publish the lineage job list to
@@ -81,7 +86,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
 // escape hatches while it waits: __csCaptureAll() (fetch every job's
 // logs) and __csCaptureFinish() (stop now). Still uploads log-image BYTES
 // same-origin (6 workers, 240s drain — v3.4) and keeps the deep-scan log
-// calibration that finds logs in ANY store state shape (v3.2).
+// calibration that finds logs in ANY store state shape (v3.2). v3.7:
+// 20-minute wait window + 3-minute re-trace grace (late traces no longer
+// miss the fetch), honest image-byte counters, and a loud zero-image
+// diagnostic so an empty capture is obvious in the console.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -589,12 +597,16 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // Streaming batch upload — the web UI shows live progress from these.
   var batch = [];
   var lastFlush = Date.now();
+  var logRefsStreamed = 0;   // v3.7: total refs streamed (zero-image diagnostic)
   function flushLogs(force) {
     if (!batch.length) return Promise.resolve();
     if (!force && batch.length < 5 && Date.now() - lastFlush < 2500) return Promise.resolve();
     var items = batch; batch = [];
     lastFlush = Date.now();
     queueImageUploads(items);
+    for (var q3 = 0; q3 < items.length; q3++) {
+      logRefsStreamed += ((items[q3] && items[q3].images) || []).length;
+    }
     return post('/logs', { items: items }).catch(function(e) {
       console.warn('[CryoSmart] Log batch upload failed (non-fatal):', e && e.message);
     });
@@ -640,7 +652,18 @@ export function SmartCapturePanel({ onCapture }: Props) {
     imgPosted++;
     post('/images', { items: items })
       .then(function(r) {
-        if (r && r.ok) imgUploaded += (r.stored || items.length);
+        // v3.7: count what the server actually STORED — a stored count of 0
+        // used to fall through to items.length and report rejected uploads
+        // as "ok", hiding byte-loss from the console summary.
+        if (r && r.ok) {
+          var storedCount = (typeof r.stored === 'number') ? r.stored : items.length;
+          imgUploaded += storedCount;
+          if (storedCount < items.length) {
+            imgFailed += items.length - storedCount;
+            console.warn('[CryoSmart] Image store accepted ' + storedCount + ' of ' + items.length +
+              ' image(s) in a batch (size cap or invalid data URL).');
+          }
+        }
         else imgFailed += items.length;
       })
       .catch(function() { imgFailed += items.length; })
@@ -777,14 +800,14 @@ export function SmartCapturePanel({ onCapture }: Props) {
   function sleepMs(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
   if (LINEAGE_MODE) {
-    var WAIT_MS = 15 * 60 * 1000;
+    var WAIT_MS = 20 * 60 * 1000;   // v3.7: 20 min — a slow first trace should not forfeit the log fetch
     var waitStart = Date.now();
     var misses = 0;
     console.log('[CryoSmart] Waiting for Trace Lineage — log images are fetched only for the traced lineage.');
     console.log('[CryoSmart]   escape hatches: __csCaptureAll() = every job · __csCaptureFinish() = stop now');
     while (!knownRequested && !FINISH_NOW) {
       if (Date.now() - waitStart > WAIT_MS) {
-        console.log('[CryoSmart] No Trace Lineage within 15 min — completing without log images.');
+        console.log('[CryoSmart] No Trace Lineage within 20 min — completing without log images.');
         break;
       }
       var st = await fetchStatus(true);   // ?hb=1 heartbeat: tells the app this script is alive
@@ -1043,7 +1066,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // request — pick those jobs up for a short window before completing.
   // __csCaptureAll() works here too (fetches every unscanned job).
   if (LINEAGE_MODE && knownRequested && !FINISH_NOW) {
-    var graceEnd = Date.now() + 45000;
+    var graceEnd = Date.now() + 180000;   // v3.7: 45s → 3 min — re-traces while reviewing land reliably
     var served = knownRequested.slice();
     while (Date.now() < graceEnd && !FINISH_NOW) {
       await sleepMs(3000);
@@ -1068,7 +1091,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
         pending = extra;
         console.log('[CryoSmart] Re-trace detected — fetching ' + extra.length + ' more job(s).');
         try { await scanLogs(); } catch (e) {}
-        graceEnd = Date.now() + 45000;
+        graceEnd = Date.now() + 180000;
       }
     }
   }
@@ -1083,10 +1106,24 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // ── STEP 4: mark the session complete ──────────────────────────────
   // The web UI stops polling and refreshes with the final data snapshot.
   try { await post('/complete', {}); } catch (e) {}
+
+  // v3.7: loud zero-image diagnostic — an empty capture (or empty bytes)
+  // should be OBVIOUS in the console, not discovered later in the report.
+  if (LINEAGE_MODE && !knownRequested) {
+    console.warn('[CryoSmart] ⚠ No Trace Lineage ran during the wait window — ZERO log images were fetched.' +
+      '\\n   The web app tab stayed open in "waiting for Trace Lineage" without a trace.' +
+      '\\n   Fix: re-run this script, then pick a Start Job and click Trace Lineage in the app' +
+      '\\n   (or run it from the FINAL job\\'s page so it auto-traces).');
+  } else if (imgUploaded === 0 && (logRefsStreamed || 0) > 0) {
+    console.warn('[CryoSmart] ⚠ ' + logRefsStreamed + ' log-image refs were captured but ZERO image bytes uploaded —' +
+      '\\n   previews will be missing. The CryoSmart /api/log_image/ endpoint rejected every fetch' +
+      '\\n   (expired session or removed files). Re-login to CryoSmart and re-run the script.');
+  }
   console.log('[CryoSmart] Capture complete' +
     (LINEAGE_MODE && knownRequested && !CAPTURE_ALL_LATE
       ? ' — lineage-scoped: ' + knownRequested.length + ' of ' + ALL_UIDS.length + ' jobs scanned'
       : '') +
+    ' · ' + (logRefsStreamed || 0) + ' log image(s) · ' + imgUploaded + ' with bytes' +
     " · multi-round jobs keep only their latest round's log images" +
     '. Live page:', appUrl);
 })();
