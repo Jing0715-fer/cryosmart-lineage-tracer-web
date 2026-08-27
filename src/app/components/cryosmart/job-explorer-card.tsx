@@ -134,7 +134,7 @@ export function JobExplorerCard({ summary }: Props) {
 
   if (!summary) {
     return (
-      <Card id="job-explorer" className="scroll-mt-20 opacity-60">
+      <Card id="job-explorer" className="scroll-mt-28 opacity-60">
         <CardHeader className="pb-4">
           <div className="flex items-center gap-2">
             <span className="flex h-7 w-7 items-center justify-center rounded-md bg-slate-300 text-[13px] font-bold text-white">
@@ -164,7 +164,7 @@ export function JobExplorerCard({ summary }: Props) {
   };
 
   return (
-    <Card id="job-explorer" className="scroll-mt-20">
+    <Card id="job-explorer" className="scroll-mt-28">
       <CardHeader className="pb-4">
         <div className="flex items-center gap-2">
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-teal-600 text-[13px] font-bold text-white">

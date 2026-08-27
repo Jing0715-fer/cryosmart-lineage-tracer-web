@@ -132,7 +132,7 @@ export function LineagePreviewCard({ summary, session, onLoadDemo }: Props) {
 
   if (!summary) {
     return (
-      <Card id="preview" className="scroll-mt-20 opacity-90">
+      <Card id="preview" className="scroll-mt-28 opacity-90">
         <CardHeader className="pb-4">
           <div className="flex items-center gap-2">
             <span className="flex h-7 w-7 items-center justify-center rounded-md bg-slate-300 text-[13px] font-bold text-white dark:bg-slate-700">3</span>
@@ -185,7 +185,7 @@ export function LineagePreviewCard({ summary, session, onLoadDemo }: Props) {
   }
 
   return (
-    <Card id="preview" className="scroll-mt-20">
+    <Card id="preview" className="scroll-mt-28">
       <CardHeader className="pb-4">
         <div className="flex items-center gap-2">
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-teal-600 text-[13px] font-bold text-white">3</span>
@@ -217,7 +217,7 @@ export function LineagePreviewCard({ summary, session, onLoadDemo }: Props) {
             icon={<Box className="h-3.5 w-3.5" />}
             label="Resolution"
             value={summary.final_resolution_A ? `${summary.final_resolution_A} Å` : "—"}
-            sub={summary.final_resolution_A ? "FSC" : (summary.resolution_note?.slice(0, 22) || "FSC")}
+            sub={summary.final_resolution_A ? "FSC" : "awaiting FSC"}
           />
           <StatCard
             icon={<Layers className="h-3.5 w-3.5" />}

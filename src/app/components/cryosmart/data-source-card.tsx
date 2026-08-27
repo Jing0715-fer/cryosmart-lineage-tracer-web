@@ -23,7 +23,7 @@ interface Props {
 
 export function DataSourceCard({ loaded, onLoad }: Props) {
   return (
-    <Card id="data-source" className="scroll-mt-20 overflow-hidden">
+    <Card id="data-source" className="scroll-mt-28 overflow-hidden">
       <CardHeader className="bg-gradient-to-br from-slate-50 to-teal-50/40 pb-4">
         <div className="flex items-start justify-between gap-3">
           <div>

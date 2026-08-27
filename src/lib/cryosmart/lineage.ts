@@ -69,12 +69,11 @@ const REPORT_NORMALIZED_EDGES_CACHE = new WeakMap<
 
 /**
  * Normalize a user-typed job uid into the canonical `J<number>` form
- * used throughout the lineage graph. Throws a Chinese error message
- * when the value is empty (matches the original popup.js UX).
+ * used throughout the lineage graph. Throws when the value is empty.
  */
 export function normalizeJobUid(value: unknown): string {
   const text = String(value || "").trim();
-  if (!text) throw new Error("请输入起始 Job，例如 427 或 J427。");
+  if (!text) throw new Error("Enter a start job, e.g. 427 or J427.");
   return /^J/i.test(text) ? text.toUpperCase() : `J${text}`;
 }
 
@@ -263,8 +262,8 @@ export function formatBinFactor(value: number | null | undefined): string {
 }
 
 /**
- * Format the extraction-params triple for a node as a Chinese-text
- * summary string (e.g. `原始 pixel 256 px · 提取 box 128 px · bin 2`).
+ * Format the extraction-params triple for a node as a short summary
+ * string (e.g. `pixel 256 px · box 128 px · bin 2`).
  */
 export function extractionParamText(node: {
   extraction_params?: ExtractionParams | null;
@@ -272,12 +271,12 @@ export function extractionParamText(node: {
   const p = node && node.extraction_params;
   if (!p) return "";
   const parts: string[] = [];
-  if (p.box_size_pix) parts.push(`原始 pixel ${formatBinFactor(p.box_size_pix)} px`);
+  if (p.box_size_pix) parts.push(`pixel ${formatBinFactor(p.box_size_pix)} px`);
   if (p.extracted_box_size_pix)
-    parts.push(`提取 box ${formatBinFactor(p.extracted_box_size_pix)} px`);
+    parts.push(`box ${formatBinFactor(p.extracted_box_size_pix)} px`);
   if (p.bin_factor)
     parts.push(
-      `bin ${formatBinFactor(p.bin_factor)}${p.bin_inferred ? " (推断)" : ""}`
+      `bin ${formatBinFactor(p.bin_factor)}${p.bin_inferred ? " (inferred)" : ""}`
     );
   return parts.join(" · ");
 }
@@ -1175,8 +1174,11 @@ export function buildSummary(
       .slice(-20)
       .map((job) => [job.uid_num ?? null, job.uid, job.job_type]);
     const lastEntry = latest.length ? latest[latest.length - 1] : null;
+    const hint = lastEntry
+      ? ` The latest job is ${lastEntry[1]} (${lastEntry[2] || "unknown type"}).`
+      : "";
     throw new Error(
-      `${projectId}/${startUid} 不在当前 metadata 中。项目内 jobs=${projectJobs.size}，最新=${JSON.stringify(lastEntry)}`
+      `${projectId}/${startUid} is not in the loaded metadata (project has ${projectJobs.size} jobs).${hint}`
     );
   }
 
@@ -1204,7 +1206,7 @@ export function buildSummary(
     final_micrograph_count: maxGroupNumItems(startJob, "exposure"),
     final_resolution_A: resolutionFromJob(startJob),
     resolution_note:
-      "需要从 CryoSmart metadata/log/FSC 结果补充；jobs metadata 通常没有最终分辨率。",
+      "Resolution needs to be filled in from CryoSmart metadata / logs / FSC results; job metadata usually has no final resolution.",
     map_download_urls: mapDownloadUrls(baseUrl, projectId, startUid),
     nodes: nodeList,
     edges,
@@ -1247,9 +1249,9 @@ export function normalizeLineageSummary<T extends LineageSummary>(
     ) ||
     null;
   summary.resolution_note = finalResolution
-    ? "从 metadata/Overview 文本中解析得到。"
+    ? "Parsed from metadata / Overview text."
     : (summary.resolution_note ||
-      "未在 metadata/Overview 中找到分辨率；可从 FSC txt/xml 继续补充。");
+      "No resolution found in metadata / Overview; it can be filled in later from FSC txt/xml.");
   return summary;
 }
 
@@ -1826,17 +1828,17 @@ export function makePreview(summary: LineageSummary): string {
   if (summary.preview) return summary.preview;
   const lines: string[] = [];
   lines.push(`${summary.project_uid}/${summary.start_uid}`);
-  lines.push(`类型: ${summary.start_job.job_type}`);
-  lines.push(`最终颗粒数: ${summary.final_particle_count ?? "未知"}`);
+  lines.push(`Type: ${summary.start_job.job_type}`);
+  lines.push(`Final particles: ${summary.final_particle_count ?? "unknown"}`);
   lines.push(
-    `最终分辨率: ${
+    `Final resolution: ${
       summary.final_resolution_A
         ? `${formatBinFactor(summary.final_resolution_A)} Å`
-        : "待从 FSC/metadata 补充"
+        : "to be filled from FSC/metadata"
     }`
   );
   lines.push("");
-  lines.push("Map 下载:");
+  lines.push("Map downloads:");
   for (const [name, url] of Object.entries(summary.map_download_urls)) {
     lines.push(`- ${name}: ${url}`);
   }
@@ -1853,7 +1855,7 @@ export function makePreview(summary: LineageSummary): string {
     }
   }
   lines.push("");
-  lines.push("Micrograph 源头:");
+  lines.push("Micrograph sources:");
   for (const job of summary.import_or_leaf_jobs) {
     lines.push(
       `- ${job.uid} ${job.job_type}: ${job.micrograph_count ?? "?"} micrographs${

@@ -50,7 +50,7 @@ const HELPER_FILES = [
 
 export function HelpCard() {
   return (
-    <Card id="help" className="scroll-mt-20">
+    <Card id="help" className="scroll-mt-28">
       <CardHeader className="pb-4">
         <div className="flex items-center gap-2">
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-slate-700 text-[13px] font-bold text-white">

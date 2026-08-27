@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { SiteHeader, SiteFooter } from "./components/cryosmart/site-chrome";
 import { DataSourceCard, type LoadedMetadata } from "./components/cryosmart/data-source-card";
 import { ConfigureCard, type TraceOptions } from "./components/cryosmart/configure-card";
@@ -53,12 +53,34 @@ export default function Home() {
 
   useKeyboardShortcuts({
     onTrace: () => {
-      document.getElementById("configure")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      // When data is ready, the shortcut handler clicks the Trace button
+      // right after this callback and the trace itself scrolls to #preview —
+      // so only nudge to #configure when tracing is not possible yet.
+      const traceBtn = Array.from(
+        document.querySelectorAll<HTMLButtonElement>("button")
+      ).find((b) => b.textContent?.includes("Trace Lineage"));
+      if (!traceBtn || traceBtn.disabled) {
+        document.getElementById("configure")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     },
     onDownload: () => {
       document.getElementById("download")?.scrollIntoView({ behavior: "smooth", block: "start" });
     },
   });
+
+  // When the page is opened as a capture popup (/?imported=<token>), jump
+  // straight to the Configure & Trace section so the user lands where the
+  // next action happens — data (and progress) streams in while they wait.
+  const importScrolledRef = useRef(false);
+  useEffect(() => {
+    if (importScrolledRef.current) return;
+    if (importState.status !== "polling" || !importState.token) return;
+    importScrolledRef.current = true;
+    const t = setTimeout(() => {
+      document.getElementById("configure")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [importState.status, importState.token]);
 
   // One-click demo: load the bundled synthetic cryo-EM workflow (P52, J1..J10)
   // AND immediately trace the upstream lineage from J10 so the user sees the
@@ -165,7 +187,7 @@ export default function Home() {
               </div>
               <div className="mt-4 flex items-center gap-2 text-[11px] text-slate-500">
                 <Keyboard className="h-3.5 w-3.5" />
-                <span>Keyboard shortcut: Ctrl+Shift+T to trace lineage</span>
+                <span>Keyboard shortcut: Ctrl+Enter to trace lineage</span>
               </div>
             </div>
           </div>
@@ -202,7 +224,7 @@ export default function Home() {
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
         <div className="space-y-6">
           <DataSourceCard loaded={loaded} onLoad={setLoaded} />
-          <ConfigureCard loaded={loaded} summary={summary} onSummary={setSummary} onOptionsChange={setTraceOptions} initialOptions={traceOptions || undefined} />
+          <ConfigureCard loaded={loaded} summary={summary} onSummary={setSummary} onOptionsChange={setTraceOptions} initialOptions={traceOptions || undefined} awaitingImport={importState.status === "polling"} />
           <LineagePreviewCard summary={summary} session={loaded?.session ?? null} onLoadDemo={handleLoadDemo} />
           <DownloadCard summary={summary} options={traceOptions} loaded={loaded} />
           <HelpCard />
