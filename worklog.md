@@ -1045,3 +1045,18 @@ Stage Summary:
 - The "images captured but not rendered" bug was a RENDER-TIMING problem, not a capture problem: the live page froze on a stale snapshot (background-throttled poller missing /complete; reload losing the token), and its not-yet-uploaded images fell back to direct intranet URLs that HTTPS mixed-content blocks (new tab worked because top-level navigation has no mixed-content rule).
 - The report/modal embed now never grinds the unreachable intranet proxy during staged captures (was ~1300×10s requests in one user run); session-image bytes are the only embed channel.
 - Reload resilience: import token + last-trace persist and resume; expired sessions end silently.
+---
+Task ID: 26
+Agent: main (Z.ai Code)
+Task: Push the pending work to GitHub (user request: "push到github").
+
+Work Log:
+- Checked repo state: clean tree; local main was 1 commit ahead of origin/master (791d279, the Task-16 render-timing fix) — origin/main is an old diverged branch (20 stale commits), untouched per the project's established main→master convention.
+- The unpushed commit carried only an auto-generated UUID message; amended it to a descriptive v3.13 message summarizing the fix (background-throttled poller missed the final /data apply → stale snapshot → mixed-content-blocked intranet fallbacks; visibilitychange/focus wake polling, localStorage token+trace resume, staged captures skip direct-CryoSmart prefetch, blob:-context src absolutization).
+- Ran `bun run lint` before pushing — 0 problems.
+- Pushed main → master: 98adfa8..064e6d4. Verified origin/master HEAD === local main at 064e6d4 (0/0 divergence).
+
+Stage Summary:
+- GitHub master now carries v3.13 (the captured-but-unrendered-images fix) on top of v3.12 (content-type-independent byte upload).
+- Remote: https://github.com/Jing0715-fer/cryosmart-lineage-tracer-web — branch master up to date with local main.
+- Remaining backlog unchanged (report-html full review + bilingual decision, nu-refine sharp/half map images, graph parallel-edge offset/compact spacing, bookmarklet-vs-panel script consolidation).
