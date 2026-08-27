@@ -686,3 +686,23 @@ Stage Summary:
 - Staged session APIs (create/jobs/logs/complete/status/data) are additive — legacy one-shot import + pending flow unchanged and regression-verified.
 - Log-harvest robustness improved for builds where the previous calibration failed (all-store scan + return-value inspection); still best-effort with cached-logs tip if the build exposes no loader.
 - Known remaining: same as task 10 backlog (42 drifted duplicate helpers, SVG export remote hrefs, compact top-lane density) + potential future: migrate bookmarklet/extension scripts to the staged flow.
+
+---
+Task ID: 12
+Agent: main (Z.ai Code)
+Task: Capture popup auto-jumps to Configure & Trace section; Trace Lineage auto-jumps to Lineage Preview; continued UI/UX polish.
+
+Work Log:
+- Read worklog (task 11 context) + verified remote sync (main == master, clean tree).
+- page.tsx: on import-popup activation (status polling + token, once-only ref), smooth-scroll to #configure after 300ms so the user lands where the next action happens while data streams in. Passed awaitingImport={importState.status === "polling"} into ConfigureCard. Fixed hero keyboard hint Ctrl+Shift+T → Ctrl+Enter (actual shortcut). onTrace shortcut callback now only nudges to #configure when the Trace button is disabled (avoids double-scroll conflict with trace → #preview).
+- configure-card.tsx: (1) smart Start Job prefill — newest refine/reconstruct/sharpen-style job within last 12, else highest uid; implemented as derived state (effectiveStartJob = user input once dirty, else suggestion) so no effect-setState lint issues; input disabled until capture data arrives. (2) <datalist> autocomplete of all job uids (newest-first, capped 1000) with job_type labels; label shows "(N jobs loaded)". (3) Waiting state: button "Waiting for data…" + spinner + contextual hint ("Capture session connected — jobs will appear here automatically." / "Load data in step 1 … first."). (4) Data-ready flash: brief teal ring-2 on Trace button when a new dataset lands, keyed by projectUid:jobCount so the staged flow's final snapshot does not re-flash. (5) handleTrace: English pre-flight validation with "Did you mean J12?" suggestion; auto-scrolls to #preview 150ms after a successful trace (same pattern as handleLoadDemo).
+- lineage.ts i18n: normalizeJobUid + buildSummary errors now English; makePreview text (Type/Final particles/Final resolution/Map downloads/Micrograph sources), extractionParamText (pixel/box/bin (inferred)), resolution_note strings all English — web UI fully English now. (Report pipeline report-html/report-svg/report-pptx remains bilingual by design — left for the pending report review task.)
+- All anchor cards (#data-source, #configure, #preview, #download, #help, #job-explorer) scroll-mt-20 → scroll-mt-28 so the sticky 56px header + ~56px import progress banner never overlap a scrolled-to section (112px stack = scroll-mt-28 exactly).
+- Resolution stat sub-label: clean "awaiting FSC" instead of a truncated resolution_note.
+- E2E verified with agent-browser (2 full staged sessions s3-49996944 / s4-c6a31fd9): popup URL → auto-scroll configureTop=112px, "Waiting for data…" + hint + disabled input; jobs POST → banner "Loaded 12 jobs — fetching log images 0/12", Start Job auto-filled J12 (homo_refine suggestion), button enabled + ring flash; log batch → "3/12 (4 captured)" bar 25%; Trace click → previewTop=112px, trace log "Done. 12 nodes, 11 edges."; complete → "Captured 12 jobs + 4 log images from 3 jobs." + URL cleaned; invalid J999 → "Job J999 is not in project P777 (12 jobs loaded). Did you mean J12?"; Load Demo → scroll to preview + J10 prefill; Preview tab fully English; Graph tab SVG 10 nodes; mobile 390px no horizontal scroll; 0 console/page errors; VLM screenshot review clean. lint 0 errors, tsc src/ 0 errors.
+- Committed 7ec55b8, pushed main → master.
+
+Stage Summary:
+- The capture → configure → trace → preview funnel is now fully guided: popup lands on Configure & Trace, smart prefill means zero typing for the common case, Trace jumps straight to the rendered lineage, and all waiting/error states have clear English affordances.
+- No API or capture-script changes this round (pure web-UI flow work on top of task 11's staged capture).
+- Remaining backlog unchanged (report-html full review + bilingual report decision, nu-refine sharp/half map images, graph polish items).
