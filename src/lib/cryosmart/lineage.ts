@@ -761,8 +761,15 @@ function lastRoundImageLogEntries<T extends { text?: unknown }>(entries: T[]): T
  * `text`. Group refs into consecutive same-title runs, then keep only the
  * LAST run per distinct title — that run is the job's final round, whose
  * files still exist on the server. Refs without a title are kept as-is.
+ *
+ * v3.10: rounds whose entries landed BACK-TO-BACK flatten into ONE run
+ * (round 1's refs immediately followed by round 2's, same title), so the
+ * run-level filter alone kept both. Inside the kept run, keep only the
+ * LAST ref per file NAME — re-runs re-emit the same file names with new
+ * fileids (the old ones 404), while genuinely different files in one
+ * round (class galleries) have distinct names.
  */
-function lastRoundLogImageRefs<T extends { text?: unknown }>(refs: T[]): T[] {
+function lastRoundLogImageRefs<T extends { text?: unknown; name?: unknown }>(refs: T[]): T[] {
   if (refs.length < 2) return refs;
   // Build consecutive runs: { key, start, end } (key === null → untitled).
   const runs: Array<{ key: string | null; start: number; end: number }> = [];
@@ -778,12 +785,42 @@ function lastRoundLogImageRefs<T extends { text?: unknown }>(refs: T[]): T[] {
   });
   if (lastRunByKey.size === 0) return refs;
   const keep = new Array<boolean>(refs.length).fill(false);
+  const refName = (i: number): string | null => {
+    const nm = (refs[i] as { name?: unknown })?.name;
+    return typeof nm === "string" && nm ? nm : null;
+  };
   runs.forEach((run, idx) => {
     if (run.key === null || lastRunByKey.get(run.key) === idx) {
-      for (let i = run.start; i < run.end; i++) keep[i] = true;
+      const lastName = new Map<string, number>();
+      for (let i = run.start; i < run.end; i++) {
+        const nm = refName(i);
+        if (nm !== null) lastName.set(nm, i);
+      }
+      for (let i = run.start; i < run.end; i++) {
+        const nm = refName(i);
+        keep[i] = nm === null || lastName.get(nm) === i;
+      }
     }
   });
   return refs.filter((_, i) => keep[i]);
+}
+
+/** True for result-PDF files inside log imgfiles / log-image refs.
+ *  CryoSmart log entries carry result PDFs alongside the PNG previews;
+ *  browsers cannot render a PDF inside an <img>, so without this filter
+ *  every PDF ref became a "duplicate title whose twin never loads" box
+ *  in the report (v3.10 — the capture script now filters them too; this
+ *  is the defense for older captures). */
+function isPdfLogFile(
+  file: { filetype?: unknown; filename?: unknown; name?: unknown } | null | undefined
+): boolean {
+  if (!file || typeof file !== "object") return false;
+  const ft = file.filetype;
+  if (typeof ft === "string" && ft && /pdf/i.test(ft)) return true;
+  for (const s of [file.filename, file.name]) {
+    if (typeof s === "string" && s.trim() && /\.pdf$/i.test(s.trim())) return true;
+  }
+  return false;
 }
 
 /** Collect preview image assets (ui_tile + output_group) for a job. */
@@ -864,6 +901,8 @@ export function imageAssets(
   };
   for (const item of lastRoundLogImageRefs(job.log_images || [])) {
     const fileid = item?.fileid || "";
+    // v3.10: skip result-PDF refs — they cannot render in <img>.
+    if (isPdfLogFile(item)) continue;
     // Prefer an explicit src: a same-origin session-image URL (staged flow,
     // bytes uploaded by the capture script) or an inline data: URL (legacy
     // console snippet). Both work from an HTTPS page, unlike the direct
@@ -893,6 +932,8 @@ export function imageAssets(
     if (log.type !== "image" || !log.imgfiles || log.imgfiles.length === 0) continue;
     for (const imgFile of log.imgfiles) {
       if (!imgFile.fileid) continue;
+      // v3.10: skip result-PDF files (same reason as the refs above).
+      if (isPdfLogFile(imgFile)) continue;
       const url = logImageUrl(baseUrl, imgFile.fileid);
       if (!url || logSeen.has(imgFile.fileid)) continue;
       logSeen.add(imgFile.fileid);
@@ -1233,6 +1274,47 @@ export function collectUpstream(
 /* Summary                                                             */
 /* ------------------------------------------------------------------ */
 
+/** v3.10 defense: legacy captures (pre-v3.10 scripts) mis-attributed ONE
+ *  shared log array to every scanned job, so the same fileid appears in
+ *  many jobs' log_images / image_logs and every job's report card showed
+ *  the same pictures. Each log fileid belongs to exactly ONE CryoSmart
+ *  job, so claim it once — upstream-first (uid order) — and strip later
+ *  duplicates. Idempotent, and a no-op for correctly-attributed data. */
+function dedupeLogImagesAcrossJobs(jobs: Iterable<JobMetadata>): void {
+  const claimed = new Set<string>();
+  const claim = (fid: unknown): boolean => {
+    if (typeof fid !== "string" || !fid) return true; // no fileid — keep
+    // Path/URL-shaped fileids (e.g. bundled demo assets like
+    // "/demo/micrographs.png") are legitimately shareable between jobs;
+    // only opaque server fileids are exclusive to one job's logs.
+    if (fid.startsWith("/") || fid.includes("://")) return true;
+    if (claimed.has(fid)) return false;
+    claimed.add(fid);
+    return true;
+  };
+  // Deterministic upstream-first order: explicit uid_num, else the numeric
+  // tail of the uid ("J12" → 12). BFS-discovery order is NOT stable for
+  // this purpose (it starts at the END job, so the smear's first owner
+  // would be the most-downstream job).
+  const uidSortKey = (job: JobMetadata): number => {
+    if (typeof job.uid_num === "number" && Number.isFinite(job.uid_num)) return job.uid_num;
+    const m = String(job.uid || "").match(/(\d+)\s*$/);
+    return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
+  };
+  const ordered = Array.from(jobs).sort((a, b) => uidSortKey(a) - uidSortKey(b));
+  for (const job of ordered) {
+    if (Array.isArray(job.log_images) && job.log_images.length) {
+      job.log_images = job.log_images.filter((ref) => claim(ref?.fileid));
+    }
+    if (Array.isArray(job.image_logs) && job.image_logs.length) {
+      for (const log of job.image_logs) {
+        if (!Array.isArray(log.imgfiles) || !log.imgfiles.length) continue;
+        log.imgfiles = log.imgfiles.filter((f) => claim(f?.fileid));
+      }
+    }
+  }
+}
+
 /** Build a full `LineageSummary` for a project + start uid. */
 export function buildSummary(
   data: JobMetadata[],
@@ -1261,6 +1343,9 @@ export function buildSummary(
   }
 
   const { nodes, edges } = collectUpstream(projectJobs, startUid);
+  // v3.10: each log-image fileid belongs to ONE job — strip duplicates
+  // that older capture scripts smeared across every scanned job.
+  dedupeLogImagesAcrossJobs(nodes.values());
   const startJob = projectJobs.get(startUid) as JobMetadata;
   const nodeList: LineageNode[] = Array.from(nodes.values())
     .sort((a, b) => (a.uid_num || 0) - (b.uid_num || 0))

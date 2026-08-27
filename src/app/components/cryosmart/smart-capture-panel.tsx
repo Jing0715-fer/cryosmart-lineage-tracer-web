@@ -32,6 +32,19 @@
  * scanned · 0 images". The deep-scan now attributes ALREADY-CACHED log
  * arrays to their jobs (state-path segment match, then entry job_uid),
  * harvesting them without a single extra API call.
+ *
+ * v3.10: per-job log attribution + PDF guard. The real build delivers job
+ * logs over a SHARED WebSocket event stream (insert_events) whose entries
+ * carry their own job_uid. v3.8/v3.9 attributed whatever array the diff saw
+ * first to whichever job was being scanned, so every job "owned" the same
+ * images (the 320-image capture = ~16 refs x 20 jobs), and once the stream
+ * grew past the 300-entry scan cap the LAST-scanned jobs (hetero_refine /
+ * homo_abinit / nu_refine — end of the pipeline, end of the scan order)
+ * got nothing. Attribution now demands EVIDENCE (path uid, single-uid
+ * content, entry job_uid slicing, or appearance/growth during THIS loader
+ * call), the scan cap is 2000, and result-PDF files inside imgfiles are
+ * skipped (browsers cannot render PDFs in <img> — they were the
+ * "duplicate title that never loads" in the report).
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -85,7 +98,8 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.9 — LAST-ROUND log images. Job metadata
+// CryoSmart Smart Capture v3.10 — LAST-ROUND, PER-JOB log images. Job
+// metadata
 // uploads for the WHOLE project immediately (fast), but log images are
 // fetched ONLY for the jobs the traced lineage needs: the script waits for
 // the web app's Trace Lineage action to publish the lineage job list to
@@ -108,6 +122,14 @@ export function SmartCapturePanel({ onCapture }: Props) {
 // v3.9: logs already cached in ANY store state shape (a previous script
 // run, an opened job view) are attributed to their jobs by the deep scan
 // — re-running in the same tab no longer yields "0 images captured".
+// v3.10: logs arriving through a SHARED event stream are attributed by
+// EVIDENCE (state-path uid, single-uid content, entry job_uid slicing, or
+// appearance/growth during THIS loader call) — never by "first array the
+// diff saw" — so each job owns ONLY its own images (previously every job
+// showed the same ~16 refs and the last-scanned refine/abinit jobs showed
+// none once the stream passed the old 300-entry cap, now 2000). Result
+// PDFs inside imgfiles are skipped entirely — they cannot render in <img>
+// and were the broken "duplicate" titles in the report.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -331,16 +353,97 @@ export function SmartCapturePanel({ onCapture }: Props) {
   //   4. Fallback: probe common HTTP log endpoints.
   // Best-effort — a failure just means fewer log images, never a failed
   // capture.
-  function extractLogImages(logs) {
+  //
+  // ── v3.10 helpers: per-job attribution + PDF guard ────────────────
+  // The real build delivers job logs over a SHARED WebSocket event
+  // stream (insert_events): entries from many jobs accumulate in ONE
+  // array. v3.8/v3.9 attributed whatever array the diff saw FIRST to
+  // whichever job was being scanned — every job then "owned" the same
+  // images (the 320-image capture: ~16 refs x 20 jobs), and once the
+  // stream passed the 300-entry scan cap the LAST-scanned jobs
+  // (hetero_refine / homo_abinit / nu_refine — end of the pipeline, end
+  // of the scan order) got NOTHING. Attribution now demands EVIDENCE.
+
+  // True for result-PDF files (log entries carry them next to the PNG
+  // previews — browsers cannot render a PDF inside <img>, so they were
+  // the "duplicate title whose twin never loads" in the report).
+  function isPdfFile(file) {
+    if (!file) return false;
+    if (typeof file === 'string') return /\.pdf$/i.test(file);
+    var ft = file.filetype || file.file_type || file.type;
+    if (typeof ft === 'string' && ft && /pdf/i.test(ft)) return true;
+    var fn = file.filename || file.name || file.title;
+    return typeof fn === 'string' && /\.pdf$/i.test(fn);
+  }
+
+  // The job a log entry belongs to (job_uid / jobUid / job_id / jobId).
+  function entryJobUid(entry) {
+    if (!entry || typeof entry !== 'object') return null;
+    var u = entry.job_uid || entry.jobUid || entry.job_id || entry.jobId;
+    return (typeof u === 'string' && u) ? u : null;
+  }
+
+  // "J12" === "J12"; full-id forms like "BJ.P259.J12" also match "J12".
+  function uidEquals(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    return ('.' + a + '.').indexOf('.' + b + '.') !== -1 ||
+           ('.' + b + '.').indexOf('.' + a + '.') !== -1;
+  }
+
+  // Slice one job's entries out of a (possibly shared) log array.
+  // keepUidless: keep entries carrying no job uid (the array was already
+  // attributed by path/appearance evidence). Strict mode (shared streams)
+  // keeps ONLY entries naming this job.
+  function filterByUid(logs, uid, keepUidless) {
+    if (!Array.isArray(logs) || !uid) return logs;
+    var out = [];
+    var changed = false;
+    for (var i = 0; i < logs.length; i++) {
+      var eu = entryJobUid(logs[i]);
+      var keep = eu === null ? !!keepUidless : uidEquals(eu, uid);
+      if (keep) out.push(logs[i]);
+      else changed = true;
+    }
+    return changed ? out : logs;
+  }
+
+  // Round key for the LAST-ROUND-ONLY filter: the entry's title, or (for
+  // title-less entries) the joined FILE NAMES it emits — re-runs re-emit
+  // the same file names with new fileids, so identical sets are rounds of
+  // the same log; different names (class 1 vs class 2 galleries) stay
+  // distinct keys.
+  function roundKeyOf(log) {
+    if (!log) return null;
+    if (typeof log.text === 'string' && log.text.trim()) return log.text.trim();
+    var files = log.imgfiles || (log.type === 'image' ? log.files : null);
+    if (files && files.length) {
+      var names = [];
+      for (var f = 0; f < files.length; f++) {
+        var file = files[f];
+        var n = (file && (file.filename || file.name)) || (typeof file === 'string' ? file : '');
+        names.push(String(n || ''));
+      }
+      var joined = names.join('|');
+      if (joined.replace(/\|/g, '')) return '\\u0001files:' + joined;
+    }
+    return null;
+  }
+
+  function extractLogImages(logs, uid) {
     var out = [];
     if (!Array.isArray(logs)) return out;
+    // v3.10: logs captured through a SHARED event stream can carry entries
+    // from several jobs — keep only this job's entries (uid-less entries
+    // stay: the caller already attributed the array by evidence).
+    if (uid) logs = filterByUid(logs, uid, true);
     // v3.6 LAST-ROUND-ONLY: multi-round jobs (re-run in CryoSmart) re-emit
     // the SAME log entries — same text title ("Selected 21 classes", …) —
     // once per round, and only the FINAL round's image files still exist on
     // the server: older rounds' fileids 404. Keep only the LAST entry per
-    // title so neither dead refs nor their bytes are ever fetched/uploaded
+    // key so neither dead refs nor their bytes are ever fetched/uploaded
     // (this is also what keeps multi-round log capture FAST).
-    var lastIdxByText = Object.create(null);
+    var lastIdxByKey = Object.create(null);
     var eligible = [];
     for (var i = 0; i < logs.length; i++) {
       var lg = logs[i];
@@ -348,21 +451,28 @@ export function SmartCapturePanel({ onCapture }: Props) {
       var files = lg.imgfiles || (lg.type === 'image' ? lg.files : null);
       if (!files || !files.length) continue;
       eligible.push(i);
-      var key = (typeof lg.text === 'string' && lg.text.trim()) ? lg.text.trim() : null;
-      if (key !== null) lastIdxByText[key] = i;
+      var key = roundKeyOf(lg);
+      if (key !== null) lastIdxByKey[key] = i;
     }
     for (var p = 0; p < eligible.length; p++) {
       var li = eligible[p];
       var log = logs[li];
-      var key2 = (typeof log.text === 'string' && log.text.trim()) ? log.text.trim() : null;
-      if (key2 !== null && lastIdxByText[key2] !== li) continue;   // older round — skip
+      var key2 = roundKeyOf(log);
+      if (key2 !== null && lastIdxByKey[key2] !== li) continue;   // older round — skip
       var files2 = log.imgfiles || (log.type === 'image' ? log.files : null);
-      for (var f = 0; f < files2.length; f++) {
-        var file = files2[f];
-        var fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
+      for (var f2 = 0; f2 < files2.length; f2++) {
+        var file2 = files2[f2];
+        var fid = typeof file2 === 'string' ? file2 : (file2 && (file2.fileid || file2.file_id || file2.id));
         if (!fid) continue;
-        var name = (file && (file.name || file.filename)) || log.name || log.title || ('log_image_' + out.length);
-        out.push({ fileid: fid, name: name, text: log.text || null, flags: log.flags || null });
+        // v3.10 PDF guard — skip result PDFs: no ref, no byte fetch, no
+        // broken report box.
+        if (isPdfFile(file2)) continue;
+        var name = (file2 && (file2.name || file2.filename)) || log.name || log.title || ('log_image_' + out.length);
+        out.push({
+          fileid: fid, name: name, text: log.text || null, flags: log.flags || null,
+          filetype: (file2 && (file2.filetype || file2.type)) || null,
+          filename: (file2 && (file2.filename || file2.name)) || null
+        });
       }
     }
     return out;
@@ -395,9 +505,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
   var stores = allStores();
 
   // Read a job's cached logs from any store's log state
-  // (jobLogs / logs / job_logs keyed by job uid).
+  // (jobLogs / logs / job_logs / logsByJob keyed by job uid).
   function readLogState(uid) {
-    var stateKeys = ['jobLogs', 'logs', 'job_logs'];
+    var stateKeys = ['jobLogs', 'logs', 'job_logs', 'logsByJob'];
     for (var i = 0; i < stores.length; i++) {
       for (var k = 0; k < stateKeys.length; k++) {
         try {
@@ -516,7 +626,11 @@ export function SmartCapturePanel({ onCapture }: Props) {
       }
       budget.n++;
       if (Array.isArray(node)) {
-        if (node.length > 0 && node.length <= 300 && hasImgEntries(node)) {
+        // v3.10: cap 300 → 2000. A shared insert_events stream grows past
+        // 300 entries once ~20 jobs are loaded — the old cap made it
+        // INVISIBLE to the deep scan, so the last-scanned jobs (hetero /
+        // abinit / nu-refine at the end of the pipeline) got no log images.
+        if (node.length > 0 && node.length <= 2000 && hasImgEntries(node)) {
           results.push({ arr: node, path: path });
         }
         if (node.length <= 60) {
@@ -549,7 +663,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
   }
 
   // Arrays that are new or have GROWN vs the baseline — catches both
-  // replaced arrays and in-place pushes.
+  // replaced arrays and in-place pushes. v3.10 records WHERE growth began
+  // (from = baseline length; 0 for brand-new arrays) so attribution can
+  // slice just the appended tail when nothing else identifies the owner.
   function diffLogs(storeList, base) {
     var fresh = scanForImageLogArrays(storeList);
     var out = [];
@@ -558,19 +674,63 @@ export function SmartCapturePanel({ onCapture }: Props) {
       for (var b = 0; b < base.length; b++) {
         if (base[b].arr === fresh[i].arr) { hit = base[b]; break; }
       }
-      if (!hit || fresh[i].arr.length > hit.len) out.push(fresh[i]);
+      if (!hit) out.push({ arr: fresh[i].arr, path: fresh[i].path, from: 0, isNew: true });
+      else if (fresh[i].arr.length > hit.len) out.push({ arr: fresh[i].arr, path: fresh[i].path, from: hit.len, isNew: false });
     }
     return out;
   }
 
-  // Prefer a fresh array whose state path contains the job uid as a segment
-  // (e.g. "logStore.logs.J12") when attributing logs to a job.
+  // v3.10: EVIDENCE-BASED attribution. An array counts as THIS job's logs
+  // only with proof — (1) the state path names the job, (2) every
+  // uid-carrying entry in it names this job, (3) it is a shared stream
+  // whose entries name jobs (slice this job's entries out), or (4) it
+  // appeared/grew as a result of THIS loader call (new array → whole;
+  // grown → the appended tail). The v3.8 fresh[0] fallback smeared one
+  // shared array over every scanned job — the "all jobs show the same
+  // log images" bug.
   function pickByUid(fresh, uid) {
-    for (var i = 0; i < fresh.length; i++) {
+    var i, e, arr, one, mixed, eu;
+    // (1) state-path segment names the job ("…logsByJob.J12")
+    for (i = 0; i < fresh.length; i++) {
       var p = '.' + (fresh[i].path || '') + '.';
-      if (p.indexOf('.' + uid + '.') !== -1) return fresh[i];
+      if (p.indexOf('.' + uid + '.') !== -1) return { arr: fresh[i].arr, path: fresh[i].path };
     }
-    return fresh[0];
+    // (2) single-uid array whose entries all name this job
+    for (i = 0; i < fresh.length; i++) {
+      arr = fresh[i].arr; one = null; mixed = false;
+      for (e = 0; e < arr.length; e++) {
+        eu = entryJobUid(arr[e]);
+        if (eu === null) continue;
+        if (one === null) one = eu;
+        else if (one !== eu) { mixed = true; break; }
+      }
+      if (one !== null && !mixed && uidEquals(one, uid)) return { arr: arr, path: fresh[i].path };
+    }
+    // (3) shared stream: entries name their jobs — slice this job's out
+    for (i = 0; i < fresh.length; i++) {
+      arr = fresh[i].arr;
+      var names = false;
+      for (e = 0; e < arr.length; e++) {
+        if (entryJobUid(arr[e]) !== null) { names = true; break; }
+      }
+      if (!names) continue;
+      var mine = filterByUid(arr, uid, false);
+      if (mine.length) return { arr: mine, path: fresh[i].path + '[' + uid + ']' };
+    }
+    // (4) call evidence: arrays that appeared or grew during THIS loader
+    // call. New array → the whole array; grown → only the appended tail.
+    var best = null;
+    for (i = 0; i < fresh.length; i++) {
+      var cand = fresh[i].isNew ? fresh[i].arr : fresh[i].arr.slice(fresh[i].from);
+      if (!cand.length) continue;
+      var imgs = 0;
+      for (e = 0; e < cand.length; e++) {
+        var c = cand[e];
+        if (c && c.imgfiles && c.imgfiles.length) imgs++;
+      }
+      if (imgs > 0 && (!best || imgs > best.imgs)) best = { arr: cand, path: fresh[i].path, imgs: imgs };
+    }
+    return best;
   }
 
   // v3.9: attribute ALREADY-CACHED logs to a job, wherever they live.
@@ -599,6 +759,19 @@ export function SmartCapturePanel({ onCapture }: Props) {
         else if (one !== String(eu)) { mixed = true; break; }
       }
       if (one !== null && !mixed && one === uid) return arr;
+    }
+    // v3.10: shared event stream — slice this job's entries out (strict:
+    // uid-less entries cannot be attributed from cache). This is what
+    // rescues a re-run when the previous run loaded every job into ONE
+    // insert_events array.
+    for (i = 0; i < all.length; i++) {
+      var sarr = all[i].arr, namesAny = false;
+      for (e = 0; e < sarr.length; e++) {
+        if (entryJobUid(sarr[e]) !== null) { namesAny = true; break; }
+      }
+      if (!namesAny) continue;
+      var mine = filterByUid(sarr, uid, false);
+      if (mine.length) return mine;
     }
     return null;
   }
@@ -989,13 +1162,13 @@ export function SmartCapturePanel({ onCapture }: Props) {
             var resolved = coerceLogs(await withTimeout(ret.catch(function() {}), 1500));
             if (looksLikeLogs(resolved)) {
               winning = { action: actions[a], shapeIdx: s, mode: 'return' };
-              batch.push({ uid: calibUid, images: extractLogImages(resolved) });
+              batch.push({ uid: calibUid, images: extractLogImages(resolved, calibUid) });
               scanned[calibUid] = true;
               break outer;
             }
           } else if (looksLikeLogs(coerceLogs(ret))) {
             winning = { action: actions[a], shapeIdx: s, mode: 'return' };
-            batch.push({ uid: calibUid, images: extractLogImages(coerceLogs(ret)) });
+            batch.push({ uid: calibUid, images: extractLogImages(coerceLogs(ret), calibUid) });
             scanned[calibUid] = true;
             break outer;
           }
@@ -1006,17 +1179,25 @@ export function SmartCapturePanel({ onCapture }: Props) {
           while (Date.now() < deadline) {
             var fresh = diffLogs(stores, base);
             if (fresh.length) {
+              // v3.10: only accept calibration when an array is
+              // ATTRIBUTABLE to the calibration job (evidence rules in
+              // pickByUid). The loader may populate state without any
+              // array naming this job — keep polling, then fall through
+              // to the next action/shape; the per-job scan re-tries via
+              // deepLogsFor + HTTP anyway.
               var pick = pickByUid(fresh, calibUid);
-              winning = { action: actions[a], shapeIdx: s, mode: 'diff' };
-              batch.push({ uid: calibUid, images: extractLogImages(pick.arr) });
-              scanned[calibUid] = true;
-              console.log('[CryoSmart] Logs landed in state at "' + pick.path + '" — deep-scan mode.');
-              break outer;
+              if (pick) {
+                winning = { action: actions[a], shapeIdx: s, mode: 'diff' };
+                batch.push({ uid: calibUid, images: extractLogImages(pick.arr, calibUid) });
+                scanned[calibUid] = true;
+                console.log('[CryoSmart] Logs landed in state at "' + pick.path + '" — deep-scan mode.');
+                break outer;
+              }
             }
             var logs = readLogState(calibUid);
             if (logs) {
               winning = { action: actions[a], shapeIdx: s, mode: 'state' };
-              batch.push({ uid: calibUid, images: extractLogImages(logs) });
+              batch.push({ uid: calibUid, images: extractLogImages(logs, calibUid) });
               scanned[calibUid] = true;
               break outer;
             }
@@ -1032,7 +1213,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
         var probe = await httpLogProbe(calibPool[pi]);
         if (probe) {
           winning = { http: true };
-          batch.push({ uid: calibPool[pi], images: extractLogImages(probe) });
+          batch.push({ uid: calibPool[pi], images: extractLogImages(probe, calibPool[pi]) });
           scanned[calibPool[pi]] = true;
         }
       }
@@ -1092,7 +1273,14 @@ export function SmartCapturePanel({ onCapture }: Props) {
             var deadline2 = Date.now() + 1300;
             while (Date.now() < deadline2) {
               var fresh2 = diffLogs(stores, base2);
-              if (fresh2.length) { logs2 = pickByUid(fresh2, uid2).arr; break; }
+              if (fresh2.length) {
+                // v3.10: attribution needs evidence — an unattributable
+                // grown array (another job's late delivery) must not be
+                // smeared onto this job. Keep polling until the deadline,
+                // then fall through to the HTTP probe.
+                var pick2 = pickByUid(fresh2, uid2);
+                if (pick2) { logs2 = pick2.arr; break; }
+              }
               var st2 = readLogState(uid2);
               if (st2) { logs2 = st2; break; }
               await new Promise(function(r) { setTimeout(r, 140); });
@@ -1110,7 +1298,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
         if (lateLogs && lateLogs.length) logs2 = lateLogs;
       }
       scanned[uid2] = true;
-      batch.push({ uid: uid2, images: logs2 ? extractLogImages(logs2) : [] });
+      batch.push({ uid: uid2, images: logs2 ? extractLogImages(logs2, uid2) : [] });
       await flushLogs(false);
       if ((j + 1) % 20 === 0) console.log('[CryoSmart] Log scan progress: ' + (j + 1) + '/' + pending.length + ' job(s)...');
     }
@@ -1201,7 +1389,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
     console.warn('[CryoSmart] ⚠ ZERO log images were found for the ' + knownRequested.length + ' traced job(s).' +
       '\\n   Those jobs may genuinely have no image logs — or this build keeps them where the' +
       '\\n   script cannot read them. Tip: open ONE job detail view in CryoSmart, then re-run' +
-      '\\n   the script (v3.9 harvests logs cached by earlier runs and views).');
+      '\\n   the script (v3.10 harvests logs cached by earlier runs and views).');
   }
   console.log('[CryoSmart] Capture complete' +
     (LINEAGE_MODE && knownRequested && !CAPTURE_ALL_LATE
