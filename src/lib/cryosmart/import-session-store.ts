@@ -235,6 +235,9 @@ export function addLogBatchToSession(
       }
     }
   }
+  // v3.12: bytes can land before their refs — a new ref batch may raise
+  // the log-uploaded count (it never exceeds the ref count now).
+  session.logImagesUploaded = logImagesUploadedCount(session);
   session.updatedAt = Date.now();
   return session;
 }
@@ -245,6 +248,55 @@ const MAX_IMAGE_STORE_CHARS = 192 * 1024 * 1024;
 
 /** Max base64 chars for a single image (~4 MB binary → ~5.4 MB base64). */
 const MAX_SINGLE_IMAGE_CHARS = 6 * 1024 * 1024;
+
+/** v3.12: sniff the real image type from a base64 payload's leading bytes.
+ * Real CryoSmart deployments serve /api/log_image/ responses with NO
+ * Content-Type — capture scripts then build data:application/octet-stream
+ * URLs whose bytes are perfectly good PNGs. The old image/*-only regex
+ * rejected every one of them, so a capture could stream 128 image refs
+ * and store ZERO bytes (the graph and report then showed no images at
+ * all). Sniffing rescues those uploads — including STALE script copies
+ * the user still has open in their CryoSmart tab. */
+function sniffImageMimeB64(b64: string): string | null {
+  try {
+    // 32 base64 chars → 24 decoded bytes, enough for every signature.
+    const head = Buffer.from(b64.slice(0, 32), "base64");
+    if (head.length >= 4) {
+      if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return "image/png";
+      if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
+      if (head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46) return "image/gif";
+      if (head[0] === 0x42 && head[1] === 0x4d) return "image/bmp";
+      if (
+        head.length >= 12 &&
+        head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
+        head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50
+      ) return "image/webp";
+      if ((head[0] === 0x49 && head[1] === 0x49 && head[2] === 0x2a) ||
+          (head[0] === 0x4d && head[1] === 0x4d && head[2] === 0x00)) return "image/tiff";
+      if (head[0] === 0x00 && head[1] === 0x00 && head[2] === 0x01) return "image/x-icon";
+    }
+  } catch {
+    // fall through — undecodable prefix is simply not a known image
+  }
+  return null;
+}
+
+/** v3.12: uploaded bytes now include map previews + ui tiles (not just log
+ * images), so the "M of N images" progress numbers must count ONLY bytes
+ * for KNOWN log refs — M can never exceed N regardless of arrival order
+ * (bytes can legitimately land before their refs stream in). */
+function logImagesUploadedCount(session: ImportSession): number {
+  if (session.imageStore.size === 0) return 0;
+  const refIds = new Set<string>();
+  for (const arr of Object.values(session.jobLogImages)) {
+    for (const r of arr || []) {
+      if (r && typeof r.fileid === "string" && r.fileid) refIds.add(r.fileid);
+    }
+  }
+  let n = 0;
+  for (const id of session.imageStore.keys()) if (refIds.has(id)) n++;
+  return n;
+}
 
 /**
  * Merge one batch of uploaded image bytes (data URLs from the capture
@@ -262,24 +314,35 @@ export function addImagesToSession(
     const data = typeof item.data === "string" ? item.data : "";
     if (!fileid || !data) continue;
     if (session.imageStore.has(fileid)) continue;
-    // Accept only well-formed image data URLs.
-    const m = data.match(/^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/i);
+    // Accept well-formed base64 data URLs of ANY declared mime — the
+    // declaring side may be a typeless server (octet-stream). When the
+    // declared mime is not an image, trust the actual BYTES instead and
+    // only store when they sniff as a real image format.
+    const m = data.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/i);
     if (!m) continue;
     if (m[2].length > MAX_SINGLE_IMAGE_CHARS) continue;
     if (session.imageStoreBytes + m[2].length > MAX_IMAGE_STORE_CHARS) {
       // Store is full — stop accepting new bytes (refs remain usable).
       break;
     }
+    let mime = m[1].toLowerCase();
+    if (!mime.startsWith("image/")) {
+      const sniffed = sniffImageMimeB64(m[2]);
+      if (!sniffed) continue; // not image bytes (text/xml/pdf body) — reject
+      mime = sniffed;
+    }
     session.imageStore.set(fileid, {
-      mime: m[1].toLowerCase(),
+      mime,
       b64: m[2],
       name: typeof item.name === "string" ? item.name : undefined,
     });
     session.imageStoreBytes += m[2].length;
-    session.logImagesUploaded += 1;
     stored += 1;
   }
-  if (stored > 0) session.updatedAt = Date.now();
+  if (stored > 0) {
+    session.logImagesUploaded = logImagesUploadedCount(session);
+    session.updatedAt = Date.now();
+  }
   return stored;
 }
 

@@ -59,6 +59,20 @@
  * collected too, log maps keyed by the FULL uid ("BJ.P259.J45") are
  * readable, and huge-payload jobs whose logs land AFTER their scan window
  * get a bounded slow-delivery re-poll before the session completes.
+ *
+ * v3.12: CONTENT-TYPE-INDEPENDENT byte upload. The real CryoSmart server
+ * serves /api/log_image/ responses with NO Content-Type — a typeless blob
+ * read through FileReader becomes data:application/octet-stream, which the
+ * app server's image/*-only check rejected, so a capture could stream 128
+ * refs and store ZERO bytes ("graph和report中都没有加载出来图片"). The
+ * script now sniffs the real image type from the BYTES (magic signatures,
+ * with the ref's own filetype/extension as fallback) and builds the data
+ * URL itself; the app server likewise sniffs+accepts any-mime data URLs
+ * (this also rescues STALE v3.10/v3.11 script copies still open in the
+ * user's CryoSmart tab). Map previews (output_group_images) and card tiles
+ * (ui_tile_images) ride the SAME byte pipeline — over the HTTPS preview
+ * their direct intranet URLs are mixed-content-blocked, so without stored
+ * bytes the report's map section showed nothing.
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -112,7 +126,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.11 — LAST-ITERATION, LAST-ROUND, PER-JOB log
+// CryoSmart Smart Capture v3.12 — LAST-ITERATION, LAST-ROUND, PER-JOB log
 // images. Job metadata uploads for the WHOLE project immediately (fast),
 // but log images are fetched ONLY for the jobs the traced lineage needs:
 // the script waits for the web app's Trace Lineage action to publish the
@@ -144,7 +158,12 @@ export function SmartCapturePanel({ onCapture }: Props) {
 // file, and hetero_refine / homo_abinit are rescued three ways: files[]
 // entries are collected (not just imgfiles), full-uid log map keys
 // ("BJ.P259.J45") are readable, and slow huge-payload deliveries get a
-// bounded re-poll before the session completes.
+// bounded re-poll before the session completes. v3.12: image bytes are
+// uploaded regardless of the server's Content-Type (the real server sends
+// NONE — a typeless blob read via FileReader used to produce
+// data:application/octet-stream, which the app rejected, storing 0 of 128
+// images); the type is sniffed from the bytes' magic signatures, and map
+// previews + card tiles ride the same pipeline.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -999,18 +1018,83 @@ export function SmartCapturePanel({ onCapture }: Props) {
   var imgUploaded = 0, imgFailed = 0;
   var imgDone = false;
 
+  // v3.12: resolve the real image type from the BYTES, never from the
+  // server's Content-Type. The real CryoSmart deployment serves
+  // /api/log_image/ responses with NO type at all — a typeless blob read
+  // through FileReader yields data:application/octet-stream, which the app
+  // server (v3.11 and older) rejected. A capture could stream 128 image
+  // refs and store ZERO bytes, so the graph and report showed no images.
+  function sniffImageMime(b) {
+    if (!b || b.length < 4) return null;
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'image/png';
+    if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'image/jpeg';
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
+    if (b[0] === 0x42 && b[1] === 0x4D) return 'image/bmp';
+    if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+        b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+    if ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2A) ||
+        (b[0] === 0x4D && b[1] === 0x4D && b[2] === 0x00)) return 'image/tiff';
+    if (b[0] === 0x00 && b[1] === 0x00 && b[2] === 0x01) return 'image/x-icon';
+    // SVG is text: skip whitespace/BOM, then look for an xml/svg open tag.
+    for (var si = 0; si < Math.min(32, b.length); si++) {
+      var sc = b[si];
+      if (sc === 0x3C) {
+        var sHead = '';
+        for (var sk = si; sk < Math.min(si + 12, b.length); sk++) sHead += String.fromCharCode(b[sk]);
+        var sLo = sHead.toLowerCase();
+        if (sLo.indexOf('<svg') === 0 || sLo.indexOf('<?xml') === 0) return 'image/svg+xml';
+        break;
+      }
+      if (sc !== 0x20 && sc !== 0x09 && sc !== 0x0A && sc !== 0x0D && sc !== 0xEF && sc !== 0xBB && sc !== 0xBF) break;
+    }
+    return null;
+  }
+
+  // v3.12: the ref itself usually knows the type (filetype / filename
+  // extension) — the last-resort hint when neither bytes nor server tell us.
+  function refMimeHint(ref) {
+    if (!ref) return null;
+    var ft = typeof ref.filetype === 'string' ? ref.filetype.toLowerCase() : '';
+    if (ft.indexOf('image/') === 0) return ft;
+    var ftShort = ft === 'jpg' ? 'jpeg' : (ft === 'tif' ? 'tiff' : (ft === 'svg' ? 'svg+xml' : ft));
+    if (ftShort === 'png' || ftShort === 'jpeg' || ftShort === 'gif' || ftShort === 'bmp' ||
+        ftShort === 'webp' || ftShort === 'tiff' || ftShort === 'ico' || ftShort === 'avif' || ftShort === 'svg+xml') {
+      return 'image/' + ftShort;
+    }
+    var nm = String(ref.filename || ref.name || '').toLowerCase();
+    var dot = nm.lastIndexOf('.');
+    if (dot >= 0 && dot < nm.length - 1) {
+      var ext = nm.slice(dot + 1);
+      var extM = ext === 'jpg' ? 'jpeg' : (ext === 'tif' ? 'tiff' : (ext === 'svg' ? 'svg+xml' : ext));
+      if (extM === 'png' || extM === 'jpeg' || extM === 'gif' || extM === 'bmp' ||
+          extM === 'webp' || extM === 'tiff' || extM === 'ico' || extM === 'avif' || extM === 'svg+xml') {
+        return 'image/' + extM;
+      }
+    }
+    return null;
+  }
+
   function fetchImageData(ref) {
     if (!ref || !ref.fileid) return Promise.resolve(null);
     return fetch('/api/log_image/' + encodeURIComponent(ref.fileid), { credentials: 'include' })
       .then(function(r) { return r.ok ? r.blob() : null; })
       .then(function(b) {
         if (!b || b.size === 0 || b.size > IMG_MAX_BYTES) return null;
-        if (b.type && b.type !== '' && b.type.indexOf('image/') !== 0) return null;
-        return new Promise(function(res) {
-          var fr = new FileReader();
-          fr.onload = function() { res(String(fr.result) || null); };
-          fr.onerror = function() { res(null); };
-          fr.readAsDataURL(b);
+        if (!b.arrayBuffer) return null;
+        return b.arrayBuffer().then(function(buf) {
+          var bytes = new Uint8Array(buf);
+          // Type priority: magic bytes > server Content-Type (when image/*)
+          // > the ref's own filetype/extension evidence.
+          var mime = sniffImageMime(bytes) ||
+            (b.type && b.type.indexOf('image/') === 0 ? b.type : null) ||
+            refMimeHint(ref);
+          if (!mime) return null;
+          var bin = '';
+          var CH = 32768;
+          for (var i = 0; i < bytes.length; i += CH) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+          }
+          return 'data:' + mime + ';base64,' + btoa(bin);
         });
       })
       .catch(function() { return null; });
@@ -1054,13 +1138,60 @@ export function SmartCapturePanel({ onCapture }: Props) {
     });
   }
 
+  // v3.12: map previews (output_group_images) and card tiles
+  // (ui_tile_images) ride along as bare fileids in the JOBS payload —
+  // without their BYTES the report's map section and the graph cards show
+  // nothing over the HTTPS preview (direct intranet URLs are
+  // mixed-content-blocked; the app server cannot reach the intranet to
+  // proxy them). Queue them through the SAME byte pipeline as log images.
+  var assetQueued = {};
+  var imgQueuedIds = {};
+  function enqueueRef(ref) {
+    if (!ref || !ref.fileid || imgQueuedIds[ref.fileid]) return;
+    imgQueuedIds[ref.fileid] = 1;
+    imgQueue.push(ref);
+  }
+  function pumpImgWorkers() {
+    while (imgWorkers < IMG_WORKERS && imgQueue.length) { imgWorkers++; imgWorker(); }
+  }
+  function queueJobAssets(uid) {
+    if (assetQueued[uid]) return;
+    assetQueued[uid] = 1;    var je = null;
+    for (var i = 0; i < jobs.length; i++) {
+      if (jobs[i] && jobs[i].uid === uid) { je = jobs[i]; break; }
+    }
+    if (!je) return;
+    var added = 0;
+    var ogi = je.output_group_images || {};
+    for (var k in ogi) {
+      if (!Object.prototype.hasOwnProperty.call(ogi, k)) continue;
+      var v = ogi[k];
+      // Plain fileids only — path-shaped values (/demo/x.png) and data/URL
+      // values are served by other means and are not /api/log_image/ ids.
+      if (typeof v === 'string' && v && v.indexOf('/') === -1 &&
+          v.indexOf('data:') !== 0 && v.indexOf('http') !== 0) {
+        enqueueRef({ fileid: v, name: k });
+        added++;
+      }
+    }
+    var tiles = je.ui_tile_images || [];
+    for (var t = 0; t < tiles.length; t++) {
+      var tw = tiles[t];
+      if (tw && typeof tw.fileid === 'string' && tw.fileid && tw.fileid.indexOf('/') === -1) {
+        enqueueRef({ fileid: tw.fileid, name: tw.name || null });
+        added++;
+      }
+    }
+    if (added) pumpImgWorkers();
+  }
+
   function queueImageUploads(items) {
     for (var i = 0; i < items.length; i++) {
       var imgs = items[i] && items[i].images;
       if (!imgs) continue;
-      for (var k = 0; k < imgs.length; k++) imgQueue.push(imgs[k]);
+      for (var k = 0; k < imgs.length; k++) enqueueRef(imgs[k]);
     }
-    while (imgWorkers < IMG_WORKERS && imgQueue.length) { imgWorkers++; imgWorker(); }
+    pumpImgWorkers();
   }
 
   // Wait (bounded) for every queued image to be fetched + posted.
@@ -1316,12 +1447,14 @@ export function SmartCapturePanel({ onCapture }: Props) {
               winning = { action: actions[a], shapeIdx: s, mode: 'return' };
               batch.push({ uid: calibUid, images: extractLogImages(resolved, calibUid) });
               scanned[calibUid] = true;
+              queueJobAssets(calibUid);
               break outer;
             }
           } else if (looksLikeLogs(coerceLogs(ret))) {
             winning = { action: actions[a], shapeIdx: s, mode: 'return' };
             batch.push({ uid: calibUid, images: extractLogImages(coerceLogs(ret), calibUid) });
             scanned[calibUid] = true;
+            queueJobAssets(calibUid);
             break outer;
           }
           // (b) v3.2 deep-scan: logs landed in ANY store state shape (this
@@ -1342,6 +1475,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
                 winning = { action: actions[a], shapeIdx: s, mode: 'diff' };
                 batch.push({ uid: calibUid, images: extractLogImages(pick.arr, calibUid) });
                 scanned[calibUid] = true;
+                queueJobAssets(calibUid);
                 console.log('[CryoSmart] Logs landed in state at "' + pick.path + '" — deep-scan mode.');
                 break outer;
               }
@@ -1351,6 +1485,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
               winning = { action: actions[a], shapeIdx: s, mode: 'state' };
               batch.push({ uid: calibUid, images: extractLogImages(logs, calibUid) });
               scanned[calibUid] = true;
+              queueJobAssets(calibUid);
               break outer;
             }
             await new Promise(function(r) { setTimeout(r, 140); });
@@ -1367,6 +1502,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
           winning = { http: true };
           batch.push({ uid: calibPool[pi], images: extractLogImages(probe, calibPool[pi]) });
           scanned[calibPool[pi]] = true;
+          queueJobAssets(calibPool[pi]);
         }
       }
     }
@@ -1451,6 +1587,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
         if (lateLogs && lateLogs.length) logs2 = lateLogs;
       }
       scanned[uid2] = true;
+      queueJobAssets(uid2);
       if (!logs2 || !logs2.length) noLog.push(uid2);
       batch.push({ uid: uid2, images: logs2 ? extractLogImages(logs2, uid2) : [] });
       await flushLogs(false);
