@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SiteHeader, SiteFooter } from "./components/cryosmart/site-chrome";
 import { DataSourceCard, type LoadedMetadata } from "./components/cryosmart/data-source-card";
-import { ConfigureCard, type TraceOptions } from "./components/cryosmart/configure-card";
+import { ConfigureCard } from "./components/cryosmart/configure-card";
 import { LineagePreviewCard } from "./components/cryosmart/lineage-preview-card";
 import { DownloadCard } from "./components/cryosmart/download-card";
 import { HelpCard } from "./components/cryosmart/help-card";
@@ -18,12 +18,6 @@ import { ShieldCheck, Globe, Zap, FileCheck2, ArrowRight, Keyboard } from "lucid
 export default function Home() {
   const [loaded, setLoaded] = useState<LoadedMetadata | null>(null);
   const [summary, setSummary] = useState<LineageSummary | null>(null);
-  const [traceOptions, setTraceOptions] = useState<TraceOptions | null>({
-    includePptx: false,
-    includeImages: true,
-    includeMaps: true,
-    includeFinalResults: true,
-  });
 
   const importState = useImportedMetadata({
     onLoaded: (data) => {
@@ -164,8 +158,6 @@ export default function Home() {
             loaded={loaded}
             summary={summary}
             onSummary={setSummary}
-            onOptionsChange={setTraceOptions}
-            initialOptions={traceOptions || undefined}
             awaitingImport={importState.status === "polling"}
             importToken={importState.status === "polling" ? importState.token : null}
             autoTraceJobUid={importState.endJobUid}
@@ -181,7 +173,7 @@ export default function Home() {
             importStatus={importState.status}
             stagedImport={importState.token !== null}
           />
-          <DownloadCard summary={summary} options={traceOptions} loaded={loaded} />
+          <DownloadCard summary={summary} loaded={loaded} />
           <HelpCard />
         </div>
       </main>

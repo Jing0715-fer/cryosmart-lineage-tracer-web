@@ -115,8 +115,8 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
     setEmbedFailed(false);
     setIframeHeight(600);
     setEmbeddingProgress("Prefetching images for report preview…");
-    prefetchImagesForReport(session, summary, (msg) => {
-      if (!cancelled) setEmbeddingProgress(msg);
+    prefetchImagesForReport(session, summary, (p) => {
+      if (!cancelled) setEmbeddingProgress(p.message ?? "Embedding images…");
     }, { stagedImport })
       .then((map) => {
         if (cancelled) return;

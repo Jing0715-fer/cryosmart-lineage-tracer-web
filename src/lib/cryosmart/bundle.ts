@@ -96,9 +96,14 @@ export async function buildBundle(
   // the `images/` folder alongside the HTML so the report works offline.
   let htmlOpts: ReportHtmlOptions = { bundleMode: options.includeImages };
   if (options.includeImages && options.session) {
-    onProgress?.({ phase: "images", current: 0, total: 2, message: "Prefetching images for report..." });
-    const embeddedImages = await prefetchImagesForReport(options.session, summary, (msg) =>
-      onProgress?.({ phase: "images", current: 0, total: 2, message: msg })
+    onProgress?.({ phase: "images", current: 0, total: 0, message: "Prefetching images for report..." });
+    const embeddedImages = await prefetchImagesForReport(options.session, summary, (p) =>
+      onProgress?.({
+        phase: "images",
+        current: p.current ?? 0,
+        total: p.total ?? 0,
+        message: p.message ?? "Embedding images…",
+      })
     );
     htmlOpts = { embeddedImages, session: options.session, bundleMode: true };
   }
@@ -138,15 +143,40 @@ export async function buildBundle(
     }
   }
 
-  // PPTX (optional)
+  // PPTX (optional). The PPTX builder embeds every byte in imageMap into
+  // the slide XML — large lineages (50+ jobs x 10+ previews) can push
+  // the resulting blob past 100MB and stall the tab. Cap the imageMap at
+  // 50 entries to keep the build bounded; downstream the missing images
+  // fall back to the report's local_image / remote-URL chain.
+  const PPTX_IMAGE_CAP = 50;
   if (options.includePptx) {
-    onProgress?.({ phase: "pptx", current: 0, total: 2, message: "Fetching PPTX images…" });
+    onProgress?.({ phase: "pptx", current: 0, total: 0, message: "Fetching PPTX images…" });
     const imageMap = new Map<string, Uint8Array>();
     if (options.session) {
       try {
-        await collectPptImages(summary, options.session, imageMap, (msg) =>
-          onProgress?.({ phase: "pptx", current: 0, total: 2, message: msg })
+        await collectPptImages(summary, options.session, imageMap, (p) =>
+          onProgress?.({
+            phase: "pptx",
+            current: p.current,
+            total: p.total,
+            message: p.message,
+          })
         );
+        if (imageMap.size > PPTX_IMAGE_CAP) {
+          warnings.push(
+            `PPTX image cap: kept the first ${PPTX_IMAGE_CAP} of ${imageMap.size} fetched images to keep the build bounded; the rest fall back to the report's local_image / remote-URL chain.`
+          );
+          // Trim to the cap — insertion order preserves the order
+          // collectPptImages saw them (representative previews first).
+          const trimmed = new Map<string, Uint8Array>();
+          let i = 0;
+          for (const [k, v] of imageMap) {
+            if (i++ >= PPTX_IMAGE_CAP) break;
+            trimmed.set(k, v);
+          }
+          imageMap.clear();
+          for (const [k, v] of trimmed) imageMap.set(k, v);
+        }
       } catch (err) {
         warnings.push(`PPTX image fetch failed: ${(err as Error).message}`);
       }
@@ -157,7 +187,9 @@ export async function buildBundle(
       const bytes = new Uint8Array(await blob.arrayBuffer());
       files.push({ path: `${base}_picture_flow.pptx`, data: bytes });
     } catch (err) {
-      warnings.push(`PPTX build failed: ${(err as Error).message}`);
+      const msg = (err as Error).message || String(err);
+      warnings.push(`PPTX build failed: ${msg}`);
+      console.error("[bundle] PPTX build failed:", err);
     }
   }
 
@@ -303,9 +335,13 @@ async function collectPptImages(
   summary: LineageSummary,
   session: CryoSmartSession,
   imageMap: Map<string, Uint8Array>,
-  onMessage: (msg: string) => void
+  onProgress: (p: { current: number; total: number; message: string }) => void
 ) {
   const requests = collectImageRequests(summary);
+  if (requests.length === 0) {
+    onProgress({ current: 0, total: 0, message: "No PPT images to fetch." });
+    return;
+  }
   let done = 0;
   for (const req of requests) {
     try {
@@ -313,10 +349,14 @@ async function collectPptImages(
       imageMap.set(req.url, bytes);
       imageMap.set(req.path, bytes);
     } catch {
-      // skip
+      // skip — a single missing image must not abort the rest
     }
     done++;
-    onMessage(`PPT image ${done}/${requests.length}: ${req.path}`);
+    onProgress({
+      current: done,
+      total: requests.length,
+      message: `PPT image ${done}/${requests.length}: ${req.path}`,
+    });
   }
 }
 

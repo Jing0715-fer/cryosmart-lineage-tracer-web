@@ -5,11 +5,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Play, Loader2, Settings2, FileBox, Boxes, FileCheck2, PresentationIcon } from "lucide-react";
+import { Play, Loader2 } from "lucide-react";
 import type { LoadedMetadata } from "./data-source-card";
 import { buildSummary, normalizeLineageSummary, normalizeJobUid } from "@/lib/cryosmart/lineage";
 import { DEFAULT_BASE_URL } from "@/lib/cryosmart/constants";
@@ -57,8 +56,6 @@ interface Props {
   loaded: LoadedMetadata | null;
   summary: LineageSummary | null;
   onSummary: (s: LineageSummary | null) => void;
-  onOptionsChange?: (o: TraceOptions) => void;
-  initialOptions?: TraceOptions;
   /** True while a staged capture session is still streaming data in. */
   awaitingImport?: boolean;
   /** Active staged-capture token — a successful Trace publishes the lineage's
@@ -71,25 +68,12 @@ interface Props {
   autoTraceJobUid?: string | null;
 }
 
-export interface TraceOptions {
-  includePptx: boolean;
-  includeImages: boolean;
-  includeMaps: boolean;
-  includeFinalResults: boolean;
-}
-
-export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, initialOptions, awaitingImport, importToken, autoTraceJobUid }: Props) {
+export function ConfigureCard({ loaded, summary, onSummary, awaitingImport, importToken, autoTraceJobUid }: Props) {
   const [startJob, setStartJob] = useState("");
   const [startJobDirty, setStartJobDirty] = useState(false);
   const [projectId, setProjectId] = useState("");
   const [tracing, setTracing] = useState(false);
   const [traceLog, setTraceLog] = useState<string[]>([]);
-  const [options, setOptions] = useState<TraceOptions>(initialOptions || {
-    includePptx: true,
-    includeImages: true,
-    includeMaps: false,
-    includeFinalResults: true,
-  });
   // Brief teal glow on the Trace button when a new dataset lands —
   // draws the eye to the now-enabled primary action. Keyed by project+count
   // so the staged capture's second (final) snapshot does not re-trigger it.
@@ -249,14 +233,6 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
       clearTimeout(t2);
     };
   }, [loaded, datasetKey]);
-
-  const updateOptions = useCallback((patch: Partial<TraceOptions>) => {
-    setOptions((prev) => {
-      const next = { ...prev, ...patch };
-      onOptionsChange?.(next);
-      return next;
-    });
-  }, [onOptionsChange]);
 
   const effectiveProjectId = useMemo(() => {
     if (projectId) return projectId;
@@ -509,47 +485,6 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
           </div>
         </div>
 
-        <div>
-          <div className="mb-2 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-            <Settings2 className="h-3 w-3" />
-            Download bundle options
-          </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <OptionCheckbox
-              checked={options.includePptx}
-              onChecked={(v) => updateOptions({ includePptx: v })}
-              icon={<PresentationIcon className="h-3.5 w-3.5" />}
-              title="Picture Flow PPTX"
-              desc="Single A4 slide with embedded preview images (hand-rolled OOXML, no pptxgenjs)"
-              tag="recommended"
-            />
-            <OptionCheckbox
-              checked={options.includeImages}
-              onChecked={(v) => updateOptions({ includeImages: v })}
-              icon={<FileBox className="h-3.5 w-3.5" />}
-              title="Preview images"
-              desc="Micrograph / select-2D / class / map preview PNGs (requires session)"
-              tag={loaded?.session ? "session" : "no session"}
-            />
-            <OptionCheckbox
-              checked={options.includeMaps}
-              onChecked={(v) => updateOptions({ includeMaps: v })}
-              icon={<Boxes className="h-3.5 w-3.5" />}
-              title="Map / MRC files"
-              desc="Normal volume.map for every traced job (requires session)"
-              tag={loaded?.session ? "session" : "no session"}
-            />
-            <OptionCheckbox
-              checked={options.includeFinalResults}
-              onChecked={(v) => updateOptions({ includeFinalResults: v })}
-              icon={<FileCheck2 className="h-3.5 w-3.5" />}
-              title="Final results package"
-              desc="FSC / Guinier / Direction plots + final maps from the start job (requires session)"
-              tag={loaded?.session ? "session" : "no session"}
-            />
-          </div>
-        </div>
-
         {(traceLog.length > 0 || summary) && (
           <>
             <Separator />
@@ -573,49 +508,3 @@ export function ConfigureCard({ loaded, summary, onSummary, onOptionsChange, ini
   );
 }
 
-function OptionCheckbox({
-  checked,
-  onChecked,
-  icon,
-  title,
-  desc,
-  tag,
-}: {
-  checked: boolean;
-  onChecked: (v: boolean) => void;
-  icon: React.ReactNode;
-  title: string;
-  desc: string;
-  tag?: string;
-}) {
-  return (
-    <label
-      className={`flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 transition-colors ${
-        checked ? "border-teal-300 bg-teal-50/60" : "border-slate-200 bg-white hover:bg-slate-50"
-      }`}
-    >
-      <Checkbox checked={checked} onCheckedChange={(v) => onChecked(v === true)} className="mt-0.5" />
-      <div className="flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className="text-slate-500">{icon}</span>
-          <span className="text-[12.5px] font-medium text-slate-800">{title}</span>
-          {tag && (
-            <Badge
-              variant="outline"
-              className={`ml-auto px-1.5 py-0 text-[9.5px] font-medium uppercase ${
-                tag === "live" ? "border-emerald-300 bg-emerald-50 text-emerald-700" :
-                tag === "recommended" ? "border-teal-300 bg-teal-50 text-teal-700" :
-                "border-slate-300 bg-slate-50 text-slate-500"
-              }`}
-            >
-              {tag}
-            </Badge>
-          )}
-        </div>
-        <p className="mt-0.5 text-[11px] leading-snug text-slate-500">{desc}</p>
-      </div>
-    </label>
-  );
-}
-
-// TraceOptions is exported above as an interface

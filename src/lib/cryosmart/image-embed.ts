@@ -180,10 +180,13 @@ export interface PrefetchImagesOptions {
   stagedImport?: boolean;
 }
 
+/** Structured progress: pass any subset of current/total/message. */
+export type PrefetchProgress = (p: { current?: number; total?: number; message?: string }) => void;
+
 export async function prefetchImagesForReport(
   session: CryoSmartSession,
   summary: import("./types").LineageSummary,
-  onProgress?: (msg: string) => void,
+  onProgress?: PrefetchProgress,
   opts?: PrefetchImagesOptions
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
@@ -247,7 +250,7 @@ export async function prefetchImagesForReport(
 
   const urlList = Array.from(urls).filter(Boolean);
   if (urlList.length === 0) {
-    onProgress?.("No images referenced in this lineage.");
+    onProgress?.({ message: "No images referenced in this lineage." });
     return out;
   }
 
@@ -276,7 +279,7 @@ export async function prefetchImagesForReport(
     urlList.length = 0;
     urlList.push(...kept);
     if (skipped > 0) {
-      onProgress?.(`Skipping ${skipped} intranet-only image URL${skipped === 1 ? "" : "s"} (bytes not uploaded yet)…`);
+      onProgress?.({ message: `Skipping ${skipped} intranet-only image URL${skipped === 1 ? "" : "s"} (bytes not uploaded yet)…` });
     }
   }
 
@@ -292,7 +295,7 @@ export async function prefetchImagesForReport(
     while (index < urlList.length) {
       const myIndex = index++;
       const url = urlList[myIndex];
-      onProgress?.(`Embedding image ${done + 1}/${urlList.length}…`);
+      onProgress?.({ current: done, total: urlList.length, message: `Embedding image ${done + 1}/${urlList.length}…` });
       const dataUrl = await imageToBase64(session, url, {
         skipDirectCryosmart: opts?.stagedImport === true,
       });
@@ -310,10 +313,13 @@ export async function prefetchImagesForReport(
   }
   await Promise.all(workers);
 
-  onProgress?.(
-    embedded > 0
-      ? `${embedded}/${urlList.length} images embedded`
-      : "Image embedding failed — falling back to remote URLs"
-  );
+  onProgress?.({
+    current: urlList.length,
+    total: urlList.length,
+    message:
+      embedded > 0
+        ? `${embedded}/${urlList.length} images embedded`
+        : "Image embedding failed — falling back to remote URLs",
+  });
   return out;
 }
