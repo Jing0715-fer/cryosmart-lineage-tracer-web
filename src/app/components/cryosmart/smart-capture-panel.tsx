@@ -92,6 +92,42 @@ interface Props {
   onCapture: (data: { jobs: unknown[]; projectUid: string; experimentUid: string }) => void;
 }
 
+/**
+ * Copy text to the clipboard with a fallback for non-secure contexts.
+ *
+ * `navigator.clipboard` is only defined in secure contexts (https,
+ * http://localhost, http://127.0.0.1). When the web app is reached over a
+ * LAN IP (e.g. http://192.168.x.x:3000), `navigator.clipboard` is undefined
+ * and `writeText` throws. Fall back to a hidden textarea + execCommand,
+ * which still works in every desktop browser even without a secure context.
+ * Returns true on success.
+ */
+async function copyToClipboard(text: string): Promise<boolean> {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // fall through to the execCommand fallback below
+    }
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export function SmartCapturePanel({ onCapture }: Props) {
   const [copied, setCopied] = useState(false);
   // webAppUrl MUST be resolved client-side only (window.location.origin).
@@ -1745,11 +1781,19 @@ export function SmartCapturePanel({ onCapture }: Props) {
 })();
 `.trim();
 
-  const handleCopyScript = useCallback(() => {
-    navigator.clipboard.writeText(captureScript);
-    setCopied(true);
-    toast.success('Script copied to clipboard!');
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopyScript = useCallback(async () => {
+    const ok = await copyToClipboard(captureScript);
+    if (ok) {
+      setCopied(true);
+      toast.success('Script copied to clipboard!');
+      setTimeout(() => setCopied(false), 2000);
+    } else {
+      toast.error(
+        'Copy failed — script printed to the browser console. Open DevTools and copy from there.'
+      );
+      // eslint-disable-next-line no-console
+      console.log('=== Capture Script ===\n' + captureScript + '\n=== /Capture Script ===');
+    }
   }, [captureScript]);
 
   const handleOpenCryoSmart = useCallback(() => {
