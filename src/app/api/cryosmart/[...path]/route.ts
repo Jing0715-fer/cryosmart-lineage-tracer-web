@@ -20,6 +20,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
   const base = url.searchParams.get("base") || "";
   const cookie = url.searchParams.get("cookie") || "";
   const auth = url.searchParams.get("auth") || "";
+  // Optional per-request upstream timeout (ms), clamped to 1s–5min. The
+  // default 10s abort is right for JSON/data calls and small images, but
+  // map / .mrc downloads routinely exceed it even on fast intranets — the
+  // ZIP bundle builder passes a large `timeout` for those (every map used
+  // to die with "aborted due to timeout" at 10s).
+  const timeoutRaw = Number(url.searchParams.get("timeout") || "");
+  const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0
+    ? Math.min(300_000, Math.max(1_000, Math.round(timeoutRaw)))
+    : 10_000;
 
   if (!base) {
     return NextResponse.json(
@@ -50,7 +59,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
   const cryosmartPath = path.map(encodeURIComponent).join("/").replace(/%2F/gi, "/");
   const targetUrl = new URL(baseUrl.origin + "/" + cryosmartPath);
   for (const [key, value] of url.searchParams.entries()) {
-    if (key === "base" || key === "cookie" || key === "auth") continue;
+    if (key === "base" || key === "cookie" || key === "auth" || key === "timeout") continue;
     targetUrl.searchParams.set(key, value);
   }
 
@@ -62,16 +71,16 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
   if (auth) headers["Authorization"] = auth;
 
   try {
-    // 10s abort timeout — unreachable intranet upstreams otherwise hang the
-    // request for minutes (this route backs the image base64 pre-fetch and
-    // every proxied data call).
+    // Abort timeout (default 10s; see `timeout` above) — unreachable
+    // intranet upstreams otherwise hang the request for minutes (this
+    // route backs the image base64 pre-fetch and every proxied data call).
     const upstream = await fetch(targetUrl, {
       method: "GET",
       headers,
       redirect: "follow",
       credentials: "omit",
       cache: "no-store",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     const contentType = upstream.headers.get("content-type") || "application/octet-stream";

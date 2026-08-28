@@ -1452,16 +1452,19 @@ export interface ReportHtmlOptions {
     // Log images — captured from the SPA's lazy jobLogs state by the Smart
     // Capture script (force-loaded via the store's log-loading action).
     // Rendered whenever present so runtime log previews make it into the
-    // report alongside the tile/select-2D images. Capped at 12 per job to
-    // keep the report printable; the count in the heading tells the reader
-    // when more exist (the graph's job-detail modal shows every one).
+    // report alongside the tile/select-2D images. Capped at 24 per job
+    // (v3.13 — was 12; with the last-iteration + numbered-series collapse
+    // filters a job's final-round set is typically ≤ 24, so the cap now
+    // only bites genuinely huge galleries) to keep the report printable;
+    // the count in the heading tells the reader when more exist (the
+    // graph's job-detail modal shows every one).
     // The block carries `imgs-block` so failed images can auto-hide it and
     // keep the heading count truthful (see reportImgTag's markFailed).
     const logImages = (node.images || []).filter(
       (item) => item.kind === "log_image" || item.kind === "image_log"
     );
     if (logImages.length > 0) {
-      const LIMIT = 12;
+      const LIMIT = 24;
       const shown = logImages.slice(0, LIMIT);
       const html = reportImageBoxes(node.uid, shown, LIMIT, opts);
       if (html) {

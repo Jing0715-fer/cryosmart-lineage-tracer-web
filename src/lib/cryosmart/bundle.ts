@@ -23,6 +23,9 @@ import {
 } from "./constants";
 import {
   cryoSmartBytes,
+  isDirectCryosmartUrl,
+  isSessionImageUrl,
+  probeCryosmartReachable,
   type CryoSmartSession,
 } from "./proxy-client";
 
@@ -65,6 +68,70 @@ const HELPER_FILES = [
 
 function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
+}
+
+/** Run `worker` over `items` with at most `limit` concurrent invocations. */
+async function pooledMap<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  let index = 0;
+  const runners = Array.from(
+    { length: Math.max(0, Math.min(limit, items.length)) },
+    async () => {
+      while (index < items.length) {
+        const i = index++;
+        await worker(items[i], i);
+      }
+    }
+  );
+  await Promise.all(runners);
+}
+
+/** Text for `images/NOT_UPLOADED_LINKS.txt` — every image the ZIP could not
+ *  bundle (bytes never uploaded by the capture script + CryoSmart
+ *  unreachable from this app server), with its direct URL so the user can
+ *  fetch it from the intranet manually. */
+function notUploadedLinksText(
+  baseUrl: string,
+  items: Array<{ path: string; url: string }>
+): string {
+  const base = String(baseUrl || "").replace(/\/$/, "");
+  const lines = [
+    "The images below are referenced by the report but were NOT bundled:",
+    "their bytes were never uploaded by the Smart Capture script, and this",
+    "app's server cannot reach the CryoSmart instance. Open each URL in a",
+    "browser on the CryoSmart network (logged in to CryoSmart) and save it",
+    "under the listed file name inside the images/ folder to complete the",
+    "offline report.",
+    "",
+  ];
+  for (const item of items) {
+    const url = /^https?:\/\//i.test(item.url)
+      ? item.url
+      : `${base}/${String(item.url).replace(/^\/+/, "")}`;
+    lines.push(`${item.path}`);
+    lines.push(`    ${url}`);
+  }
+  return lines.join("\n") + "\n";
+}
+
+/** Text for `maps/DOWNLOAD_LINKS.txt` — direct CryoSmart URLs for every map
+ *  that could not be bundled automatically. */
+function mapLinksText(items: Array<{ path: string; link: string }>): string {
+  const lines = [
+    "The maps below could not be bundled automatically (this app's server",
+    "cannot reach the CryoSmart instance). Open each URL in a browser on the",
+    "CryoSmart network (logged in to CryoSmart) and save it under the listed",
+    "file name inside the maps/ folder.",
+    "",
+  ];
+  for (const item of items) {
+    lines.push(`maps/${item.path}`);
+    lines.push(`    ${item.link}`);
+  }
+  return lines.join("\n") + "\n";
 }
 
 /**
@@ -143,6 +210,42 @@ export async function buildBundle(
     }
   }
 
+  // ── Staged-session image partitioning + upstream reachability ──────
+  // (v3.13) Images referenced by the report come in two flavours after a
+  // staged Smart Capture:
+  //   • session-image URLs — bytes already uploaded into the import
+  //     session; served same-origin by THIS app, always fetchable.
+  //   • direct `http://<cryosmart>/api/log_image/…` URLs — refs whose
+  //     bytes were never uploaded. Only the app server's proxy could
+  //     fetch those, and when the app runs in the cloud the intranet
+  //     CryoSmart is unreachable — each URL used to burn a 10s abort and
+  //     fail (the user's "247 warnings" bundle). They are now attempted
+  //     only when the server can reach CryoSmart; the rest are listed in
+  //     images/NOT_UPLOADED_LINKS.txt for manual intranet download.
+  const imageRequests = options.session ? collectImageRequests(summary) : [];
+  const sessionImageItems = imageRequests.filter((i) => isSessionImageUrl(i.url));
+  const directImageItems = imageRequests.filter((i) => isDirectCryosmartUrl(i.url));
+  const otherImageItems = imageRequests.filter(
+    (i) => !isSessionImageUrl(i.url) && !isDirectCryosmartUrl(i.url)
+  );
+
+  // Lazily probed ONCE per bundle build: can THIS app's server reach the
+  // CryoSmart origin at all? (Direct-URL images and every map depend on it.)
+  let upstreamReachable: boolean | null = null;
+  const ensureReachability = async (): Promise<boolean> => {
+    if (!options.session) return false;
+    if (upstreamReachable === null) {
+      onProgress?.({
+        phase: "probe",
+        current: 0,
+        total: 1,
+        message: `Checking CryoSmart reachability (${options.session.baseUrl})…`,
+      });
+      upstreamReachable = await probeCryosmartReachable(options.session);
+    }
+    return upstreamReachable;
+  };
+
   // PPTX (optional). The builder embeds every byte in imageMap into the
   // slide XML. For very large lineages the resulting blob can be sizeable
   // (100+ jobs x multiple previews), but the user explicitly asked to see
@@ -154,7 +257,14 @@ export async function buildBundle(
     const imageMap = new Map<string, Uint8Array>();
     if (options.session) {
       try {
-        await collectPptImages(summary, options.session, imageMap, (p) =>
+        // Session-store images always; direct intranet URLs only when the
+        // app server can actually reach CryoSmart (same rule as the images
+        // phase below — skipping them avoids a wall of 10s proxy aborts).
+        const pptRequests = [...sessionImageItems, ...otherImageItems];
+        if (directImageItems.length > 0 && (await ensureReachability())) {
+          pptRequests.push(...directImageItems);
+        }
+        await collectPptImages(pptRequests, options.session, imageMap, (p) =>
           onProgress?.({
             phase: "pptx",
             current: p.current,
@@ -182,23 +292,63 @@ export async function buildBundle(
   if (options.includeImages) {
     onProgress?.({ phase: "images", current: 0, total: 1, message: "Collecting preview images…" });
     if (options.session) {
-      const imageItems = collectImageRequests(summary);
       let done = 0;
-      for (const item of imageItems) {
+      const totalImages =
+        sessionImageItems.length + otherImageItems.length + directImageItems.length;
+      const notUploaded: Array<{ path: string; url: string }> = [];
+
+      const fetchOne = async (item: { url: string; path: string }, timeoutMs?: number) => {
         try {
-          const bytes = await cryoSmartBytes(options.session, item.url);
+          const bytes = await cryoSmartBytes(
+            options.session!,
+            item.url,
+            timeoutMs ? { timeoutMs } : undefined
+          );
           // item.path is already the HTML-canonical `images/<uid>/<name>.png`
           // (from localImageFilename) — no extra prefix here.
           files.push({ path: item.path, data: bytes });
         } catch (err) {
+          notUploaded.push(item);
           warnings.push(`Image ${item.path} failed: ${(err as Error).message}`);
         }
         done++;
         onProgress?.({
           phase: "images",
           current: done,
-          total: imageItems.length,
-          message: `Image ${done}/${imageItems.length}: ${item.path}`,
+          total: totalImages,
+          message: `Image ${done}/${totalImages}: ${item.path}`,
+        });
+      };
+
+      // Session-store images (bytes uploaded by the capture script) are
+      // served same-origin from the import session — fast and always
+      // fetchable; use a small concurrency pool. (These used to be
+      // forwarded through the CryoSmart proxy, which 404'd EVERY one of
+      // them — the 221 lost images in the user's "247 warnings" bundle.)
+      await pooledMap(sessionImageItems, 4, (item) => fetchOne(item));
+      await pooledMap(otherImageItems, 4, (item) => fetchOne(item));
+
+      // Direct intranet URLs — bytes never uploaded. Only the app server's
+      // proxy could fetch them; when CryoSmart is unreachable from this
+      // server (the common cloud-preview deployment) skip the whole batch
+      // after ONE probe instead of N × 10s aborts, and record the links.
+      if (directImageItems.length > 0) {
+        if (await ensureReachability()) {
+          for (const item of directImageItems) {
+            await fetchOne(item, 30_000);
+          }
+        } else {
+          notUploaded.push(...directImageItems);
+          warnings.push(
+            `${directImageItems.length} image(s) skipped: bytes were not uploaded by Smart Capture and CryoSmart (${options.session.baseUrl}) is unreachable from this app — direct links saved to images/NOT_UPLOADED_LINKS.txt`
+          );
+        }
+      }
+
+      if (notUploaded.length > 0) {
+        files.push({
+          path: "images/NOT_UPLOADED_LINKS.txt",
+          data: utf8(notUploadedLinksText(options.session.baseUrl, notUploaded)),
         });
       }
     } else {
@@ -211,20 +361,63 @@ export async function buildBundle(
     onProgress?.({ phase: "maps", current: 0, total: 1, message: "Collecting maps…" });
     if (options.session) {
       const mapItems = collectMapRequests(summary);
-      let done = 0;
-      for (const item of mapItems) {
-        try {
-          const bytes = await cryoSmartBytes(options.session, item.url);
-          files.push({ path: `maps/${item.path}`, data: bytes });
-        } catch (err) {
-          warnings.push(`Map ${item.path} failed: ${(err as Error).message}`);
+      const mapBase = String(options.session.baseUrl || "").replace(/\/$/, "");
+      const mapLink = (item: { url: string; path: string }): string => {
+        const u = String(item.url || "");
+        return /^https?:\/\//i.test(u) ? u : `${mapBase}/${u.replace(/^\/+/, "")}`;
+      };
+      const failedMaps: Array<{ url: string; path: string }> = [];
+
+      if (mapItems.length > 0 && (await ensureReachability())) {
+        let done = 0;
+        let unreachableNow = false;
+        for (const item of mapItems) {
+          if (!unreachableNow) {
+            try {
+              // .mrc volumes are big — give the proxy a long window (the
+              // 10s default aborted every map, even where reachable).
+              const bytes = await cryoSmartBytes(options.session, item.url, {
+                timeoutMs: 180_000,
+              });
+              files.push({ path: `maps/${item.path}`, data: bytes });
+            } catch (err) {
+              const msg = (err as Error).message || String(err);
+              failedMaps.push(item);
+              if (/CryoSmart 502/.test(msg) && /failed to reach/i.test(msg)) {
+                // Connection-level failure — every remaining map will fail
+                // the same way; stop grinding and just record the links.
+                unreachableNow = true;
+                warnings.push(
+                  `CryoSmart became unreachable mid-download — remaining map(s) skipped (links in maps/DOWNLOAD_LINKS.txt)`
+                );
+              } else {
+                warnings.push(`Map ${item.path} failed: ${msg}`);
+              }
+            }
+          } else {
+            failedMaps.push(item);
+          }
+          done++;
+          onProgress?.({
+            phase: "maps",
+            current: done,
+            total: mapItems.length,
+            message: `Map ${done}/${mapItems.length}: ${item.path}`,
+          });
         }
-        done++;
-        onProgress?.({
-          phase: "maps",
-          current: done,
-          total: mapItems.length,
-          message: `Map ${done}/${mapItems.length}: ${item.path}`,
+      } else if (mapItems.length > 0) {
+        failedMaps.push(...mapItems);
+        warnings.push(
+          `Map download skipped: CryoSmart at ${mapBase} is unreachable from this app server (0/${mapItems.length} bundled) — direct links saved to maps/DOWNLOAD_LINKS.txt`
+        );
+      }
+
+      if (failedMaps.length > 0) {
+        files.push({
+          path: "maps/DOWNLOAD_LINKS.txt",
+          data: utf8(
+            mapLinksText(failedMaps.map((m) => ({ path: m.path, link: mapLink(m) })))
+          ),
         });
       }
     } else {
@@ -315,14 +508,17 @@ export async function buildBundle(
   };
 }
 
-/** Collect image URLs from the summary for PPTX embedding. */
+/** Fetch the given image requests for PPTX embedding.
+ *
+ *  The caller hands in the already-partitioned request list (session-store
+ *  images plus, when the app server can reach CryoSmart, direct-URL
+ *  images) — see buildBundle. */
 async function collectPptImages(
-  summary: LineageSummary,
+  requests: Array<{ url: string; path: string }>,
   session: CryoSmartSession,
   imageMap: Map<string, Uint8Array>,
   onProgress: (p: { current: number; total: number; message: string }) => void
 ) {
-  const requests = collectImageRequests(summary);
   if (requests.length === 0) {
     onProgress({ current: 0, total: 0, message: "No PPT images to fetch." });
     return;

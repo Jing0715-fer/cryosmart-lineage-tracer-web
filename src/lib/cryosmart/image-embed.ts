@@ -156,7 +156,7 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
  *
  * Scope per node (matching reportMediaBlock / reportClassTable /
  * reportMapDownloads / reportImageBoxes):
- *   - node.images: log-image refs (log_image + image_log kinds) → first 12;
+ *   - node.images: log-image refs (log_image + image_log kinds) → first 24;
  *     other kinds are not rendered by the report (they feed the graph
  *     card / modal instead) → skipped.
  *   - representative_micrograph_images → first 3.
@@ -168,7 +168,7 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
  * must be a key in the returned map. Fetches are deduped, so adding both
  * variants costs nothing extra when they're equal.
  */
-const REPORT_LOG_IMAGE_LIMIT = 12;
+const REPORT_LOG_IMAGE_LIMIT = 24;
 
 export interface PrefetchImagesOptions {
   /** A staged Smart-Capture session is ACTIVE for this summary — the capture

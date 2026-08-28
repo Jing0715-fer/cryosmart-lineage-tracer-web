@@ -208,6 +208,7 @@ export function DownloadCard({ summary, loaded }: Props) {
 
   const enabled = !!summary;
   const phaseLabel = progress?.phase === "report" ? "Generating reports"
+    : progress?.phase === "probe" ? "Checking CryoSmart reachability"
     : progress?.phase === "pptx" ? "Building PPTX"
     : progress?.phase === "images" ? "Fetching preview images"
     : progress?.phase === "maps" ? "Fetching maps"

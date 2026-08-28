@@ -242,9 +242,13 @@ export function addLogBatchToSession(
   return session;
 }
 
-/** Max base64 chars stored across a session's image store (~192 MB).
- * When exceeded, further uploads are rejected (refs still flow through). */
-const MAX_IMAGE_STORE_CHARS = 192 * 1024 * 1024;
+/** Max base64 chars stored across a session's image store (~288 MB).
+ * When exceeded, further uploads are rejected (refs still flow through).
+ * v3.13: 192 MB → 288 MB — a full-project capture (46 jobs, 900+ images)
+ * lands around 200–250 MB of base64; the old cap silently dropped the
+ * LAST-scanned jobs' bytes (hetero/abinit at the end of the pipeline),
+ * which then rendered as "no log images" over the HTTPS preview. */
+const MAX_IMAGE_STORE_CHARS = 288 * 1024 * 1024;
 
 /** Max base64 chars for a single image (~4 MB binary → ~5.4 MB base64). */
 const MAX_SINGLE_IMAGE_CHARS = 6 * 1024 * 1024;

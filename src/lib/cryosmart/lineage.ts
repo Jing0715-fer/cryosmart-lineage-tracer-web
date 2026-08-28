@@ -788,6 +788,69 @@ function lastIterationOnly<T extends { text?: unknown; name?: unknown; filename?
   });
 }
 
+/** Trailing index of a NUMBERED-SERIES title or file name —
+ *  "Per particle scale factors 007" → { base: "per particle scale factors",
+ *  num: 7 }. Unlike `iterNumOf` this needs no explicit "Iteration" marker:
+ *  nu_refine-style jobs emit one numbered title/file per round
+ *  ("…scale factors 000" … "…scale factors 007") and the marker filter
+ *  cannot see them (user report: all 8 rounds of per-particle-scale-factor
+ *  plots were captured; only the last one's files still exist).
+ *
+ *  GUARDS (a missed collapse is safe — everything stays — so these err on
+ *  the side of NOT collapsing):
+ *   • 2–4 digit numbers only: 1-digit suffixes ("mic0", "class_5",
+ *     "particles1") index things, not rounds.
+ *   • bases ending in class/cluster/group/frame/mic/micrograph/exposure/
+ *     blob/mask words are class or entity galleries ("volume_class_10",
+ *     "trefoil for group 12") and must keep every row.
+ *   • separators (_ space - : .) required before the number so a filename
+ *     like "P259_J44_x007" is not split at "x007".
+ *  Underscores and spaces normalize to single spaces in the base so a
+ *  title ("…factors 007") and its file name ("…factors_007.png") land on
+ *  the SAME series. */
+function trailingIndexOf(s: unknown): { base: string; num: number } | null {
+  if (typeof s !== "string" || !s) return null;
+  const t = s
+    .replace(/\.[a-z0-9]{1,6}$/i, "")
+    .replace(/[_\s]+/g, " ")
+    .trim();
+  const m = t.match(/^(.+?)[ \-:.]+(\d{2,4})$/);
+  if (!m) return null;
+  const base = m[1].trim().toLowerCase();
+  if (!base) return null;
+  if (/(class|classes|cluster|group|groups|frame|frames|mic|micrograph|exposure|blob|mask)$/.test(base)) {
+    return null;
+  }
+  return { base, num: parseInt(m[2], 10) };
+}
+
+/** Keep only the LAST item of each numbered series (see trailingIndexOf).
+ *  Bases seen with a single number — and items with no trailing index —
+ *  pass through untouched. Runs SEPARATELY from the marker-based
+ *  lastIterationOnly pass on purpose: numbered-series indices are
+ *  per-BASE sequences ("scale factors 000–007" while the same job's
+ *  explicit-marker plots run "Iteration 000–008"), so merging them into
+ *  one global max would delete entire series whose top index happens to
+ *  be below another series' max. */
+function collapseNumberedSeries<T>(
+  items: T[],
+  keyOf: (item: T) => { base: string; num: number } | null
+): T[] {
+  if (items.length < 2) return items;
+  const maxNum = new Map<string, number>();
+  for (const item of items) {
+    const k = keyOf(item);
+    if (!k) continue;
+    const cur = maxNum.get(k.base);
+    if (cur === undefined || k.num > cur) maxNum.set(k.base, k.num);
+  }
+  if (maxNum.size === 0) return items;
+  return items.filter((item) => {
+    const k = keyOf(item);
+    return k === null || maxNum.get(k.base) === k.num;
+  });
+}
+
 /**
  * LAST-ROUND-ONLY filter for RAW jobLogs entries (`image_logs`).
  *
@@ -803,7 +866,12 @@ function lastRoundImageLogEntries<T extends { text?: unknown }>(entries: T[]): T
   // v3.11: LAST-ITERATION first — earlier-iteration entries must drop
   // BEFORE the per-title filter (a newest-first stream would otherwise
   // keep the FIRST iteration's entry for every title).
-  const pool = lastIterationOnly(entries as Array<T & { text?: unknown; imgfiles?: unknown }>);
+  let pool = lastIterationOnly(entries as Array<T & { text?: unknown; imgfiles?: unknown }>);
+  // v3.13: NUMBERED-SERIES collapse — titles like "Per particle scale
+  // factors 007" (one per round, no "Iteration" marker) collapse to their
+  // highest number. Keyed on the TITLE only; numbered files INSIDE one
+  // entry are collapsed later in imageAssets().
+  pool = collapseNumberedSeries(pool, (entry) => trailingIndexOf((entry as { text?: unknown })?.text));
   if (pool.length < 2) return pool;
   const lastIdx = new Map<string, number>();
   for (let i = 0; i < pool.length; i++) {
@@ -837,7 +905,28 @@ function lastRoundLogImageRefs<T extends { text?: unknown; name?: unknown }>(ref
   // v3.11: LAST-ITERATION first — see lastIterationOnly. Applied before
   // the run-level filter so a re-run multi-iteration job collapses to its
   // final round's FINAL iteration.
-  const pool = lastIterationOnly(refs as Array<T & { text?: unknown; name?: unknown }>);
+  let pool = lastIterationOnly(refs as Array<T & { text?: unknown; name?: unknown }>);
+  // v3.13: NUMBERED-SERIES collapse — refs whose title OR file name ends
+  // in a bare 2–4 digit number ("Per particle scale factors 007",
+  // "per_particle_scale_factors_007.png") form one series per base; keep
+  // only each series' highest number. The marker-based pass above cannot
+  // see these (no "Iteration" word) and the user's capture shipped all 8
+  // rounds of scale-factor plots. The FILE-NAME fallback only applies when
+  // the ref has NO title at all — a ref WITH a numberless title plus
+  // numbered files (e.g. "Final classes" + J4_final_000.png/001.png) is a
+  // CLASS GALLERY whose files must all survive.
+  pool = collapseNumberedSeries(
+    pool,
+    (ref) => {
+      const text = (ref as { text?: unknown })?.text;
+      const textStr = typeof text === "string" ? text.trim() : "";
+      if (textStr) return trailingIndexOf(textStr);
+      return (
+        trailingIndexOf((ref as { name?: unknown })?.name) ??
+        trailingIndexOf((ref as { filename?: unknown })?.filename)
+      );
+    }
+  );
   if (pool.length < 2) return pool;
   // Build consecutive runs: { key, start, end } (key === null → untitled).
   const runs: Array<{ key: string | null; start: number; end: number }> = [];
@@ -1013,6 +1102,12 @@ export function imageAssets(
   for (const log of imageLogs) {
     // v3.11: accept `files`-shaped entries too (hetero_refine /
     // homo_abinit deliver their images there on some builds).
+    // v3.13 note: NO file-level numbered-series collapse here on purpose —
+    // a numberless-title entry carrying numbered files (e.g. "Final
+    // classes" + J4_final_000.png / J4_final_001.png) is a CLASS GALLERY,
+    // not an iteration series; the user's numbered series ("Per particle
+    // scale factors 007") always carry the number in the ref's title or
+    // own name, which the REF-level collapse above already handles.
     const logFiles = (log.imgfiles && log.imgfiles.length ? log.imgfiles : log.files) || [];
     if (logFiles.length === 0) continue;
     for (const imgFile of logFiles) {

@@ -73,6 +73,18 @@
  * (ui_tile_images) ride the SAME byte pipeline — over the HTTPS preview
  * their direct intranet URLs are mixed-content-blocked, so without stored
  * bytes the report's map section showed nothing.
+ *
+ * v3.13: NUMBERED-SERIES collapse + hetero/abinit loader rescue.
+ * (1) Series whose titles/file names end in a bare 2–4 digit number
+ * ("Per particle scale factors 007") carry no "Iteration" marker, so the
+ * v3.11 filter kept every round (user: 000–007 all captured). Only the
+ * highest number per series survives now. (2) Huge-log jobs
+ * (hetero_refine / homo_abinit / class_3d) regularly missed their log
+ * images: the loader call's 1.5s race and the 1.3s state-diff window both
+ * expired mid-delivery, and shared event streams past 2000 entries became
+ * invisible to the deep scan. The loader now gets a 20s second chance, big
+ * job types get an 8s diff window, the deep-scan caps are 10× bigger, and
+ * the slow-log rescue window is 90s.
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -162,23 +174,25 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.12 — LAST-ITERATION, LAST-ROUND, PER-JOB log
-// images. Job metadata uploads for the WHOLE project immediately (fast),
-// but log images are fetched ONLY for the jobs the traced lineage needs:
-// the script waits for the web app's Trace Lineage action to publish the
-// lineage job list to the session, then scans just those jobs (a 46-job
-// project with 900+ images typically needs only ~10 jobs). Multi-round
-// jobs keep ONLY their latest round's log entries (re-runs re-emit the
-// same titles and the older rounds' files are gone from the server) AND
-// only their FINAL iteration's images (titles/file names carry iteration
-// numbers — "Iteration 000" is the FIRST, previously what you got; only
-// non-image result files that <img> can never render are dropped: PDF /
-// XML / TXT / CSV / maps). Run the script from the END JOB's page and the
+// CryoSmart Smart Capture v3.13 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
+// project immediately (fast), but log images are fetched ONLY for the jobs
+// the traced lineage needs: the script waits for the web app's Trace
+// Lineage action to publish the lineage job list to the session, then
+// scans just those jobs (a 46-job project with 900+ images typically needs
+// only ~10 jobs). Multi-round jobs keep ONLY their latest round's log
+// entries (re-runs re-emit the same titles and the older rounds' files are
+// gone from the server) AND only their FINAL iteration's images (titles/
+// file names carry iteration numbers — "Iteration 000" is the FIRST,
+// previously what you got; only non-image result files that <img> can
+// never render are dropped: PDF / XML / TXT / CSV / maps). Numbered
+// series ("Per particle scale factors 007") keep only their highest
+// number. Run the script from the END JOB's page and the
 // app auto-traces — zero manual setup. Console escape hatches while it
 // waits: __csCaptureAll() (fetch every job's logs) and __csCaptureFinish()
-// (stop now). Still uploads log-image BYTES same-origin (6 workers, 240s
-// drain — v3.4) and keeps the deep-scan log calibration that finds logs
-// in ANY store state shape (v3.2). v3.7: 20-minute wait window + 3-minute
+// (stop now). Still uploads log-image BYTES same-origin (6 workers, 420s
+// drain) and keeps the deep-scan log calibration that finds logs in ANY
+// store state shape (v3.2). v3.7: 20-minute wait window + 3-minute
 // re-trace grace, honest image-byte counters, loud zero-image diagnostics.
 // v3.8: the web app refreshes the graph + report LIVE as images stream
 // in, and /complete is retried so one lost POST cannot strand the session.
@@ -199,7 +213,12 @@ export function SmartCapturePanel({ onCapture }: Props) {
 // NONE — a typeless blob read via FileReader used to produce
 // data:application/octet-stream, which the app rejected, storing 0 of 128
 // images); the type is sniffed from the bytes' magic signatures, and map
-// previews + card tiles ride the same pipeline.
+// previews + card tiles ride the same pipeline. v3.13: numbered-series
+// collapse ("Per particle scale factors 000–007" -> only 007), a 20s
+// second chance for slow loader calls + 8s diff windows for huge-log job
+// types (the hetero/abinit "no log images" class of bugs), 10× bigger
+// deep-scan caps so >2000-entry shared streams stay visible, and a 90s
+// slow-log rescue window.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -492,6 +511,38 @@ export function SmartCapturePanel({ onCapture }: Props) {
     return iterNumOf(s);
   }
 
+  // v3.13: NUMBERED-SERIES index — a title/file name ending in a bare 2–4
+  // digit number after a separator ("Per particle scale factors 007",
+  // "per_particle_scale_factors_007.png"). No "Iteration" marker exists on
+  // these, so the PASS 2 filter cannot see them; without PASS 2.5 every
+  // round of the series was captured (user report: 000–007 all uploaded;
+  // only the last round's files still exist). GUARDS mirror the app
+  // server's trailingIndexOf: 1-digit suffixes index things (mic0,
+  // class_5, particles1), and bases ending in class/cluster/group/frame/
+  // mic/micrograph/exposure/blob/mask are galleries that must keep every
+  // row ("volume_class_10", "trefoil for group 12").
+  function numSeriesOf(s) {
+    if (typeof s !== 'string' || !s) return null;
+    var t = String(s).replace(/\\.[a-z0-9]{1,6}$/i, '').replace(/[_\\s]+/g, ' ').trim();
+    var m = t.match(/^(.+?)[ \\-:.]+(\\d{2,4})$/);
+    if (!m) return null;
+    var base = m[1].trim().toLowerCase();
+    if (!base) return null;
+    if (/(class|classes|cluster|group|groups|frame|frames|mic|micrograph|exposure|blob|mask)$/.test(base)) return null;
+    return { base: base, num: parseInt(m[2], 10) };
+  }
+  // Series key of one candidate ref: the ENTRY TITLE first; the file name
+  // only when the ref has NO title at all — a ref WITH a numberless title
+  // plus numbered files ("Final classes" + J4_final_000/001.png) is a class
+  // gallery whose files must all survive.
+  function refSeriesKey(r) {
+    if (!r) return null;
+    var t = r.log && r.log.text;
+    if (typeof t === 'string' && t.trim()) return numSeriesOf(t);
+    var nm = r.file && (r.file.filename || r.file.name);
+    return numSeriesOf(nm) || null;
+  }
+
   // The job a log entry belongs to (job_uid / jobUid / job_id / jobId).
   function entryJobUid(entry) {
     if (!entry || typeof entry !== 'object') return null;
@@ -602,6 +653,28 @@ export function SmartCapturePanel({ onCapture }: Props) {
         if (maxIter !== null && it !== null && it < maxIter) continue;
         refList.push({ ci: p, log: c.log, file: file2 });
       }
+    }
+
+    // PASS 2.5 — NUMBERED-SERIES collapse (v3.13). Series whose title or
+    // file name ends in a bare 2–4 digit number ("Per particle scale
+    // factors 007") keep only the HIGHEST number per base — older numbers'
+    // files no longer exist on the server (same rationale as PASS 2, for
+    // series the marker filter cannot see). Bases seen once, and refs
+    // without a series key, pass through untouched.
+    var maxSeries = Object.create(null);
+    var sIdx, sKey;
+    for (sIdx = 0; sIdx < refList.length; sIdx++) {
+      sKey = refSeriesKey(refList[sIdx]);
+      if (!sKey) continue;
+      if (!(sKey.base in maxSeries) || sKey.num > maxSeries[sKey.base]) {
+        maxSeries[sKey.base] = sKey.num;
+      }
+    }
+    if (Object.keys(maxSeries).length > 0) {
+      refList = refList.filter(function(r2) {
+        var k2 = refSeriesKey(r2);
+        return !k2 || maxSeries[k2.base] === k2.num;
+      });
     }
 
     // PASS 3 — LAST-ROUND-per-title filter (v3.6): multi-round jobs
@@ -817,7 +890,13 @@ export function SmartCapturePanel({ onCapture }: Props) {
       return false;
     }
     function walk(node, path, depth) {
-      if (budget.n > 6000 || depth > 6 || node === null || node === undefined) return;
+      // v3.13: budget 6000 → 24000 nodes, depth 6 → 8, per-object key cap
+      // 80 → 200. A single hetero/abinit job can stream 1500+ log entries
+      // (each an object + imgfiles array + file objects ≈ 3 nodes), so the
+      // old budget exhausted itself INSIDE one shared event stream — the
+      // arrays after it (and every later store) were never walked, and
+      // those jobs' logs were invisible to the deep scan.
+      if (budget.n > 24000 || depth > 8 || node === null || node === undefined) return;
       if (typeof node !== 'object') return;
       if (seen) {
         if (seen.has(node)) return;
@@ -829,7 +908,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
         // 300 entries once ~20 jobs are loaded — the old cap made it
         // INVISIBLE to the deep scan, so the last-scanned jobs (hetero /
         // abinit / nu-refine at the end of the pipeline) got no log images.
-        if (node.length > 0 && node.length <= 2000 && hasImgEntries(node)) {
+        // v3.13: 2000 → 20000 — abinit-class jobs alone emit hundreds of
+        // entries EACH; with several in one project the shared stream
+        // sailed past 2000 and hid exactly the jobs that matter.
+        if (node.length > 0 && node.length <= 20000 && hasImgEntries(node)) {
           results.push({ arr: node, path: path });
         }
         if (node.length <= 60) {
@@ -839,7 +921,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
       }
       try {
         var keys = Object.keys(node);
-        for (var k = 0; k < keys.length && k < 80; k++) {
+        for (var k = 0; k < keys.length && k < 200; k++) {
           walk(node[keys[k]], path + '.' + keys[k], depth + 1);
         }
       } catch (e) {}
@@ -1386,6 +1468,15 @@ export function SmartCapturePanel({ onCapture }: Props) {
   async function scanLogs() {
     if (pending.length === 0) return;
 
+    // v3.13: job-type map + huge-log detector — hetero_refine / abinit /
+    // class_3d jobs deliver hundreds of log entries and get longer loader
+    // + state-diff windows below (the 1.3s/1.5s defaults expired
+    // mid-delivery, which is how "hetero refinement has no log images"
+    // happened).
+    var typeByUid = {};
+    for (var t2 = 0; t2 < jobs.length; t2++) typeByUid[jobs[t2].uid] = jobs[t2].job_type || '';
+    var HUGE_LOG_RE = /hetero|abinit|class_?3d|variability/i;
+
     // In-memory logs (cached jobLogs state or embedded image_logs) cost
     // nothing to harvest; the loader CALIBRATION must only run on truly
     // lazy jobs — a pre-cached job would make whatever action was tried
@@ -1454,8 +1545,6 @@ export function SmartCapturePanel({ onCapture }: Props) {
     // v3.2: calibrate on up to 3 LAZY jobs, image-rich job types FIRST.
     // The old script calibrated on J1 (import movies), which often has no
     // image logs at all — making a perfectly working loader look broken.
-    var typeByUid = {};
-    for (var t2 = 0; t2 < jobs.length; t2++) typeByUid[jobs[t2].uid] = jobs[t2].job_type || '';
     var RICH_RE = /refine|class|3d|2d|reconstruct|sharpen|nu|motion|ctf|mask|build/i;
     var calibPool = lazy.slice().sort(function(x, y) {
       return (RICH_RE.test(typeByUid[y] || '') ? 1 : 0) - (RICH_RE.test(typeByUid[x] || '') ? 1 : 0);
@@ -1569,7 +1658,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
     // (return value → ALL store state → per-job HTTP probe). Jobs with no
     // readable logs still stream an EMPTY batch so the progress count stays
     // exact — and the lineage-scoped total equals the request size.
-    var t0 = Date.now(), BUDGET_MS = 180000;
+    // v3.13: budget 3 min → 5 min — huge-log jobs now take up to 20s per
+    // loader call + 8s diff windows, and the budget must not cut the scan
+    // short before the late-pipeline hetero/abinit jobs are reached.
+    var t0 = Date.now(), BUDGET_MS = 300000;
     var noLog = [];   // v3.11: jobs whose logs never became readable
     for (var j = 0; j < pending.length; j++) {
       var uid2 = pending[j];
@@ -1589,13 +1681,25 @@ export function SmartCapturePanel({ onCapture }: Props) {
             var rr = winning.action.fn.call(winning.action.store, arg);
             if (rr && typeof rr.then === 'function') {
               var rv = coerceLogs(await withTimeout(rr.catch(function() {}), 1500));
+              if (!rv) {
+                // v3.13: the 1.5s race timed out — huge-log jobs (hetero /
+                // abinit carry hundreds of entries) regularly exceed it.
+                // Keep waiting on the SAME promise for up to 20s before
+                // giving up; this was the systematic "hetero_refine /
+                // ab-init have no log images" failure: the loader worked,
+                // it was just slow.
+                rv = coerceLogs(await withTimeout(rr.catch(function() {}), 20000));
+              }
               if (looksLikeLogs(rv)) logs2 = rv;
             } else if (looksLikeLogs(coerceLogs(rr))) {
               logs2 = coerceLogs(rr);
             }
           } catch (e) {}
           if (!logs2) {
-            var deadline2 = Date.now() + 1300;
+            // v3.13: huge-log job types get an 8s state-diff window (the
+            // 1.3s default expired mid-delivery for big payloads).
+            var bigLog = HUGE_LOG_RE.test(typeByUid[uid2] || '');
+            var deadline2 = Date.now() + (bigLog ? 8000 : 1300);
             while (Date.now() < deadline2) {
               var fresh2 = diffLogs(stores, base2);
               if (fresh2.length) {
@@ -1635,9 +1739,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
     // deliver their logs AFTER the per-job 1.3s diff window expired —
     // the job streamed an empty batch and would show zero log images
     // forever. Give the loader one more call, then re-poll every store
-    // shape for up to 40s before giving up.
+    // shape for up to 90s before giving up (v3.13: 40s → 90s — the real
+    // build's abinit deliveries regularly outlived 40s).
     if (noLog.length) {
-      console.log('[CryoSmart] ' + noLog.length + ' job(s) had no readable logs yet (large payloads can be slow) — re-checking for up to 40s…');
+      console.log('[CryoSmart] ' + noLog.length + ' job(s) had no readable logs yet (large payloads can be slow) — re-checking for up to 90s…');
       if (winning && !winning.http) {
         for (var n1 = 0; n1 < noLog.length; n1++) {
           try {
@@ -1646,7 +1751,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
           } catch (e) {}
         }
       }
-      var rescueEnd = Date.now() + 40000;
+      var rescueEnd = Date.now() + 90000;
       while (noLog.length && Date.now() < rescueEnd) {
         await sleepMs(2000);
         var stillMissing = [];
@@ -1730,7 +1835,10 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // v3.4 gives them a 240s window — a real capture can carry 900+ images
   // and v3.3's 90s budget regularly expired mid-queue, leaving most bytes
   // unsent (report images then rendered broken because only refs existed).
-  await drainImageUploads(240000);
+  // v3.13: 240s → 420s — with lineage scans now allowed 5 minutes (slow
+  // hetero/abinit loaders), the byte drain must not expire first: bytes
+  // queued by late jobs need their window too.
+  await drainImageUploads(420000);
 
   // ── STEP 4: mark the session complete ──────────────────────────────
   // The web UI stops polling and shows the final summary. v3.8 retries:
@@ -1775,7 +1883,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
       ? ' — lineage-scoped: ' + knownRequested.length + ' of ' + ALL_UIDS.length + ' jobs scanned'
       : '') +
     ' · ' + (logRefsStreamed || 0) + ' log image(s) · ' + imgUploaded + ' with bytes' +
-    " · multi-round/multi-iteration jobs keep only their FINAL round + iteration's log images" +
+    " · multi-round/multi-iteration/numbered-series jobs keep only their FINAL round's images" +
     ' · non-image result files (pdf/xml/txt/…) are never captured' +
     '. Live page:', appUrl);
 })();
@@ -1897,8 +2005,9 @@ export function SmartCapturePanel({ onCapture }: Props) {
               lands, auto-traces from your page job, and log images stream in
               <strong> only for the traced lineage</strong> — the other jobs
               are skipped; multi-round jobs fetch only their
-              <strong>final round + final iteration's</strong> images and
-              non-image result files (pdf/xml/txt) are never fetched,
+              <strong>final round / final iteration / last numbered plot</strong> ("Per particle
+              scale factors 007" keeps only 007) and non-image result files
+              (pdf/xml/txt) are never fetched,
               saving minutes on large projects.
             </p>
             <p className="mt-0.5 text-[11px] text-teal-600">
