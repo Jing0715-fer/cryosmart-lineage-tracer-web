@@ -56,3 +56,6 @@ server.log
 .zscripts/
 tool-results/
 cloned-repo/
+
+# capture history (persisted Smart Capture snapshots — can be hundreds of MB)
+/capture-history/

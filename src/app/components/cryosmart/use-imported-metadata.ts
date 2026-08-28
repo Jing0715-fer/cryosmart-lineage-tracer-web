@@ -4,7 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import type { LoadedMetadata } from "@/app/components/cryosmart/data-source-card";
 import type { CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 
-interface PendingData {
+/**
+ * Shape shared by the LIVE staged-session /data endpoint and the RESTORED
+ * capture-history /api/cryosmart/history/<id> endpoint — restoring a
+ * historical capture reuses the exact same merge pipeline.
+ */
+export interface PendingData {
   ok: boolean;
   token: string;
   captured_at: string | null;
@@ -114,14 +119,12 @@ function mergeLogImagesIntoRaw(
   raw: unknown,
   jobLogImages: PendingData["data"]["job_log_images"],
   uploadedImageIds?: string[],
-  token?: string
+  imageBase?: string | null
 ): unknown {
   if (!jobLogImages) return raw;
   const uploaded = new Set(uploadedImageIds || []);
   const sessionBase =
-    token && uploaded.size > 0
-      ? `/api/cryosmart/import/session/${encodeURIComponent(token)}/image/`
-      : null;
+    imageBase && uploaded.size > 0 ? imageBase : null;
   const decorate = (ref: {
     fileid?: string;
     name?: string;
@@ -219,21 +222,44 @@ function mergeLogImagesIntoRaw(
   return raw;
 }
 
-function toLoaded(data: PendingData, token: string): LoadedMetadata {
+function toLoaded(
+  data: PendingData,
+  imageBase: string | null,
+  source: LoadedMetadata["source"] = "upload"
+): LoadedMetadata {
   const session = buildSessionFromPending(data.data);
   const mergedRaw = mergeLogImagesIntoRaw(
     data.data.raw || { jobs: data.data.jobs },
     data.data.job_log_images,
     data.data.uploaded_image_ids,
-    token
+    imageBase
   );
   return {
     raw: mergedRaw,
     projectUid: data.data.project_uid || "P",
     jobCount: (data.data.jobs || []).length,
-    source: "upload",
+    source,
     session,
   };
+}
+
+/** Image-base prefix for a LIVE staged session's uploaded bytes. */
+export function sessionImageBase(token: string): string {
+  return `/api/cryosmart/import/session/${encodeURIComponent(token)}/image/`;
+}
+
+/** Image-base prefix for a RESTORED capture-history entry's stored bytes. */
+export function historyImageBase(entryId: string): string {
+  return `/api/cryosmart/history/${encodeURIComponent(entryId)}/image/`;
+}
+
+/**
+ * Build a LoadedMetadata from a capture-history RESTORE response — the
+ * same pipeline the live staged flow uses, with the history image base
+ * so every ref/fileid points at this app's on-disk byte store.
+ */
+export function toLoadedFromHistory(data: PendingData, entryId: string): LoadedMetadata {
+  return toLoaded(data, historyImageBase(entryId), "history");
 }
 
 const POLL_INTERVAL_MS = 700;
@@ -428,7 +454,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
         if (!dataResp.ok) return null;
         const data = (await dataResp.json()) as PendingData;
         if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
-          onLoadedRef.current?.(toLoaded(data, token));
+          onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
           return data;
         }
         return null;
@@ -708,7 +734,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             const data = (await resp.json()) as PendingData;
             if (data.ok && data.data && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
               const session = buildSessionFromPending(data.data);
-              onLoadedRef.current?.(toLoaded(data, token));
+              onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
               setState({
                 status: "loaded",
                 message: session

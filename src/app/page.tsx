@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SiteHeader, SiteFooter } from "./components/cryosmart/site-chrome";
 import { DataSourceCard, type LoadedMetadata } from "./components/cryosmart/data-source-card";
+import { CaptureHistoryCard } from "./components/cryosmart/capture-history-card";
 import { ConfigureCard } from "./components/cryosmart/configure-card";
 import { LineagePreviewCard } from "./components/cryosmart/lineage-preview-card";
 import { DownloadCard } from "./components/cryosmart/download-card";
@@ -18,6 +19,15 @@ import { ShieldCheck, Globe, Zap, FileCheck2, ArrowRight, Keyboard } from "lucid
 export default function Home() {
   const [loaded, setLoaded] = useState<LoadedMetadata | null>(null);
   const [summary, setSummary] = useState<LineageSummary | null>(null);
+  /** Auto-trace anchor from a RESTORED capture-history entry (the capture's
+   *  original end job). Lives until the next live capture / manual load
+   *  replaces the dataset — ConfigureCard validates it against the loaded
+   *  jobs, so a stale anchor can never trace a different project. */
+  const [historyAnchorUid, setHistoryAnchorUid] = useState<string | null>(null);
+  /** Bumped on every history restore — remounts ConfigureCard so its
+   *  once-per-dataset auto-trace guard resets and the restored capture
+   *  auto-traces even when an identical dataset was traced before. */
+  const [restoreEpoch, setRestoreEpoch] = useState(0);
 
   const importState = useImportedMetadata({
     onLoaded: (data) => {
@@ -26,6 +36,8 @@ export default function Home() {
         source: "bookmarklet",
       });
       saveSession(data.session ?? null);
+      // A live capture supersedes any restored-history anchor.
+      setHistoryAnchorUid(null);
     },
   });
 
@@ -38,6 +50,7 @@ export default function Home() {
       source: "bookmarklet",
       cryosmartOrigin: sharedSummary.base_url,
     });
+    setHistoryAnchorUid(null);
   });
 
   useKeyboardShortcuts({
@@ -153,14 +166,34 @@ export default function Home() {
 
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
         <div className="space-y-6">
-          <DataSourceCard loaded={loaded} onLoad={setLoaded} />
+          <DataSourceCard
+            loaded={loaded}
+            onLoad={(next) => {
+              setLoaded(next);
+              // A fresh capture/load supersedes any restored-history anchor.
+              setHistoryAnchorUid(null);
+            }}
+          />
+          <CaptureHistoryCard
+            importToken={importState.token}
+            onRestore={(restored, anchorUid) => {
+              // Replace the whole working set: data + session, reset the trace,
+              // and auto-trace from the capture's original anchor job.
+              setLoaded(restored);
+              setSummary(null);
+              setHistoryAnchorUid(anchorUid);
+              setRestoreEpoch((n) => n + 1);
+              saveSession(restored.session ?? null);
+            }}
+          />
           <ConfigureCard
+            key={`configure-${restoreEpoch}`}
             loaded={loaded}
             summary={summary}
             onSummary={setSummary}
             awaitingImport={importState.status === "polling"}
             importToken={importState.status === "polling" ? importState.token : null}
-            autoTraceJobUid={importState.endJobUid}
+            autoTraceJobUid={importState.endJobUid ?? historyAnchorUid}
           />
           <LineagePreviewCard
             summary={summary}

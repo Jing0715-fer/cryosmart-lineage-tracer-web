@@ -51,11 +51,13 @@ export async function imageToBase64(
     // Data URLs are already self-contained — nothing to fetch.
     if (/^data:/i.test(pathOnly)) return pathOnly;
 
-    // Uploaded session images (`/api/cryosmart/import/session/<token>/image/...`)
-    // are served by THIS app — fetch them directly, NOT through the CryoSmart
+    // App-served uploaded images — a staged session's
+    // `/api/cryosmart/import/session/<token>/image/...` OR a restored
+    // capture-history entry's `/api/cryosmart/history/<id>/image/...` —
+    // are served by THIS app: fetch them directly, NOT through the CryoSmart
     // proxy (the generic `/api/...` branch below would forward them to the
     // CryoSmart server, which doesn't have that path → 404).
-    if (/^\/api\/cryosmart\/import\/session\/[^/]+\/image\//i.test(pathOnly)) {
+    if (/^\/api\/cryosmart\/(?:import\/session|history)\/[^/]+\/image\//i.test(pathOnly)) {
       const resp = await fetch(pathOnly, {
         credentials: "same-origin",
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -269,7 +271,7 @@ export async function prefetchImagesForReport(
   // proxy-fallback chain (hidden cleanly when unreachable) and upgrades to
   // a session URL when its bytes land and the summary refreshes.
   const isSessionImageUrl = (u: string) =>
-    /\/api\/cryosmart\/import\/session\/[^/?#]+\/image\//.test(u);
+    /\/api\/cryosmart\/(?:import\/session|history)\/[^/?#]+\/image\//.test(u);
   const isDirectCryosmartUrl = (u: string) =>
     /^https?:\/\//i.test(u) && u.includes("/api/log_image/");
   if (opts?.stagedImport || urlList.some(isSessionImageUrl)) {

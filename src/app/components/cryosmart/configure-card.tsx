@@ -174,14 +174,15 @@ export function ConfigureCard({ loaded, summary, onSummary, awaitingImport, impo
       ),
     [loadedJobs]
   );
-  /** Count of ALL same-origin session-image URLs present in the loaded
+  /** Count of ALL same-origin app-served image URLs present in the loaded
    * data (log_images src, output_group_images values, ui_tile_images and
-   * image_logs imgfiles fileids rewritten by the merge step). The capture
-   * script uploads bytes for these ASYNCHRONOUSLY — map/tile bytes can
-   * land AFTER the log counters stopped moving, so the summary rebuild
+   * image_logs imgfiles fileids rewritten by the merge step) — both the
+   * live session-image URLs and the restored capture-history ones. The
+   * capture script uploads bytes for these ASYNCHRONOUSLY — map/tile bytes
+   * can land AFTER the log counters stopped moving, so the summary rebuild
    * must key on this too, or map previews stay stale. */
   const loadedSessionImageCount = useMemo(() => {
-    const SESSION_URL_RE = /\/api\/cryosmart\/import\/session\/[^/?#]+\/image\//;
+    const SESSION_URL_RE = /\/api\/cryosmart\/(?:import\/session|history)\/[^/?#]+\/image\//;
     let n = 0;
     const bump = (v: unknown) => {
       if (typeof v === "string" && SESSION_URL_RE.test(v)) n += 1;

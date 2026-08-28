@@ -61,6 +61,20 @@ bun run dev
 
 > ⚠️ **Secure context 注意**：`navigator.clipboard` 只在 `https://` 或 `http://localhost` 下可用。如果你从局域网 IP（`http://192.168.x.x:3000`）访问，Smart Capture 的 Copy 按钮会走 `execCommand` fallback，DevTools console 也能兜底拿脚本。
 
+### Capture History（采集历史：记录、恢复、导出、迁移）
+
+每次 capture 完成时会**自动归档**到磁盘（`capture-history/<id>/`，LRU 保留最近 40 份，不入库不入 git），无需重复采集：
+
+- **恢复（Restore）**：点击历史条目上的 Restore，数据（jobs + log images + 图片字节）完整回到当前页面 —— 自动回填 Start Job、自动 Trace、Graph / Report / ZIP 下载全部照常工作，即使原 session 已过期或服务器已重启
+- **保存（Save current capture）**：capture 进行中或刚完成时也可手动归档（应对脚本中断、session 即将过期等场景）
+- **导出（Export）**：三种便携 JSON（`cryosmart-capture/v1` 格式）：
+  - *Links only* —— 体积小，每张 image / 每个 map 都带**绝对 URL**（`http://<内网>/api/log_image/...` 及 `download_result_file/...`）
+  - *With embedded images* —— 图片字节内嵌 base64，完全自包含
+  - *Embedded + credentials* —— 再附带捕获的登录凭据（供需要鉴权的内网服务器重新下载）
+- **导入（Import capture JSON）**：把导出的 JSON 导入到任何一台部署了本应用的实例，恢复 Graph + Report（也可导入旧版 `{ jobs: [...] }` 项目元数据）
+
+> **只靠 JSON 能否通过网络下载全部 image / map？** image 和 map 的绝对 URL 都在文件里 —— 只要读取方所在机器能访问你的 CryoSmart 内网服务器（需要登录时随文件带上 credentials），就能仅凭 JSON 重新下载全部 image 和 map；带内嵌字节的导出让 image 完全离线自包含。map 是大体积二进制，永不内嵌，只能通过 URL 从 CryoSmart 服务器下载。
+
 ---
 
 ## 项目结构
@@ -80,11 +94,16 @@ cryosmart-lineage-tracer-web/
 │   │   │   │   ├── images/           #     - 批量 image 字节上传
 │   │   │   │   ├── request-logs/     #     - 上报 lineage log（应用层去重）
 │   │   │   │   └── jobs|logs|complete
+│   │   │   ├── cryosmart/history/    # Capture History（磁盘归档）
+│   │   │   │   ├── [id]/             #   - 恢复数据 / 删除 / 图片字节服务
+│   │   │   │   │   └── export/       #   - 便携 JSON 导出（可内嵌图片/凭据）
+│   │   │   │   └── import/           #   - 从导出 JSON（或旧版 jobs JSON）导入
 │   │   │   └── proxy-image/[fileid]  # 直链图片代理（防盗链回退）
 │   │   ├── components/cryosmart/     # 业务 UI（smart-capture-panel / lineage-graph / …）
 │   │   └── page.tsx                  # 主页面
 │   ├── components/ui/                # shadcn/ui 生成的基础组件
 │   ├── lib/cryosmart/                # 业务核心
+│   │   ├── capture-history.ts        # 采集历史磁盘存储（归档/恢复/导出/导入）
 │   │   ├── image-embed.ts            # 字节 → data URL（sniff magic number）
 │   │   ├── import-session-store.ts   # staged 导入 session 内存存储
 │   │   ├── lineage.ts                # BFS / ancestors / downstream helpers
@@ -101,10 +120,11 @@ cryosmart-lineage-tracer-web/
 ├── prisma/                           # Prisma schema（可选）
 ├── db/                               # SQL 初始化脚本
 ├── tests/                            # 运行时构建脚本
+├── capture-history/                  # Capture History 归档（gitignored，可到数百 MB）
 ├── .harness/                         # 端到端 harness 脚本（v3.x 历史快照）
 ├── Caddyfile                         # 反向代理（HTTPS 终止 → 3000）
 ├── TESTING-GUIDE.md                  # 端到端 / harness 测试说明
-└── worklog.md                        # 项目演进 worklog（v1 → v3.13）
+└── worklog.md                        # 项目演进 worklog（v1 → v3.14）
 ```
 
 ---

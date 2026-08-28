@@ -51,12 +51,14 @@ export interface CryoSmartFetchInit {
   timeoutMs?: number;
 }
 
-/** True for URLs pointing at THIS app's staged-capture image store
- *  (`/api/cryosmart/import/session/<token>/image/<fileid>`). Those bytes
- *  live in the import session's in-memory store and are served same-origin;
- *  the CryoSmart server knows nothing about the path. */
+/** True for URLs pointing at THIS app's own uploaded-image stores —
+ *  either the staged-capture session store
+ *  (`/api/cryosmart/import/session/<token>/image/<fileid>`) or a persisted
+ *  capture-history entry (`/api/cryosmart/history/<id>/image/<fileid>`).
+ *  Those bytes live in this app; the CryoSmart server knows nothing about
+ *  those paths. */
 export function isSessionImageUrl(url: string | null | undefined): boolean {
-  return /^\/?(?:https?:\/\/[^/]+\/)?api\/cryosmart\/import\/session\/[^/?#]+\/image\//i.test(
+  return /^\/?(?:https?:\/\/[^/]+\/)?api\/cryosmart\/(?:import\/session|history)\/[^/?#]+\/image\//i.test(
     String(url || "")
   );
 }
@@ -73,13 +75,15 @@ export function isDirectCryosmartUrl(url: string | null | undefined): boolean {
  * The caller can use `.json()`, `.arrayBuffer()`, `.blob()`, or `.text()`.
  *
  * Path shapes supported:
- *  (0) An uploaded session-image URL (`/api/cryosmart/import/session/<token>/
- *      image/<fileid>`) — served by THIS app, fetched directly same-origin.
- *      Forwarding it through the proxy used to relay it to the CryoSmart
- *      server, which 404s ("detail: Not Found") — that single missing branch
- *      broke EVERY staged-capture image in the ZIP bundle download (the
- *      "247 warnings" report: 221 images lost despite their bytes being
- *      safely stored in the session).
+ *  (0) An app-served uploaded-image URL — a staged session's
+ *      `/api/cryosmart/import/session/<token>/image/<fileid>` OR a restored
+ *      capture-history entry's `/api/cryosmart/history/<id>/image/<fileid>`.
+ *      The bytes live in THIS app, so fetch them directly same-origin.
+ *      Forwarding them through the proxy used to relay them to the
+ *      CryoSmart server, which 404s ("detail: Not Found") — that single
+ *      missing branch broke EVERY staged-capture image in the ZIP bundle
+ *      download (the "247 warnings" report: 221 images lost despite their
+ *      bytes being safely stored in the session).
  *  (1) A CryoSmart relative path (e.g. "api/log_image/<fileid>" or
  *      "api/job/get_clear_job_list?project_uid=P259") — the path is
  *      forwarded through `/api/cryosmart/[...path]?base=&cookie=&auth=`.
@@ -100,8 +104,9 @@ export async function cryoSmartFetch(
 ): Promise<Response> {
   const cleanPath = String(cryosmartPath || "").replace(/^\/+/, "");
 
-  // Branch (0): uploaded session-image URL — served by THIS app.
-  if (/^api\/cryosmart\/import\/session\/[^/]+\/image\//i.test(cleanPath)) {
+  // Branch (0): app-served uploaded-image URL (staged session or restored
+  // capture history) — served by THIS app.
+  if (/^api\/cryosmart\/(?:import\/session|history)\/[^/]+\/image\//i.test(cleanPath)) {
     const [p, q] = cleanPath.split("?");
     return fetch(`/${p}${q ? `?${q}` : ""}`, {
       method: "GET",
