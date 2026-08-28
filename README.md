@@ -15,10 +15,12 @@ CryoSmart 是一个冷冻电镜数据处理平台（[cryosmart.bio](https://cryo
 
 这个项目是一站式解决方案：
 
-1. **把数据从 CryoSmart 拉出来**（4 种方式：Bookmarklet 控制台脚本 / JSON 上传 / WebSocket 实时桥接 / 内置示例）
+1. **把数据从 CryoSmart 拉出来** —— 唯一方式：**Smart Capture**（复制一段控制台脚本到 CryoSmart 页面的 DevTools 里执行，自动捕获、上传、自动追踪）
 2. **渲染可交互的 lineage 图**（BFS 距离分层 + 族系颜色边 + hover 高亮上下游路径 + PNG/SVG 导出）
 3. **生成可分享的 HTML 报告**（含懒加载图片、点击 fallback、Referrer-Policy 防防盗链）
 4. **对接 ChimeraX 自动化**（4 个 helper 脚本，3D 地图对齐 + 优化 + PPTX 导出 + 重打包）
+
+> 早期的 Bookmarklet 控制台脚本 / JSON 上传 / WebSocket 实时桥接 / 内置示例 4 种方式已全部移除，只保留 Smart Capture 一条通路。
 
 ---
 
@@ -33,7 +35,7 @@ CryoSmart 是一个冷冻电镜数据处理平台（[cryosmart.bio](https://cryo
 | 国际化 | **next-intl** |
 | 数据库 | **Prisma 6**（可选，导入 session 持久化） |
 | 包管理 | **Bun 1.3** |
-| 辅助 | `sharp`（图片处理）、`qrcode`（分享）、`ws`（WS 桥接）、`puppeteer`-free 导出 |
+| 辅助 | `sharp`（图片处理）、`qrcode`（分享） |
 
 ---
 
@@ -50,14 +52,14 @@ bun run dev
 #    http://localhost:3000
 ```
 
-打开后看到 4 个数据源标签页：
+### Smart Capture（唯一的数据获取方式）
 
-- **Smart Capture** — 推荐：从 CryoSmart 页面复制粘贴一段 console 脚本到 DevTools 执行，自动捕获并 POST 进来
-- **Upload JSON** — 把之前导出的 CryoSmart job JSON 拖进来
-- **Live Connect** — 填 CryoSmart Base URL + 登录 cookie + Project ID，实时同步 jobs
-- **Try Sample** — 用内置示例数据先看效果
+1. 在页面 **Smart Capture** 卡片里点 **Open CryoSmart**，登录并进入你的项目（或直接进入最终 job 的页面，推荐）
+2. 按 `F12` 打开 DevTools → **Console** 标签
+3. 点 Smart Capture 卡片里的 **Copy Capture Script**，粘贴到 Console，回车
+4. 之后全自动：job 元数据即时导入 → lineage 自动追踪 → 只对 lineage 内的 job 抓取 log images → 新标签页自动打开本应用并渲染
 
-> ⚠️ **Secure context 注意**：`navigator.clipboard` 只在 `https://` 或 `http://localhost` 下可用。如果你从局域网 IP（`http://192.168.x.x:3000`）访问 Smart Capture 的 Copy 按钮会用 `execCommand` fallback，DevTools console 也能兜底拿脚本。
+> ⚠️ **Secure context 注意**：`navigator.clipboard` 只在 `https://` 或 `http://localhost` 下可用。如果你从局域网 IP（`http://192.168.x.x:3000`）访问，Smart Capture 的 Copy 按钮会走 `execCommand` fallback，DevTools console 也能兜底拿脚本。
 
 ---
 
@@ -69,47 +71,40 @@ cryosmart-lineage-tracer-web/
 │   ├── app/                          # Next.js App Router
 │   │   ├── api/
 │   │   │   ├── cryosmart/[...path]   # 通用 CryoSmart 后端代理（cookie 透传）
-│   │   │   ├── cryosmart/import/session/[token]/   # staged 导入 session API
-│   │   │   │   ├── data/             #   - 元数据
-│   │   │   │   ├── image/[fileid]/   #   - 单张 log image 代理（魔数 sniff）
-│   │   │   │   ├── images/           #   - 批量 image 字节上传
-│   │   │   │   ├── request-logs/     #   - 上报 lineage log（应用层去重）
+│   │   │   ├── cryosmart/import/     # 直传导入（脚本 POST 元数据）
+│   │   │   ├── cryosmart/pending/    # 直传导入的单次领取端点
+│   │   │   ├── cryosmart/import/session/[token]/
+│   │   │   │                         #   staged 导入 session API
+│   │   │   │   ├── data/             #     - 元数据
+│   │   │   │   ├── image/[fileid]/   #     - 单张 log image 代理（魔数 sniff）
+│   │   │   │   ├── images/           #     - 批量 image 字节上传
+│   │   │   │   ├── request-logs/     #     - 上报 lineage log（应用层去重）
 │   │   │   │   └── jobs|logs|complete
 │   │   │   └── proxy-image/[fileid]  # 直链图片代理（防盗链回退）
-│   │   ├── components/cryosmart/     # 业务 UI（lineage-graph / smart-capture-panel / …）
-│   │   └── page.tsx                  # 主页面（4 个标签的根）
+│   │   ├── components/cryosmart/     # 业务 UI（smart-capture-panel / lineage-graph / …）
+│   │   └── page.tsx                  # 主页面
 │   ├── components/ui/                # shadcn/ui 生成的基础组件
 │   ├── lib/cryosmart/                # 业务核心
-│   │   ├── bookmarklet.ts            # 老式 bookmarklet 脚本源
 │   │   ├── image-embed.ts            # 字节 → data URL（sniff magic number）
 │   │   ├── import-session-store.ts   # staged 导入 session 内存存储
 │   │   ├── lineage.ts                # BFS / ancestors / downstream helpers
 │   │   ├── report-html.ts            # 报告 HTML 模板 + 懒加载
+│   │   ├── proxy-client.ts           # CryoSmart 代理 fetch（map 下载等）
 │   │   └── types.ts                  # LineageSummary / Edge / Node 等类型
-│   ├── hooks/                        # 自定义 React hooks
-│   ├── tools/cryosmart-bridge/       # WebSocket 桥接服务（实时模式）
-│   └── ...
+│   └── hooks/                        # 自定义 React hooks
 ├── public/
-│   ├── helpers/                      # 4 个 ChimeraX helper 脚本
-│   │   ├── CryoSmart_auto_align_export_ppt.py   # 一键：align + 优化 + 导出 + PPTX
-│   │   ├── CryoSmart_align_maps_check_view.py   # 仅对齐 + 优化
-│   │   ├── CryoSmart_export_current_view_ppt.py # 仅导出 + PPTX
-│   │   └── rebuild_picture_flow_pptx.mjs        # 独立 Node PPTX 重打包
-│   └── demo/                         # 内置示例数据 / 截图
-├── cryosmart-capture-extension/      # 子项目：Chrome 扩展（自动捕获）
-├── download/                         # 旧版下载工具
-├── examples/websocket/               # WS 桥接示例
-├── mini-services/                    # 本地辅助服务（WS 桥接等）
+│   └── helpers/                      # 4 个 ChimeraX helper 脚本
+│       ├── CryoSmart_auto_align_export_ppt.py   # 一键：align + 优化 + 导出 + PPTX
+│       ├── CryoSmart_align_maps_check_view.py   # 仅对齐 + 优化
+│       ├── CryoSmart_export_current_view_ppt.py # 仅导出 + PPTX
+│       └── rebuild_picture_flow_pptx.mjs        # 独立 Node PPTX 重打包
 ├── prisma/                           # Prisma schema（可选）
 ├── db/                               # SQL 初始化脚本
-├── scripts/                          # 维护脚本
-├── tests/                            # 端到端 / harness 测试
-├── upload/                           # 浏览器粘贴的临时上传
+├── tests/                            # 运行时构建脚本
 ├── .harness/                         # 端到端 harness 脚本（v3.x 历史快照）
 ├── Caddyfile                         # 反向代理（HTTPS 终止 → 3000）
-├── LIVE-CONNECT-GUIDE.md             # 实时连接（轮询 vs WS 桥接）详细配置
 ├── TESTING-GUIDE.md                  # 端到端 / harness 测试说明
-└── worklog.md                        # 项目演进 worklog（v1 → v3.12）
+└── worklog.md                        # 项目演进 worklog（v1 → v3.13）
 ```
 
 ---
@@ -129,43 +124,51 @@ cryosmart-lineage-tracer-web/
 
 ### 2. Smart Capture（`smart-capture-panel.tsx`）
 
-捕获脚本的源头。每次版本变化都更新这里的 staged copy（v3.6 多 round 去重 → v3.7 20min 等待 → v3.8 渐进式渲染 → v3.9 cache-hit loader → v3.12 magic-number sniff）。
+捕获脚本的源头（当前 v3.12）。每次版本变化都更新这里的 staged copy（v3.6 多 round 去重 → v3.7 20min 等待 → v3.8 渐进式渲染 → v3.9 cache-hit loader → v3.11 最后一轮 + 图片白名单 → v3.12 magic-number sniff）。
 
-执行流程（v3.12）：
+执行流程（staged，两阶段）：
 
 ```
 打开 about:blank (防弹窗拦截)
-  └─► POST /api/cryosmart/import/session       ← 拿 token
+  └─► POST /api/cryosmart/import/session      ← 拿 token
        └─► 跳转已开 tab 到 /?imported=<token>
-            └─► POST .../jobs    ← UI 立即渲染图
-                 └─► POST .../request-logs  ← app 自动追踪 lineage
-                      └─► POST .../images   ← log image 字节流（sniff magic number）
-                           └─► POST .../complete  ← 收尾
+            └─► POST .../jobs    ← 阶段 1：全部 job 元数据，UI 立即渲染图
+                 └─► Trace Lineage（app 自动）
+                      └─► POST .../logs     ← 阶段 2：只对 lineage 内 job 抓 log images
+                           └─► POST .../images  ← log image 字节流（sniff magic number）
+                                └─► POST .../complete  ← 收尾
 ```
+
+关键设计：
+
+- **阶段式采集**：先快速抓全部 jobs（跳过 log 扫描），lineage 追踪确定子集后，才逐 job 抓 log images —— 不在 lineage 里的 job 不浪费一次 API 调用
+- **最后一轮**：多轮/多 iteration 的 job 只保留最后一轮（最大 iteration 号）的 log images
+- **图片白名单**：只采集真实图片（PNG/JPEG/GIF/WebP/BMP 等，按魔数判断），PDF/XML/TXT 一律过滤
+- **Content-Type 无关上传**：CryoSmart 服务端对 `/api/log_image/` 不回 Content-Type，脚本自己从魔数嗅探 MIME 再构造 data URL 上传
+- **防登出**：脚本黑名单机制绝不触碰 auth/logout 类请求
 
 ### 3. Report HTML（`report-html.ts`）
 
 - 单文件 HTML，含 base64 内嵌图、懒加载、Referrer-Policy、`onerror` 远程回退
+- log images 按 job 严格分组、只取最后一轮
 - 直接邮件 / IM 分享，**不需要后端托管**
 
-### 4. Live Connect（`LIVE-CONNECT-GUIDE.md`）
+### 4. Share（`share-url.ts`）
 
-两种模式：
-
-- **轮询模式**：默认 30s HTTP 刷新 job 列表
-- **WS 桥接模式**（推荐）：本地 `mini-services/cryosmart-bridge` 订阅 CryoSmart WebSocket，再推给前端，毫秒级延迟
+- 把 lineage summary 压缩成 URL-safe base64url 塞进 `#s=...`
+- 同事打开链接即渲染同样的图和统计，无需任何数据源
+- 附二维码，手机扫码直接打开
 
 ---
 
-## 子项目
+## ChimeraX helper 脚本
 
-### `cryosmart-capture-extension/`
+4 个脚本都随下载 bundle 一起打包，也可在页面 Help 卡片单独下载（需本地安装 ChimeraX）：
 
-Chrome 扩展，访问 `chrome://extensions/` → 加载已解压的扩展程序 → 选这个目录。可在 CryoSmart 项目页加载时**自动捕获 + 同步**到本应用。详见 [`cryosmart-capture-extension/README.md`](./cryosmart-capture-extension/README.md)。
-
-### `download/`
-
-旧版手动下载工具（保留以兼容旧流程）。新流程请用 Smart Capture。
+- **`CryoSmart_auto_align_export_ppt.py`**（推荐一键流）：打开 lineage 全部 maps，测试 5 种对齐假设（原始 + 3 轴翻转 + z-flip），按相关性选优，优化 90° 视角，导出 PNG，白平衡 + 统一裁剪，按 `name="CryoSmartImage:<key>"` 标记替换进 PPTX
+- **`CryoSmart_align_maps_check_view.py`**：手动流程第 1 步（仅对齐 + 优化，可检查中间状态）
+- **`CryoSmart_export_current_view_ppt.py`**：手动流程第 2 步（手动调相机后仅导出）
+- **`rebuild_picture_flow_pptx.mjs`**：独立 Node 脚本，从 lineage JSON 重建 Picture Flow PPTX
 
 ---
 
@@ -202,10 +205,8 @@ caddy run --config Caddyfile
 
 | 文档 | 用途 |
 | --- | --- |
-| [`LIVE-CONNECT-GUIDE.md`](./LIVE-CONNECT-GUIDE.md) | 实时连接：轮询 vs WebSocket 桥接 详细配置 |
 | [`TESTING-GUIDE.md`](./TESTING-GUIDE.md) | 端到端 / harness 测试说明 |
-| [`worklog.md`](./worklog.md) | 项目演进 worklog（v1 → v3.12，捕获脚本每次迭代的 root cause + fix） |
-| [`cryosmart-capture-extension/README.md`](./cryosmart-capture-extension/README.md) | Chrome 扩展安装 / 配置 / 故障排查 |
+| [`worklog.md`](./worklog.md) | 项目演进 worklog（v1 → v3.13，捕获脚本每次迭代的 root cause + fix） |
 
 ---
 
@@ -213,12 +214,13 @@ caddy run --config Caddyfile
 
 - **Secure context**：局域网 IP 访问时 Clipboard API 不可用，已加 `execCommand` fallback（见 `smart-capture-panel.tsx` 的 `copyToClipboard` helper）
 - **Next.js 16 allowedDevOrigins**：从非 localhost 访问会看到 `Cross origin request detected from …` 警告，配置 `next.config.ts` 的 `allowedDevOrigins` 可消除
-- **CryoSmart 后端**：第三方管理，WebSocket 路径不能改，所以本项目用 WS 桥接做实时同步
+- **后台标签页节流**：捕获期间本应用的预览标签页若被切到后台，浏览器会节流轮询 —— 已用 `visibilitychange` 唤醒 + localStorage token 恢复兜底，切回来即刷新
 - **多 round job**：捕获脚本只保留**最后一轮**的 log images（之前的已被清理）
+- **CryoSmart 后端**：第三方管理；本应用不依赖其 WebSocket，全部数据经 Smart Capture 脚本一次性带出
 
 ---
 
 ## 许可证
 
-本仓库内代码：MIT。  
+本仓库内代码：MIT。
 CryoSmart 是 [cryosmart.bio](https://cryosmart.bio) 的产品，本项目是非官方辅助工具。

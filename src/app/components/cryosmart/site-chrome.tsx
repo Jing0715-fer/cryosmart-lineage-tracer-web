@@ -46,12 +46,6 @@ export function SiteHeader() {
             Data Source
           </Link>
           <Link
-            href="#job-explorer"
-            className="hidden rounded-md px-3 py-1.5 text-[13px] font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100 md:inline-block"
-          >
-            Explorer
-          </Link>
-          <Link
             href="#download"
             className="hidden rounded-md px-3 py-1.5 text-[13px] font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100 md:inline-block"
           >

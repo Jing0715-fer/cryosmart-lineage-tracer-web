@@ -7,7 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2, ImageIcon, Loader2, FlaskConical, CheckCircle2, AlertCircle, X } from "lucide-react";
+import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2, ImageIcon, Loader2, CheckCircle2, AlertCircle, X } from "lucide-react";
 import { toast } from "sonner";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildLineageHtmlV2, type ReportHtmlOptions } from "@/lib/cryosmart/report-html";
@@ -27,9 +27,6 @@ interface Props {
    *  pre-fetches all referenced images as base64 data URLs so the report
    *  is fully self-contained (no remote/CORS/referrer issues). */
   session?: CryoSmartSession | null;
-  /** Fires the one-click demo: loads the bundled synthetic workflow and
-   *  traces it from J10 so this card fills in immediately. Wired in page.tsx. */
-  onLoadDemo?: () => void;
   /** Live capture progress — THE single progress bar of the whole app
    *  (user request: it lives here, next to the lineage it is filling in,
    *  instead of being duplicated in the banner and the Configure card). */
@@ -44,7 +41,7 @@ interface Props {
   stagedImport?: boolean;
 }
 
-export function LineagePreviewCard({ summary, session, onLoadDemo, importInfo, importStatus, stagedImport }: Props) {
+export function LineagePreviewCard({ summary, session, importInfo, importStatus, stagedImport }: Props) {
   const [reportTab, setReportTab] = useState("stats");
   const { resolvedTheme } = useTheme();
 
@@ -216,17 +213,7 @@ export function LineagePreviewCard({ summary, session, onLoadDemo, importInfo, i
             <div className="flex flex-col items-center gap-2">
               <Layers className="h-6 w-6 text-slate-300 dark:text-slate-600" />
               <span>No lineage traced yet.</span>
-              <span className="text-[10.5px] text-slate-400 dark:text-slate-500">Load data above and click <strong className="text-teal-600 dark:text-teal-400">Trace Lineage</strong> (Ctrl+Enter), or try the built-in demo.</span>
-              {onLoadDemo && (
-                <Button
-                  onClick={onLoadDemo}
-                  size="sm"
-                  className="mt-1.5 h-8 gap-1.5 bg-teal-600 px-4 text-[12px] font-medium text-white shadow-sm transition-all hover:bg-teal-700 hover:shadow-md"
-                >
-                  <FlaskConical className="h-3.5 w-3.5" />
-                  Load Demo
-                </Button>
-              )}
+              <span className="text-[10.5px] text-slate-400 dark:text-slate-500">Run Smart Capture above and click <strong className="text-teal-600 dark:text-teal-400">Trace Lineage</strong> (Ctrl+Enter).</span>
             </div>
           </div>
         </CardContent>

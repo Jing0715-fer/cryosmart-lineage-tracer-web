@@ -91,7 +91,7 @@ export function HelpCard() {
                 </p>
               </div>
               <div className="rounded-md border border-slate-200 bg-slate-50/60 p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
-                <strong>Fallbacks (rarely needed):</strong> if you already have a metadata JSON file from a previous capture, you can still load it — open the Smart Capture card, paste the JSON into a <code className="font-mono">.json</code> file, and drag-drop it onto the page (the import endpoint accepts either form). For programmatic use, POST the JSON to <code className="font-mono">/api/cryosmart/import</code> directly.
+                <strong>For programmatic use:</strong> the same import endpoint the script talks to is public — POST a previously captured metadata JSON to <code className="font-mono">/api/cryosmart/import</code> and open the returned <code className="font-mono">/?imported=…</code> link. This is the only fallback; there is no other capture method.
               </div>
             </AccordionContent>
           </AccordionItem>

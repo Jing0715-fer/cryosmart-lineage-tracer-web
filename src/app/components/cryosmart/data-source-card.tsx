@@ -10,7 +10,10 @@ export interface LoadedMetadata {
   raw: unknown;
   projectUid: string;
   jobCount: number;
-  source: 'upload' | 'sample' | 'live' | 'bookmarklet';
+  /** 'bookmarklet' = staged Smart-Capture session; 'upload' = legacy direct
+   *  POST to /api/cryosmart/import (both are Smart Capture code paths —
+   *  the old Upload JSON / Live Connect / Try Sample sources are gone). */
+  source: 'upload' | 'bookmarklet';
   session?: CryoSmartSession | null;
   liveJobUids?: string[];
   cryosmartOrigin?: string;

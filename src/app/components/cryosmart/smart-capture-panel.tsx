@@ -1791,7 +1791,6 @@ export function SmartCapturePanel({ onCapture }: Props) {
       toast.error(
         'Copy failed — script printed to the browser console. Open DevTools and copy from there.'
       );
-      // eslint-disable-next-line no-console
       console.log('=== Capture Script ===\n' + captureScript + '\n=== /Capture Script ===');
     }
   }, [captureScript]);
