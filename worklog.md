@@ -1101,3 +1101,17 @@ Stage Summary:
 - Numbered series like "Per particle scale factors 000-007" now collapse to the last number ONLY, both at capture time (script v3.13, saves dead-round byte fetches) and at render time (lineage.ts — also fixes already-captured sessions without re-running).
 - Hetero/abinit log capture hardened: 20s loader second chance, 8s diff windows, 10× deep-scan caps, 90s rescue, 420s byte drain, 288MB store — plus the standing tip: open the job's detail view in CryoSmart and re-run the script to harvest its cached logs.
 - NOTE for the user: the capture-script fixes require re-copying the script (v3.13 header) from the Smart Capture panel; the render-side fixes (collapse, report cap, ZIP bundle) apply to existing sessions immediately.
+
+---
+Task ID: 28 (rebase + push)
+Agent: main (Z.ai Code)
+Task: Rebase the v3.13 fix onto the user's remote commits and push.
+
+Work Log:
+- Remote had advanced (0a62241 download-card rework + PPTX cap, 1aa064a cap revert + dev watchdog scripts); rebased 71ecdc8 → 54520f1.
+- One conflict (bundle.ts): merged BOTH sides — kept the remote's PPTX no-trim comment, progress-object callback style and "No PPT images" early return, AND the v3.13 partition/probe/links-file restructure (collectPptImages now takes the partitioned request list). Auto-merges verified semantically: REPORT_LOG_IMAGE_LIMIT=24 intact, "probe" phaseLabel present in the reworked download-card.
+- Re-verified after rebase: lint 0 problems, tsc 0 errors in src/, v310+v311+v313 unit suites PASS (13/13), headless bundle E2E 16/16 (session images in ZIP, links files, ~9s build, ≤2 warnings), browser E2E on fresh session s9-4ee46dfb (report "Log images (24 / 26)" with collapsed captions, Build & download ZIP button present, 0 errors, 390px viewport fits).
+- Pushed main → origin/main (1aa064a..54520f1).
+
+Stage Summary:
+- origin/main now carries v3.13 on top of the user's download-card rework — single branch, up to date.
