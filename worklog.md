@@ -1292,3 +1292,22 @@ Stage Summary:
 - Class extraction is heuristic-gated (explicit "class N" everywhere; gallery/bare-number only on abinit/hetero/class_3D) so rounds ("Per particle scale factors 007") and entity galleries are never misread as classes; single-class or classless jobs stay flat.
 - Links-only imports now render everywhere the app can reach CryoSmart: same-instance via byte reuse (zero user action), cross-instance via the on-demand remote proxy with forwarded credentials; raster-only sniffing preserved (SVG stored-XSS rejected at the new path too).
 - All artifacts: src/lib/cryosmart/{lineage,types,capture-history,report-html}.ts, lineage-graph.tsx, use-imported-metadata.ts, history routes, capture-history-card.tsx, README.md, .harness/v315-{regression,session}.mjs.
+
+---
+Task ID: 32
+Agent: main (Z.ai Code)
+Task: User reported ZIP-download crash — "Maximum update depth exceeded" at DownloadCard.useEffect (download-card.tsx:155). Root-cause, fix, and push.
+
+Work Log:
+- Root-caused: the `buildCrashed` useState was written from a useEffect keyed on [building, progress, result]; during a real build the onProgress callback fires a FRESH progress object per image (hundreds per run), each re-ran the effect and unconditionally re-issued setBuildCrashed(false) — the canonical setState-in-effect anti-pattern; under the user's event timing the effect-scheduled updates nested past React's 50-update guard and threw. (Could not reproduce the exact throw in the sandbox — timing-sensitive — but the stack frame pins line 155 setBuildCrashed and this was the ONLY unguarded setState-in-effect in the tree; all other component effects audited: ref-guarded / cancelled-flag / boolean-state / run-once.)
+- Fixed structurally in download-card.tsx: `buildCrashed` is now DERIVED (`!building && progress !== null && result === null`), not stored. Removed the effect entirely plus both imperative setBuildCrashed calls (handleBuild start + catch); simplified the banner render condition. No setState-in-effect remains → an update loop from this component is structurally impossible. Derived value verified equivalent across all transitions (fresh load false; during build false; success false — result set; failure true — progress non-null, result null, building false; new-build-from-crashed false immediately).
+- Stress seeders .harness/v3151-stress-session.mjs + v3151-stress2.mjs: hetero_refine capture with 80 class-grouped log images (v2 uses DISTINCT non-collapsible letter-tagged titles so the numbered-series collapse keeps all 80) → bundle build fires 240+ rapid progress events across report-prefetch/PPTX/images phases.
+- Gold-standard repro attempt: git-stashed the fix and ran the full ZIP build on 80-image stress under OLD code — sandbox timing completed without the throw (bug is timing-sensitive; documented honestly). Restored fix (git stash pop).
+- Fixed-code browser E2E (agent-browser, s37-b064fd9813565b27 / P315T, 80 images): restore from Capture History → trace → Build & download ZIP → "Bundle ready CryoSmart_P315T_J2_lineage.zip · 92 files" with ZERO console errors and zero page errors (was: Maximum update depth exceeded); J2 modal class tabs Class 0 (30) / Class 1 (30) / General (20) with working tab switching; Report tab renders 101 class-section matches; fresh load 0 console issues.
+- Full regression: lint 0/0; tsc --noEmit 0 errors in src/; v313-unit 13/13; v314-regression 24/24 (must run from .harness/ — relative source reads); v315-regression 35/35; v313-bundle 16/16; v36-harness v3.8 capture E2E PASS; history-e2e 50/50 after clearing cross-suite pollution (stress/bundle suites auto-archive into history — same known isolation caveat as Task 30).
+- Committed and pushed to GitHub (main): fix(v3.15.1) download-card infinite update loop.
+
+Stage Summary:
+- The ZIP-download crash is fixed by deleting the offending state+effect pattern entirely (derived state), not by patching around it; no throttle needed — remaining setProgress-per-event is normal event-driven React usage.
+- v3.15 features (class-grouped galleries + links-only import) re-verified green on the stress capture during this pass.
+- Artifacts: src/app/components/cryosmart/download-card.tsx (fix), .harness/v3151-stress-{session,2}.mjs (stress seeders).

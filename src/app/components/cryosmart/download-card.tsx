@@ -108,12 +108,6 @@ export function DownloadCard({ summary, loaded }: Props) {
   const [building, setBuilding] = useState(false);
   const [progress, setProgress] = useState<BundleProgress | null>(null);
   const [result, setResult] = useState<BundleResult | null>(null);
-  /** True when the most recent in-flight build crashed (process death,
-   *  navigation, or an unhandled rejection). Renders a recovery banner so
-   *  the user knows the previous run did not finish and they have to
-   *  click Build again — there is no cross-session resume for the ZIP
-   *  assembly itself, by design. */
-  const [buildCrashed, setBuildCrashed] = useState(false);
   /** Bumped on every fresh "Build & download" click; ties the abort flag
    *  to the currently-running build so a stale catch can't dismiss a
    *  newer run. */
@@ -139,22 +133,18 @@ export function DownloadCard({ summary, loaded }: Props) {
     });
   }, [selections]);
 
-  // If the tab is reloaded mid-build (very rare — would mean the React
-  // tree unmounted and remounted), the in-memory `building` resets to
-  // false but the persisted build is in a half-baked state. Detect the
-  // mismatch and surface a clear "previous build did not finish" hint.
-  // Implementation note: we can't tell from localStorage alone that a
-  // build was in flight (we deliberately don't persist the `building`
-  // flag), so this hook only fires on a stale `progress` lingering
-  // without an active build. In practice the most common case is the
-  // user navigating away and coming back; either way the hint is useful.
-  useEffect(() => {
-    if (!building && progress && !result) {
-      setBuildCrashed(true);
-    } else {
-      setBuildCrashed(false);
-    }
-  }, [building, progress, result]);
+  // DERIVED, never stored: true when a build left a stale `progress`
+  // behind without an active build and without a finished result — i.e.
+  // the run crashed (process death, navigation, unhandled rejection) and
+  // the ZIP was lost. Previously this lived in a useState written from a
+  // useEffect keyed on [building, progress, result]; during a real build
+  // the progress callback fires a fresh object per image (hundreds per
+  // run), each one re-ran the effect and re-issued setBuildCrashed(false),
+  // and the resulting update storm tripped React's nested-update guard
+  // ("Maximum update depth exceeded" — the ZIP-download crash). Deriving
+  // it instead makes an update loop structurally impossible: no state,
+  // no effect, no setState.
+  const buildCrashed = !building && progress !== null && result === null;
 
   const updateSelection = useCallback(<K extends keyof BundleSelections>(
     key: K,
@@ -170,7 +160,6 @@ export function DownloadCard({ summary, loaded }: Props) {
     }
     const epoch = ++buildEpochRef.current;
     setBuilding(true);
-    setBuildCrashed(false);
     setResult(null);
     setProgress({ phase: "init", current: 0, total: 1, message: "Starting…" });
     try {
@@ -200,7 +189,6 @@ export function DownloadCard({ summary, loaded }: Props) {
     } catch (err) {
       if (buildEpochRef.current !== epoch) return;
       const msg = err instanceof Error ? err.message : String(err);
-      setBuildCrashed(true);
       toast.error(`Bundle build failed: ${msg}. The build state is lost — click Build again to retry. Raw data + image bytes are not re-captured automatically; rerun Smart Capture only if the lineage itself is gone.`);
     } finally {
       if (buildEpochRef.current === epoch) {
@@ -308,7 +296,7 @@ export function DownloadCard({ summary, loaded }: Props) {
           </div>
         </div>
 
-        {buildCrashed && !building && (
+        {buildCrashed && (
           <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-[12px] text-amber-800">
             <div className="flex items-center gap-1.5 font-medium">
               <AlertTriangle className="h-3.5 w-3.5" />
