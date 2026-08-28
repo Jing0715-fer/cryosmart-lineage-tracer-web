@@ -1,0 +1,279 @@
+247 warning(s)
+Image images/J44/volume.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84125728990692576f55cf: {"detail":"Not Found"}
+Image images/J44/fsc.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84125728990692576f55d1: {"detail":"Not Found"}
+Image images/J44/2).png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84058728990692576f53c9: {"detail":"Not Found"}
+Image images/J44/Input_Mask_Real_Space_Slices.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84058828990692576f53cf: {"detail":"Not Found"}
+Image images/J44/Initial_Real_Space_Slices.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8405a328990692576f53d5: {"detail":"Not Found"}
+Image images/J44/Initial_Fourier_Space_Slices.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8405a528990692576f53da: {"detail":"Not Found"}
+Image images/J44/Per_particle_scale_factors_000.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84085328990692576f544e: {"detail":"Not Found"}
+Image images/J44/Per_particle_scale_factors_001.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840b8028990692576f54c5: {"detail":"Not Found"}
+Image images/J44/Per_particle_scale_factors_002.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840ece28990692576f553c: {"detail":"Not Found"}
+Image images/J44/Alignment_map_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840ef128990692576f5551: {"detail":"Not Found"}
+Image images/J44/Alignment_map_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840ef228990692576f5556: {"detail":"Not Found"}
+Image images/J44/FSC_Filtered_Side_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84113e28990692576f556b: {"detail":"Not Found"}
+Image images/J44/CV_Filtered_Side_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84113f28990692576f5570: {"detail":"Not Found"}
+Image images/J44/FSC_Filtered_Side_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84122328990692576f5577: {"detail":"Not Found"}
+Image images/J44/CV_Filtered_Side_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84122428990692576f557c: {"detail":"Not Found"}
+Image images/J44/Real_Space_Slices_Iteration_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84123a28990692576f5584: {"detail":"Not Found"}
+Image images/J44/Fourier_Space_Slices_Iteration_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84123b28990692576f5589: {"detail":"Not Found"}
+Image images/J44/Real_Space_Mask_Slices_Iteration_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84123c28990692576f558e: {"detail":"Not Found"}
+Image images/J44/FSC_Iteration_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84123d28990692576f5595: {"detail":"Not Found"}
+Image images/J44/FSC_Iteration_003,_after_FSC-mask_auto-tightening.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84123e28990692576f55a2: {"detail":"Not Found"}
+Image images/J44/Guinier_Plot_Iteration_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84124128990692576f55ab: {"detail":"Not Found"}
+Image images/J44/Noise_Model_Iteration_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84124228990692576f55b0: {"detail":"Not Found"}
+Image images/J44/Viewing_Direction_Distribution_Iteration_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84124428990692576f55b5: {"detail":"Not Found"}
+Image images/J44/Posterior_Precision_Directional_Distribution_Iteration_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84124628990692576f55ba: {"detail":"Not Found"}
+Image images/J44/Magnitudes_of_alignment_changes_Iteration_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84124b28990692576f55bf: {"detail":"Not Found"}
+Image images/J44/Per_particle_scale_factors_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84124d28990692576f55c4: {"detail":"Not Found"}
+Image images/J44/volume.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84125628990692576f55cd: {"detail":"Not Found"}
+Image images/J44/volume.map_half_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84125628990692576f55cd: {"detail":"Not Found"}
+Image images/J44/volume.map_half_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84125628990692576f55cd: {"detail":"Not Found"}
+Image images/J44/volume.precision.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84125628990692576f55cd: {"detail":"Not Found"}
+Image images/J43/volume.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840436b86f1c97448d73de: {"detail":"Not Found"}
+Image images/J43/fsc.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840437b86f1c97448d73e0: {"detail":"Not Found"}
+Image images/J43/Initial_Real_Space_Slices.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83eca3b86f1c97448d6fe4: {"detail":"Not Found"}
+Image images/J43/Initial_Fourier_Space_Slices.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83eca4b86f1c97448d6fe9: {"detail":"Not Found"}
+Image images/J43/Per_particle_scale_factors_000.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83ee91b86f1c97448d7048: {"detail":"Not Found"}
+Image images/J43/Per_particle_scale_factors_001.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83f078b86f1c97448d70b0: {"detail":"Not Found"}
+Image images/J43/Per_particle_scale_factors_002.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83f272b86f1c97448d7118: {"detail":"Not Found"}
+Image images/J43/Per_particle_scale_factors_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83f487b86f1c97448d7180: {"detail":"Not Found"}
+Image images/J43/Per_particle_scale_factors_004.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83f69eb86f1c97448d71e8: {"detail":"Not Found"}
+Image images/J43/Per_particle_scale_factors_005.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83f9bdb86f1c97448d7250: {"detail":"Not Found"}
+Image images/J43/Per_particle_scale_factors_006.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83fccbb86f1c97448d72b8: {"detail":"Not Found"}
+Image images/J43/Per_particle_scale_factors_007.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840058b86f1c97448d733c: {"detail":"Not Found"}
+Image images/J43/Defocus_error_landscape_for_first_3_particles_for_split_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8400e0b86f1c97448d7354: {"detail":"Not Found"}
+Image images/J43/Defocus_change_across_all_particles_split_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8400e0b86f1c97448d7359: {"detail":"Not Found"}
+Image images/J43/Defocus_error_landscape_for_first_3_particles_for_split_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84012db86f1c97448d7360: {"detail":"Not Found"}
+Image images/J43/Defocus_change_across_all_particles_split_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84012eb86f1c97448d7365: {"detail":"Not Found"}
+Image images/J43/FSC_Filtered_Side_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84034db86f1c97448d737f: {"detail":"Not Found"}
+Image images/J43/CV_Filtered_Side_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84034eb86f1c97448d7384: {"detail":"Not Found"}
+Image images/J43/FSC_Filtered_Side_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84040ab86f1c97448d738b: {"detail":"Not Found"}
+Image images/J43/CV_Filtered_Side_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84040bb86f1c97448d7390: {"detail":"Not Found"}
+Image images/J43/Real_Space_Slices_Iteration_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840421b86f1c97448d7398: {"detail":"Not Found"}
+Image images/J43/Fourier_Space_Slices_Iteration_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840422b86f1c97448d739d: {"detail":"Not Found"}
+Image images/J43/Real_Space_Mask_Slices_Iteration_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840423b86f1c97448d73a2: {"detail":"Not Found"}
+Image images/J43/FSC_Iteration_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840424b86f1c97448d73a9: {"detail":"Not Found"}
+Image images/J43/FSC_Iteration_008,_after_FSC-mask_auto-tightening.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840425b86f1c97448d73b6: {"detail":"Not Found"}
+Image images/J43/Guinier_Plot_Iteration_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840428b86f1c97448d73bf: {"detail":"Not Found"}
+Image images/J43/Noise_Model_Iteration_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840428b86f1c97448d73c4: {"detail":"Not Found"}
+Image images/J43/Viewing_Direction_Distribution_Iteration_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84042bb86f1c97448d73c9: {"detail":"Not Found"}
+Image images/J43/Posterior_Precision_Directional_Distribution_Iteration_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84042db86f1c97448d73ce: {"detail":"Not Found"}
+Image images/J43/Per_particle_scale_factors_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a84042fb86f1c97448d73d3: {"detail":"Not Found"}
+Image images/J43/volume.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840436b86f1c97448d73dc: {"detail":"Not Found"}
+Image images/J43/volume.map_half_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840436b86f1c97448d73dc: {"detail":"Not Found"}
+Image images/J43/volume.map_half_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840436b86f1c97448d73dc: {"detail":"Not Found"}
+Image images/J43/volume.precision.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a840436b86f1c97448d73dc: {"detail":"Not Found"}
+Image images/J42/particles_kept.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83ea9311e8ced99404dc9e: {"detail":"Not Found"}
+Image images/J42/particles_rejected.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83ea9511e8ced99404dca0: {"detail":"Not Found"}
+Image images/J39/volume.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d103e94b506491545574: {"detail":"Not Found"}
+Image images/J39/fsc.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d104e94b506491545576: {"detail":"Not Found"}
+Image images/J39/Initial_Real_Space_Slices.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83b57be94b5064915450f4: {"detail":"Not Found"}
+Image images/J39/Initial_Fourier_Space_Slices.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83b57de94b5064915450f9: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_000.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83b779e94b506491545158: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_001.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83b974e94b5064915451c0: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_002.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83bb83e94b506491545228: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_003.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83bd9ee94b506491545290: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_004.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83bfc2e94b5064915452f8: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_005.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83c30fe94b506491545360: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_006.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83c641e94b5064915453c8: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_007.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83c9e7e94b50649154544c: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_008.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83cd88e94b5064915454d0: {"detail":"Not Found"}
+Image images/J39/Defocus_error_landscape_for_first_3_particles_for_split_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83cdebe94b5064915454e8: {"detail":"Not Found"}
+Image images/J39/Defocus_change_across_all_particles_split_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83cdece94b5064915454ed: {"detail":"Not Found"}
+Image images/J39/Defocus_error_landscape_for_first_3_particles_for_split_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83ce1ee94b5064915454f4: {"detail":"Not Found"}
+Image images/J39/Defocus_change_across_all_particles_split_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83ce1fe94b5064915454f9: {"detail":"Not Found"}
+Image images/J39/FSC_Filtered_Side_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d02ae94b506491545515: {"detail":"Not Found"}
+Image images/J39/CV_Filtered_Side_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d02be94b50649154551a: {"detail":"Not Found"}
+Image images/J39/FSC_Filtered_Side_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0d9e94b506491545521: {"detail":"Not Found"}
+Image images/J39/CV_Filtered_Side_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0dae94b506491545526: {"detail":"Not Found"}
+Image images/J39/Real_Space_Slices_Iteration_009.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0eee94b50649154552e: {"detail":"Not Found"}
+Image images/J39/Fourier_Space_Slices_Iteration_009.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0efe94b506491545533: {"detail":"Not Found"}
+Image images/J39/Real_Space_Mask_Slices_Iteration_009.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0f0e94b506491545538: {"detail":"Not Found"}
+Image images/J39/FSC_Iteration_009.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0f1e94b50649154553f: {"detail":"Not Found"}
+Image images/J39/FSC_Iteration_009,_after_FSC-mask_auto-tightening.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0f2e94b50649154554c: {"detail":"Not Found"}
+Image images/J39/Guinier_Plot_Iteration_009.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0f5e94b506491545555: {"detail":"Not Found"}
+Image images/J39/Noise_Model_Iteration_009.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0f6e94b50649154555a: {"detail":"Not Found"}
+Image images/J39/Viewing_Direction_Distribution_Iteration_009.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0f8e94b50649154555f: {"detail":"Not Found"}
+Image images/J39/Posterior_Precision_Directional_Distribution_Iteration_009.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0fae94b506491545564: {"detail":"Not Found"}
+Image images/J39/Per_particle_scale_factors_009.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d0fce94b506491545569: {"detail":"Not Found"}
+Image images/J39/volume.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d103e94b506491545572: {"detail":"Not Found"}
+Image images/J39/volume.map_half_A.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d103e94b506491545572: {"detail":"Not Found"}
+Image images/J39/volume.map_half_B.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d103e94b506491545572: {"detail":"Not Found"}
+Image images/J39/volume.precision.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d103e94b506491545572: {"detail":"Not Found"}
+Image images/J40/oddsig.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d347c3482063146a6d6f: {"detail":"Not Found"}
+Image images/J40/evensig.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d349c3482063146a6d86: {"detail":"Not Found"}
+Image images/J40/Real-space_reference_map.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d11ec3482063146a6cf7: {"detail":"Not Found"}
+Image images/J40/Real-space_mask.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d11ec3482063146a6cfc: {"detail":"Not Found"}
+Image images/J40/Masked_reference.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d11fc3482063146a6d01: {"detail":"Not Found"}
+Image images/J40/FSC_for_input_half-maps..png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d121c3482063146a6d0e: {"detail":"Not Found"}
+Image images/J40/P259_J40_.png.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d2e6c3482063146a6d23: {"detail":"Not Found"}
+Image images/J40/trefoil)_for_group_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d33dc3482063146a6d3c: {"detail":"Not Found"}
+Image images/J40/tetrafoil)_for_group_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d33fc3482063146a6d53: {"detail":"Not Found"}
+Image images/J40/trefoil)_for_group_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d347c3482063146a6d6c: {"detail":"Not Found"}
+Image images/J40/tetrafoil)_for_group_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a83d349c3482063146a6d83: {"detail":"Not Found"}
+Image images/J38/classes.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335e18cd6799a4878478c: {"detail":"Not Found"}
+Image images/J38/volume_class_0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335e08cd6799a48784785: {"detail":"Not Found"}
+Image images/J38/volume_class_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335e08cd6799a48784787: {"detail":"Not Found"}
+Image images/J38/volume_class_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335e18cd6799a48784789: {"detail":"Not Found"}
+Image images/J38/Class_000_Initial_Structure_Real-Space.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a832f008cd6799a48783fa6: {"detail":"Not Found"}
+Image images/J38/Class_001_Initial_Structure_Real-Space.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a832f018cd6799a48783fab: {"detail":"Not Found"}
+Image images/J38/Class_002_Initial_Structure_Real-Space.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a832f028cd6799a48783fb0: {"detail":"Not Found"}
+Image images/J38/Real_Space_Slices_Iteration_082_Class_000.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335d48cd6799a4878473c: {"detail":"Not Found"}
+Image images/J38/FSC_Iteration_082_Class_000.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335d48cd6799a48784741: {"detail":"Not Found"}
+Image images/J38/Viewing_Direction_Distribution_(27851_particles)_Iteration_082_Class_000.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335d58cd6799a48784748: {"detail":"Not Found"}
+Image images/J38/Posterior_Precision_Directional_Distribution_Iteration_082_Class_000.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335d78cd6799a4878474d: {"detail":"Not Found"}
+Image images/J38/Real_Space_Slices_Iteration_082_Class_001.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335d78cd6799a48784752: {"detail":"Not Found"}
+Image images/J38/FSC_Iteration_082_Class_001.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335d88cd6799a48784757: {"detail":"Not Found"}
+Image images/J38/Viewing_Direction_Distribution_(348138_particles)_Iteration_082_Class_001.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335d98cd6799a4878475e: {"detail":"Not Found"}
+Image images/J38/Posterior_Precision_Directional_Distribution_Iteration_082_Class_001.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335db8cd6799a48784763: {"detail":"Not Found"}
+Image images/J38/Real_Space_Slices_Iteration_082_Class_002.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335db8cd6799a48784768: {"detail":"Not Found"}
+Image images/J38/FSC_Iteration_082_Class_002.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335dc8cd6799a4878476d: {"detail":"Not Found"}
+Image images/J38/Viewing_Direction_Distribution_(30381_particles)_Iteration_082_Class_002.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335dd8cd6799a48784774: {"detail":"Not Found"}
+Image images/J38/Posterior_Precision_Directional_Distribution_Iteration_082_Class_002.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335de8cd6799a48784779: {"detail":"Not Found"}
+Image images/J38/Noise_Model_Iteration_082.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335df8cd6799a4878477e: {"detail":"Not Found"}
+Image images/J38/volume_class_0.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335e08cd6799a48784785: {"detail":"Not Found"}
+Image images/J38/volume_class_1.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335e08cd6799a48784787: {"detail":"Not Found"}
+Image images/J38/volume_class_2.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8335e18cd6799a48784789: {"detail":"Not Found"}
+Image images/J37/volume_class_0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a832e21a6969b3587e9c756: {"detail":"Not Found"}
+Image images/J37/volume_class_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a832e23a6969b3587e9c75a: {"detail":"Not Found"}
+Image images/J37/volume_class_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a832e23a6969b3587e9c75e: {"detail":"Not Found"}
+Image images/J35/classes.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830e9c8054fbbb8a5cf24c: {"detail":"Not Found"}
+Image images/J35/volume_class_0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830e9b8054fbbb8a5cf245: {"detail":"Not Found"}
+Image images/J35/volume_class_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830e9b8054fbbb8a5cf247: {"detail":"Not Found"}
+Image images/J35/volume_class_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830e9c8054fbbb8a5cf249: {"detail":"Not Found"}
+Image images/J35/volume_class_0.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830e9b8054fbbb8a5cf245: {"detail":"Not Found"}
+Image images/J35/volume_class_1.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830e9b8054fbbb8a5cf247: {"detail":"Not Found"}
+Image images/J35/volume_class_2.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830e9c8054fbbb8a5cf249: {"detail":"Not Found"}
+Image images/J34/volume_class_0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830196944e27d6a9e20ee3: {"detail":"Not Found"}
+Image images/J34/volume_class_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830197944e27d6a9e20ee7: {"detail":"Not Found"}
+Image images/J34/volume_class_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a830198944e27d6a9e20eeb: {"detail":"Not Found"}
+Image images/J30/classes.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82be84cb2d37a2b277ff15: {"detail":"Not Found"}
+Image images/J30/volume_class_0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82be82cb2d37a2b277ff0e: {"detail":"Not Found"}
+Image images/J30/volume_class_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82be83cb2d37a2b277ff10: {"detail":"Not Found"}
+Image images/J30/volume_class_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82be83cb2d37a2b277ff12: {"detail":"Not Found"}
+Image images/J30/volume_class_0.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82be82cb2d37a2b277ff0e: {"detail":"Not Found"}
+Image images/J30/volume_class_1.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82be83cb2d37a2b277ff10: {"detail":"Not Found"}
+Image images/J30/volume_class_2.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82be83cb2d37a2b277ff12: {"detail":"Not Found"}
+Image images/J29/mic.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8292eebf7e9fccf491b2d6: {"detail":"Not Found"}
+Image images/J29/particles.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8292f0bf7e9fccf491b2df: {"detail":"Not Found"}
+Image images/J29/micrographs.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8292eebf7e9fccf491b2d8: {"detail":"Not Found"}
+Image images/J23/volume_class_0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81df49b0613e83e327fae6: {"detail":"Not Found"}
+Image images/J23/volume_class_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81df4ab0613e83e327faea: {"detail":"Not Found"}
+Image images/J23/volume_class_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81df4bb0613e83e327faee: {"detail":"Not Found"}
+Image images/J26/particles1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82650a4cc43225d8b0715c: {"detail":"Not Found"}
+Image images/J26/particles2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82650a4cc43225d8b0715e: {"detail":"Not Found"}
+Image images/J26/micrographs.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8265094cc43225d8b0715a: {"detail":"Not Found"}
+Image images/J26/particles.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a82650a4cc43225d8b07160: {"detail":"Not Found"}
+Image images/J28/classes.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8291e580e406d4c7fe1b3c: {"detail":"Not Found"}
+Image images/J28/volume_class_0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8291e380e406d4c7fe1b35: {"detail":"Not Found"}
+Image images/J28/volume_class_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8291e380e406d4c7fe1b37: {"detail":"Not Found"}
+Image images/J28/volume_class_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8291e480e406d4c7fe1b39: {"detail":"Not Found"}
+Image images/J28/volume_class_0.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8291e380e406d4c7fe1b35: {"detail":"Not Found"}
+Image images/J28/volume_class_1.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8291e380e406d4c7fe1b37: {"detail":"Not Found"}
+Image images/J28/volume_class_2.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8291e480e406d4c7fe1b39: {"detail":"Not Found"}
+Image images/J22/templates_selected.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81bfd4636e9ade34eb7ca6: {"detail":"Not Found"}
+Image images/J22/particles_excluded.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81bfef636e9ade34eb7cb8: {"detail":"Not Found"}
+Image images/J22/particles_selected.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81bfea636e9ade34eb7cb6: {"detail":"Not Found"}
+Image images/J22/templates_excluded.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81bfe7636e9ade34eb7cb2: {"detail":"Not Found"}
+Image images/J22/Selected_21_classes_.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81bfd3636e9ade34eb7c9f: {"detail":"Not Found"}
+Image images/J22/Excluded_179_classes_.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81bfe7636e9ade34eb7cad: {"detail":"Not Found"}
+Image images/J25/tile_image.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a826203fe88d311bdfc7657: {"detail":"Not Found"}
+Image images/J25/micrographs.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a826204fe88d311bdfc7659: {"detail":"Not Found"}
+Image images/J25/topaz_model.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a826202fe88d311bdfc7655: {"detail":"Not Found"}
+Image images/J25/P259_J25_.png.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a826202fe88d311bdfc7650: {"detail":"Not Found"}
+Image images/J27/mic.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a826533d151c29ef43b7aa5: {"detail":"Not Found"}
+Image images/J27/particles.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a826535d151c29ef43b7aae: {"detail":"Not Found"}
+Image images/J27/micrographs.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a826533d151c29ef43b7aa7: {"detail":"Not Found"}
+Image images/J21/classes.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8190cf29c9750be1c5949b: {"detail":"Not Found"}
+Image images/J21/class_averages.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8190d029c9750be1c5949d: {"detail":"Not Found"}
+Image images/J21/particles.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a816cb829c9750be1c591cf: {"detail":"Not Found"}
+Image images/J21/Noise_Model_for_iteration_20.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8190d029c9750be1c5949f: {"detail":"Not Found"}
+Image images/J21/Effective_number_of_assigned_classes_for_iteration_20.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8190d129c9750be1c594a4: {"detail":"Not Found"}
+Image images/J21/Probability_of_best_class_for_iteration_20.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a8190d229c9750be1c594a9: {"detail":"Not Found"}
+Image images/J18/img_patch_df0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cf4fcc759e7db020439: {"detail":"Not Found"}
+Image images/J18/exposures.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cf5fcc759e7db02043b: {"detail":"Not Found"}
+Image images/J24/classes.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81eaa671cc5bd30810e810: {"detail":"Not Found"}
+Image images/J24/volume_class_0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81eaa571cc5bd30810e809: {"detail":"Not Found"}
+Image images/J24/volume_class_1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81eaa671cc5bd30810e80b: {"detail":"Not Found"}
+Image images/J24/volume_class_2.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81eaa671cc5bd30810e80d: {"detail":"Not Found"}
+Image images/J24/volume_class_0.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81eaa571cc5bd30810e809: {"detail":"Not Found"}
+Image images/J24/volume_class_1.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81eaa671cc5bd30810e80b: {"detail":"Not Found"}
+Image images/J24/volume_class_2.map_sharp.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81eaa671cc5bd30810e80d: {"detail":"Not Found"}
+Image images/J20/mic.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81585abccb326736bb785b: {"detail":"Not Found"}
+Image images/J20/particles.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81585bbccb326736bb7864: {"detail":"Not Found"}
+Image images/J20/micrographs.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a81585abccb326736bb785d: {"detail":"Not Found"}
+Image images/J16/imported_small.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cd855f69463297c4909: {"detail":"Not Found"}
+Image images/J16/imported_smaller.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cd855f69463297c490b: {"detail":"Not Found"}
+Image images/J16/imported_smallest.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cd855f69463297c490d: {"detail":"Not Found"}
+Image images/J16/imported_micrographs.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cd855f69463297c490f: {"detail":"Not Found"}
+Image images/J16/000961735811310229675_A13_B14_3_20260815_173127_Fractions_DW.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cd855f69463297c4906: {"detail":"Not Found"}
+Image images/J16/015797686612457546615_A13_B14_3_20260815_173134_Fractions_DW.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cd955f69463297c4912: {"detail":"Not Found"}
+Image images/J16/012893860843164155956_A13_B14_3_20260815_173143_Fractions_DW.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cda55f69463297c4916: {"detail":"Not Found"}
+Image images/J17/imported_small.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cded18c536ef300ba97: {"detail":"Not Found"}
+Image images/J17/imported_smaller.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cded18c536ef300ba99: {"detail":"Not Found"}
+Image images/J17/imported_smallest.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cded18c536ef300ba9b: {"detail":"Not Found"}
+Image images/J17/imported_micrographs.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cded18c536ef300ba9d: {"detail":"Not Found"}
+Image images/J17/010861168292619611964_A13_B14_4_20260815_105530_Fractions_DW.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cddd18c536ef300ba94: {"detail":"Not Found"}
+Image images/J17/005416615226184878335_A13_B14_4_20260815_105539_Fractions_DW.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811cdfd18c536ef300baa0: {"detail":"Not Found"}
+Image images/J17/007379372426682402185_A13_B14_4_20260815_105547_Fractions_DW.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a811ce0d18c536ef300baa4: {"detail":"Not Found"}
+Image images/J19/mic0.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a812ff171138fe2c0755fdc: {"detail":"Not Found"}
+Image images/J19/mic1.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a812ff271138fe2c0755fe4: {"detail":"Not Found"}
+Image images/J19/particles.png failed: CryoSmart 404 for /api/cryosmart/import/session/s1-4364f2c3/image/6a812ff171138fe2c0755fde: {"detail":"Not Found"}
+Map J44/BJ.P259.J44.volume.map.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J44.volume.map: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J44/BJ.P259.J44.volume.map_sharp.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J44.volume.map_sharp: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J44/BJ.P259.J44.volume.map_half_A.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J44.volume.map_half_A: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J44/BJ.P259.J44.volume.map_half_B.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J44.volume.map_half_B: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J44/BJ.P259.J44.volume.mask_refine.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J44.volume.mask_refine: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J44/BJ.P259.J44.volume.mask_fsc.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J44.volume.mask_fsc: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J44/BJ.P259.J44.volume.mask_fsc_auto.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J44.volume.mask_fsc_auto: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J44/BJ.P259.J44.volume.precision.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J44.volume.precision: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J44/BJ.P259.J44.mask.mask_refine.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J44.mask.mask_refine: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J43/BJ.P259.J43.volume.map.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J43.volume.map: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J43/BJ.P259.J43.volume.map_sharp.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J43.volume.map_sharp: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J43/BJ.P259.J43.volume.map_half_A.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J43.volume.map_half_A: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J43/BJ.P259.J43.volume.map_half_B.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J43.volume.map_half_B: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J43/BJ.P259.J43.volume.mask_refine.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J43.volume.mask_refine: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J43/BJ.P259.J43.volume.mask_fsc.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J43.volume.mask_fsc: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J43/BJ.P259.J43.volume.mask_fsc_auto.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J43.volume.mask_fsc_auto: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J43/BJ.P259.J43.volume.precision.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J43.volume.precision: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J43/BJ.P259.J43.mask.mask_refine.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J43.mask.mask_refine: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J39/BJ.P259.J39.volume.map.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J39.volume.map: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J39/BJ.P259.J39.volume.map_sharp.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J39.volume.map_sharp: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J39/BJ.P259.J39.volume.map_half_A.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J39.volume.map_half_A: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J39/BJ.P259.J39.volume.map_half_B.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J39.volume.map_half_B: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J39/BJ.P259.J39.volume.mask_refine.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J39.volume.mask_refine: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J39/BJ.P259.J39.volume.mask_fsc.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J39.volume.mask_fsc: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J39/BJ.P259.J39.volume.mask_fsc_auto.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J39.volume.mask_fsc_auto: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J39/BJ.P259.J39.volume.precision.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J39.volume.precision: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Map J39/BJ.P259.J39.mask.mask_refine.mrc failed: CryoSmart 502 for api/log_image/download_result_file/P259/J39.mask.mask_refine: {"ok":false,"error":"Failed to reach CryoSmart at http://192.168.202.11:8080: The operation was aborted due to timeout"}
+Build & download ZIP
+Re-download
+Help & ChimeraX Helper Scripts
+How to capture CryoSmart metadata with the in-page Smart Capture console snippet, the browser-portability verdict, and the downloadable ChimeraX desktop helper scripts.
+
+How do I get CryoSmart metadata into the web app?
+Smart Capture — the only method you need
+
+The web app now ships a single, reliable capture method that runs a script directly inside the CryoSmart page to read the Vue Pinia store. It returns full job metadata (input slot groups, params spec, output group images, UI tile images) and the session info needed to download maps and images later — no extension, no manual cookie paste, no JSON file export.
+
+In the Smart Capture card above, click Open CryoSmart and log in.
+Navigate to your project page (URL like http://192.168.202.11:8080/#/projects/P259) and wait for the jobs to render.
+Press F12 → open the Console tab.
+Click Copy Capture Script in the Smart Capture card, paste into the console (Ctrl/Cmd+V), press Enter.
+The script extracts every job with full metadata + the CryoSmart session token, POSTs to /api/cryosmart/import, and a new tab opens here at /?imported=… with everything loaded.
+Why this is the only method: it runs in the exact page context (never about:blank), no bookmark installation, no URL length limits, cookies + bearer token auto-attached (same-origin), and captures full Pinia-store metadata that the legacy bookmarklet could not. Works in Chrome / Firefox / Safari / Edge.
+
+Fallbacks (rarely needed): if you already have a metadata JSON file from a previous capture, you can still load it — open the Smart Capture card, paste the JSON into a .json file, and drag-drop it onto the page (the import endpoint accepts either form). For programmatic use, POST the JSON to /api/cryosmart/import directly.
+
+Can a web app fully replicate the Chrome extension?
+
+ChimeraX helper scripts (desktop only)
+
+How do I share a lineage with a colleague?
+
+What was ported vs. replaced?
+Quick start: Click Open CryoSmart in the Smart Capture card above, log in, navigate to your project, press F12 → Console, click Copy Capture Script, paste into the console, press Enter — a new tab opens here with everything auto-loaded (project, jobs, session for maps/images).
+
+Reimplementation of the CryoSmart Lineage Tracer 3.0 Chrome extension as a cross-browser web app.
+Works in Chrome · Firefox · Safari · Edge
+No extensi
