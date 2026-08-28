@@ -33,8 +33,8 @@ export async function GET(
   }
 
   const resp =
-    (await historyImageResponse(capture, decoded)) ??
-    (await historyImageResponse(capture, fileid));
+    (await historyImageResponse(capture, decoded, { allowRemote: true })) ??
+    (await historyImageResponse(capture, fileid, { allowRemote: true }));
   if (!resp) {
     return NextResponse.json(
       { ok: false, error: "Image not found in this capture." },

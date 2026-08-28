@@ -71,9 +71,13 @@ bun run dev
   - *Links only* —— 体积小，每张 image / 每个 map 都带**绝对 URL**（`http://<内网>/api/log_image/...` 及 `download_result_file/...`）
   - *With embedded images* —— 图片字节内嵌 base64，完全自包含
   - *Embedded + credentials* —— 再附带捕获的登录凭据（供需要鉴权的内网服务器重新下载）
-- **导入（Import capture JSON）**：把导出的 JSON 导入到任何一台部署了本应用的实例，恢复 Graph + Report（也可导入旧版 `{ jobs: [...] }` 项目元数据）
+- **导入（Import capture JSON）**：把导出的 JSON 导入到任何一台部署了本应用的实例，恢复 Graph + Report（也可导入旧版 `{ jobs: [...] }` 项目元数据）。图片按优先级解析：内嵌字节 → **源条目字节复用**（同实例导入 links-only 导出时自动拷贝原图）→ **按需远程拉取**（links-only 导入后，图片 URL 索引持久化，`/api/cryosmart/history/<id>/image/<fileid>` 端点在磁盘未命中时代理拉取远程 URL 并转发凭据）——只要应用服务器能访问内网 CryoSmart，links-only 导入的图片照常显示
 
 > **只靠 JSON 能否通过网络下载全部 image / map？** image 和 map 的绝对 URL 都在文件里 —— 只要读取方所在机器能访问你的 CryoSmart 内网服务器（需要登录时随文件带上 credentials），就能仅凭 JSON 重新下载全部 image 和 map；带内嵌字节的导出让 image 完全离线自包含。map 是大体积二进制，永不内嵌，只能通过 URL 从 CryoSmart 服务器下载。
+
+### Class 分组展示（v3.15）
+
+ab-initio / hetero-refine 这类多 class 作业的 log image 会按 class 自动分组：标题/文件名中的 `class N` 标记、纯数字标题、class 画廊文件（如 `J4_final_000.png`）都能被识别。**Graph 详情弹窗**渲染紧凑的 class 标签页（Class 0 / Class 1 / … / General），**Report** 每类一个紧密的 auto-fill 网格分区（每类上限 12 张，计数随加载失败自动修正）。无法提取 class 的作业保持原有平铺展示。
 
 ---
 

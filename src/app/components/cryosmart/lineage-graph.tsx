@@ -80,6 +80,7 @@ import type {
   LineageSummary,
   MapAsset,
 } from "@/lib/cryosmart/types";
+import { groupLogImagesByClass } from "@/lib/cryosmart/lineage";
 import type { CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 
 interface Props {
@@ -2273,6 +2274,21 @@ function NodeDetailModal({
   const family = classify(node);
   const color = FAMILY_COLOR[family];
   const allImages = useMemo(() => collectAllImages(node), [node]);
+  /* v3.15: class grouping — ab-initio / hetero-refine galleries carry
+   * per-class plots ("class 0 FSC", `J4_final_000.png` gallery files…).
+   * When grouping adds information (≥2 buckets), the gallery renders a
+   * compact class tab bar + per-class thumbnails instead of one long
+   * flat strip. Null → keep the flat gallery (non-class jobs, or a
+   * single-class capture). */
+  const logGroups = useMemo(() => groupLogImagesByClass(allImages), [allImages]);
+  const [activeGroupKey, setActiveGroupKey] = useState<string | null>(null);
+  const activeGroup =
+    logGroups && logGroups.length > 0
+      ? logGroups.find((g) => g.key === activeGroupKey) ?? logGroups[0]
+      : null;
+  /* The viewer + thumbnail strip operate on the ACTIVE group when
+   * grouped (activeIdx indexes into it), or on the flat list otherwise. */
+  const visibleImages = activeGroup ? activeGroup.images : allImages;
   const [embeddedGallery, setEmbeddedGallery] = useState<Record<string, string>>({});
   const [activeIdx, setActiveIdx] = useState(0);
   /* Image srcs that failed EVERY load strategy (direct + proxy fallback).
@@ -2280,7 +2296,13 @@ function NodeDetailModal({
    * e.g. log images whose bytes never reached the session store, or a
    * session whose TTL expired. */
   const [failedSrcs, setFailedSrcs] = useState<Record<string, true>>({});
-  useEffect(() => { setFailedSrcs({}); setActiveIdx(0); }, [node.uid]);
+  useEffect(() => {
+    setFailedSrcs({});
+    setActiveIdx(0);
+    setActiveGroupKey(null);
+  }, [node.uid]);
+  // Clamp the index when the active group shrinks it (group switch).
+  const safeActiveIdx = activeIdx < visibleImages.length ? activeIdx : 0;
 
   /* Pre-fetch all gallery images as base64 when a session is available,
    * so they render self-contained (no remote/referrer/CORS issues).
@@ -2328,7 +2350,7 @@ function NodeDetailModal({
     return m;
   }, [summary.nodes]);
 
-  const activeImage = allImages[activeIdx];
+  const activeImage = visibleImages[safeActiveIdx];
   const activeSrc = activeImage
     ? embeddedGallery[activeImage.src] || withSession(activeImage.original_url || activeImage.url, session)
     : null;
@@ -2451,6 +2473,46 @@ function NodeDetailModal({
                   </div>
                 ) : (
                   <div className="space-y-2">
+                    {/* v3.15: class tab bar — one compact pill per class
+                        (plus "General" for classless plots). Switching
+                        re-scopes the viewer + thumbnail strip below. */}
+                    {logGroups && logGroups.length > 1 && (
+                      <div
+                        className="flex flex-wrap items-center gap-1"
+                        role="tablist"
+                        aria-label="Log image class groups"
+                      >
+                        {logGroups.map((g) => {
+                          const active = g.key === (activeGroup?.key ?? "");
+                          return (
+                            <button
+                              key={g.key}
+                              type="button"
+                              role="tab"
+                              aria-selected={active}
+                              onClick={() => {
+                                setActiveGroupKey(g.key);
+                                setActiveIdx(0);
+                              }}
+                              className="rounded-full border px-2 py-0.5 text-[10px] font-semibold leading-4 transition-colors"
+                              style={{
+                                borderColor: active ? color : borderColor,
+                                color: active ? "#fff" : mutedColor,
+                                backgroundColor: active ? color : "transparent",
+                              }}
+                            >
+                              {g.label}
+                              <span
+                                className="ml-1 font-mono text-[9px] opacity-70"
+                                style={{ color: active ? "#fff" : mutedColor }}
+                              >
+                                {g.images.length}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                     {/* Main viewer */}
                     <div
                       className="relative flex items-center justify-center rounded-md border"
@@ -2503,13 +2565,14 @@ function NodeDetailModal({
                     {/* Thumbnail grid — wraps (bounded height, vertical
                         scroll) so a large gallery never stretches the modal
                         sideways; the old single-row strip made a 112-image
-                        job's min-content width exceed the dialog. */}
-                    {allImages.length > 1 && (
+                        job's min-content width exceed the dialog. v3.15:
+                        iterates the ACTIVE class group (or the flat list). */}
+                    {visibleImages.length > 1 && (
                       <div className="flex max-h-[168px] flex-wrap gap-1.5 overflow-y-auto pb-1">
-                        {allImages.map((img, idx) => {
+                        {visibleImages.map((img, idx) => {
                           const src = embeddedGallery[img.src] || withSession(img.original_url || img.url, session);
                           const fallback = !embeddedGallery[img.src] ? buildProxyFallback(img.original_url || img.url, session) : null;
-                          const active = idx === activeIdx;
+                          const active = idx === safeActiveIdx;
                           return (
                             <button
                               key={`${img.src}-${idx}`}
@@ -2560,6 +2623,17 @@ function NodeDetailModal({
                       <div className="break-all text-[10px]" style={{ color: mutedColor }}>
                         <span className="font-mono">{activeImage.kind}</span>
                         {" · "}
+                        {activeGroup && (
+                          <span
+                            className="mr-1 rounded px-1 py-px font-mono text-[9px]"
+                            style={{
+                              backgroundColor: activeGroup.class_index == null ? "transparent" : `${color}22`,
+                              color: activeGroup.class_index == null ? mutedColor : color,
+                            }}
+                          >
+                            {activeGroup.label}
+                          </span>
+                        )}
                         <span>{activeImage.name}</span>
                       </div>
                     )}

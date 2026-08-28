@@ -271,6 +271,13 @@ export interface ImageAsset {
   log_text?: string | null;
   log_flags?: string[] | null;
   category?: string | null;
+  /** v3.15: class index extracted from the log entry title / file name
+   *  ("class 2 FSC", "class_0_volume", bare-number titles, class-gallery
+   *  files like `J4_final_000.png` under a numberless "Final classes"
+   *  title). Only present for log_image / image_log kinds on class-type
+   *  jobs (abinit / hetero / class_3D) — used to group the gallery and
+   *  the report by class. */
+  class_index?: number | null;
 }
 
 /** A downloadable map asset attached to a `LineageNode`. */

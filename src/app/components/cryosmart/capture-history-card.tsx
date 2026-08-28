@@ -221,14 +221,24 @@ export function CaptureHistoryCard({ importToken, onRestore }: Props) {
           ok: boolean;
           entry?: HistoryEntrySummary;
           embedded_images?: number;
+          reused_images?: number;
+          linked_images?: number;
           error?: string;
         };
         if (json.ok && json.entry) {
+          // v3.15: images resolve in priority order — embedded bytes,
+          // bytes reused from the still-present source entry, then remote
+          // links (served on demand by the history image endpoint).
+          const imgNote =
+            json.embedded_images
+              ? `, ${json.embedded_images} embedded images restored.`
+              : json.reused_images
+                ? `, ${json.reused_images} images restored from the source capture.`
+                : json.linked_images
+                  ? `, ${json.linked_images} image links (served on demand).`
+                  : ".";
           toast.success(
-            `Imported ${json.entry.label} — ${json.entry.counts.jobs} jobs` +
-              (json.embedded_images
-                ? `, ${json.embedded_images} embedded images restored.`
-                : " (links only — no embedded image bytes in this file).")
+            `Imported ${json.entry.label} — ${json.entry.counts.jobs} jobs${imgNote}`
           );
           await refresh();
         } else {

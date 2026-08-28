@@ -30,6 +30,10 @@ export interface PendingData {
     // Fileids whose BYTES were uploaded to the session's image store —
     // these get a same-origin /image/<fileid> src that works over HTTPS.
     uploaded_image_ids?: string[];
+    // v3.15: fileids WITHOUT bytes but WITH an absolute CryoSmart URL
+    // (links-only imports). Same rewrite as uploaded ids — the history
+    // image endpoint proxy-fetches the URL when disk bytes are missing.
+    remote_image_ids?: string[];
   };
 }
 
@@ -119,12 +123,18 @@ function mergeLogImagesIntoRaw(
   raw: unknown,
   jobLogImages: PendingData["data"]["job_log_images"],
   uploadedImageIds?: string[],
-  imageBase?: string | null
+  imageBase?: string | null,
+  linkedImageIds?: string[]
 ): unknown {
   if (!jobLogImages) return raw;
-  const uploaded = new Set(uploadedImageIds || []);
+  // v3.15: the rewrite set is the UNION of byte-uploaded ids and
+  // remote-linked ids — for history restores the imageBase endpoint serves
+  // both (disk bytes first, then an on-demand proxy fetch of the stored
+  // absolute URL). Live staged sessions pass no linked ids (all images are
+  // browser-uploaded bytes).
+  const known = new Set([...(uploadedImageIds || []), ...(linkedImageIds || [])]);
   const sessionBase =
-    imageBase && uploaded.size > 0 ? imageBase : null;
+    imageBase && known.size > 0 ? imageBase : null;
   const decorate = (ref: {
     fileid?: string;
     name?: string;
@@ -139,7 +149,7 @@ function mergeLogImagesIntoRaw(
         sessionBase &&
         typeof out.fileid === "string" &&
         out.fileid &&
-        uploaded.has(out.fileid)
+        known.has(out.fileid)
       ) {
         out.src = sessionBase + encodeURIComponent(out.fileid);
       }
@@ -149,7 +159,7 @@ function mergeLogImagesIntoRaw(
   };
   /** Rewrite a bare fileid string to its same-origin session-image URL. */
   const refile = (v: unknown): unknown =>
-    typeof v === "string" && sessionBase && uploaded.has(v)
+    typeof v === "string" && sessionBase && known.has(v)
       ? sessionBase + encodeURIComponent(v)
       : v;
   const attach = (j: unknown): unknown => {
@@ -179,7 +189,7 @@ function mergeLogImagesIntoRaw(
       if (Array.isArray(out.ui_tile_images)) {
         let changed = false;
         const tiles = (out.ui_tile_images as Array<Record<string, unknown>>).map((t) => {
-          if (t && typeof t === "object" && typeof t.fileid === "string" && uploaded.has(t.fileid)) {
+          if (t && typeof t === "object" && typeof t.fileid === "string" && known.has(t.fileid)) {
             changed = true;
             return { ...t, fileid: sessionBase + encodeURIComponent(t.fileid) };
           }
@@ -195,7 +205,7 @@ function mergeLogImagesIntoRaw(
           if (l && typeof l === "object" && Array.isArray(l.imgfiles)) {
             let fChanged = false;
             const files = (l.imgfiles as Array<Record<string, unknown>>).map((f) => {
-              if (f && typeof f === "object" && typeof f.fileid === "string" && uploaded.has(f.fileid)) {
+              if (f && typeof f === "object" && typeof f.fileid === "string" && known.has(f.fileid)) {
                 fChanged = true;
                 return { ...f, fileid: sessionBase + encodeURIComponent(f.fileid) };
               }
@@ -232,7 +242,8 @@ function toLoaded(
     data.data.raw || { jobs: data.data.jobs },
     data.data.job_log_images,
     data.data.uploaded_image_ids,
-    imageBase
+    imageBase,
+    data.data.remote_image_ids
   );
   return {
     raw: mergedRaw,

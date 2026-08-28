@@ -1268,3 +1268,27 @@ Stage Summary:
 - Mobile: graph pan/pinch-zoom now work via pointer events (was mouse-only).
 - Test assets: v314-regression.mjs (24 checks) joins the standing suite; .harness/** eslint-ignored; all 5 suites green post-fix.
 - 26 files changed (2 new: clipboard.ts, v314-regression.mjs); NOT pushed (user did not request a push this round).
+
+---
+Task ID: 31
+Agent: Z.ai Code (main)
+Task: v3.15 — (1) class-grouped log-image display for ab-initio/hetero-refine in graph modal + HTML report with compact layout; (2) fix links-only JSON export → re-import showing no images; push to GitHub.
+
+Work Log:
+- Explored log-image data flow (two Explore sub-agents): lineage.ts parsing pipeline (lastRound filters, trailingIndexOf guards, imageAssets), NodeDetailModal gallery, reportMediaBlock (flat flex grid, cap 24), and the export/import pipeline (exportCaptureJson / importCaptureJson / historyImageResponse / mergeLogImagesIntoRaw).
+- Root-caused the links-only import bug: `importCaptureJson` skipped every `images[]` entry without `data` (capture-history.ts:667 old) — `url` was never persisted, `uploaded_image_ids` stayed empty, so `mergeLogImagesIntoRaw` disabled the same-origin rewrite and refs degenerated to direct intranet URLs (mixed-content blocked / proxy unreachable).
+- lineage.ts: added logImageClassIndexOf (explicit "class N" in title/filename, all job types), galleryClassIndexOf (numberless title + `J4_final_000.png` trailing index, class jobs only), bareNumberClassIndexOf (pure-number titles, class jobs only), logImageClassOf, and groupLogImagesByClass (sorted class buckets + General last; null when grouping adds nothing). imageAssets now stamps class_index on log_image refs and image_log files (entry-level evidence wins).
+- types.ts: ImageAsset.class_index?: number | null.
+- lineage-graph.tsx NodeDetailModal: class tab bar (role=tablist pills with per-class counts), viewer + thumbnail strip scoped to the active group, activeGroupKey state reset on node change, safeActiveIdx clamp, class badge in the caption line. Flat behavior unchanged when grouping is null.
+- report-html.ts: reportImageBoxes gained a "compact" variant (.imgs-c auto-fill grid minmax(150px,1fr) + .imgbox.sm tighter boxes, ellipsised captions); reportMediaBlock renders per-class .cls-sec sections (12/class cap, count in .cls-head .cnt) or the compact flat grid (24 cap); markFailed extended with a cls-sec-scoped count decrement; CSS additions for the compact grid.
+- Links-only import fix, three delivery paths: (a) importCaptureJson now collects every http(s) images[].url into remote_image_urls (persisted in capture.json); (b) BYTE REUSE — when the export's capture.id source entry exists on this instance, its image bytes are copied into the new entry (fixes the reported same-instance flow); (c) historyImageResponse gained {allowRemote} — on disk miss it proxy-fetches the stored URL (auth/cookie forwarded, 10s timeout, 8MB cap, raster-only byte sniff) and serves it same-origin; exportCaptureJson re-emits link-only entries so export chains never lose URLs.
+- Routes: history/[id] GET returns remote_image_ids + log_images_linked; history image route passes allowRemote:true; import route returns reused_images + linked_images; capture-history-card toast reflects the three-tier resolution.
+- use-imported-metadata.ts: PendingData.data.remote_image_ids; mergeLogImagesIntoRaw rewrite set = uploaded ∪ linked (live staged flow unchanged).
+- Tests: .harness/v315-regression.mjs — 35 checks, all passing (class extraction unit tests incl. negatives, report grouping, byte-reuse import, on-demand remote fetch against a local test origin incl. SVG rejection, embedded-import regression, re-export chain). .harness/v315-session.mjs seeds a class-carrying hetero capture for browser E2E.
+- Agent Browser E2E: modal shows Class 0/Class 1/General tabs, switching works, all images self-contained; report iframe renders 3 .cls-sec sections + 3 compact grids (172px auto-fill, 4px padding), 5/5 images loaded; links-only export → browser upload import → restore → modal images render (bug fixed end-to-end); zero console errors; sticky footer verified at 390px and 1920px.
+- README: documented the three-tier image resolution on import and the class-grouped display.
+
+Stage Summary:
+- Class extraction is heuristic-gated (explicit "class N" everywhere; gallery/bare-number only on abinit/hetero/class_3D) so rounds ("Per particle scale factors 007") and entity galleries are never misread as classes; single-class or classless jobs stay flat.
+- Links-only imports now render everywhere the app can reach CryoSmart: same-instance via byte reuse (zero user action), cross-instance via the on-demand remote proxy with forwarded credentials; raster-only sniffing preserved (SVG stored-XSS rejected at the new path too).
+- All artifacts: src/lib/cryosmart/{lineage,types,capture-history,report-html}.ts, lineage-graph.tsx, use-imported-metadata.ts, history routes, capture-history-card.tsx, README.md, .harness/v315-{regression,session}.mjs.

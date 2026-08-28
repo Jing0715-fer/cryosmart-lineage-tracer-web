@@ -32,6 +32,11 @@ export async function GET(
     (n, arr) => n + (Array.isArray(arr) ? arr.length : 0),
     0
   );
+  // v3.15: fileids WITHOUT disk bytes but WITH an absolute CryoSmart URL
+  // (links-only imports). The frontend unions them with uploaded_image_ids
+  // so refs get same-origin srcs pointing at THIS route — which proxy-fetches
+  // the remote URL when the disk lookup misses.
+  const remoteImageIds = Object.keys(capture.remote_image_urls || {});
 
   return NextResponse.json({
     ok: true,
@@ -42,6 +47,7 @@ export async function GET(
     log_jobs_total: 0,
     log_images_count: logImageCount,
     log_images_uploaded: (capture.image_files || []).length,
+    log_images_linked: remoteImageIds.length,
     entry: {
       id: capture.id,
       label: capture.label,
@@ -65,6 +71,7 @@ export async function GET(
       cryosmart_cookie: capture.cryosmart_cookie || undefined,
       job_log_images: capture.job_log_images || {},
       uploaded_image_ids: (capture.image_files || []).map((f) => f.fileid),
+      remote_image_ids: remoteImageIds,
     },
   });
 }

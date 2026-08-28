@@ -11,9 +11,13 @@ import { importCaptureJson } from "@/lib/cryosmart/capture-history";
  *
  * Embedded image bytes (images[].data) are written to the entry's binary
  * store, so a fully-embedded export restores pixel-perfect offline.
- * Links-only exports restore the metadata + refs; their images fall back
- * to the absolute CryoSmart URLs (renderable wherever the browser can
- * reach the intranet server).
+ * v3.15 links-only exports now restore their images too, via TWO
+ * mechanisms: (a) when the export's SOURCE entry still exists on this
+ * instance, its bytes are copied into the new entry (same-instance
+ * re-import restores offline); (b) every absolute CryoSmart URL is
+ * persisted as a `remote_image_urls` index and served on demand by the
+ * history image endpoint (works wherever the app server can reach the
+ * CryoSmart origin, forwarding stored credentials when present).
  *
  * Returns the created entry summary.
  */
@@ -59,6 +63,8 @@ export async function POST(req: NextRequest) {
       ok: true,
       entry: result.meta,
       embedded_images: result.embeddedImages,
+      reused_images: result.reusedImages,
+      linked_images: result.linkedImages,
     });
   } catch (err) {
     return NextResponse.json(

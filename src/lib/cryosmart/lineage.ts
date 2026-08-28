@@ -719,6 +719,121 @@ export function classSplits(
 /* Image / map assets                                                  */
 /* ------------------------------------------------------------------ */
 
+/** v3.15 — CLASS extraction for log images (ab-initio / hetero-refine).
+ *
+ * These job types emit their runtime plots PER CLASS: entries titled
+ * "class 0 FSC" / "Class 1" (or a bare "0".."N"), plus class GALLERIES —
+ * a numberless title ("Final classes") carrying numbered files
+ * (`J4_final_000.png` / `001.png` / …), one per class. The rules below
+ * mirror the guard family used by `trailingIndexOf` so rounds/series
+ * ("Per particle scale factors 007") are never misread as classes. */
+
+/** Explicit "class N" marker in a title or file name — "class 2 FSC",
+ *  "class_0_volume", "Class 1". Word "class" + separators + 1–3 digits;
+ *  "classes"/"classif-" etc. cannot match (a non-separator follows the
+ *  keyword). Applied to EVERY job type (a "class" marker is unambiguous). */
+export function logImageClassIndexOf(text: unknown, name: unknown): number | null {
+  for (const s of [text, name]) {
+    if (typeof s !== "string" || !s) continue;
+    const m = s.match(/(?:^|[^a-z0-9])class[\s_:.\-]*(\d{1,3})(?!\d)/i);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+}
+
+/** Class index of a class-GALLERY member: the entry title carries NO digit
+ *  ("Final classes") while the file name ends in a 2–3-digit index
+ *  (`J4_final_000.png` → class 0). Titles WITH digits are numbered
+ *  series/rounds, never galleries; 1-digit suffixes index entities
+ *  ("mic0"), not classes — same guards as `trailingIndexOf`, inverted
+ *  (there the goal was to PROTECT these rows; here we READ the index). */
+function galleryClassIndexOf(text: unknown, name: unknown): number | null {
+  const t = typeof text === "string" ? text.trim() : "";
+  if (!t || /\d/.test(t)) return null;
+  if (typeof name !== "string" || !name) return null;
+  const m = name
+    .replace(/\.[a-z0-9]{1,6}$/i, "")
+    .replace(/[_\s]+/g, " ")
+    .match(/(?:^|[ \-:.])(\d{2,3})$/);
+  if (!m) return null;
+  return parseInt(m[1], 10);
+}
+
+/** Bare-number title ("0".."99") — per-class entry streams where every
+ *  entry is titled with its class index and nothing else. 1–2 digits,
+ *  whole title, class-type jobs only. */
+function bareNumberClassIndexOf(text: unknown): number | null {
+  if (typeof text !== "string") return null;
+  const t = text.trim();
+  if (!/^\d{1,2}$/.test(t)) return null;
+  return parseInt(t, 10);
+}
+
+/** Full class extraction for one log-image ref / file.
+ *  `isClassJob` gates the heuristic rules (gallery + bare-number) to
+ *  abinit / hetero / class_3D jobs; the explicit "class N" rule applies
+ *  everywhere. */
+function logImageClassOf(
+  isClassJob: boolean,
+  text: unknown,
+  name: unknown
+): number | null {
+  return (
+    logImageClassIndexOf(text, name) ??
+    (isClassJob
+      ? bareNumberClassIndexOf(text) ?? galleryClassIndexOf(text, name)
+      : null)
+  );
+}
+
+/** One class-grouped bucket of log images (v3.15). */
+export interface LogImageGroup {
+  key: string;
+  label: string;
+  class_index: number | null;
+  images: ImageAsset[];
+}
+
+/** Group a job's log images by extracted class index. Returns null when
+ *  grouping adds nothing (no class info at all, or everything in a single
+ *  class) — callers fall back to the flat gallery. Order inside each
+ *  group preserves the incoming order (callers pass their ranked list). */
+export function groupLogImagesByClass(images: ImageAsset[]): LogImageGroup[] | null {
+  const classed = new Map<number, ImageAsset[]>();
+  const general: ImageAsset[] = [];
+  for (const im of images || []) {
+    if (im.kind !== "log_image" && im.kind !== "image_log") continue;
+    if (typeof im.class_index === "number" && Number.isInteger(im.class_index)) {
+      const arr = classed.get(im.class_index);
+      if (arr) arr.push(im);
+      else classed.set(im.class_index, [im]);
+    } else {
+      general.push(im);
+    }
+  }
+  // No class info → flat. Exactly one class and nothing else → the flat
+  // list is identical; save the chrome.
+  if (classed.size === 0) return null;
+  if (classed.size === 1 && general.length === 0) return null;
+  const groups: LogImageGroup[] = Array.from(classed.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([idx, imgs]) => ({
+      key: `class-${idx}`,
+      label: `Class ${idx}`,
+      class_index: idx,
+      images: imgs,
+    }));
+  if (general.length > 0) {
+    groups.push({
+      key: "general",
+      label: "General",
+      class_index: null,
+      images: general,
+    });
+  }
+  return groups;
+}
+
 /** Normalize a log entry's text into a dedupe key (trimmed), or null when
  *  the entry carries no usable title. */
 function logTextKey(text: unknown): string | null {
@@ -1003,6 +1118,9 @@ export function imageAssets(
   _projectId = ""
 ): ImageAsset[] {
   const assets: ImageAsset[] = [];
+  // v3.15: class extraction (gallery / bare-number heuristics) is gated to
+  // class-type jobs — abinit / hetero / class_3D emit per-class log streams.
+  const isClassJob = /abinit|hetero|class_3d/i.test(job.job_type || "");
   for (const item of job.ui_tile_images || []) {
     const tile: UiTileImage = item;
     const fileid = tile.fileid;
@@ -1095,6 +1213,11 @@ export function imageAssets(
       log_text: item.text || null,
       log_flags: flags,
       category: logCategory(flags),
+      class_index: logImageClassOf(
+        isClassJob,
+        item.text,
+        item.name || (item as { filename?: unknown }).filename
+      ),
     });
   }
   const imageLogs = lastRoundImageLogEntries(job.image_logs || []);
@@ -1117,6 +1240,14 @@ export function imageAssets(
       if (!url || logSeen.has(imgFile.fileid)) continue;
       logSeen.add(imgFile.fileid);
       const flags = logFlags(log.flags);
+      // v3.15: class index — entry-level evidence wins ("class 1" title,
+      // bare-number title), then file-level evidence ("class_0_…png",
+      // gallery member `…_000.png` under a numberless title).
+      const entryClass = logImageClassOf(isClassJob, log.text, null);
+      const fileClass =
+        entryClass ??
+        logImageClassIndexOf(null, imgFile.filename) ??
+        (isClassJob ? galleryClassIndexOf(log.text, imgFile.filename) : null);
       assets.push({
         kind: "image_log",
         name: logName(log.text, imgFile.filename || "image"),
@@ -1126,6 +1257,7 @@ export function imageAssets(
         log_text: log.text || null,
         log_flags: flags,
         category: logCategory(flags),
+        class_index: fileClass,
       });
     }
   }

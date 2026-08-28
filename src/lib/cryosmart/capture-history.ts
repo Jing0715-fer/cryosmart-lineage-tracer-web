@@ -89,6 +89,12 @@ export interface HistoryCapture extends HistoryMeta {
   /** { [jobUid]: [{ fileid, name, text, flags, src?, data? }] } */
   job_log_images: Record<string, unknown[]>;
   image_files: HistoryImageFile[];
+  /** v3.15: fileids WITHOUT local bytes that carry an absolute CryoSmart
+   *  URL (links-only imports). The history image endpoint falls back to a
+   *  server-side fetch of these URLs (forwarding cryosmart_auth/cookie)
+   * when the disk lookup misses, so a link-mode import renders wherever
+   * the app server can reach the CryoSmart intranet origin. */
+  remote_image_urls?: Record<string, { url: string; mime?: string; name?: string }>;
 }
 
 /** One downloadable map derived from the jobs' output_result_groups. */
@@ -145,6 +151,13 @@ export interface CaptureJsonExport {
   }>;
   /** Every downloadable map across all jobs, with its absolute URL. */
   maps: HistoryMapEntry[];
+}
+
+/** One entry of the `remote_image_urls` index (links-only imports). */
+export interface RemoteImageLink {
+  url: string;
+  mime?: string;
+  name?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -473,28 +486,73 @@ export async function deleteHistoryEntry(id: string): Promise<boolean> {
   return true;
 }
 
-/** Serve one stored image as a Response (or null when not found). */
+/** Serve one stored image as a Response (or null when not found).
+ *  v3.15: `opts.allowRemote` — when the disk lookup misses but the entry
+ *  carries a `remote_image_urls` link for this fileid (links-only import),
+ *  server-side fetch the absolute CryoSmart URL (forwarding the entry's
+ *  stored credentials) and serve the bytes same-origin. This is what makes
+ *  a link-mode JSON import render: the frontend rewrites refs to this
+ *  endpoint, and the endpoint becomes the delivery channel the plain
+ *  import previously lacked entirely. Timeouts + size cap + raster-mime
+ *  sniffing mirror the live session store's safety rules. */
 export async function historyImageResponse(
   capture: HistoryCapture,
-  fileid: string
+  fileid: string,
+  opts?: { allowRemote?: boolean }
 ): Promise<Response | null> {
   const idx = (capture.image_files || []).find((f) => f.fileid === fileid);
-  if (!idx) return null;
+  if (idx) {
+    try {
+      const buf = await fsp.readFile(path.join(imagesDir(capture.id), idx.file));
+      return new Response(new Uint8Array(buf), {
+        status: 200,
+        headers: {
+          "Content-Type": idx.mime || "image/png",
+          "Content-Length": String(buf.byteLength),
+          // History images are immutable — cache aggressively.
+          "Cache-Control": "public, max-age=31536000, immutable",
+          // Defense in depth for served image bytes (see sessionImageResponse).
+          "Content-Security-Policy": "default-src 'none'; sandbox",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    } catch {
+      // fall through to the remote fallback
+    }
+  }
+  const link = capture.remote_image_urls?.[fileid];
+  if (!opts?.allowRemote || !link || !/^https?:\/\//i.test(link.url)) return null;
   try {
-    const buf = await fsp.readFile(path.join(imagesDir(capture.id), idx.file));
+    const headers: Record<string, string> = {};
+    if (capture.cryosmart_auth) headers.Authorization = capture.cryosmart_auth;
+    if (capture.cryosmart_cookie) headers.Cookie = capture.cryosmart_cookie;
+    const res = await fetch(link.url, {
+      headers,
+      redirect: "follow",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.byteLength === 0 || buf.byteLength > 8 * 1024 * 1024) return null;
+    // SECURITY: trust the BYTES, never the declared content type — only
+    // raster signatures are accepted (same rule as the session store).
+    const mime = sniffImageMimeBuf(buf);
+    if (!mime) return null;
     return new Response(new Uint8Array(buf), {
       status: 200,
       headers: {
-        "Content-Type": idx.mime || "image/png",
+        "Content-Type": mime,
         "Content-Length": String(buf.byteLength),
-        // History images are immutable — cache aggressively.
-        "Cache-Control": "public, max-age=31536000, immutable",
-        // Defense in depth for served image bytes (see sessionImageResponse).
+        // Remote-fetched bytes are re-fetched per CDN/browser expiry — a
+        // day is plenty (log images are immutable on the CryoSmart side,
+        // but the URL itself may 404 after server-side cleanup).
+        "Cache-Control": "public, max-age=86400",
         "Content-Security-Policy": "default-src 'none'; sandbox",
         "X-Content-Type-Options": "nosniff",
       },
     });
   } catch {
+    // unreachable origin / timeout / oversized — treat as not found
     return null;
   }
 }
@@ -512,9 +570,13 @@ export async function exportCaptureJson(
   const originOrPlaceholder = origin || "<cryosmart-origin>";
 
   // images[] — every stored image, with its absolute CryoSmart URL, and
-  // (optionally) its bytes as a data: URL.
+  // (optionally) its bytes as a data: URL. v3.15: entries that exist ONLY
+  // as remote links (a links-only import re-exported) are emitted too, so
+  // export → import → export chains never lose the URL index.
   const images: CaptureJsonExport["images"] = [];
+  const seenFileids = new Set<string>();
   for (const f of capture.image_files || []) {
+    seenFileids.add(f.fileid);
     const entry: CaptureJsonExport["images"][number] = {
       fileid: f.fileid,
       name: f.name,
@@ -531,6 +593,16 @@ export async function exportCaptureJson(
       }
     }
     images.push(entry);
+  }
+  for (const [fileid, link] of Object.entries(capture.remote_image_urls || {})) {
+    if (seenFileids.has(fileid)) continue;
+    images.push({
+      fileid,
+      name: link.name,
+      mime: link.mime || "image/png",
+      size: 0,
+      url: link.url,
+    });
   }
 
   const captureSection: CaptureJsonExport["capture"] = {
@@ -590,27 +662,35 @@ export function exportFilename(capture: HistoryCapture): string {
 /* Import (from a portable JSON or a legacy jobs-only JSON)            */
 /* ------------------------------------------------------------------ */
 
-/** Sniff the real image mime from base64 payload bytes (mirrors the
- *  import-session-store logic — CryoSmart often serves typeless bytes). */
+/** Sniff the real image mime from raw bytes — only RASTER signatures
+ *  are accepted (mirrors the import-session-store logic; CryoSmart often
+ *  serves typeless bytes, and an `image/svg+xml` payload must never be
+ *  persisted + re-served from this app — stored XSS). */
+export function sniffImageMimeBuf(head: Buffer): string | null {
+  if (head.length >= 4) {
+    if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return "image/png";
+    if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
+    if (head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46) return "image/gif";
+    if (head[0] === 0x42 && head[1] === 0x4d) return "image/bmp";
+    if (
+      head.length >= 12 &&
+      head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
+      head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50
+    ) return "image/webp";
+    // TIFF + ICO: match the live session store's sniffer so imports of
+    // exports taken from live sessions accept every format it accepts.
+    if ((head[0] === 0x49 && head[1] === 0x49 && head[2] === 0x2a) ||
+        (head[0] === 0x4d && head[1] === 0x4d && head[2] === 0x00)) return "image/tiff";
+    if (head[0] === 0x00 && head[1] === 0x00 && head[2] === 0x01) return "image/x-icon";
+  }
+  return null;
+}
+
+/** Sniff the real image mime from base64 payload bytes (wrapper over
+ *  `sniffImageMimeBuf` — decodes just the signature prefix). */
 function sniffImageMimeB64(b64: string): string | null {
   try {
-    const head = Buffer.from(b64.slice(0, 32), "base64");
-    if (head.length >= 4) {
-      if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return "image/png";
-      if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
-      if (head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46) return "image/gif";
-      if (head[0] === 0x42 && head[1] === 0x4d) return "image/bmp";
-      if (
-        head.length >= 12 &&
-        head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
-        head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50
-      ) return "image/webp";
-      // TIFF + ICO: match the live session store's sniffer so imports of
-      // exports taken from live sessions accept every format it accepts.
-      if ((head[0] === 0x49 && head[1] === 0x49 && head[2] === 0x2a) ||
-          (head[0] === 0x4d && head[1] === 0x4d && head[2] === 0x00)) return "image/tiff";
-      if (head[0] === 0x00 && head[1] === 0x00 && head[2] === 0x01) return "image/x-icon";
-    }
+    return sniffImageMimeBuf(Buffer.from(b64.slice(0, 32), "base64"));
   } catch {
     // fall through
   }
@@ -621,6 +701,12 @@ export interface ImportResult {
   meta: HistoryMeta;
   /** True when the payload carried embedded image bytes (vs links only). */
   embeddedImages: number;
+  /** v3.15: bytes copied from the SOURCE entry when it still exists on
+   *  this instance (links-only export → re-import on the same instance). */
+  reusedImages: number;
+  /** v3.15: images that exist ONLY as absolute CryoSmart URLs — served
+   *  on demand via the history image endpoint's remote fallback. */
+  linkedImages: number;
 }
 
 /**
@@ -655,6 +741,30 @@ export async function importCaptureJson(
   // this function as an async IIFE so every failure path cleans up the dir.
   try {
   return await (async (): Promise<ImportResult> => {
+
+  // 0. v3.15 — LINK INDEX: collect every absolute CryoSmart URL carried
+  //  by the payload (present on every image entry, embedded or not).
+  //  Previously the links-only entries were discarded at the `!data`
+  //  guard below and NOTHING ever read `images[].url` — a links-only
+  //  import had NO image delivery channel at all (refs degenerated to
+  //  direct intranet URLs → mixed-content blocked → "图片显示不出来").
+  //  The index is persisted in capture.json and consumed by the history
+  //  image endpoint's remote fallback.
+  const remoteUrls: Record<string, RemoteImageLink> = {};
+  let linked = 0;
+  if (isPortable && Array.isArray(p.images)) {
+    for (const rawImg of p.images as Array<Record<string, unknown>>) {
+      const fileid = typeof rawImg.fileid === "string" ? rawImg.fileid : "";
+      const url = typeof rawImg.url === "string" ? rawImg.url : "";
+      if (!fileid || !/^https?:\/\//i.test(url)) continue;
+      remoteUrls[fileid] = {
+        url,
+        mime: typeof rawImg.mime === "string" ? rawImg.mime : undefined,
+        name: typeof rawImg.name === "string" ? rawImg.name : undefined,
+      };
+      linked += 1;
+    }
+  }
 
   // 1. Embedded image bytes → binary files.
   const imageFiles: HistoryImageFile[] = [];
@@ -691,6 +801,45 @@ export async function importCaptureJson(
       } catch {
         // skip this image
       }
+    }
+  }
+
+  // 1b. v3.15 — BYTE REUSE from the SOURCE entry: a links-only export
+  //  still names its origin entry (`capture.id`). When that entry lives
+  //  on THIS instance (the common "export → re-import here" flow), copy
+  //  its image bytes into the new entry instead of degrading to
+  //  link-only — the import then restores pixel-perfect offline, exactly
+  //  like an embedded export would have.
+  let reused = 0;
+  const sourceId = typeof captureSection.id === "string" ? captureSection.id : "";
+  if (sourceId && isValidId(sourceId) && sourceId !== id) {
+    try {
+      const source = await getHistoryCapture(sourceId);
+      if (source && Array.isArray(source.image_files)) {
+        const have = new Set(imageFiles.map((f) => f.fileid));
+        for (const sf of source.image_files) {
+          if (!sf.fileid || have.has(sf.fileid)) continue;
+          try {
+            const buf = await fsp.readFile(path.join(imagesDir(sourceId), sf.file));
+            const mime = sf.mime || "image/png";
+            const file = imageFileName(sf.fileid, mime);
+            await fsp.writeFile(path.join(imagesDir(id), file), buf);
+            bytes += buf.byteLength;
+            reused += 1;
+            imageFiles.push({
+              fileid: sf.fileid,
+              file,
+              mime,
+              name: sf.name,
+              size: buf.byteLength,
+            });
+          } catch {
+            // one unreadable source file must not kill the reuse pass
+          }
+        }
+      }
+    } catch {
+      // source entry unreadable → stay links-only
     }
   }
 
@@ -760,6 +909,7 @@ export async function importCaptureJson(
     jobs,
     job_log_images: jobLogImages,
     image_files: imageFiles,
+    ...(linked > 0 ? { remote_image_urls: remoteUrls } : {}),
   };
 
   await fsp.writeFile(
@@ -770,7 +920,7 @@ export async function importCaptureJson(
   await fsp.writeFile(path.join(dir, "meta.json"), JSON.stringify(meta), "utf8");
 
   await evictOldEntries();
-  return { meta, embeddedImages: embedded };
+  return { meta, embeddedImages: embedded, reusedImages: reused, linkedImages: linked };
   })();
   } catch (err) {
     // Roll back the half-written entry so no orphan dir survives.
