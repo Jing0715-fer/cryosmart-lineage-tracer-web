@@ -84,9 +84,22 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
     });
 
     const contentType = upstream.headers.get("content-type") || "application/octet-stream";
-    const arrayBuf = await upstream.arrayBuffer();
 
-    return new NextResponse(arrayBuf, {
+    // STREAM the upstream body through instead of buffering it (v3.16).
+    // With the old `await upstream.arrayBuffer()` the route waited for the
+    // ENTIRE body (map / .mrc volumes can be tens–hundreds of MB) before
+    // sending the first byte to the browser — every large download paid
+    // BOTH network legs serially (CryoSmart→server, then server→browser),
+    // roughly doubling per-file latency, and held a full extra copy in
+    // server memory per concurrent download. Passing the ReadableStream
+    // straight through lets both legs overlap and keeps peak memory at
+    // chunk size. Connection-level failures still reject the fetch() above
+    // (before headers arrive) so the 502 "Failed to reach" contract used
+    // by probeCryosmartReachable() and the bundle's unreachable-mid-run
+    // detection is unchanged; a mid-body abort now surfaces as a network
+    // error in the caller's arrayBuffer() instead, which every consumer
+    // already treats as a per-item failure.
+    return new NextResponse(upstream.body ?? null, {
       status: upstream.status,
       headers: {
         "Content-Type": contentType,

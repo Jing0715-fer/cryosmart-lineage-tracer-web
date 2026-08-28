@@ -92,9 +92,13 @@ export async function GET(
 
     const contentType =
       upstream.headers.get("content-type") || "image/png";
-    const arrayBuf = await upstream.arrayBuffer();
 
-    return new NextResponse(arrayBuf, {
+    // Stream the body through (same rationale as /api/cryosmart/[...path],
+    // v3.16): avoids a full second copy in server memory and lets the
+    // browser start rendering/copying bytes while the upstream transfer is
+    // still in flight. Thumbnails are small so this is mostly about
+    // consistency + memory, not raw latency.
+    return new NextResponse(upstream.body ?? null, {
       status: upstream.status,
       headers: {
         "Content-Type": contentType,

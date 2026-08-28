@@ -66,6 +66,25 @@ const HELPER_FILES = [
   "helpers/rebuild_picture_flow_pptx.mjs",
 ];
 
+/* ── Download concurrency tuning (v3.16 speed-up) ────────────────────
+ * The maps phase used to download every .mrc SEQUENTIALLY (one at a
+ * time, 180s timeout each) — a 26-map lineage ground for minutes even
+ * on a fast intranet, because per-request latency (server read + two
+ * network legs through the proxy) serialized instead of overlapping.
+ * All bulk-download phases now run through pooledMap(). Limits are
+ * deliberately ≤4: the browser allows only ~6 concurrent HTTP/1.1
+ * connections per origin, maps are tens–hundreds of MB each (peak
+ * memory in-flight scales with concurrency), and undici on the server
+ * side has no per-origin cap to worry about. */
+/** Concurrent downloads for the maps/ phase (large .mrc volumes). */
+const MAP_CONCURRENCY = 4;
+/** Concurrent downloads for direct-URL images (bytes never uploaded). */
+const DIRECT_IMAGE_CONCURRENCY = 3;
+/** Concurrent downloads for PPTX-embedded preview images (small PNGs). */
+const PPT_IMAGE_CONCURRENCY = 4;
+/** Concurrent best-effort fetches for the Final_Result scan. */
+const FINAL_RESULT_CONCURRENCY = 4;
+
 function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
 }
@@ -334,9 +353,12 @@ export async function buildBundle(
       // after ONE probe instead of N × 10s aborts, and record the links.
       if (directImageItems.length > 0) {
         if (await ensureReachability()) {
-          for (const item of directImageItems) {
-            await fetchOne(item, 30_000);
-          }
+          // Parallel (was: serial for-loop → per-image 30s window stacked
+          // end-to-end). Connection-level failures still surface per item;
+          // the reachability probe above already handled the fully-dead case.
+          await pooledMap(directImageItems, DIRECT_IMAGE_CONCURRENCY, (item) =>
+            fetchOne(item, 30_000)
+          );
         } else {
           notUploaded.push(...directImageItems);
           warnings.push(
@@ -361,6 +383,7 @@ export async function buildBundle(
     onProgress?.({ phase: "maps", current: 0, total: 1, message: "Collecting maps…" });
     if (options.session) {
       const mapItems = collectMapRequests(summary);
+      const session = options.session;
       const mapBase = String(options.session.baseUrl || "").replace(/\/$/, "");
       const mapLink = (item: { url: string; path: string }): string => {
         const u = String(item.url || "");
@@ -369,14 +392,25 @@ export async function buildBundle(
       const failedMaps: Array<{ url: string; path: string }> = [];
 
       if (mapItems.length > 0 && (await ensureReachability())) {
+        // PARALLEL map download (v3.16): was a serial for-loop — every map
+        // waited for the previous one, so N maps cost N × (server read +
+        // proxy transfer). pooledMap keeps MAP_CONCURRENCY downloads in
+        // flight; the shared `unreachableNow` flag preserves the old
+        // "connection died → stop grinding, record links" semantics: the
+        // first connection-level failure flips the flag and every item a
+        // worker pulls after that is recorded as failed WITHOUT a request.
+        // In-flight requests at the moment of the failure still complete
+        // (or fail) on their own and keep their bytes if they succeed.
         let done = 0;
         let unreachableNow = false;
-        for (const item of mapItems) {
-          if (!unreachableNow) {
+        await pooledMap(mapItems, MAP_CONCURRENCY, async (item) => {
+          if (unreachableNow) {
+            failedMaps.push(item);
+          } else {
             try {
               // .mrc volumes are big — give the proxy a long window (the
               // 10s default aborted every map, even where reachable).
-              const bytes = await cryoSmartBytes(options.session, item.url, {
+              const bytes = await cryoSmartBytes(session, item.url, {
                 timeoutMs: 180_000,
               });
               files.push({ path: `maps/${item.path}`, data: bytes });
@@ -385,17 +419,19 @@ export async function buildBundle(
               failedMaps.push(item);
               if (/CryoSmart 502/.test(msg) && /failed to reach/i.test(msg)) {
                 // Connection-level failure — every remaining map will fail
-                // the same way; stop grinding and just record the links.
-                unreachableNow = true;
-                warnings.push(
-                  `CryoSmart became unreachable mid-download — remaining map(s) skipped (links in maps/DOWNLOAD_LINKS.txt)`
-                );
+                // the same way. Under concurrency several workers can hit
+                // it simultaneously; only the one that flips the flag
+                // emits the warning (await-free sync section → no race).
+                if (!unreachableNow) {
+                  unreachableNow = true;
+                  warnings.push(
+                    `CryoSmart became unreachable mid-download — remaining map(s) skipped (links in maps/DOWNLOAD_LINKS.txt)`
+                  );
+                }
               } else {
                 warnings.push(`Map ${item.path} failed: ${msg}`);
               }
             }
-          } else {
-            failedMaps.push(item);
           }
           done++;
           onProgress?.({
@@ -404,7 +440,7 @@ export async function buildBundle(
             total: mapItems.length,
             message: `Map ${done}/${mapItems.length}: ${item.path}`,
           });
-        }
+        });
       } else if (mapItems.length > 0) {
         failedMaps.push(...mapItems);
         warnings.push(
@@ -457,33 +493,36 @@ export async function buildBundle(
         { kind: "guinier", iteration: 1, suffix: "Guinier_Plot", ext: "pdf" },
         { kind: "direction_distribution", iteration: 1, suffix: "Direction_Distribution", ext: "png" },
       ];
-      // Try to fetch final maps (best-effort; will 404 if the job isn't a refine).
-      const finalFiles: BundleFile[] = [];
+      // Try to fetch final maps + plots (best-effort; will 404 if the job
+      // isn't a refine). Parallel since v3.16 (was two serial loops — the
+      // 11 requests stacked their round-trips needlessly; most of them are
+      // expected 404s which now resolve concurrently).
+      const finalSession = options.session;
+      const finalTargets: Array<{ url: string; path: string }> = [];
       for (const suffix of suffixes) {
-        const url = `api/log_image/download_result_file/${projectId}/${startUid}.${suffix}`;
-        try {
-          const bytes = await cryoSmartBytes(options.session, url);
-          finalFiles.push({
-            path: `Final_Result/Map/BJ.${projectId}.${startUid}.${suffix}.mrc`,
-            data: bytes,
-          });
-        } catch {
-          // expected to fail for non-refine jobs
-        }
+        finalTargets.push({
+          url: `api/log_image/download_result_file/${projectId}/${startUid}.${suffix}`,
+          path: `Final_Result/Map/BJ.${projectId}.${startUid}.${suffix}.mrc`,
+        });
       }
       // Plots (best-effort; we don't know the exact iteration, try 1)
       for (const g of graphPaths) {
-        const url = `api/log_image/${g.kind}_${g.iteration}_${g.suffix}.${g.ext}`;
-        try {
-          const bytes = await cryoSmartBytes(options.session, url);
-          finalFiles.push({
-            path: `Final_Result/${g.kind}/${g.suffix}.${g.ext}`,
-            data: bytes,
-          });
-        } catch {
-          // expected to fail
-        }
+        finalTargets.push({
+          url: `api/log_image/${g.kind}_${g.iteration}_${g.suffix}.${g.ext}`,
+          path: `Final_Result/${g.kind}/${g.suffix}.${g.ext}`,
+        });
       }
+      const finalFiles: BundleFile[] = [];
+      await pooledMap(finalTargets, FINAL_RESULT_CONCURRENCY, async (t) => {
+        try {
+          const bytes = await cryoSmartBytes(finalSession, t.url);
+          finalFiles.push({ path: t.path, data: bytes });
+        } catch {
+          // expected to fail for non-refine jobs
+        }
+      });
+      // pooledMap completes out of order — sort for deterministic ZIP content.
+      finalFiles.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
       files.push(...finalFiles);
       const summaryText = `Final result scan for ${projectId}/${startUid}.\n` +
         `Fetched ${finalFiles.length} files.\n` +
@@ -532,7 +571,10 @@ async function collectPptImages(
     return;
   }
   let done = 0;
-  for (const req of requests) {
+  // Parallel since v3.16 (was a serial for-loop — preview PNGs are small,
+  // the win here is overlapping per-request round-trips, which dominated
+  // for 40+ images).
+  await pooledMap(requests, PPT_IMAGE_CONCURRENCY, async (req) => {
     try {
       const bytes = await cryoSmartBytes(session, req.url);
       imageMap.set(req.url, bytes);
@@ -546,7 +588,7 @@ async function collectPptImages(
       total: requests.length,
       message: `PPT image ${done}/${requests.length}: ${req.path}`,
     });
-  }
+  });
 }
 
 /** Gather all preview image URLs referenced by the HTML report.

@@ -1311,3 +1311,27 @@ Stage Summary:
 - The ZIP-download crash is fixed by deleting the offending state+effect pattern entirely (derived state), not by patching around it; no throttle needed — remaining setProgress-per-event is normal event-driven React usage.
 - v3.15 features (class-grouped galleries + links-only import) re-verified green on the stress capture during this pass.
 - Artifacts: src/app/components/cryosmart/download-card.tsx (fix), .harness/v3151-stress-{session,2}.mjs (stress seeders).
+
+---
+Task ID: 33
+Agent: main (Z.ai Code)
+Task: User asked to speed up map packaging ("打包map的时候很慢，可否并行下载？"). Root-cause the bottleneck, parallelize, and push.
+
+Work Log:
+- Root-caused THREE stacked bottlenecks (network speed was only part of it):
+  1. bundle.ts maps phase downloaded every .mrc SEQUENTIALLY (serial for-loop, 180s timeout each) — N maps cost N × (server read + transfer) with zero overlap.
+  2. The /api/cryosmart/[...path] proxy buffered the ENTIRE upstream body (await arrayBuffer()) before forwarding — every map traversed BOTH network legs serially (CryoSmart→server, then server→browser), ~2× per-file latency, plus a full extra copy in server memory per concurrent download.
+  3. PPT images (collectPptImages), direct-URL images, and the Final_Result scan were also serial loops (session images were already pooled at 4).
+- bundle.ts: added MAP_CONCURRENCY=4 / DIRECT_IMAGE_CONCURRENCY=3 / PPT_IMAGE_CONCURRENCY=4 / FINAL_RESULT_CONCURRENCY=4 constants; maps phase now runs through pooledMap with the old "unreachable mid-download → skip queue" semantics preserved via a shared unreachableNow flag checked at worker pull-time (first connection-level failure flips it once — sync section, no race; in-flight requests still complete and keep their bytes); direct images → pooledMap(3); collectPptImages → pooledMap(4); Final_Result scan → pooledMap(4) with a post-sort for deterministic ZIP order.
+- [...path]/route.ts + proxy-image route: replaced arrayBuffer() buffering with straight-through ReadableStream passthrough (upstream.body ?? null). Connection-level failures still reject fetch() BEFORE headers → the 502 "Failed to reach" contract used by probeCryosmartReachable() and the mid-run unreachable detection is unchanged; mid-body aborts now surface as network errors in the caller, which every consumer already treats as per-item failure.
+- New harness .harness/v316-parallel-maps.mjs (fake CryoSmart upstream on :3999 with 120ms delay + concurrency stats, run against the LIVE dev-server proxy):
+  Run 1 happy path — 12 maps: all bundled, maxInFlight=4 (parallel proof), upstream busy 726ms vs 1440ms serial baseline, bytes byte-exact through the streaming proxy (pattern compare), zero warnings, no DOWNLOAD_LINKS.txt.
+  Run 2 mid-run death (502 "failed to reach" after 2 successes) — arrivals stop at 6 (no grinding), 2 pre-death successes bundled, 10 links recorded, exactly ONE "became unreachable" warning.
+  (First harness run had 2 harness-logic bugs — death check judged by completion-time global counter instead of arrival slot, and the maps/ filter counted DOWNLOAD_LINKS.txt as a bundled map — both fixed; app code unchanged.)
+- Browser gold-standard E2E (agent-browser + .harness/v316-upstream-daemon.mjs + v316-browser-prep.mjs): restored staged session ?imported=s58… → checked Map/MRC + Final results → Trace Lineage → Build & download ZIP → "Bundle ready CryoSmart_PX7_J4_lineage.zip · 18 files" with ZERO console/page errors; upstream log shows max=4 concurrent requests from the real browser path. Test history entry deleted afterwards.
+- Regression: lint 0/0; tsc --noEmit 0 errors in src/ (skills/ errors pre-existing); v314-regression 24/24; v315-regression 35/35; v313-bundle 16/16; v36-harness capture E2E PASS.
+
+Stage Summary:
+- Answer to the user: it was NOT purely network-bound — serial downloads + the double-network-leg buffering proxy dominated. Now 4 concurrent map downloads + streamed proxy (both legs overlap) give roughly 4–8× aggregate speedup on large map sets; if it is STILL slow after this, the remaining limit is genuine bandwidth/CryoSmart read throughput.
+- Mid-run unreachability keeps the fail-fast contract (no return to the "minutes of 502 grinding" bug).
+- Artifacts: src/lib/cryosmart/bundle.ts (pooledMap everywhere + concurrency constants), src/app/api/cryosmart/[...path]/route.ts + proxy-image/[fileid]/route.ts (streaming passthrough), .harness/v316-parallel-maps.mjs + v316-upstream-daemon.mjs + v316-browser-prep.mjs (E2E verification).
