@@ -7,7 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2, ImageIcon, Loader2, CheckCircle2, AlertCircle, X } from "lucide-react";
+import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2, ImageIcon, Loader2, CheckCircle2, AlertCircle, X, Square } from "lucide-react";
 import { toast } from "sonner";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildLineageHtmlV2, type ReportHtmlOptions } from "@/lib/cryosmart/report-html";
@@ -31,7 +31,13 @@ interface Props {
   /** Live capture progress — THE single progress bar of the whole app
    *  (user request: it lives here, next to the lineage it is filling in,
    *  instead of being duplicated in the banner and the Configure card). */
-  importInfo?: { message: string; progress: ImportProgress | null } | null;
+  importInfo?: {
+    message: string;
+    progress: ImportProgress | null;
+    /** v3.16.1: counters frozen with the upload incomplete — the strip
+     * shows an amber badge and emphasizes the Stop button. */
+    uploadStalled?: boolean;
+  } | null;
   /** Capture lifecycle state — "polling" renders the live strip;
    *  "loaded"/"error"/"expired" render the final message (dismissable). */
   importStatus?: ImportStatusKind;
@@ -40,9 +46,13 @@ interface Props {
    *  (the capture script delivers bytes via the session-image channel;
    *  proxying direct URLs from the app server only grinds 10s timeouts). */
   stagedImport?: boolean;
+  /** v3.16.1: manual escape hatch for a live capture — stops waiting and
+   * keeps whatever data arrived so far (the user's "stuck at 263/268 with
+   * no way to stop" case). Rendered as a Stop button on the polling strip. */
+  onStopImport?: () => void;
 }
 
-export function LineagePreviewCard({ summary, session, importInfo, importStatus, stagedImport }: Props) {
+export function LineagePreviewCard({ summary, session, importInfo, importStatus, onStopImport, stagedImport }: Props) {
   const [reportTab, setReportTab] = useState("stats");
   const { resolvedTheme } = useTheme();
 
@@ -189,6 +199,8 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
             message={importInfo?.message || ""}
             progress={progress}
             pct={importPct}
+            stalled={importInfo?.uploadStalled}
+            onStop={onStopImport}
             onDismiss={() => setDismissedKey(stripKey)}
           />
           {/* Skeleton stat cards */}
@@ -243,6 +255,8 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
           message={importInfo?.message || ""}
           progress={progress}
           pct={importPct}
+          stalled={importInfo?.uploadStalled}
+          onStop={onStopImport}
           onDismiss={() => setDismissedKey(stripKey)}
         />
         {/* Stats row */}
@@ -449,6 +463,8 @@ function ImportProgressStrip({
   message,
   progress,
   pct,
+  stalled,
+  onStop,
   onDismiss,
 }: {
   visible: boolean;
@@ -456,6 +472,10 @@ function ImportProgressStrip({
   message: string;
   progress: ImportProgress | null;
   pct: number | null;
+  /** v3.16.1: capture counters frozen with the upload incomplete. */
+  stalled?: boolean;
+  /** v3.16.1: manual stop — stop waiting and keep the data captured so far. */
+  onStop?: () => void;
   onDismiss: () => void;
 }) {
   if (!visible || !message) return null;
@@ -499,6 +519,32 @@ function ImportProgressStrip({
           <span className="shrink-0 rounded-md bg-white/80 px-1.5 py-0.5 font-mono text-[11px] font-semibold text-teal-700 ring-1 ring-inset ring-teal-200/70 dark:bg-slate-900/70 dark:text-teal-300 dark:ring-teal-800/60">
             {pct}%
           </span>
+        )}
+        {status === "polling" && stalled && (
+          <span className="flex shrink-0 items-center gap-1 rounded-md bg-amber-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-amber-800 ring-1 ring-inset ring-amber-300/70 dark:bg-amber-900/40 dark:text-amber-200 dark:ring-amber-700/60">
+            <span className="relative flex h-1.5 w-1.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-500 opacity-75" />
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-amber-500" />
+            </span>
+            no progress
+          </span>
+        )}
+        {status === "polling" && onStop && (
+          <button
+            type="button"
+            onClick={onStop}
+            title="Stop waiting and keep the data captured so far (the capture script itself is not affected — close its CryoSmart tab to stop it too)"
+            aria-label="Stop waiting and keep captured data"
+            className={
+              stalled
+                ? "flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-amber-400 bg-amber-50 px-2.5 text-[11.5px] font-semibold text-amber-800 transition-colors hover:bg-amber-100 dark:border-amber-600 dark:bg-amber-900/40 dark:text-amber-100 dark:hover:bg-amber-900/70"
+                : "flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-teal-300 bg-white/80 px-2.5 text-[11.5px] font-medium text-teal-700 transition-colors hover:bg-white dark:border-teal-700 dark:bg-slate-900/70 dark:text-teal-300 dark:hover:bg-slate-800"
+            }
+          >
+            <Square className="h-3 w-3 fill-current" />
+            <span className="hidden sm:inline">Stop &amp; keep data</span>
+            <span className="sm:hidden">Stop</span>
+          </button>
         )}
         {status !== "polling" && (
           <button

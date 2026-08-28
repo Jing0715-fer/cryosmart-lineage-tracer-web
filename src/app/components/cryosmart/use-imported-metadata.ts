@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { LoadedMetadata } from "@/app/components/cryosmart/data-source-card";
 import type { CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 
@@ -86,6 +86,15 @@ export interface ImportState {
    * the polling → loaded transition so the suggested Start Job doesn't
    * flip after the capture completes). */
   endJobUid: string | null;
+  /** v3.16.1: TRUE when the capture counters (jobs scanned / image refs /
+   * uploaded bytes) have been FROZEN for a while with the scan finished
+   * but the byte upload still incomplete — the user's "stuck at 263/268"
+   * case. The script's ?hb=1 heartbeat keeps the session alive (so the
+   * 10-min dead-tab stall timeout never fires) while nothing progresses:
+   * a hung /images POST, a frozen capture tab, or a script that already
+   * exited after its /complete POST failed 3×. The strip surfaces this
+   * with an amber badge and emphasizes the Stop button. */
+  uploadStalled?: boolean;
 }
 
 interface UseImportedOpts {
@@ -356,6 +365,28 @@ function sleepWithWake(ms: number): Promise<void> {
 // session clock, which trips this timeout.
 const STALL_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** v3.16.1: how long the capture PROGRESS counters (jobs scanned / image
+ * refs / uploaded bytes — everything EXCEPT the heartbeat-bumped
+ * updated_at) may sit frozen, with the scan finished but the byte upload
+ * still incomplete, before the strip flags the capture as stalled.
+ * Deliberately BELOW the script's own worst-case healthy silence (3-min
+ * re-trace grace window + up-to-7-min byte drain tail) — the badge is a
+ * hint ("nothing has moved for 2 min; you can stop waiting"), NOT an
+ * auto-abort: a healthy capture whose last few images are slow or failed
+ * can legitimately look like this for a few minutes and then complete on
+ * its own, so we never cut it off automatically. The user decides via the
+ * Stop button. */
+const UPLOAD_STALL_HINT_MS = 2 * 60 * 1000;
+
+/** Snapshot of the fields stopImport() needs, mirrored from state via an
+ * effect so the callback itself never has to be rebuilt (stable identity
+ * for the whole page lifetime). */
+interface StopSnapshot {
+  token: string | null;
+  endJobUid: string | null;
+  startedAt: number | null;
+}
+
 export function useImportedMetadata(opts?: UseImportedOpts) {
   const [state, setState] = useState<ImportState>({
     status: "idle",
@@ -441,6 +472,11 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
       let sawData = false;
       let lastSig = "";
       let lastActivity = Date.now();
+      /** v3.16.1: progress-only fingerprint + its clock — heartbeat-bumped
+       *  updated_at must NOT count as capture progress (a live-but-stuck
+       *  script keeps the session alive while the counters freeze). */
+      let lastProgressSig = "";
+      let progressLastActivity = Date.now();
       /** consecutive session-endpoint 404s (stale-URL early exit below). */
       let staged404Count = 0;
 
@@ -483,6 +519,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             prev.token === next.token &&
             prev.startedAt === next.startedAt &&
             prev.endJobUid === next.endJobUid &&
+            prev.uploadStalled === next.uploadStalled &&
             sameProgress
           ) {
             return prev;
@@ -627,6 +664,36 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             sessionStatus.updated_at ?? 0,
             sessionStatus.log_request?.revision ?? 0,
           ].join("|");
+          // v3.16.1: progress-only fingerprint (NO updated_at) — heartbeat
+          // bumps must not mask frozen COUNTERS. When the scan is finished
+          // but the byte upload is incomplete and even the counters stop
+          // moving for UPLOAD_STALL_HINT_MS, the strip flags the capture as
+          // stalled (amber badge + emphasized Stop button). See
+          // UPLOAD_STALL_HINT_MS for why this is a hint, never an auto-abort.
+          const progressSig = [
+            sessionStatus.status,
+            sessionStatus.log_jobs_done,
+            sessionStatus.log_jobs_total,
+            sessionStatus.log_images_count,
+            sessionStatus.log_images_uploaded,
+            sessionStatus.note,
+            sessionStatus.log_request?.revision ?? 0,
+          ].join("|");
+          if (progressSig !== lastProgressSig) {
+            lastProgressSig = progressSig;
+            progressLastActivity = Date.now();
+          }
+          const scanFinished =
+            sessionStatus.log_jobs_total > 0 &&
+            sessionStatus.log_jobs_done >= sessionStatus.log_jobs_total;
+          const uploadIncomplete =
+            sessionStatus.log_images_count > 0 &&
+            sessionStatus.log_images_uploaded < sessionStatus.log_images_count;
+          const uploadStalled =
+            sawData &&
+            scanFinished &&
+            uploadIncomplete &&
+            Date.now() - progressLastActivity > UPLOAD_STALL_HINT_MS;
           if (sig !== lastSig) {
             lastSig = sig;
             lastActivity = Date.now();
@@ -754,6 +821,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 startedAt,
                 progress: null,
                 endJobUid: endJobUidSeen,
+                uploadStalled: false,
               });
             } else {
               const imgs = sessionStatus.log_images_count;
@@ -788,6 +856,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   uploaded: sessionStatus.log_images_uploaded,
                 },
                 endJobUid: endJobUidSeen,
+                uploadStalled,
               });
             }
           } else {
@@ -798,6 +867,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               startedAt,
               progress: null,
               endJobUid: endJobUidSeen,
+              uploadStalled: false,
             });
           }
 
@@ -847,5 +917,84 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     };
   }, [state.status, state.token, state.startedAt]);
 
-  return state;
+  /* ── v3.16.1: manual stop ("Stop waiting & keep captured data") ──────
+   * The user's "stuck at 263/268 with no way to stop" case: a live capture
+   * can sit with frozen counters for minutes (hung /images POST, frozen
+   * capture tab, or a script whose /complete POST failed 3×) — the
+   * heartbeat keeps the dead-tab stall timeout at bay, so the strip used to
+   * spin forever with NO escape hatch. stopImport() detaches the page from
+   * the session: it applies the LATEST cumulative snapshot (progressive
+   * application already streamed most of it, this is the final refresh),
+   * ends the polling state, and reports exactly what was kept. The capture
+   * script itself is untouched — it may still be running in its CryoSmart
+   * tab, and its eventual /complete persists whatever it collected to
+   * Capture History for a later restore. */
+  const stopRef = useRef<StopSnapshot>({ token: null, endJobUid: null, startedAt: null });
+  useEffect(() => {
+    stopRef.current = {
+      token: state.token,
+      endJobUid: state.endJobUid,
+      startedAt: state.startedAt,
+    };
+  }, [state.token, state.endJobUid, state.startedAt]);
+
+  const stopImport = useCallback(async (): Promise<void> => {
+    const { token, endJobUid, startedAt } = stopRef.current;
+    if (!token) return;
+    // Best-effort final snapshot: fetch + apply the cumulative data (the
+    // poll loop has been applying it live all along — this is a last
+    // refresh so anything uploaded in the final seconds is not lost).
+    try {
+      const dataResp = await fetch(
+        `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
+        { credentials: "same-origin", cache: "no-store" }
+      );
+      if (dataResp.ok) {
+        const data = (await dataResp.json()) as PendingData;
+        if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
+          onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
+          const jobsCount = data.data.jobs.length;
+          const uploaded = data.data.uploaded_image_ids?.length ?? 0;
+          const refs = Object.values(data.data.job_log_images || {}).reduce(
+            (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
+            0
+          );
+          const withLogs = Object.values(data.data.job_log_images || {}).filter(
+            (arr) => Array.isArray(arr) && arr.length > 0
+          ).length;
+          setState({
+            status: "loaded",
+            message:
+              refs > 0
+                ? `Stopped waiting — kept ${jobsCount} jobs + ${refs} log images from ${withLogs} jobs (${uploaded} with previews). The capture script may still be running in its tab; re-run Smart Capture to fetch the rest.`
+                : `Stopped waiting — kept ${jobsCount} jobs (no log images captured yet). Re-run Smart Capture to collect them.`,
+            token,
+            startedAt,
+            progress: null,
+            endJobUid,
+            uploadStalled: false,
+          });
+          clearPersistedImportToken();
+          return;
+        }
+      }
+    } catch {
+      // fall through to the error report below
+    }
+    // Data unreadable (session expired / server restart): still STOP —
+    // an honest error beats an eternal spinner.
+    setState({
+      status: "error",
+      message:
+        "Stopped waiting — the capture session could no longer be read (it may have expired). Re-run Smart Capture, or restore a previous capture from Capture History.",
+      token,
+      startedAt,
+      progress: null,
+      endJobUid,
+      uploadStalled: false,
+    });
+    clearPersistedImportToken();
+  }, []);
+
+  return { ...state, stop: stopImport };
 }

@@ -196,9 +196,14 @@ export default function Home() {
             importInfo={
               importState.status === "idle" || importState.status === "not-found"
                 ? null
-                : { message: importState.message, progress: importState.progress }
+                : {
+                    message: importState.message,
+                    progress: importState.progress,
+                    uploadStalled: importState.uploadStalled,
+                  }
             }
             importStatus={importState.status}
+            onStopImport={importState.status === "polling" ? importState.stop : undefined}
             stagedImport={importState.token !== null}
           />
           <DownloadCard summary={summary} loaded={loaded} />

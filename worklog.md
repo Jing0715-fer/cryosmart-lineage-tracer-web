@@ -1335,3 +1335,28 @@ Stage Summary:
 - Answer to the user: it was NOT purely network-bound — serial downloads + the double-network-leg buffering proxy dominated. Now 4 concurrent map downloads + streamed proxy (both legs overlap) give roughly 4–8× aggregate speedup on large map sets; if it is STILL slow after this, the remaining limit is genuine bandwidth/CryoSmart read throughput.
 - Mid-run unreachability keeps the fail-fast contract (no return to the "minutes of 502 grinding" bug).
 - Artifacts: src/lib/cryosmart/bundle.ts (pooledMap everywhere + concurrency constants), src/app/api/cryosmart/[...path]/route.ts + proxy-image/[fileid]/route.ts (streaming passthrough), .harness/v316-parallel-maps.mjs + v316-upstream-daemon.mjs + v316-browser-prep.mjs (E2E verification).
+
+---
+Task ID: 34
+Agent: main (Z.ai Code)
+Task: User reported the live-capture strip sometimes gets stuck ("Loaded 46 jobs — uploading image previews 263/268… 100% · 24/24 jobs scanned · 268 images captured · 263 ready") with NO way to manually stop it.
+
+Work Log:
+- Root-caused WHY the poller never gives up on a stuck upload: the stall fingerprint includes `updated_at`, which the capture script's ?hb=1 heartbeat keeps bumping every ~3s — a live-but-stuck script (hung /images POST, browser-frozen capture tab, or a script whose final /complete POST failed 3× and exited) keeps the session "alive" while the COUNTERS are frozen, so the 10-min dead-tab stall timeout never fires. The strip spun forever with no escape hatch.
+- use-imported-metadata.ts:
+  - New progress-only fingerprint (status/log_jobs_done/log_jobs_total/log_images_count/log_images_uploaded/note/log_request.revision — NO updated_at) tracked alongside the full sig. When the scan is finished but the byte upload is incomplete and the progress fingerprint stays frozen > UPLOAD_STALL_HINT_MS (2 min), state gets uploadStalled=true. Deliberately a HINT, never an auto-abort: a healthy capture's 3-min re-trace grace window + slow byte-drain tail can legitimately look frozen; the user decides via Stop.
+  - New stable stopImport() callback (reads token/endJobUid/startedAt via a ref mirror): fetches the final cumulative /data snapshot, applies it via onLoaded, ends the polling state with an honest "Stopped waiting — kept N jobs + M log images (U with previews)… re-run Smart Capture to fetch the rest" message, and clears the persisted import token. If /data is unreadable (expired session) it still stops with an error message instead of spinning forever. The capture script itself is untouched — its eventual /complete persists to Capture History for later restore.
+  - Hook return extended: `{ ...state, stop: stopImport }` (page.tsx is the only consumer).
+  - applyState bailout comparison now includes uploadStalled.
+- lineage-preview-card.tsx ImportProgressStrip:
+  - polling state renders a "Stop & keep data" button (amber-emphasized when stalled; icon-only "Stop" on xs screens) with a tooltip explaining the script itself keeps running.
+  - amber "no progress" pulsing badge when stalled.
+  - Props threaded through both strip call sites; new onStopImport card prop.
+- page.tsx wires onStopImport={polling ? importState.stop : undefined} + uploadStalled into importInfo.
+- Browser E2E (.harness/v3161-stuck-prep.mjs + agent-browser): crafted the EXACT stuck state (4 jobs, 8 refs, only 5 bytes, no /complete — session "collecting_logs" forever) → strip shows "Loaded 4 jobs — uploading image previews 5/8 for the traced lineage… 100% · 4/4 jobs scanned · 8 images captured · 5 ready" with the Stop button; after 2 min the amber "no progress" badge appears; clicking Stop flips the strip to "Stopped waiting — kept 4 jobs + 8 log images from 4 jobs (5 with previews)…"; the graph (J1→J2→J3→J4 → target J4), trace, and Build & download ZIP all still work; ZERO console/page errors.
+- Regression: lint 0/0; tsc --noEmit 0 errors in src/; v36-harness full capture E2E PASS (normal completion unaffected); v314 24/24; v315 35/35; v313-bundle 16/16; v316-parallel-maps 11/11.
+
+Stage Summary:
+- The stuck capture now has TWO escape hatches: an always-available Stop button (manual, immediate, data-preserving) and an honest amber "no progress" badge after 2 min of frozen counters.
+- Auto-abort deliberately NOT implemented (would race the script's legit 3-min re-trace grace window); the 10-min dead-tab stall rescue stays as the automatic backstop.
+- Artifacts: use-imported-metadata.ts (progressSig tracking + stopImport), lineage-preview-card.tsx (Stop button + stall badge), page.tsx (wiring), .harness/v3161-stuck-prep.mjs (stuck-state seeder).
