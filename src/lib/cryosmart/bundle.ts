@@ -143,12 +143,12 @@ export async function buildBundle(
     }
   }
 
-  // PPTX (optional). The PPTX builder embeds every byte in imageMap into
-  // the slide XML — large lineages (50+ jobs x 10+ previews) can push
-  // the resulting blob past 100MB and stall the tab. Cap the imageMap at
-  // 50 entries to keep the build bounded; downstream the missing images
-  // fall back to the report's local_image / remote-URL chain.
-  const PPTX_IMAGE_CAP = 50;
+  // PPTX (optional). The builder embeds every byte in imageMap into the
+  // slide XML. For very large lineages the resulting blob can be sizeable
+  // (100+ jobs x multiple previews), but the user explicitly asked to see
+  // the full result first — do NOT trim here. If a build OOMs or stalls,
+  // the user will see it in the progress bar / buildCrashed banner and can
+  // re-run with a smaller option set.
   if (options.includePptx) {
     onProgress?.({ phase: "pptx", current: 0, total: 0, message: "Fetching PPTX images…" });
     const imageMap = new Map<string, Uint8Array>();
@@ -162,21 +162,6 @@ export async function buildBundle(
             message: p.message,
           })
         );
-        if (imageMap.size > PPTX_IMAGE_CAP) {
-          warnings.push(
-            `PPTX image cap: kept the first ${PPTX_IMAGE_CAP} of ${imageMap.size} fetched images to keep the build bounded; the rest fall back to the report's local_image / remote-URL chain.`
-          );
-          // Trim to the cap — insertion order preserves the order
-          // collectPptImages saw them (representative previews first).
-          const trimmed = new Map<string, Uint8Array>();
-          let i = 0;
-          for (const [k, v] of imageMap) {
-            if (i++ >= PPTX_IMAGE_CAP) break;
-            trimmed.set(k, v);
-          }
-          imageMap.clear();
-          for (const [k, v] of trimmed) imageMap.set(k, v);
-        }
       } catch (err) {
         warnings.push(`PPTX image fetch failed: ${(err as Error).message}`);
       }
