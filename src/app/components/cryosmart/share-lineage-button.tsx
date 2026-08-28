@@ -20,8 +20,10 @@ import {
   Loader2,
   ExternalLink,
   Link as LinkIcon,
+  AlertCircle,
 } from "lucide-react";
 import { buildShareUrl } from "@/lib/cryosmart/share-url";
+import { copyToClipboard } from "@/lib/cryosmart/clipboard";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 
 interface Props {
@@ -52,7 +54,7 @@ export function ShareLineageButton({ summary }: Props) {
       setShareUrl(url);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      toast.error("Share URL too large — use the JSON download instead.");
+      toast.error("Share URL too large — export it from Capture History instead.");
     } finally {
       setBuilding(false);
     }
@@ -65,12 +67,14 @@ export function ShareLineageButton({ summary }: Props) {
 
   const copyUrl = useCallback(async () => {
     if (!shareUrl) return;
-    try {
-      await navigator.clipboard.writeText(shareUrl);
+    // Shared helper — falls back to execCommand on LAN-HTTP deployments
+    // where navigator.clipboard is undefined.
+    const ok = await copyToClipboard(shareUrl);
+    if (ok) {
       setCopied(true);
       toast.success("Share URL copied to clipboard");
       setTimeout(() => setCopied(false), 2500);
-    } catch {
+    } else {
       toast.error("Failed to copy. Select the URL and press Ctrl/Cmd+C.");
     }
   }, [shareUrl]);
@@ -155,7 +159,7 @@ export function ShareLineageButton({ summary }: Props) {
               <div>
                 <Label text="Scan to open on mobile" />
                 <div className="flex justify-center rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
-                  <QrCodeCanvas text={shareUrl} size={160} />
+                  <QrCodeCanvas key={shareUrl} text={shareUrl} size={160} />
                 </div>
               </div>
 
@@ -208,12 +212,20 @@ function Label({ text }: { text: string }) {
 /**
  * QR code renderer — draws to a canvas via the `qrcode` npm package.
  * Color matches the teal brand.
+ *
+ * QR capacity is ~2.3KB at error-correction M, but share URLs routinely
+ * run 1–48KB. When encoding fails the spinner used to run FOREVER with no
+ * error (the err callback was ignored) — now an explicit "too long" note
+ * replaces the canvas.
  */
 function QrCodeCanvas({ text, size }: { text: string; size: number }) {
-  const [ok, setOk] = useState(false);
+  const [status, setStatus] = useState<"pending" | "ok" | "failed">("pending");
   const ref = useRef<HTMLCanvasElement | null>(null);
 
+  // The parent keys this component by `text`, so a new URL remounts it with
+  // fresh "pending" state — no in-effect reset needed (react-compiler rule).
   useEffect(() => {
+    let active = true;
     if (!ref.current) return;
     QRCode.toCanvas(ref.current, text, {
       width: size,
@@ -221,16 +233,26 @@ function QrCodeCanvas({ text, size }: { text: string; size: number }) {
       color: { dark: "#0f766e", light: "#ffffff" },
       errorCorrectionLevel: "M",
     }, (err: Error | null | undefined) => {
-      if (!err) setOk(true);
+      if (!active) return;
+      setStatus(err ? "failed" : "ok");
     });
+    return () => {
+      active = false;
+    };
   }, [text, size]);
 
   return (
     <div className="relative" style={{ width: size, height: size }}>
-      <canvas ref={ref} width={size} height={size} className={ok ? "" : "opacity-0"} />
-      {!ok && (
+      <canvas ref={ref} width={size} height={size} className={status === "ok" ? "" : "opacity-0"} />
+      {status === "pending" && (
         <div className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-400">
           <Loader2 className="h-4 w-4 animate-spin" />
+        </div>
+      )}
+      {status === "failed" && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 px-3 text-center text-[10.5px] text-slate-500 dark:text-slate-400">
+          <AlertCircle className="h-4 w-4 text-amber-500" />
+          Link too long for a QR code — copy the URL instead.
         </div>
       )}
     </div>

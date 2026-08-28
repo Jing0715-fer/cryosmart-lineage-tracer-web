@@ -166,14 +166,9 @@ export default function Home() {
 
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
         <div className="space-y-6">
-          <DataSourceCard
-            loaded={loaded}
-            onLoad={(next) => {
-              setLoaded(next);
-              // A fresh capture/load supersedes any restored-history anchor.
-              setHistoryAnchorUid(null);
-            }}
-          />
+          {/* Data loading flows through useImportedMetadata's onLoaded hook
+              (staged capture / restore) — the card itself is display-only. */}
+          <DataSourceCard loaded={loaded} />
           <CaptureHistoryCard
             importToken={importState.token}
             onRestore={(restored, anchorUid) => {

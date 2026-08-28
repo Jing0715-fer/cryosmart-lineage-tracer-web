@@ -13,26 +13,23 @@ import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildBundle, downloadBlob, type BundleProgress, type BundleResult } from "@/lib/cryosmart/bundle";
 import type { LoadedMetadata } from "./data-source-card";
 
-/** localStorage key for the trace summary + build selections.
- *  Persists the lineage across page reloads (v3.13 resumed the staged
- *  capture; this layer covers the manually-traced case where the user
- *  reloads between Trace and Build, or between interrupted Build runs).
- *  - `summary`     : the normalized lineage (small — ~tens of KB even
- *                    for 50-job projects).
- *  - `selections`  : the 4 download-bundle checkboxes.
- *  - `builtAt`     : a human-readable "last traced" hint for the UI.
- *  Raw jobs + image bytes are NOT persisted: they routinely run into the
- *  multi-MB range and would blow past the 5-10 MB localStorage quota.
- *  If the user wants those back they must re-run Smart Capture. */
+/** localStorage key for the build selections.
+ *  Persists the 4 download-bundle checkboxes across page reloads. The
+ *  normalized lineage summary is deliberately NOT persisted here anymore:
+ *  it was write-only (nothing ever read it back — restoring the summary
+ *  would fight the page-level state anyway) and cost a tens-of-KB
+ *  re-serialize on every keystroke of the selection state. If the user
+ *  wants the trace back after a reload they re-run Smart Capture or
+ *  restore from Capture History. */
 const LAST_BUILD_KEY = "cryosmart_last_build_v1";
 
 interface PersistedBuild {
-  summary: LineageSummary | null;
   selections: BundleSelections;
   builtAt: number;
 }
 
 function readPersistedBuild(): PersistedBuild | null {
+  if (typeof window === "undefined") return null;
   try {
     const raw = localStorage.getItem(LAST_BUILD_KEY);
     if (!raw) return null;
@@ -47,7 +44,6 @@ function readPersistedBuild(): PersistedBuild | null {
         }
       : DEFAULT_SELECTIONS;
     return {
-      summary: (parsed.summary as LineageSummary | null) ?? null,
       selections,
       builtAt: typeof parsed.builtAt === "number" ? parsed.builtAt : 0,
     };
@@ -103,13 +99,12 @@ const BUNDLE_FILES = [
 
 export function DownloadCard({ summary, loaded }: Props) {
   // Selections are restored from localStorage so the user's previous
-  // choices survive a page reload. Hydration-safe: useState's initialiser
-  // runs only on the client (this whole component is "use client" and
-  // localStorage is guarded by try/catch).
-  const [selections, setSelections] = useState<BundleSelections>(() => {
-    const persisted = readPersistedBuild();
-    return persisted?.selections ?? DEFAULT_SELECTIONS;
-  });
+  // choices survive a page reload — but ONLY in an effect AFTER mount.
+  // "use client" components are still SSR-rendered: reading localStorage
+  // in the useState initializer used to produce a client initial state
+  // that differed from the server HTML (persisted selections ≠ defaults),
+  // i.e. a React hydration mismatch on every reload for returning users.
+  const [selections, setSelections] = useState<BundleSelections>(DEFAULT_SELECTIONS);
   const [building, setBuilding] = useState(false);
   const [progress, setProgress] = useState<BundleProgress | null>(null);
   const [result, setResult] = useState<BundleResult | null>(null);
@@ -124,17 +119,25 @@ export function DownloadCard({ summary, loaded }: Props) {
    *  newer run. */
   const buildEpochRef = useRef(0);
 
-  // Persist the trace summary + selections whenever they change. We persist
-  // the summary even when the user has not yet built — the page-level
-  // `summary` is the source of truth while the tab is open, but on reload
-  // we want to put the user back where they left off without re-tracing.
+  // Restore persisted selections AFTER hydration (see the useState note
+  // above), then persist every subsequent change.
+  useEffect(() => {
+    const persisted = readPersistedBuild();
+    if (persisted?.selections) {
+      setSelections((prev) =>
+        JSON.stringify(prev) === JSON.stringify(persisted.selections)
+          ? prev
+          : persisted.selections
+      );
+    }
+  }, []);
+
   useEffect(() => {
     writePersistedBuild({
-      summary,
       selections,
       builtAt: Date.now(),
     });
-  }, [summary, selections]);
+  }, [selections]);
 
   // If the tab is reloaded mid-build (very rare — would mean the React
   // tree unmounted and remounted), the in-memory `building` resets to

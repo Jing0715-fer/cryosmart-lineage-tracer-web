@@ -5,7 +5,6 @@ import { useEffect } from "react";
 interface ShortcutActions {
   onTrace?: () => void;
   onDownload?: () => void;
-  onFocusSearch?: () => void;
   onShowHelp?: () => void;
 }
 
@@ -14,10 +13,12 @@ interface ShortcutActions {
  *
  * - `Ctrl/Cmd + Enter` → Trace Lineage (the primary action)
  * - `Ctrl/Cmd + S`     → Build & download ZIP (prevents browser save)
- * - `Ctrl/Cmd + K`     → Focus the Job Explorer search
- * - `/`                 → Focus search (when not already in an input)
- * - `?`                 → Scroll to Help section
- * - `Esc`              → Close any open dialog / drawer
+ * - `?`                 → Scroll to Help section (when not in an input)
+ *
+ * (A `Ctrl/Cmd + K` / `/` “focus job search” pair used to be wired here,
+ * but the Job Explorer search input was removed with the legacy
+ * acquisition methods — the handlers targeted a selector that no longer
+ * exists anywhere in the DOM.)
  */
 export function useKeyboardShortcuts(actions: ShortcutActions) {
   useEffect(() => {
@@ -38,9 +39,6 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
         e.preventDefault();
         actions.onTrace?.();
         // Also click the actual trace button if visible
-        const traceBtn = document.querySelector<HTMLButtonElement>(
-          'button:not([disabled])'
-        );
         const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>("button"));
         const traceButton = buttons.find((b) => b.textContent?.includes("Trace Lineage") && !b.disabled);
         traceButton?.click();
@@ -56,17 +54,6 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
         );
         downloadButton?.click();
         actions.onDownload?.();
-        return;
-      }
-
-      // Cmd/Ctrl + K or `/` → Focus search
-      if (((e.metaKey || e.ctrlKey) && e.key === "k") || (e.key === "/" && !isInput)) {
-        e.preventDefault();
-        const searchInput = document.querySelector<HTMLInputElement>(
-          'input[placeholder*="Search by UID"]'
-        );
-        searchInput?.focus();
-        actions.onFocusSearch?.();
         return;
       }
 

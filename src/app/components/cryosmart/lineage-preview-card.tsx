@@ -14,6 +14,7 @@ import { buildLineageHtmlV2, type ReportHtmlOptions } from "@/lib/cryosmart/repo
 import { prefetchImagesForReport } from "@/lib/cryosmart/image-embed";
 import type { CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 import { makePreview } from "@/lib/cryosmart/lineage";
+import { copyToClipboard } from "@/lib/cryosmart/clipboard";
 import { LineageGraph } from "./lineage-graph";
 import { ShareLineageButton } from "./share-lineage-button";
 import { FscPlotViewer } from "./fsc-plot-viewer";
@@ -178,7 +179,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
             <CardTitle className="text-lg text-slate-700 dark:text-slate-300">Lineage Preview</CardTitle>
           </div>
           <CardDescription className="mt-1.5 pl-9 text-[13px]">
-            Load data and trace lineage above — or load the demo — and the lineage graph, stats, and full HTML report will appear here.
+            Load data and trace lineage above — or restore a past capture from Capture History — and the lineage graph, stats, and full HTML report will appear here.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -399,10 +400,15 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                   variant="outline"
                   size="sm"
                   className="h-7 text-[11px]"
-                  onClick={() => {
+                  onClick={async () => {
                     if (!summary.focused_mermaid) return;
-                    navigator.clipboard.writeText(summary.focused_mermaid);
-                    toast.success("Mermaid source copied");
+                    // Shared helper: falls back to execCommand on LAN-HTTP
+                    // deployments where navigator.clipboard is undefined —
+                    // the bare writeText call used to throw an unhandled
+                    // TypeError and silently copy nothing.
+                    const ok = await copyToClipboard(summary.focused_mermaid);
+                    if (ok) toast.success("Mermaid source copied");
+                    else toast.error("Copy failed — select the text and press Ctrl/Cmd+C.");
                   }}
                 >
                   <Copy className="mr-1 h-3 w-3" /> Copy

@@ -15,16 +15,14 @@ export interface LoadedMetadata {
    *  capture history (images served by /api/cryosmart/history/<id>/image/). */
   source: 'upload' | 'bookmarklet' | 'history';
   session?: CryoSmartSession | null;
-  liveJobUids?: string[];
   cryosmartOrigin?: string;
 }
 
 interface Props {
   loaded: LoadedMetadata | null;
-  onLoad: (loaded: LoadedMetadata) => void;
 }
 
-export function DataSourceCard({ loaded, onLoad }: Props) {
+export function DataSourceCard({ loaded }: Props) {
   return (
     <Card id="data-source" className="scroll-mt-28 overflow-hidden">
       <CardHeader className="bg-gradient-to-br from-slate-50 to-teal-50/40 pb-4">
@@ -48,17 +46,7 @@ export function DataSourceCard({ loaded, onLoad }: Props) {
         </div>
       </CardHeader>
       <CardContent className="p-4 pt-4">
-        <SmartCapturePanel
-          onCapture={(data) => {
-            onLoad({
-              raw: { jobs: data.jobs },
-              projectUid: data.projectUid,
-              jobCount: data.jobs.length,
-              source: 'bookmarklet',
-              cryosmartOrigin: 'http://192.168.202.11:8080',
-            });
-          }}
-        />
+        <SmartCapturePanel />
 
         {loaded && (
 

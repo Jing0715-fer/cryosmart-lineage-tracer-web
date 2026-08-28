@@ -38,8 +38,6 @@ import {
   edgeKind,
   reportKindFamily,
   pixelSizeText,
-  resolutionText,
-  extractionBinText,
   safePart,
   localImageFilename,
   reportIsRepickParticleProducer,
@@ -49,6 +47,7 @@ import {
   reportPictureParticleMetricText,
   reportRoundNodes,
   normalMapAssets,
+  mapPreviewAssetName,
   reportFirstMicrographNode,
   reportSelectedClassIndices,
 } from "./report-html";
@@ -62,7 +61,6 @@ import {
   resolutionNumber,
   formatBinFactor,
   parseClassIndex,
-  mapPreviewImageName,
   reportEdgeKind,
   htmlGroupLabel,
 } from "./lineage";
@@ -451,27 +449,9 @@ function reportRoundParticleNodes(
   );
 }
 
-function reportMetricText(node: LineageNode, compact = false): string {
-  const parts: string[] = [];
-  if (node.micrograph_count !== null && node.micrograph_count !== undefined) {
-    parts.push(`照片 ${fmt(node.micrograph_count)}`);
-  }
-  if (pixelSizeText(node)) parts.push(`pixel ${pixelSizeText(node)}`);
-  if (node.particle_count !== null && node.particle_count !== undefined) {
-    parts.push(`颗粒 ${fmt(node.particle_count)}`);
-  }
-  if (node.class_count !== null && node.class_count !== undefined) {
-    parts.push(`class ${fmt(node.class_count)}`);
-  }
-  if (node.volume_count !== null && node.volume_count !== undefined) {
-    parts.push(`volume ${fmt(node.volume_count)}`);
-  }
-  const res = resolutionText(node);
-  if (res) parts.push(res);
-  const bin = extractionBinText(node);
-  if (bin) parts.push(bin);
-  return compact ? parts.join(" · ") : parts.join(" · ");
-}
+/* NOTE: a local `reportMetricText` duplicate used to live here — dead code
+ * (all callers import the live one from ./report-html.ts). Removed during
+ * the v3.14 audit; report-html's version honors `compact` properly. */
 
 /* ================================================================== */
 /* SVG primitives                                                     */
@@ -649,7 +629,10 @@ export function buildPictureFlowSvg(
       width / 2 -
       (imgs.length * imgW + Math.max(0, imgs.length - 1) * 12) / 2;
     for (let i = 0; i < imgs.length; i += 1) {
-      body += `<image href="${svgImageHref(microNode.uid, imgs[i].name || "image", imageDataMap)}" x="${startX + i * (imgW + 12)}" y="${y}" width="${imgW}" height="${imgW}" preserveAspectRatio="xMidYMid meet"/>`;
+      // Fallback name MUST match collectImageRequests() in bundle.ts
+      // ("micrograph"), or the offline ZIP's images/ folder 404s for
+      // nameless micrograph refs (SVG referenced images/<uid>/image.png).
+      body += `<image href="${svgImageHref(microNode.uid, imgs[i].name || "micrograph", imageDataMap)}" x="${startX + i * (imgW + 12)}" y="${y}" width="${imgW}" height="${imgW}" preserveAspectRatio="xMidYMid meet"/>`;
     }
     y += imgs.length ? imgW + 24 : 20;
     body += svgText(width / 2, y, `${microNode.uid} ${microNode.job_type}`, 12, 500);
@@ -704,7 +687,11 @@ export function buildPictureFlowSvg(
       );
       y += 10;
       if (s.selected_classes_image) {
-        body += `<image href="${svgImageHref(node.uid, "selected_classes", imageDataMap)}" x="${(width - 360) / 2}" y="${y}" width="360" height="150" preserveAspectRatio="xMidYMid meet"/>`;
+        // Name MUST match collectImageRequests() in bundle.ts, which saves
+        // the select-2D previews as "templates_selected" — the SVG used to
+        // reference images/<uid>/selected_classes.png, a file the ZIP never
+        // contains (silent 404 for every select_2D job in the offline report).
+        body += `<image href="${svgImageHref(node.uid, "templates_selected", imageDataMap)}" x="${(width - 360) / 2}" y="${y}" width="360" height="150" preserveAspectRatio="xMidYMid meet"/>`;
         y += 166;
       } else {
         y += 12;
@@ -756,7 +743,10 @@ export function buildPictureFlowSvg(
         const maps = normalMapAssets(node);
         const item = maps.find((map) => map.preview_url) || maps[0];
         if (item && item.preview_url) {
-          body += `<image href="${svgImageHref(node.uid, mapPreviewImageName(item.group), imageDataMap)}" x="${(width - 170) / 2}" y="${y}" width="170" height="150" preserveAspectRatio="xMidYMid meet"/>`;
+          // Use mapPreviewAssetName() (group + ".result_name" for sharp/half
+          // maps) — mirrors collectImageRequests(); the plain group name
+          // 404s in the offline ZIP whenever the first map is a sharp/half.
+          body += `<image href="${svgImageHref(node.uid, mapPreviewAssetName(item), imageDataMap)}" x="${(width - 170) / 2}" y="${y}" width="170" height="150" preserveAspectRatio="xMidYMid meet"/>`;
           y += 162;
         }
         if (node.particle_count !== null && node.particle_count !== undefined) {

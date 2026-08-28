@@ -7,15 +7,28 @@ import { takePending } from "@/lib/cryosmart/pending-store";
  * Returns the pending import data for a given token.
  * Single-use: data is deleted after first successful read.
  */
+/** CORS on every response (see import/route.ts for the rationale). */
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
 export async function GET(req: NextRequest) {
   const token = req.nextUrl.searchParams.get("token");
   if (!token) {
-    return NextResponse.json({ ok: false, error: "Missing token" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "Missing token" },
+      { status: 400, headers: CORS }
+    );
   }
 
   const entry = takePending(token);
   if (!entry) {
-    return NextResponse.json({ ok: false, error: "Token not found or expired" }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: "Token not found or expired" },
+      { status: 404, headers: CORS }
+    );
   }
 
   return NextResponse.json(
@@ -39,25 +52,14 @@ export async function GET(req: NextRequest) {
         job_log_images: entry.data.job_log_images,
       },
     },
-    {
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-      },
-    }
+    { headers: CORS }
   );
 }
 
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Max-Age": "86400",
-    },
+    headers: { ...CORS, "Access-Control-Max-Age": "86400" },
   });
 }
 

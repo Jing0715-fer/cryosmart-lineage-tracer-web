@@ -34,7 +34,7 @@ export function SiteHeader() {
               CryoSmart Lineage Tracer <span className="text-teal-600 dark:text-teal-400">Web</span>
             </span>
             <span className="hidden text-[11px] text-slate-500 dark:text-slate-400 sm:block">
-              Cross-browser reimplementation · v1.0
+              Cross-browser reimplementation · v3.14
             </span>
           </div>
         </div>
@@ -78,10 +78,8 @@ export function SiteHeader() {
               <ul className="space-y-1.5 text-[11.5px]">
                 <ShortcutRow keys={["Ctrl", "Enter"]} label="Trace lineage" />
                 <ShortcutRow keys={["Ctrl", "S"]} label="Build & download ZIP" />
-                <ShortcutRow keys={["Ctrl", "K"]} label="Focus job search" />
-                <ShortcutRow keys={["/"]} label="Focus search (alt)" />
                 <ShortcutRow keys={["?"]} label="Jump to help" />
-                <ShortcutRow keys={["Esc"]} label="Close dialog / drawer" />
+                <ShortcutRow keys={["Esc"]} label="Close dialog (built-in)" />
               </ul>
             </PopoverContent>
           </Popover>

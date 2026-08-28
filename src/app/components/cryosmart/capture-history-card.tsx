@@ -47,8 +47,7 @@ interface Props {
   /** Called with the fully-merged dataset after a successful restore. */
   onRestore: (
     loaded: LoadedMetadata,
-    anchorUid: string | null,
-    entry: HistoryEntrySummary
+    anchorUid: string | null
   ) => void;
 }
 
@@ -75,6 +74,7 @@ export function CaptureHistoryCard({ importToken, onRestore }: Props) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -94,10 +94,11 @@ export function CaptureHistoryCard({ importToken, onRestore }: Props) {
     refresh();
   }, [refresh]);
 
-  // Clear any pending delete-confirmation timer on unmount.
+  // Clear any pending delete-confirmation / restore-scroll timers on unmount.
   useEffect(() => {
     return () => {
       if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
     };
   }, []);
 
@@ -154,24 +155,14 @@ export function CaptureHistoryCard({ importToken, onRestore }: Props) {
           return;
         }
         const loaded = toLoadedFromHistory(json, id);
-        onRestore(loaded, json.entry.end_job_uid ?? null, {
-          id,
-          label: "",
-          origin: "session",
-          project_uid: loaded.projectUid,
-          captured_at: json.captured_at,
-          created_at: Date.now(),
-          end_job_uid: json.entry.end_job_uid ?? null,
-          lineage_mode: json.entry.lineage_mode,
-          cryosmart_origin: loaded.session?.baseUrl ?? null,
-          counts: json.entry.counts,
-          bytes: 0,
-        });
+        onRestore(loaded, json.entry.end_job_uid ?? null);
         toast.success(
           `Restored capture — ${loaded.jobCount} jobs, ${json.entry.counts.log_images} log images, ${json.entry.counts.images} image files. Tracing lineage…`
         );
-        // Auto-trace fires in ConfigureCard; give it a beat then show the result.
-        setTimeout(() => {
+        // Auto-trace fires in ConfigureCard; give it a beat then show the
+        // result. Tracked so an unmount mid-wait doesn't fire a stray scroll.
+        if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+        scrollTimerRef.current = setTimeout(() => {
           document.getElementById("preview")?.scrollIntoView({ behavior: "smooth", block: "start" });
         }, 900);
       } catch (err) {

@@ -430,6 +430,8 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
       let sawData = false;
       let lastSig = "";
       let lastActivity = Date.now();
+      /** consecutive session-endpoint 404s (stale-URL early exit below). */
+      let staged404Count = 0;
 
       // ── Progressive data application ─────────────────────────────
       // The graph/report are built from `loaded`, which used to refresh
@@ -444,6 +446,39 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
       let lastDataSig = "";
       let lastDataFetchAt = 0;
       const DATA_FETCH_MIN_INTERVAL_MS = 1500;
+
+      /** PERF: the poll loop fires every 700ms for up to ~20 minutes. Each
+       *  tick used to swap in a FRESH state object, re-rendering the entire
+       *  page (including the mounted lineage-graph SVG — no card is
+       *  React.memo'd) ~1700× per capture even when NOTHING changed.
+       *  Returning the PREVIOUS object from the updater makes React bail
+       *  out of the re-render + effects entirely when every visible field
+       *  is identical. */
+      const applyState = (next: ImportState) => {
+        setState((prev) => {
+          const p = prev.progress;
+          const n = next.progress;
+          const sameProgress =
+            p === n ||
+            (!!p && !!n &&
+              p.done === n.done &&
+              p.total === n.total &&
+              p.images === n.images &&
+              p.uploaded === n.uploaded) ||
+            (!p && !n);
+          if (
+            prev.status === next.status &&
+            prev.message === next.message &&
+            prev.token === next.token &&
+            prev.startedAt === next.startedAt &&
+            prev.endJobUid === next.endJobUid &&
+            sameProgress
+          ) {
+            return prev;
+          }
+          return next;
+        });
+      };
 
       /** Fetch the current cumulative session snapshot and apply it. */
       const applyStagedData = async (): Promise<PendingData | null> => {
@@ -479,7 +514,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
         if (!sawData && Date.now() - startedAt > MAX_WAIT_MS) {
           if (!cancelled) {
             clearPersistedImportToken();
-            setState({
+            applyState({
               status: "error",
               message: "Timed out waiting for CryoSmart data — please re-run the capture script.",
               token,
@@ -509,19 +544,55 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
           // network hiccup — fall through to legacy probe
         }
 
+        // Track consecutive session-404s for the stale-token early exit
+        // below (reset whenever the session IS found or the network hiccuped).
+        if (stagedNotFound) staged404Count += 1;
+        else staged404Count = 0;
+
         // Resumed re-attach to a session that has since expired: stop
         // silently instead of showing an error (and stop the legacy probe —
         // a staged token can never appear in /pending).
         if (!sessionStatus && stagedNotFound && isResume) {
           clearPersistedImportToken();
           if (!cancelled) {
-            setState({
+            applyState({
               status: "idle",
               message: "",
               token: null,
               startedAt: null,
               progress: null,
               endJobUid: null,
+            });
+          }
+          return;
+        }
+
+        // Fresh ?imported= URL pointing at a session that no longer exists
+        // (45-min TTL passed, or the server restarted). The staged token
+        // can NEVER appear in /pending either, so the old behavior ground
+        // the full MAX_WAIT_MS before a misleading "Timed out" — bail
+        // early with an actionable message instead. Staged tokens carry a
+        // `s<seq>-` prefix (legacy /pending tokens don't), and 3
+        // consecutive 404s (~2s) rules out a transient network blip.
+        if (
+          !sessionStatus &&
+          stagedNotFound &&
+          !isResume &&
+          !sawData &&
+          staged404Count >= 3 &&
+          /^s\d+-/.test(token)
+        ) {
+          clearPersistedImportToken();
+          cleanUrl();
+          if (!cancelled) {
+            applyState({
+              status: "error",
+              message:
+                "Capture session expired or not found — re-run Smart Capture, or restore the capture from Capture History below.",
+              token,
+              startedAt,
+              progress: null,
+              endJobUid: endJobUidSeen,
             });
           }
           return;
@@ -565,7 +636,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               }
               if (cancelled) return;
               clearPersistedImportToken();
-              setState({
+              applyState({
                 status: "error",
                 message:
                   "Capture stalled — the capture script stopped responding (its tab may have been closed). The data received so far is shown; re-run the script to capture the rest.",
@@ -625,7 +696,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   sessionStatus.lineage_mode && req && req.jobs.length > 0
                     ? ` (traced lineage — ${req.jobs.length} of ${jobsCount} jobs scanned)`
                     : "";
-                setState({
+                applyState({
                   status: "loaded",
                   message:
                     nLogs > 0
@@ -661,7 +732,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               !req &&
               sessionStatus.log_jobs_done === 0;
             if (waitingForTrace) {
-              setState({
+              applyState({
                 status: "polling",
                 message:
                   `Loaded ${sessionStatus.total_jobs} jobs — waiting for Trace Lineage (log images are fetched only for the traced lineage)` +
@@ -694,7 +765,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                       `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
                       (imgs > 0 ? ` (${imgs} captured)` : "") +
                       "…";
-              setState({
+              applyState({
                 status: "polling",
                 message,
                 token,
@@ -709,7 +780,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               });
             }
           } else {
-            setState({
+            applyState({
               status: "polling",
               message: "Capture session established — uploading job metadata…",
               token,
@@ -735,7 +806,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             if (data.ok && data.data && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
               const session = buildSessionFromPending(data.data);
               onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
-              setState({
+              applyState({
                 status: "loaded",
                 message: session
                   ? `Loaded ${data.data.jobs.length} jobs from CryoSmart (session available for maps/images).`

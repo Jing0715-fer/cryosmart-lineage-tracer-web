@@ -14,6 +14,8 @@
  * as they are collected, and finally marks the session complete.
  */
 
+import { randomBytes } from "crypto";
+
 export type ImportSessionStatus =
   | "awaiting_jobs" // session created, jobs not uploaded yet
   | "collecting_logs" // jobs uploaded; log images streaming in
@@ -127,9 +129,11 @@ function gc() {
 function newToken(): string {
   seq += 1;
   globalRef.__cryoImportSessionSeq = seq;
-  const entropy = Math.floor(Math.random() * 0xffffffff)
-    .toString(16)
-    .padStart(8, "0");
+  // SECURITY: crypto randomness, not Math.random — session tokens gate
+  // access to /data which returns the captured CryoSmart credentials, so
+  // a guessable 32-bit token is a real credential-leak risk on shared
+  // deployments. 16 bytes = 128 bits of entropy on top of the seq prefix.
+  const entropy = randomBytes(8).toString("hex");
   return `s${seq}-${entropy}`;
 }
 
@@ -329,12 +333,15 @@ export function addImagesToSession(
       // Store is full — stop accepting new bytes (refs remain usable).
       break;
     }
-    let mime = m[1].toLowerCase();
-    if (!mime.startsWith("image/")) {
-      const sniffed = sniffImageMimeB64(m[2]);
-      if (!sniffed) continue; // not image bytes (text/xml/pdf body) — reject
-      mime = sniffed;
-    }
+    // SECURITY: ALWAYS trust the actual BYTES over the declared mime. The
+    // sniffer only recognizes RASTER signatures (png/jpeg/gif/bmp/webp/
+    // tiff/ico) — anything else is rejected, so a declared
+    // `image/svg+xml` carrying a <script> payload can never be stored and
+    // re-served same-origin (stored XSS via history import would make it
+    // persistent). Previously any image/* declared mime bypassed sniffing.
+    const sniffed = sniffImageMimeB64(m[2]);
+    if (!sniffed) continue; // not raster image bytes (text/xml/svg/pdf body) — reject
+    const mime = sniffed;
     session.imageStore.set(fileid, {
       mime,
       b64: m[2],
@@ -406,9 +413,15 @@ export function sessionImageResponse(
     headers: {
       "Content-Type": img.mime,
       "Content-Length": String(bytes.byteLength),
-      // The session TTL is 15 min — cache in the browser for comfortably
+      // The session TTL is 45 min — cache in the browser for comfortably
       // less than that so an expired+reused fileid never sticks around.
       "Cache-Control": "public, max-age=300",
+      // Defense in depth for served image bytes: if anything ever slips
+      // past the raster sniffing, these headers stop the response from
+      // being executed as an active document (script/iframe) in the app
+      // origin. Harmless for <img> usage.
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+      "X-Content-Type-Options": "nosniff",
       ...IMPORT_SESSION_CORS,
     },
   });

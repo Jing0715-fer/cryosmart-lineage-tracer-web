@@ -480,7 +480,7 @@ export function ConfigureCard({ loaded, summary, onSummary, awaitingImport, impo
             </Button>
             {!loaded && !awaitingImport && (
               <p className="text-[10.5px] leading-snug text-slate-400">
-                Load data in step 1 (Smart Capture, Upload, or Demo) first.
+                Load data in step 1 (Smart Capture) — or restore a capture from Capture History — first.
               </p>
             )}
           </div>

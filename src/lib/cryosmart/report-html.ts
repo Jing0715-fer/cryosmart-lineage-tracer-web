@@ -1401,10 +1401,19 @@ export interface ReportHtmlOptions {
     // relative resolution fails outright.
     const renderSrc = absolutizeSessionUrl(remoteSrc, opts?.webAppOrigin);
     const proxyUrl = buildProxyFallbackUrl(remoteSrc, opts?.session);
+    // SECURITY: the proxy fallback URL is carried in a data-* attribute and
+    // read back via `this.dataset.proxySrc` — NEVER interpolated into the
+    // JS string literal. `proxyUrl` embeds the raw fileid captured from the
+    // remote URL, and a crafted fileid like `x";alert(document.cookie);//`
+    // used to break out of the old `this.src="${proxyUrl}"` literal and
+    // execute arbitrary JS inside the report iframe (which runs SAME-ORIGIN
+    // with the app when rendered from srcdoc). escHtml() protects the
+    // HTML-attribute context only; a dataset read-back is context-safe.
+    const proxyAttr = proxyUrl ? ` data-proxy-src="${escHtml(proxyUrl)}"` : "";
     const onerror = proxyUrl
-      ? `if(!this.dataset.tried){this.dataset.tried='1';this.src="${proxyUrl}";}else{${markFailed}}`
+      ? `if(!this.dataset.tried){this.dataset.tried='1';this.src=this.dataset.proxySrc;}else{${markFailed}}`
       : `if(!this.dataset.tried){this.dataset.tried='1';${markFailed}}`;
-    return `<img${cls} src="${escHtml(renderSrc)}" referrerpolicy="no-referrer" loading="lazy" decoding="async" onerror="${escHtml(onerror)}" alt="${escHtml(alt)}">`;
+    return `<img${cls} src="${escHtml(renderSrc)}"${proxyAttr} referrerpolicy="no-referrer" loading="lazy" decoding="async" onerror="${escHtml(onerror)}" alt="${escHtml(alt)}">`;
   }
 
   /** Grid of image boxes (used by media block). */

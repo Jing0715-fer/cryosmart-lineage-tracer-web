@@ -4,6 +4,8 @@
  * (with auth tokens).
  */
 
+import { randomBytes } from "crypto";
+
 interface PendingImport {
   data: {
     project_uid?: string;
@@ -46,19 +48,22 @@ function gc() {
   for (const [k, v] of store) {
     if (v.expiresAt < now) store.delete(k);
   }
-  if (store.size > MAX_ENTRIES) {
-    let i = 0;
-    for (const k of store.keys()) {
-      store.delete(k);
-      if (++i >= store.size - MAX_ENTRIES) break;
-    }
+  // Evict oldest-inserted entries until at cap. (The old loop compared
+  // `++i >= store.size - MAX_ENTRIES` against a SHRINKING store.size, so
+  // each pass deleted only ~half the excess — the cap was enforced
+  // asymptotically, not immediately.)
+  while (store.size > MAX_ENTRIES) {
+    const first = store.keys().next();
+    if (first.done) break;
+    store.delete(first.value);
   }
 }
 
 function newToken(): string {
   seq += 1;
   globalRef.__cryoPendingSeq = seq;
-  const entropy = Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, "0");
+  // SECURITY: crypto randomness, not Math.random (see import-session-store).
+  const entropy = randomBytes(8).toString("hex");
   return `${seq}-${entropy}`;
 }
 
@@ -82,24 +87,6 @@ export function takePending(token: string): PendingImport | null {
   store.delete(token);
   if (entry.expiresAt < Date.now()) return null;
   return entry;
-}
-
-export function peekPending(token: string): {
-  exists: boolean;
-  expired: boolean;
-  createdAt?: number;
-  expiresAt?: number;
-} {
-  if (!token) return { exists: false, expired: false };
-  gc();
-  const entry = store.get(token);
-  if (!entry) return { exists: false, expired: false };
-  return {
-    exists: true,
-    expired: entry.expiresAt < Date.now(),
-    createdAt: entry.createdAt,
-    expiresAt: entry.expiresAt,
-  };
 }
 
 /** Build a CryoSmartSession from stored import data. */

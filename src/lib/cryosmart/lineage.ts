@@ -408,11 +408,10 @@ export function resolutionText(node: { resolution_A?: number | null }): string {
 
 /**
  * `popup.js` does not define a dedicated `formatResolution` helper — it
- * reuses `formatBinFactor` for resolution values (see `resolutionText`).
+ * reuses `formatBinFactor` for resolution values (see `resolutionText`,
+ * which formats with formatBinFactor — verified).
  * Alias kept here so downstream modules can import a single source of
  * truth for resolution formatting.
- *
- * TODO: verify — original `resolutionText` calls `formatBinFactor(value)`.
  */
 export const formatResolution = formatBinFactor;
 
@@ -1488,6 +1487,13 @@ function dedupeLogImagesAcrossJobs(jobs: Iterable<JobMetadata>): void {
     }
     if (Array.isArray(job.image_logs) && job.image_logs.length) {
       for (const log of job.image_logs) {
+        // v3.11 `files` shape carries the same per-job fileids as
+        // `imgfiles` (hetero_refine / homo_abinit deliver images under
+        // `files`) — legacy captures smeared BOTH shapes across jobs, so
+        // claim() must run over each array independently.
+        if (Array.isArray(log.files) && log.files.length) {
+          log.files = log.files.filter((f) => claim(f?.fileid));
+        }
         if (!Array.isArray(log.imgfiles) || !log.imgfiles.length) continue;
         log.imgfiles = log.imgfiles.filter((f) => claim(f?.fileid));
       }

@@ -427,9 +427,19 @@ export async function buildBundle(
 
   // Final results (optional) — only available in live mode
   if (options.includeFinalResults) {
-    if (options.session) {
+    // Gate the whole phase on the SAME reachability probe as maps and
+    // direct-URL images: these are 11 best-effort PROXIED fetches at the
+    // 10s default timeout — on an unreachable intranet origin they used
+    // to grind ~110s of aborts for nothing, exactly the stall the v3.13
+    // probe was introduced to prevent.
+    if (!options.session) {
+      warnings.push("Final results scan skipped: requires session from Smart Capture mode.");
+    } else if (!(await ensureReachability())) {
+      warnings.push(
+        `Final results scan skipped: CryoSmart (${options.session.baseUrl}) is unreachable from this app.`
+      );
+    } else {
       onProgress?.({ phase: "final", current: 0, total: 1, message: "Scanning final results…" });
-      const baseUrl = options.session.baseUrl || DEFAULT_BASE_URL;
       const projectId = summary.project_uid;
       const startUid = summary.start_uid;
       const suffixes = [
@@ -479,8 +489,6 @@ export async function buildBundle(
         `Fetched ${finalFiles.length} files.\n` +
         `Generated at ${new Date().toISOString()}.\n`;
       files.push({ path: `Final_Result/final_result_summary.txt`, data: utf8(summaryText) });
-    } else {
-      warnings.push("Final results scan skipped: requires session from Smart Capture mode.");
     }
   }
 

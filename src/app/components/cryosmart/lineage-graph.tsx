@@ -1077,25 +1077,81 @@ export function LineageGraph({ summary, session, stagedImport }: Props) {
     return () => { cancelled = true; };
   }, [session, detailMode, nodes]);
 
-  /* Pan via mouse drag on the canvas background (not on nodes). */
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+  /* Pan via pointer drag on the canvas background (not on nodes).
+   * POINTER events (v3.14) — covers mouse, touch and pen in one path; the
+   * old mouse-only implementation made drag-pan inoperative on touch
+   * devices. `setPointerCapture` keeps the move/up stream flowing to the
+   * container even when the pointer leaves it, and replaces the old window
+   * listeners (which leaked if the component unmounted mid-drag).
+   * Two active pointers = pinch-zoom about their midpoint. */
+  const activePointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchStartRef = useRef<{ dist: number; zoom: number } | null>(null);
+
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
     if ((e.target as Element | null)?.closest("[data-node]")) return;
+    const el = e.currentTarget as HTMLElement;
+    activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch {
+      // some browsers reject capture for released pointers — harmless
+    }
+    if (activePointersRef.current.size === 2) {
+      const [p1, p2] = Array.from(activePointersRef.current.values());
+      pinchStartRef.current = {
+        dist: Math.hypot(p2.x - p1.x, p2.y - p1.y),
+        zoom: zoomRef.current,
+      };
+      setDragging(false);
+      return;
+    }
+    if (activePointersRef.current.size > 2) return;
     e.preventDefault();
     const startX = e.clientX;
     const startY = e.clientY;
     const startPanX = pan.x;
     const startPanY = pan.y;
     setDragging(true);
-    const move = (ev: MouseEvent) => {
+    const move = (ev: PointerEvent) => {
+      if (!activePointersRef.current.has(ev.pointerId)) return;
+      activePointersRef.current.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+      if (pinchStartRef.current && activePointersRef.current.size >= 2) {
+        // Pinch: zoom about the current midpoint, anchored at the start zoom.
+        const [p1, p2] = Array.from(activePointersRef.current.values());
+        const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        if (dist > 10 && pinchStartRef.current.dist > 10) {
+          const target = Math.max(
+            MIN_ZOOM,
+            Math.min(MAX_ZOOM, pinchStartRef.current.zoom * (dist / pinchStartRef.current.dist))
+          );
+          const rect = el.getBoundingClientRect();
+          const midX = (p1.x + p2.x) / 2 - rect.left;
+          const midY = (p1.y + p2.y) / 2 - rect.top;
+          const z0 = zoomRef.current;
+          const k = z0 > 0 ? target / z0 : 1;
+          if (k !== 1) {
+            zoomRef.current = target;
+            setZoom(target);
+            setPan((p) => ({ x: midX - (midX - p.x) * k, y: midY - (midY - p.y) * k }));
+          }
+        }
+        return;
+      }
       setPan({ x: startPanX + (ev.clientX - startX), y: startPanY + (ev.clientY - startY) });
     };
-    const up = () => {
-      setDragging(false);
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
+    const up = (ev: PointerEvent) => {
+      activePointersRef.current.delete(ev.pointerId);
+      if (activePointersRef.current.size < 2) pinchStartRef.current = null;
+      if (activePointersRef.current.size === 0) {
+        setDragging(false);
+        el.removeEventListener("pointermove", move);
+        el.removeEventListener("pointerup", up);
+        el.removeEventListener("pointercancel", up);
+      }
     };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
   }, [pan.x, pan.y]);
 
   /* Wheel zoom (non-passive so preventDefault stops page scroll).
@@ -1370,8 +1426,12 @@ export function LineageGraph({ summary, session, stagedImport }: Props) {
           cursor: dragging ? "grabbing" : "grab",
           borderColor,
           background: bgColor,
+          // Let pointer drags pan the graph on touch devices instead of
+          // scrolling the page (page scroll is still available everywhere
+          // outside the canvas — the standard canvas-app convention).
+          touchAction: "none",
         }}
-        onMouseDown={handleMouseDown}
+        onPointerDown={handlePointerDown}
       >
         <span className="sr-only">
           Lineage graph: {nodes.length} jobs and {drawnEdges.length} data links. Target job is {summary.start_uid}. Data flows from the leftmost (oldest) source jobs rightward, converging on the target job on the far right. Use Tab to focus a node and Enter or Space to open its details.

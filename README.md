@@ -232,11 +232,18 @@ caddy run --config Caddyfile
 
 ## 已知行为与限制
 
-- **Secure context**：局域网 IP 访问时 Clipboard API 不可用，已加 `execCommand` fallback（见 `smart-capture-panel.tsx` 的 `copyToClipboard` helper）
+- **Secure context**：局域网 IP 访问时 Clipboard API 不可用，已加 `execCommand` fallback（统一封装在 `src/lib/cryosmart/clipboard.ts`，Smart Capture / Share / Mermaid Copy 三处共用）
 - **Next.js 16 allowedDevOrigins**：从非 localhost 访问会看到 `Cross origin request detected from …` 警告，配置 `next.config.ts` 的 `allowedDevOrigins` 可消除
 - **后台标签页节流**：捕获期间本应用的预览标签页若被切到后台，浏览器会节流轮询 —— 已用 `visibilitychange` 唤醒 + localStorage token 恢复兜底，切回来即刷新
 - **多 round job**：捕获脚本只保留**最后一轮**的 log images（之前的已被清理）
 - **CryoSmart 后端**：第三方管理；本应用不依赖其 WebSocket，全部数据经 Smart Capture 脚本一次性带出
+
+### 安全姿态（内网单用户工具的设计决策）
+
+- **`/api/cryosmart/[...path]` 与 `/api/proxy-image/*` 是开放代理**：`base` 参数完全由调用方控制，服务端会对任意 http(s) URL 发起请求并回传响应体。这是内网单用户工具的有意设计（浏览器无法直连 CryoSmart 的 CORS/HttpOnly cookie 限制所致）；**请勿将本应用暴露到公网**，否则会成为一个 SSRF 中继。
+- **上传字节只接受光栅图片**：两处存储（session store / capture history）都按魔数嗅探字节，PNG/JPEG/GIF/BMP/WebP/TIFF/ICO 之外一律拒绝（`image/svg+xml` 携带脚本的存储型 XSS 由此封死），图片响应另附 `Content-Security-Policy: default-src 'none'; sandbox` + `nosniff` 纵深防御。
+- **会话 token 使用 crypto 随机数**（`randomBytes`，128-bit 熵 + 序号前缀）。`/data` 等端点会返回捕获到的 CryoSmart 凭据（应用需要它们做代理下载）——持有 token 即持有凭据，因此 token 不可猜测是硬要求。
+- **凭据明文落盘**：capture history 的 `capture.json` 内含捕获时的 cookie/auth（导出时凭据默认剔除、需显式勾选）——历史目录（`capture-history/`）请当作敏感数据对待。
 
 ---
 

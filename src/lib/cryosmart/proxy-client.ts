@@ -104,6 +104,48 @@ export async function cryoSmartFetch(
 ): Promise<Response> {
   const cleanPath = String(cryosmartPath || "").replace(/^\/+/, "");
 
+  // Normalize DIRECT absolute http(s) URLs (e.g.
+  // "http://<intranet>/api/log_image/<fileid>") BEFORE the branch logic.
+  // Previously such URLs fell through to branch (1) verbatim and the
+  // [...path] route rebuilt `${base}/http://<intranet>/api/...` — a nested
+  // path the upstream 404s, so EVERY direct-URL image (ZIP bundle + PPTX)
+  // failed even when this server COULD reach CryoSmart, and landed in
+  // images/NOT_UPLOADED_LINKS.txt misleadingly. image-embed.ts strips
+  // origins at its own call sites; bundle.ts / collectPptImages pass full
+  // URLs — normalizing HERE fixes every caller at once.
+  if (/^https?:\/\//i.test(cleanPath)) {
+    try {
+      const u = new URL(cleanPath);
+      const rest = `${u.pathname.replace(/^\/+/, "")}${u.search}`;
+      // Absolute form of an app-served uploaded-image URL (staged session
+      // or capture history): the bytes live in THIS app — fetch same-origin,
+      // never through the CryoSmart proxy.
+      if (/^api\/cryosmart\/(?:import\/session|history)\/[^/]+\/image\//i.test(rest)) {
+        return fetch(`/${rest}`, {
+          method: "GET",
+          credentials: "same-origin",
+          signal: init?.signal,
+        });
+      }
+      // Direct CryoSmart (or other) URL: proxy it against ITS OWN origin —
+      // a direct image URL may point at an intranet host even when
+      // session.baseUrl differs. Mirrors branch (1)'s query merging.
+      const [pathPart, queryPart] = rest.split("?");
+      const params = new URLSearchParams(queryPart || "");
+      params.set("base", u.origin);
+      if (session.cookie) params.set("cookie", session.cookie);
+      if (session.auth) params.set("auth", session.auth);
+      if (init?.timeoutMs) params.set("timeout", String(Math.round(init.timeoutMs)));
+      return fetch(`/api/cryosmart/${pathPart}?${params.toString()}`, {
+        method: "GET",
+        credentials: "same-origin",
+        signal: init?.signal,
+      });
+    } catch {
+      // Unparseable absolute URL — fall through to the legacy branches.
+    }
+  }
+
   // Branch (0): app-served uploaded-image URL (staged session or restored
   // capture history) — served by THIS app.
   if (/^api\/cryosmart\/(?:import\/session|history)\/[^/]+\/image\//i.test(cleanPath)) {

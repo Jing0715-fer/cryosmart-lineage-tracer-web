@@ -151,7 +151,8 @@ export interface CaptureJsonExport {
 /* Storage plumbing                                                    */
 /* ------------------------------------------------------------------ */
 
-/** Keep the most recent N captures on disk (LRU-evicted, newest kept). */
+/** Keep the most recent N captures on disk (newest-kept by created_at —
+ * age-based retention; restoring an entry does NOT bump its recency). */
 const MAX_HISTORY_ENTRIES = 40;
 
 const globalRef = globalThis as unknown as {
@@ -399,7 +400,7 @@ export async function saveSessionToHistory(
   }
 }
 
-/** LRU-evict: keep only the newest MAX_HISTORY_ENTRIES entries. */
+/** Retention: keep only the newest MAX_HISTORY_ENTRIES entries. */
 async function evictOldEntries(): Promise<void> {
   try {
     const entries = await listHistoryEntries();
@@ -488,6 +489,9 @@ export async function historyImageResponse(
         "Content-Length": String(buf.byteLength),
         // History images are immutable — cache aggressively.
         "Cache-Control": "public, max-age=31536000, immutable",
+        // Defense in depth for served image bytes (see sessionImageResponse).
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "X-Content-Type-Options": "nosniff",
       },
     });
   } catch {
@@ -601,6 +605,11 @@ function sniffImageMimeB64(b64: string): string | null {
         head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
         head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50
       ) return "image/webp";
+      // TIFF + ICO: match the live session store's sniffer so imports of
+      // exports taken from live sessions accept every format it accepts.
+      if ((head[0] === 0x49 && head[1] === 0x49 && head[2] === 0x2a) ||
+          (head[0] === 0x4d && head[1] === 0x4d && head[2] === 0x00)) return "image/tiff";
+      if (head[0] === 0x00 && head[1] === 0x00 && head[2] === 0x01) return "image/x-icon";
     }
   } catch {
     // fall through
@@ -640,6 +649,12 @@ export async function importCaptureJson(
   const dir = entryDir(id);
   await fsp.rm(dir, { recursive: true, force: true });
   await fsp.mkdir(imagesDir(id), { recursive: true });
+  // A failed import (fs error, unwritable disk, …) must not leave an orphan
+  // dir behind: an entry without meta.json is INVISIBLE to listHistoryEntries
+  // and never evicted by the LRU — a silent disk leak. Rewrite the tail of
+  // this function as an async IIFE so every failure path cleans up the dir.
+  try {
+  return await (async (): Promise<ImportResult> => {
 
   // 1. Embedded image bytes → binary files.
   const imageFiles: HistoryImageFile[] = [];
@@ -652,12 +667,13 @@ export async function importCaptureJson(
       if (!fileid || !data) continue;
       const m = data.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/i);
       if (!m) continue;
-      let mime = String(rawImg.mime || m[1] || "").toLowerCase();
-      if (!mime.startsWith("image/")) {
-        const sniffed = sniffImageMimeB64(m[2]);
-        if (!sniffed) continue;
-        mime = sniffed;
-      }
+      // SECURITY: ALWAYS trust the actual BYTES over the declared mime —
+      // same rule as the live session store: only RASTER signatures are
+      // accepted, so an `image/svg+xml` with a <script> payload can never
+      // be persisted to disk and re-served (stored XSS).
+      const sniffed = sniffImageMimeB64(m[2]);
+      if (!sniffed) continue;
+      const mime = sniffed;
       try {
         const buf = Buffer.from(m[2], "base64");
         if (buf.byteLength === 0) continue;
@@ -755,4 +771,10 @@ export async function importCaptureJson(
 
   await evictOldEntries();
   return { meta, embeddedImages: embedded };
+  })();
+  } catch (err) {
+    // Roll back the half-written entry so no orphan dir survives.
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    throw err;
+  }
 }

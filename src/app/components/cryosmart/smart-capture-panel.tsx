@@ -85,6 +85,16 @@
  * invisible to the deep scan. The loader now gets a 20s second chance, big
  * job types get an 8s diff window, the deep-scan caps are 10× bigger, and
  * the slow-log rescue window is 90s.
+ *
+ * v3.14: hung-fetch timeouts + working legacy fallback. (1) Every outbound
+ * request (session create, staged POSTs, log probes, image byte fetches,
+ * heartbeats) is raced against a timeout via AbortController — a single
+ * hung request used to stall the scan loop forever, leaving the app to trip
+ * its 10-min stall detector. (2) The legacy one-shot fallback now carries
+ * the STAGED token in its body; the app applies the payload to the very
+ * session its progress tab is already polling (previously the fallback
+ * minted a token the app never learned about — console said "Legacy import
+ * done" while the app timed out).
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -99,48 +109,13 @@ import {
   ChevronRight,
   Info
 } from "lucide-react";
+import { copyToClipboard } from "@/lib/cryosmart/clipboard";
+import { DEFAULT_BASE_URL } from "@/lib/cryosmart/constants";
 
-interface Props {
-  onCapture: (data: { jobs: unknown[]; projectUid: string; experimentUid: string }) => void;
-}
-
-/**
- * Copy text to the clipboard with a fallback for non-secure contexts.
- *
- * `navigator.clipboard` is only defined in secure contexts (https,
- * http://localhost, http://127.0.0.1). When the web app is reached over a
- * LAN IP (e.g. http://192.168.x.x:3000), `navigator.clipboard` is undefined
- * and `writeText` throws. Fall back to a hidden textarea + execCommand,
- * which still works in every desktop browser even without a secure context.
- * Returns true on success.
- */
-async function copyToClipboard(text: string): Promise<boolean> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // fall through to the execCommand fallback below
-    }
-  }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.top = "-1000px";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
-export function SmartCapturePanel({ onCapture }: Props) {
+/** The panel takes no props: Smart Capture streams its data to the
+ *  staged-session endpoints directly; the app-side poller picks it up.
+ *  (An old onCapture callback used to be declared but never invoked.) */
+export function SmartCapturePanel() {
   const [copied, setCopied] = useState(false);
   // webAppUrl MUST be resolved client-side only (window.location.origin).
   // Computing it during render with `typeof window !== 'undefined'` produces
@@ -174,7 +149,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.13 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.14 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast), but log images are fetched ONLY for the jobs
 // the traced lineage needs: the script waits for the web app's Trace
@@ -388,7 +363,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   // ── STEP 1: create the import session (tiny request → token) ──────
   var sess = null;
   try {
-    var r0 = await fetch(APP + '/api/cryosmart/import/session', {
+    var r0 = await fetchT(APP + '/api/cryosmart/import/session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -420,12 +395,29 @@ export function SmartCapturePanel({ onCapture }: Props) {
     catch (e) { try { win.location.href = appUrl; } catch (e2) {} }
   }
 
+  // v3.14: fetch with a timeout — a single hung request (session create,
+  // staged POST, log probe, image byte fetch, heartbeat) used to stall the
+  // scan loop forever, leaving the app to trip its 10-min stall detector.
+  // AbortController is available in every browser this script supports.
+  function fetchT(url, opts, ms) {
+    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    var tid = ctrl ? setTimeout(function() { ctrl.abort(); }, ms || 30000) : null;
+    var o = opts || {};
+    if (ctrl) o.signal = ctrl.signal;
+    return fetch(url, o).then(
+      function(r) { if (tid) clearTimeout(tid); return r; },
+      function(e) { if (tid) clearTimeout(tid); throw e; }
+    );
+  }
+
   function post(path, body) {
-    return fetch(APP + '/api/cryosmart/import/session/' + token + path, {
+    // 120s covers the largest staged payloads (/images byte batches can
+    // carry ~30MB of base64 on slow uplinks).
+    return fetchT(APP + '/api/cryosmart/import/session/' + token + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {})
-    }).then(function(r) { return r.json(); });
+    }, 120000).then(function(r) { return r.json(); });
   }
 
   // ── Log-image machinery (used by STEP 3) ───────────────────────────
@@ -1085,7 +1077,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
     return paths.reduce(function(chain, p) {
       return chain.then(function(logs) {
         if (logs) return logs;
-        return fetch(p, { credentials: 'include' })
+        return fetchT(p, { credentials: 'include' }, 15000)
           .then(function(r) { return r.ok ? r.json() : null; })
           .then(function(d) {
             if (!d) return null;
@@ -1134,7 +1126,6 @@ export function SmartCapturePanel({ onCapture }: Props) {
   var imgWorkers = 0;
   var imgPosted = 0;                          // in-flight POSTs
   var imgUploaded = 0, imgFailed = 0;
-  var imgDone = false;
 
   // v3.12: resolve the real image type from the BYTES, never from the
   // server's Content-Type. The real CryoSmart deployment serves
@@ -1194,7 +1185,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
 
   function fetchImageData(ref) {
     if (!ref || !ref.fileid) return Promise.resolve(null);
-    return fetch('/api/log_image/' + encodeURIComponent(ref.fileid), { credentials: 'include' })
+    return fetchT('/api/log_image/' + encodeURIComponent(ref.fileid), { credentials: 'include' }, 45000)
       .then(function(r) { return r.ok ? r.blob() : null; })
       .then(function(b) {
         if (!b || b.size === 0 || b.size > IMG_MAX_BYTES) return null;
@@ -1314,7 +1305,6 @@ export function SmartCapturePanel({ onCapture }: Props) {
 
   // Wait (bounded) for every queued image to be fetched + posted.
   function drainImageUploads(budgetMs) {
-    imgDone = true;
     var deadline = Date.now() + (budgetMs || 90000);
     return new Promise(function(resolve) {
       (function check() {
@@ -1364,12 +1354,18 @@ export function SmartCapturePanel({ onCapture }: Props) {
 
   if (!up || !up.ok) {
     // Fallback: legacy one-shot import so the user still gets the data.
+    // v3.14: the body now carries the STAGED token — the app applies the
+    // payload to the very session its progress tab is already polling
+    // (see the staged-session rescue branch in /api/cryosmart/import), so
+    // the fallback actually rescues the live tab instead of leaving it to
+    // grind its timeout while this console says "Legacy import done".
     console.warn('[CryoSmart] Staged upload failed — falling back to legacy one-shot import.');
     try {
-      var r1 = await fetch(APP + '/api/cryosmart/import', {
+      var r1 = await fetchT(APP + '/api/cryosmart/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          token: token,
           project_uid: projectId,
           experiment_uid: project.experiments && project.experiments[0] ? project.experiments[0].uid : undefined,
           jobs: jobs,
@@ -1382,7 +1378,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
         })
       });
       var res1 = await r1.json();
-      if (res1.ok) console.log('[CryoSmart] Legacy import done:', res1.count, 'jobs');
+      if (res1.ok) console.log('[CryoSmart] Legacy import done:', res1.count, 'jobs', res1.mode === 'staged-rescue' ? '(applied to the live capture session)' : '');
       else alert('Upload failed: ' + (res1.error || 'unknown'));
     } catch (e) {
       alert('Upload failed: ' + (e && e.message));
@@ -1415,7 +1411,7 @@ export function SmartCapturePanel({ onCapture }: Props) {
   };
 
   function fetchStatus(hb) {
-    return fetch(APP + '/api/cryosmart/import/session/' + token + (hb ? '?hb=1' : ''), { cache: 'no-store' })
+    return fetchT(APP + '/api/cryosmart/import/session/' + token + (hb ? '?hb=1' : ''), { cache: 'no-store' }, 10000)
       .then(function(r) { return r.ok ? r.json() : null; })
       .catch(function() { return null; });
   }
@@ -1904,20 +1900,11 @@ export function SmartCapturePanel({ onCapture }: Props) {
   }, [captureScript]);
 
   const handleOpenCryoSmart = useCallback(() => {
-    window.open('http://192.168.202.11:8080', '_blank');
+    // Single source of truth for the default CryoSmart origin (the panel
+    // used to hardcode a SECOND, divergent IP here).
+    window.open(DEFAULT_BASE_URL, "_blank");
   }, []);
 
-  const handleCapture = useCallback(() => {
-    if (window.confirm('This will extract all job data from CryoSmart.\n\nMake sure CryoSmart is fully loaded, then click OK to continue.')) {
-      try {
-        // new Function (rather than eval) keeps the capture script out of the
-        // enclosing scope and avoids the react-compiler eval restriction.
-        new Function(captureScript)();
-      } catch (e) {
-        toast.error('Failed to run capture script: ' + (e instanceof Error ? e.message : String(e)));
-      }
-    }
-  }, [captureScript]);
   return (<div className="space-y-4">
     <div className="flex items-start gap-3">
       <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-bold text-teal-700">
