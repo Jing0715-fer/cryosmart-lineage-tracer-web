@@ -11,7 +11,15 @@ import { toast } from "sonner";
 import { Package, Loader2, Download, AlertTriangle, CheckCircle2, FileArchive, Settings2, FileBox, Boxes, FileCheck2, PresentationIcon, StopCircle } from "lucide-react";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildBundle, downloadBlob, type BundleProgress, type BundleResult } from "@/lib/cryosmart/bundle";
+import { createBundleSink, type BundleSinkKind } from "@/lib/cryosmart/zip-sink";
 import type { LoadedMetadata } from "./data-source-card";
+
+/** Human size for toasts / progress lines ("8.4 MB", "1.2 GB"). */
+function fmtSize(bytes: number): string {
+  if (!bytes) return "0 MB";
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1073741824).toFixed(2)} GB`;
+  return `${(bytes / 1048576).toFixed(1)} MB`;
+}
 
 /** localStorage key for the build selections.
  *  Persists the 4 download-bundle checkboxes across page reloads. The
@@ -116,6 +124,11 @@ export function DownloadCard({ summary, loaded }: Props) {
    *  build; handleCancel aborts it and bumps the epoch so late progress
    *  events / the eventual rejection from the dying build are ignored. */
   const abortRef = useRef<AbortController | null>(null);
+  /** Output mode of the RUNNING build (v3.18): "opfs" = streamed to
+   *  browser disk storage, "memory" = in-memory fallback with the 1 GB
+   * budget. Surfaced in the progress box so the user can SEE that a
+   *  66-map build is streaming, not ballooning in RAM. */
+  const [sinkKind, setSinkKind] = useState<BundleSinkKind | null>(null);
 
   // Restore persisted selections AFTER hydration (see the useState note
   // above), then persist every subsequent change.
@@ -169,6 +182,12 @@ export function DownloadCard({ summary, loaded }: Props) {
     setResult(null);
     setProgress({ phase: "init", current: 0, total: 1, message: "Starting…" });
     try {
+      // Open the output BEFORE any downloading (v3.18): OPFS writable in
+      // secure contexts (https/localhost) → the ZIP streams to disk
+      // entry-by-entry; otherwise the memory sink with the 1 GB budget.
+      // createBundleSink never throws — worst case it degrades to memory.
+      const sink = await createBundleSink();
+      setSinkKind(sink.kind);
       const res = await buildBundle(
         summary,
         {
@@ -178,6 +197,7 @@ export function DownloadCard({ summary, loaded }: Props) {
           includeFinalResults: selections.includeFinalResults,
           session: loaded?.session || null,
           signal: abort.signal,
+          sink,
         },
         (p) => {
           // Drop progress events from a stale build (defensive — a
@@ -192,7 +212,9 @@ export function DownloadCard({ summary, loaded }: Props) {
       setResult(res);
       setProgress({ phase: "done", current: 1, total: 1, message: "Done." });
       downloadBlob(res.blob, res.filename);
-      toast.success(`Downloaded ${res.filename} (${res.fileCount} files)`);
+      toast.success(
+        `Downloaded ${res.filename} (${res.fileCount} files · ${fmtSize(res.zipBytes)}${sink.kind === "opfs" ? " · streamed to disk" : ""})`
+      );
     } catch (err) {
       if (buildEpochRef.current !== epoch) return;
       const cancelled = abort.signal.aborted || (err as { name?: string })?.name === "AbortError";
@@ -208,6 +230,7 @@ export function DownloadCard({ summary, loaded }: Props) {
     } finally {
       if (buildEpochRef.current === epoch) {
         setBuilding(false);
+        setSinkKind(null);
       }
       if (abortRef.current === abort) abortRef.current = null;
     }
@@ -223,6 +246,7 @@ export function DownloadCard({ summary, loaded }: Props) {
     abortRef.current = null;
     buildEpochRef.current++;
     setBuilding(false);
+    setSinkKind(null);
     setProgress(null); // keep the derived crash banner OFF — cancel ≠ crash
     toast.info("Build cancelled — click Build to retry.");
   }, []);
@@ -333,7 +357,11 @@ export function DownloadCard({ summary, loaded }: Props) {
               Previous build did not finish
             </div>
             <p className="mt-1 leading-snug">
-              The ZIP assembly is in-memory and cannot be resumed across reloads. Your trace is preserved — just click <strong>Build &amp; download ZIP</strong> to start a fresh build. The lineage data is intact; only the partial ZIP output was lost.
+              The page was closed or ran out of memory mid-build (v3.18 already streams the ZIP to
+              browser storage instead of holding it all in RAM — if this still happens on a very
+              large bundle, check free disk space). A build cannot resume after a reload: your
+              trace is preserved — click <strong>Build &amp; download ZIP</strong> to start a fresh
+              build. Only the partial ZIP output was lost.
             </p>
           </div>
         )}
@@ -349,6 +377,13 @@ export function DownloadCard({ summary, loaded }: Props) {
             </div>
             <Progress value={pct} className="h-1.5 bg-teal-100" />
             <div className="mt-1.5 truncate font-mono text-[10.5px] text-teal-700">{progress.message}</div>
+            {sinkKind && (
+              <div className={`mt-1 text-[10px] ${sinkKind === "opfs" ? "text-teal-600" : "text-amber-700"}`}>
+                {sinkKind === "opfs"
+                  ? "Streaming ZIP to browser disk storage — large bundles no longer exhaust memory"
+                  : "In-memory ZIP fallback (1 GB budget) — open this app over HTTPS/localhost to stream to disk and bundle everything"}
+              </div>
+            )}
           </div>
         )}
 

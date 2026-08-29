@@ -1,6 +1,12 @@
 /**
  * Bundle assembly: pulls together all the report generators + ZIP writer +
- * bundled helper scripts, and produces a single .zip Blob for download.
+ * bundled helper scripts, and produces a single .zip for download.
+ *
+ * v3.18: the archive is STREAMED entry-by-entry into a BundleSink (OPFS
+ * file on disk in browsers; guarded memory buffer as fallback) instead of
+ * accumulating every byte in a files[] array and assembling one giant
+ * in-memory Blob — the old path peaked at ~3× the archive size in JS heap
+ * and killed the tab on a 66-map build ("Previous build did not finish").
  *
  * Browser-only (uses fetch, Blob, URL).
  */
@@ -16,7 +22,8 @@ import { prefetchImagesForReport } from "./image-embed";
 import { buildPictureFlowSvg } from "./report-svg";
 import { buildPictureFlowPptx } from "./report-pptx";
 import { makePreview, normalMapAssets } from "./lineage";
-import { makeZip } from "./zip";
+import { StreamingZipWriter } from "./zip";
+import { createBundleSink, type BundleSink } from "./zip-sink";
 import {
   DEFAULT_BASE_URL,
   MAP_SUFFIXES,
@@ -44,6 +51,15 @@ export interface BundleOptions {
    *  cryoSmartBytes). Exposed mainly so the harness can test the stall
    *  path quickly; power users can raise it on genuinely bursty links. */
   mapStallMs?: number;
+  /** Pre-opened output sink (v3.18). When omitted (harness / server use)
+   * buildBundle opens one itself — OPFS where available, otherwise the
+   * byte-budget-guarded memory fallback (see zip-sink.ts). */
+  sink?: BundleSink | null;
+  /** Byte budget for the MEMORY fallback sink only (default 1 GiB). Once
+   * the buffered archive would exceed it, large payloads (maps, final
+   * .mrc results) degrade to DOWNLOAD_LINKS.txt entries instead of OOMing
+   * the tab. Ignored for the OPFS sink (disk-backed). Test hook. */
+  memZipBudgetBytes?: number;
 }
 
 export interface BundleFile {
@@ -61,9 +77,14 @@ export interface BundleProgress {
 }
 
 export interface BundleResult {
+  /** Final archive. OPFS builds return a File BACKED BY the on-disk
+   *  staging file (not a heap copy); memory builds return a Blob over
+   * the buffered chunks. */
   blob: Blob;
   filename: string;
   fileCount: number;
+  /** Total archive size in bytes (for honest "66 files · 8.2 GB" UI). */
+  zipBytes: number;
   warnings: string[];
 }
 
@@ -93,9 +114,11 @@ const PPT_IMAGE_CONCURRENCY = 4;
 /** Concurrent best-effort fetches for the Final_Result scan. */
 const FINAL_RESULT_CONCURRENCY = 4;
 
-function utf8(s: string): Uint8Array {
-  return new TextEncoder().encode(s);
-}
+/** Default byte budget for the MEMORY fallback sink (see BundleOptions.
+ *  memZipBudgetBytes). 1 GiB keeps the tab comfortably under its ~4 GB
+ *  ceiling even with the report HTML + PPTX + in-flight download buffers
+ *  on top, while leaving room for ~1 GB of maps on the degraded path. */
+export const DEFAULT_MEM_ZIP_BUDGET_BYTES = 1024 * 1024 * 1024;
 
 /** True for the AbortError thrown by cryoSmartBytes when the caller's
  *  signal (Stop button) fires — used to bail out of download pools
@@ -169,7 +192,11 @@ function mapLinksText(items: Array<{ path: string; link: string }>): string {
 }
 
 /**
- * Assemble the full download bundle as a ZIP.
+ * Assemble the full download bundle as a ZIP, streamed entry-by-entry.
+ *
+ * The output sink is opened BEFORE any downloading starts, so completed
+ * files are written + released immediately (peak heap = a few concurrent
+ * download buffers instead of the whole archive).
  *
  * @param summary    The lineage summary (already built).
  * @param options    What to include.
@@ -180,8 +207,29 @@ export async function buildBundle(
   options: BundleOptions,
   onProgress?: (p: BundleProgress) => void
 ): Promise<BundleResult> {
+  // options.sink lets the UI pre-open OPFS at click time; everything
+  // else (harness / server / non-secure context) gets the guarded
+  // memory fallback. createBundleSink NEVER throws.
+  const bundleSink = options.sink ?? (await createBundleSink());
+  const writer = new StreamingZipWriter(bundleSink.sink);
+  try {
+    return await assembleBundle(summary, options, bundleSink, writer, onProgress);
+  } catch (err) {
+    // Cancel, sink failure, phase crash — never leave a half-written
+    // writable stream or a partial OPFS staging file behind.
+    await writer.abort();
+    throw err;
+  }
+}
+
+async function assembleBundle(
+  summary: LineageSummary,
+  options: BundleOptions,
+  bundleSink: BundleSink,
+  writer: StreamingZipWriter,
+  onProgress?: (p: BundleProgress) => void
+): Promise<BundleResult> {
   const warnings: string[] = [];
-  const files: BundleFile[] = [];
   const project = summary.project_uid || "P";
   const startUid = summary.start_uid || "J0";
   const base = `CryoSmart_${project}_${startUid}_lineage`;
@@ -190,8 +238,38 @@ export async function buildBundle(
     if (options.signal?.aborted) throw new DOMException("Build cancelled", "AbortError");
   };
 
+  /* ── Streaming output plumbing (v3.18) ─────────────────────────────
+   * Every phase below calls addFile() the moment its bytes are ready;
+   * the entry is CRC'd + written to the sink and the bytes become
+   * collectable. fitsBudget() gates ONLY the big binary payloads
+   * (maps / final .mrc results) on the MEMORY fallback sink — reports,
+   * HTML and links files always go through (they are the point of the
+   * bundle and are bounded by the report builders themselves). */
+  const memBudget =
+    options.memZipBudgetBytes ?? DEFAULT_MEM_ZIP_BUDGET_BYTES;
+  const fitsBudget = (bytes: number): boolean =>
+    bundleSink.kind !== "memory" || bundleSink.writtenBytes() + bytes <= memBudget;
+  let memBudgetWarned = false;
+  const warnMemBudgetOnce = (what: string) => {
+    if (memBudgetWarned) return;
+    memBudgetWarned = true;
+    warnings.push(
+      `In-memory ZIP budget (${(memBudget / 1073741824).toFixed(1)} GB) reached while adding ${what} — remaining large files degrade to manual links. Serve this app over HTTPS (or localhost) to stream the ZIP to browser disk storage and bundle everything.`
+    );
+  };
+  const addFile = async (path: string, data: Uint8Array | string): Promise<void> => {
+    try {
+      await writer.add(path, data);
+    } catch (err) {
+      if (isCancelError(err)) throw err;
+      // Sink-level failure (disk full, stream torn down): fatal for the
+      // whole build — wrapping keeps it recognizable upstream.
+      throw new Error(`ZIP sink write failed: ${(err as Error).message || String(err)}`);
+    }
+  };
+
   onProgress?.({ phase: "report", current: 0, total: 6, message: "Generating JSON…" });
-  files.push({ path: `${base}.json`, data: utf8(JSON.stringify(summary, null, 2)) });
+  await addFile(`${base}.json`, JSON.stringify(summary, null, 2));
 
   onProgress?.({ phase: "report", current: 1, total: 6, message: "Generating HTML report…" });
   // Build HTML report with embedded images when session is available.
@@ -212,25 +290,25 @@ export async function buildBundle(
     );
     htmlOpts = { embeddedImages, session: options.session, bundleMode: true };
   }
-  files.push({ path: `${base}_report.html`, data: utf8(buildLineageHtmlV2(summary, htmlOpts)) });
+  await addFile(`${base}_report.html`, buildLineageHtmlV2(summary, htmlOpts));
 
   onProgress?.({ phase: "report", current: 2, total: 6, message: "Generating SVG…" });
   try {
     const svg = buildPictureFlowSvg(summary);
-    files.push({ path: `${base}_picture_flow.svg`, data: utf8(svg) });
+    await addFile(`${base}_picture_flow.svg`, svg);
   } catch (err) {
     warnings.push(`SVG generation failed: ${(err as Error).message}`);
   }
 
   onProgress?.({ phase: "report", current: 3, total: 6, message: "Generating Mermaid…" });
   if (summary.focused_mermaid) {
-    files.push({ path: `${base}.mmd`, data: utf8(summary.focused_mermaid) });
+    await addFile(`${base}.mmd`, summary.focused_mermaid);
   }
 
   onProgress?.({ phase: "report", current: 4, total: 6, message: "Generating preview text…" });
   try {
     const preview = makePreview(summary);
-    files.push({ path: `${base}_preview.txt`, data: utf8(preview) });
+    await addFile(`${base}_preview.txt`, preview);
   } catch (err) {
     warnings.push(`Preview text failed: ${(err as Error).message}`);
   }
@@ -241,7 +319,7 @@ export async function buildBundle(
       const resp = await fetch(`/${helperPath}`);
       if (resp.ok) {
         const text = await resp.text();
-        files.push({ path: helperPath.replace(/^helpers\//, ""), data: utf8(text) });
+        await addFile(helperPath.replace(/^helpers\//, ""), text);
       }
     } catch (err) {
       warnings.push(`Helper ${helperPath} fetch failed: ${(err as Error).message}`);
@@ -319,7 +397,7 @@ export async function buildBundle(
     try {
       const blob = buildPictureFlowPptx(summary, imageMap);
       const bytes = new Uint8Array(await blob.arrayBuffer());
-      files.push({ path: `${base}_picture_flow.pptx`, data: bytes });
+      await addFile(`${base}_picture_flow.pptx`, bytes);
     } catch (err) {
       const msg = (err as Error).message || String(err);
       warnings.push(`PPTX build failed: ${msg}`);
@@ -349,7 +427,12 @@ export async function buildBundle(
           );
           // item.path is already the HTML-canonical `images/<uid>/<name>.png`
           // (from localImageFilename) — no extra prefix here.
-          files.push({ path: item.path, data: bytes });
+          if (!fitsBudget(bytes.length)) {
+            notUploaded.push(item);
+            warnMemBudgetOnce("preview images");
+          } else {
+            await addFile(item.path, bytes);
+          }
         } catch (err) {
           if (isCancelError(err)) throw err; // Stop button — bail, don't record
           notUploaded.push(item);
@@ -393,10 +476,10 @@ export async function buildBundle(
       }
 
       if (notUploaded.length > 0) {
-        files.push({
-          path: "images/NOT_UPLOADED_LINKS.txt",
-          data: utf8(notUploadedLinksText(options.session.baseUrl, notUploaded)),
-        });
+        await addFile(
+          "images/NOT_UPLOADED_LINKS.txt",
+          notUploadedLinksText(options.session.baseUrl, notUploaded)
+        );
       }
     } else {
       warnings.push("Image download skipped: requires session from Smart Capture mode.");
@@ -447,6 +530,7 @@ export async function buildBundle(
         let done = 0;
         let stopQueue = false;
         let stallFails = 0;
+        let budgetStop = false;
         let activeDownloads = 0;
         let bytesReceived = 0;
         let lastEmit = 0;
@@ -480,7 +564,21 @@ export async function buildBundle(
                   emitLiveness();
                 },
               });
-              files.push({ path: `maps/${item.path}`, data: bytes });
+              if (!fitsBudget(bytes.length)) {
+                // Memory-sink budget guard (OPFS path never lands here):
+                // the bytes are already downloaded, but buffering them
+                // would push the JS heap past the tab-safe budget — the
+                // same OOM that killed 66-map builds outright before
+                // v3.18. Record the link, stop pulling more maps.
+                failedMaps.push(item);
+                if (!budgetStop) {
+                  budgetStop = true;
+                  stopQueue = true;
+                  warnMemBudgetOnce("maps");
+                }
+              } else {
+                await addFile(`maps/${item.path}`, bytes);
+              }
             } catch (err) {
               if (options.signal?.aborted || isCancelError(err)) throw err;
               const msg = (err as Error).message || String(err);
@@ -533,12 +631,10 @@ export async function buildBundle(
       }
 
       if (failedMaps.length > 0) {
-        files.push({
-          path: "maps/DOWNLOAD_LINKS.txt",
-          data: utf8(
-            mapLinksText(failedMaps.map((m) => ({ path: m.path, link: mapLink(m) })))
-          ),
-        });
+        await addFile(
+          "maps/DOWNLOAD_LINKS.txt",
+          mapLinksText(failedMaps.map((m) => ({ path: m.path, link: mapLink(m) })))
+        );
       }
     } else {
       warnings.push("Map download skipped: requires session from Smart Capture mode.");
@@ -611,35 +707,50 @@ export async function buildBundle(
       });
       // pooledMap completes out of order — sort for deterministic ZIP content.
       finalFiles.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-      files.push(...finalFiles);
+      let finalBudgetSkipped = 0;
+      for (const f of finalFiles) {
+        if (f.data instanceof Uint8Array && !fitsBudget(f.data.length)) {
+          finalBudgetSkipped++;
+          continue;
+        }
+        await addFile(f.path, f.data);
+      }
+      if (finalBudgetSkipped > 0) {
+        warnMemBudgetOnce("final results");
+        warnings.push(`${finalBudgetSkipped} final-result file(s) skipped: in-memory ZIP budget exceeded (no manual link available for these)`);
+      }
       const summaryText = `Final result scan for ${projectId}/${startUid}.\n` +
         `Fetched ${finalFiles.length} files.\n` +
         `Generated at ${new Date().toISOString()}.\n`;
-      files.push({ path: `Final_Result/final_result_summary.txt`, data: utf8(summaryText) });
+      await addFile(`Final_Result/final_result_summary.txt`, summaryText);
     }
   }
 
   // download_warnings.txt if any
   if (warnings.length > 0) {
-    files.push({ path: `download_warnings.txt`, data: utf8(warnings.join("\n") + "\n") });
+    await addFile(`download_warnings.txt`, warnings.join("\n") + "\n");
   }
 
   throwIfCancelled();
-  onProgress?.({ phase: "zip", current: 0, total: 1, message: `Zipping ${files.length} files…` });
 
-  // Build the ZIP
-  const zipFiles = files.map((f) => ({
-    name: f.path,
-    data: typeof f.data === "string" ? utf8(f.data) : f.data,
-  }));
-  const blob = makeZip(zipFiles, "application/zip");
+  // Central directory + EOCD. By now every payload byte is already on the
+  // sink (disk for OPFS) — this only writes the small per-entry metadata.
+  onProgress?.({
+    phase: "zip",
+    current: 0,
+    total: 1,
+    message: `Finalizing ZIP · ${writer.entryCount} files · ${(writer.bytesWritten / 1048576).toFixed(1)} MB…`,
+  });
+  await writer.finish();
+  const blob = await bundleSink.result();
 
   onProgress?.({ phase: "done", current: 1, total: 1, message: "Done." });
 
   return {
     blob,
     filename: `${base}.zip`,
-    fileCount: files.length,
+    fileCount: writer.entryCount,
+    zipBytes: writer.bytesWritten,
     warnings,
   };
 }
@@ -804,5 +915,7 @@ export function downloadBlob(blob: Blob, filename: string) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  // v3.18: multi-GB archives can take a while for the browser to latch
+  // onto the blob URL — 5s was too aggressive, 30s is still bounded.
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }

@@ -83,6 +83,15 @@ ab-initio / hetero-refine 这类多 class 作业的 log image 会按 class 自�
 
 打包时的 map / .mrc 下载不会再"永远停在 0%"：每个下载自带**双向超时**（代理上游侧 + 浏览器侧绝对上限）与**无数据看门狗**（默认 45 秒没有任何字节到达即判定 stalled，慢速但持续有数据的下载不会误伤）；累计 3 次 stall 自动跳过剩余队列并写入 `maps/DOWNLOAD_LINKS.txt`。下载过程中进度行实时显示 `Map 0/12 · 4 in flight · 0.4 MB received`（字节级心跳），慢 ≠ 卡死一眼可辨。Download 卡片新增 **Stop build** 按钮：随时中断打包，进行中的下载立即中止，不会误报 "Previous build did not finish"。另外修复了全站 toast 从不显示的问题（layout 挂错 Toaster：radix → sonner）。
 
+### ZIP 增量（流式）写入 — 大包不再爆内存（v3.18）
+
+修复"66 个 map 打包到一半页面崩溃、重载后提示 Previous build did not finish"：旧流程把所有文件字节累积在内存里再一次性拼 ZIP（内部还有两轮全量拷贝，峰值 ≈ 3× 包体积），66 个 .mrc（10+ GB）直接把浏览器页签撑爆。现在 ZIP 通过 **StreamingZipWriter** 逐条写入（字节布局与旧版完全一致，可与历史产物逐字节比对）：
+
+- **浏览器安全上下文（https / localhost）**：逐条流式写入 **OPFS**（浏览器私有磁盘文件），峰值内存只剩 4 个并发下载的缓冲；打包结束后由浏览器把磁盘上的文件以普通下载方式流出。构建时进度框显示 "Streaming ZIP to browser disk storage"。
+- **兜底（纯 http 部署 / 非浏览器环境）**：内存 sink + **1 GB 预算守卫** —— 超预算的 map / Final_Result 大文件自动降级为 `maps/DOWNLOAD_LINKS.txt` 手动链接（构建照常完成，绝不 OOM），并以明确警告提示改用 HTTPS 部署以启用磁盘流式。
+- 并发下载完成顺序不定：writer 内部以 promise 链串行化写入，杜绝条目交错损坏；Stop build / 任何异常路径都会中止并丢弃半截输出（不留脏的 OPFS 暂存文件）。
+- 完成 toast 现在带真实体积（`Downloaded … .zip (66 files · 8.2 GB · streamed to disk)`），Re-download 对 OPFS 磁盘文件同样有效。
+
 ---
 
 ## 项目结构

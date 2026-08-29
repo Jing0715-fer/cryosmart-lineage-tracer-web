@@ -120,6 +120,199 @@ export function dosDateTime(date: Date = new Date()): DosDateTime {
 }
 
 /* ------------------------------------------------------------------ */
+/* StreamingZipWriter — STORE-only archive, written entry-by-entry     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Minimal structural type for a writable byte sink. `FileSystemWritableFileStream`
+ * (File System Access / OPFS) satisfies this shape; so does the in-memory sink
+ * below. Declared here so neither zip.ts nor bundle.ts depends on the exact
+ * TypeScript DOM-lib version of the File System standard types.
+ */
+export interface ZipByteSink {
+  /** Append a chunk to the output. Resolves when the chunk is handed off. */
+  write(chunk: Uint8Array): Promise<void>;
+  /** Finalize successfully (flush + release the underlying file/lock). */
+  close(): Promise<void>;
+  /** Tear down after a failure/cancel — best-effort discard of the output. */
+  abort(): Promise<void>;
+}
+
+/** Central-directory metadata buffered per entry (tiny — names + numbers). */
+interface CentralEntry {
+  nameBytes: Uint8Array;
+  crc: number;
+  size: number;
+  offset: number;
+}
+
+/**
+ * Incremental STORE-only ZIP writer (v3.18).
+ *
+ * WHY: `makeZip` requires every file's bytes to be alive in JS memory at
+ * once AND internally makes two more full concatenation passes
+ * (`concatBytes([header, data])` per file, then `concatBytes(localParts)`)
+ * — peak heap ≈ 3× the archive size. A 66-map lineage bundle (often
+ * 10+ GB of .mrc volumes) blew the browser tab past its ~4 GB limit and
+ * the page died mid-build (the "Previous build did not finish" banner
+ * after reload).
+ *
+ * This writer emits the exact same byte layout as `makeZip`, but streams
+ * each entry to a `ZipByteSink` (OPFS file on disk in the happy path) the
+ * moment it is produced, so completed maps become garbage-collectable
+ * immediately. Only the small central-directory metadata is buffered in
+ * memory and flushed by `finish()`.
+ *
+ * Layout per entry (identical to makeZip — regressions can diff bytes):
+ *   local file header … name … data
+ * and at the end: central directory (one header per entry) + EOCD.
+ * A single `dosDateTime()` stamp is computed at construction and reused
+ * for every entry so output stays deterministic across the build.
+ */
+export class StreamingZipWriter {
+  private readonly sink: ZipByteSink;
+  private readonly stamp: DosDateTime;
+  private readonly entries: CentralEntry[] = [];
+  private offset = 0;
+  private state: "open" | "finished" | "aborted" = "open";
+  /**
+   * Serializes `add` calls. Download pools (maps ×4, images ×4, PPT ×4…)
+   * complete out of order and their `add` calls would otherwise interleave
+   * mid-entry (header from A + data from B) and corrupt the archive. A
+   * promise chain is enough: adds are byte copies + CRC, i.e. fast; only
+   * the sink `write` await can straddle a macrotask, and the chain keeps
+   * the CRITICAL SECTION (header → data) atomic per entry.
+   */
+  private chain: Promise<void> = Promise.resolve();
+
+  constructor(sink: ZipByteSink) {
+    this.sink = sink;
+    this.stamp = dosDateTime();
+  }
+
+  /** Running total of archive bytes handed to the sink so far. */
+  get bytesWritten(): number {
+    return this.offset;
+  }
+
+  /** Number of entries added so far. */
+  get entryCount(): number {
+    return this.entries.length;
+  }
+
+  /**
+   * Append one file. `data` is encoded (string) or written as-is (bytes);
+   * after this returns, the caller may release the data — only the ~name
+   * sized central metadata is retained. Safe to call from concurrent
+   * download workers — calls are serialized internally.
+   */
+  add(name: string, data: Uint8Array | string): Promise<void> {
+    const run = this.chain.then(() => this.addLocked(name, data));
+    // Keep the chain alive even when one add rejects, so a later cancel
+    // path can still acquire the lock and tear down cleanly.
+    this.chain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async addLocked(name: string, data: Uint8Array | string): Promise<void> {
+    if (this.state !== "open") {
+      throw new Error(`zip writer is ${this.state} — cannot add ${name}`);
+    }
+    const nameBytes = utf8Bytes(name);
+    const bytes = data instanceof Uint8Array ? data : utf8Bytes(data);
+    const crc = zipCrc32(bytes);
+
+    // Local file header (signature 0x04034b50) — field order mirrors makeZip.
+    const localHeader = concatBytes([
+      zipU32(0x04034b50),
+      zipU16(20), // version needed to extract (2.0)
+      zipU16(0), // general purpose bit flag (no flags)
+      zipU16(0), // compression method (0 = STORE)
+      zipU16(this.stamp.time),
+      zipU16(this.stamp.date),
+      zipU32(crc),
+      zipU32(bytes.length), // compressed size
+      zipU32(bytes.length), // uncompressed size
+      zipU16(nameBytes.length),
+      zipU16(0), // extra field length
+      nameBytes,
+    ]);
+    const entryOffset = this.offset;
+    await this.sink.write(localHeader);
+    await this.sink.write(bytes);
+    this.offset += localHeader.length + bytes.length;
+    this.entries.push({ nameBytes, crc, size: bytes.length, offset: entryOffset });
+  }
+
+  /** Write the central directory + end-of-central-directory and close. */
+  async finish(): Promise<void> {
+    if (this.state === "finished") return;
+    if (this.state === "aborted") {
+      throw new Error("zip writer was aborted — archive is incomplete");
+    }
+    // Wait for any queued adds to drain first (they hold the lock).
+    await this.chain;
+    if (this.state !== "open") {
+      throw new Error(`zip writer is ${this.state} — cannot finish`);
+    }
+    this.state = "finished";
+    const centralStart = this.offset;
+    for (const e of this.entries) {
+      const centralHeader = concatBytes([
+        zipU32(0x02014b50),
+        zipU16(20), // version made by
+        zipU16(20), // version needed to extract
+        zipU16(0), // general purpose bit flag
+        zipU16(0), // compression method
+        zipU16(this.stamp.time),
+        zipU16(this.stamp.date),
+        zipU32(e.crc),
+        zipU32(e.size), // compressed size
+        zipU32(e.size), // uncompressed size
+        zipU16(e.nameBytes.length),
+        zipU16(0), // extra field length
+        zipU16(0), // file comment length
+        zipU16(0), // disk number start
+        zipU16(0), // internal file attributes
+        zipU32(0), // external file attributes
+        zipU32(e.offset), // relative offset of local header
+        e.nameBytes,
+      ]);
+      await this.sink.write(centralHeader);
+      this.offset += centralHeader.length;
+    }
+    const centralSize = this.offset - centralStart;
+    const end = concatBytes([
+      zipU32(0x06054b50),
+      zipU16(0), // number of this disk
+      zipU16(0), // disk where central directory starts
+      zipU16(this.entries.length), // entries on this disk
+      zipU16(this.entries.length), // total entries
+      zipU32(centralSize), // size of central directory
+      zipU32(centralStart), // offset of central directory
+      zipU16(0), // comment length
+    ]);
+    await this.sink.write(end);
+    this.offset += end.length;
+    await this.sink.close();
+  }
+
+  /** Mark the writer dead and discard the sink output (Stop button / error). */
+  async abort(): Promise<void> {
+    if (this.state !== "open") return;
+    this.state = "aborted";
+    try {
+      await this.sink.abort();
+    } catch {
+      // best-effort — a failed teardown must not mask the original error
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* makeZip — STORE-only archive → Blob                                */
 /* ------------------------------------------------------------------ */
 
