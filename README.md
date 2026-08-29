@@ -79,6 +79,10 @@ bun run dev
 
 ab-initio / hetero-refine 这类多 class 作业的 log image 会按 class 自动分组：标题/文件名中的 `class N` 标记、纯数字标题、class 画廊文件（如 `J4_final_000.png`）都能被识别。**Graph 详情弹窗**渲染紧凑的 class 标签页（Class 0 / Class 1 / … / General），**Report** 每类一个紧密的 auto-fill 网格分区（每类上限 12 张，计数随加载失败自动修正）。无法提取 class 的作业保持原有平铺展示。
 
+### Map 下载防卡死与手动停止（v3.17）
+
+打包时的 map / .mrc 下载不会再"永远停在 0%"：每个下载自带**双向超时**（代理上游侧 + 浏览器侧绝对上限）与**无数据看门狗**（默认 45 秒没有任何字节到达即判定 stalled，慢速但持续有数据的下载不会误伤）；累计 3 次 stall 自动跳过剩余队列并写入 `maps/DOWNLOAD_LINKS.txt`。下载过程中进度行实时显示 `Map 0/12 · 4 in flight · 0.4 MB received`（字节级心跳），慢 ≠ 卡死一眼可辨。Download 卡片新增 **Stop build** 按钮：随时中断打包，进行中的下载立即中止，不会误报 "Previous build did not finish"。另外修复了全站 toast 从不显示的问题（layout 挂错 Toaster：radix → sonner）。
+
 ---
 
 ## 项目结构

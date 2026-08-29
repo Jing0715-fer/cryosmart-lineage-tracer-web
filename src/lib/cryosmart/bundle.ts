@@ -36,6 +36,14 @@ export interface BundleOptions {
   includeFinalResults: boolean;
   /** Live-mode session (for downloading images/maps via proxy). */
   session?: CryoSmartSession | null;
+  /** Cancel switch (v3.17): aborts every in-flight download (Stop button
+   *  in the Download card) and short-circuits the build between phases.
+   *  buildBundle rejects with an AbortError as soon as possible. */
+  signal?: AbortSignal;
+  /** No-data stall window forwarded to map downloads (default 45s — see
+   *  cryoSmartBytes). Exposed mainly so the harness can test the stall
+   *  path quickly; power users can raise it on genuinely bursty links. */
+  mapStallMs?: number;
 }
 
 export interface BundleFile {
@@ -87,6 +95,13 @@ const FINAL_RESULT_CONCURRENCY = 4;
 
 function utf8(s: string): Uint8Array {
   return new TextEncoder().encode(s);
+}
+
+/** True for the AbortError thrown by cryoSmartBytes when the caller's
+ *  signal (Stop button) fires — used to bail out of download pools
+ *  immediately instead of recording bogus per-item failures. */
+function isCancelError(err: unknown): boolean {
+  return (err as { name?: string })?.name === "AbortError";
 }
 
 /** Run `worker` over `items` with at most `limit` concurrent invocations. */
@@ -170,6 +185,10 @@ export async function buildBundle(
   const project = summary.project_uid || "P";
   const startUid = summary.start_uid || "J0";
   const base = `CryoSmart_${project}_${startUid}_lineage`;
+  /** Abort short-circuit at every phase boundary (Stop button). */
+  const throwIfCancelled = () => {
+    if (options.signal?.aborted) throw new DOMException("Build cancelled", "AbortError");
+  };
 
   onProgress?.({ phase: "report", current: 0, total: 6, message: "Generating JSON…" });
   files.push({ path: `${base}.json`, data: utf8(JSON.stringify(summary, null, 2)) });
@@ -272,6 +291,7 @@ export async function buildBundle(
   // the user will see it in the progress bar / buildCrashed banner and can
   // re-run with a smaller option set.
   if (options.includePptx) {
+    throwIfCancelled();
     onProgress?.({ phase: "pptx", current: 0, total: 0, message: "Fetching PPTX images…" });
     const imageMap = new Map<string, Uint8Array>();
     if (options.session) {
@@ -290,7 +310,7 @@ export async function buildBundle(
             total: p.total,
             message: p.message,
           })
-        );
+        , options.signal);
       } catch (err) {
         warnings.push(`PPTX image fetch failed: ${(err as Error).message}`);
       }
@@ -309,6 +329,7 @@ export async function buildBundle(
 
   // Images (optional)
   if (options.includeImages) {
+    throwIfCancelled();
     onProgress?.({ phase: "images", current: 0, total: 1, message: "Collecting preview images…" });
     if (options.session) {
       let done = 0;
@@ -321,12 +342,16 @@ export async function buildBundle(
           const bytes = await cryoSmartBytes(
             options.session!,
             item.url,
-            timeoutMs ? { timeoutMs } : undefined
+            {
+              ...(timeoutMs ? { timeoutMs } : {}),
+              signal: options.signal,
+            }
           );
           // item.path is already the HTML-canonical `images/<uid>/<name>.png`
           // (from localImageFilename) — no extra prefix here.
           files.push({ path: item.path, data: bytes });
         } catch (err) {
+          if (isCancelError(err)) throw err; // Stop button — bail, don't record
           notUploaded.push(item);
           warnings.push(`Image ${item.path} failed: ${(err as Error).message}`);
         }
@@ -380,9 +405,15 @@ export async function buildBundle(
 
   // Maps (optional)
   if (options.includeMaps) {
-    onProgress?.({ phase: "maps", current: 0, total: 1, message: "Collecting maps…" });
+    throwIfCancelled();
+    const mapItems = collectMapRequests(summary);
+    onProgress?.({
+      phase: "maps",
+      current: 0,
+      total: Math.max(1, mapItems.length),
+      message: mapItems.length > 0 ? `Collecting ${mapItems.length} maps…` : "Collecting maps…",
+    });
     if (options.session) {
-      const mapItems = collectMapRequests(summary);
       const session = options.session;
       const mapBase = String(options.session.baseUrl || "").replace(/\/$/, "");
       const mapLink = (item: { url: string; path: string }): string => {
@@ -395,26 +426,63 @@ export async function buildBundle(
         // PARALLEL map download (v3.16): was a serial for-loop — every map
         // waited for the previous one, so N maps cost N × (server read +
         // proxy transfer). pooledMap keeps MAP_CONCURRENCY downloads in
-        // flight; the shared `unreachableNow` flag preserves the old
+        // flight; the shared `stopQueue` flag preserves the old
         // "connection died → stop grinding, record links" semantics: the
         // first connection-level failure flips the flag and every item a
         // worker pulls after that is recorded as failed WITHOUT a request.
         // In-flight requests at the moment of the failure still complete
         // (or fail) on their own and keep their bytes if they succeed.
+        //
+        // v3.17 adds two more escape hatches for the "stuck at 0%" hang:
+        //  • STALL-SKIP — a map whose body goes silent (no chunk for
+        //    stallMs, default 45s) is aborted by cryoSmartBytes; after 3
+        //    such stalls the queue is skipped like an unreachable — a
+        //    wedged-but-accepting CryoSmart used to burn 180s × N/4 before
+        //    v3.17 (or forever when a leg never closed the socket).
+        //  • LIVENESS — progress used to tick only when a map COMPLETED,
+        //    so the first minutes of a healthy 4-way download showed an
+        //    unchanged "0% Collecting maps…". Byte chunks now emit a
+        //    throttled "N in flight · M MB received" line (400ms) so slow
+        //    ≠ stuck is visible at a glance.
         let done = 0;
-        let unreachableNow = false;
+        let stopQueue = false;
+        let stallFails = 0;
+        let activeDownloads = 0;
+        let bytesReceived = 0;
+        let lastEmit = 0;
+        const emitLiveness = () => {
+          const now = Date.now();
+          if (now - lastEmit < 400) return;
+          lastEmit = now;
+          onProgress?.({
+            phase: "maps",
+            current: done,
+            total: mapItems.length,
+            message: `Map ${done}/${mapItems.length} · ${activeDownloads} in flight · ${(bytesReceived / 1048576).toFixed(1)} MB received`,
+          });
+        };
         await pooledMap(mapItems, MAP_CONCURRENCY, async (item) => {
-          if (unreachableNow) {
+          if (stopQueue) {
             failedMaps.push(item);
           } else {
+            activeDownloads++;
+            const itemBytes = { v: 0 };
             try {
               // .mrc volumes are big — give the proxy a long window (the
               // 10s default aborted every map, even where reachable).
               const bytes = await cryoSmartBytes(session, item.url, {
                 timeoutMs: 180_000,
+                stallMs: options.mapStallMs,
+                signal: options.signal,
+                onBytes: (t) => {
+                  bytesReceived += t - itemBytes.v;
+                  itemBytes.v = t;
+                  emitLiveness();
+                },
               });
               files.push({ path: `maps/${item.path}`, data: bytes });
             } catch (err) {
+              if (options.signal?.aborted || isCancelError(err)) throw err;
               const msg = (err as Error).message || String(err);
               failedMaps.push(item);
               if (/CryoSmart 502/.test(msg) && /failed to reach/i.test(msg)) {
@@ -422,15 +490,31 @@ export async function buildBundle(
                 // the same way. Under concurrency several workers can hit
                 // it simultaneously; only the one that flips the flag
                 // emits the warning (await-free sync section → no race).
-                if (!unreachableNow) {
-                  unreachableNow = true;
+                if (!stopQueue) {
+                  stopQueue = true;
                   warnings.push(
                     `CryoSmart became unreachable mid-download — remaining map(s) skipped (links in maps/DOWNLOAD_LINKS.txt)`
+                  );
+                }
+              } else if (/stalled — no data/i.test(msg)) {
+                // Server accepted the request (maybe even sent headers)
+                // then went SILENT — not a routing failure like the 502
+                // above, but just as fatal for this map. One stall can be
+                // a hiccup; three means the upstream is wedged → skip the
+                // rest of the queue instead of burning stallMs × N/4.
+                stallFails++;
+                warnings.push(`Map ${item.path} failed: ${msg}`);
+                if (stallFails >= 3 && !stopQueue) {
+                  stopQueue = true;
+                  warnings.push(
+                    `Map downloads stalled ${stallFails}× with no data from CryoSmart — remaining map(s) skipped (links in maps/DOWNLOAD_LINKS.txt); CryoSmart may be overloaded or its disk stalled`
                   );
                 }
               } else {
                 warnings.push(`Map ${item.path} failed: ${msg}`);
               }
+            } finally {
+              activeDownloads--;
             }
           }
           done++;
@@ -463,6 +547,7 @@ export async function buildBundle(
 
   // Final results (optional) — only available in live mode
   if (options.includeFinalResults) {
+    throwIfCancelled();
     // Gate the whole phase on the SAME reachability probe as maps and
     // direct-URL images: these are 11 best-effort PROXIED fetches at the
     // 10s default timeout — on an unreachable intranet origin they used
@@ -515,9 +600,12 @@ export async function buildBundle(
       const finalFiles: BundleFile[] = [];
       await pooledMap(finalTargets, FINAL_RESULT_CONCURRENCY, async (t) => {
         try {
-          const bytes = await cryoSmartBytes(finalSession, t.url);
+          const bytes = await cryoSmartBytes(finalSession, t.url, {
+            signal: options.signal,
+          });
           finalFiles.push({ path: t.path, data: bytes });
-        } catch {
+        } catch (err) {
+          if (isCancelError(err)) throw err; // Stop button — bail, not a 404
           // expected to fail for non-refine jobs
         }
       });
@@ -536,6 +624,7 @@ export async function buildBundle(
     files.push({ path: `download_warnings.txt`, data: utf8(warnings.join("\n") + "\n") });
   }
 
+  throwIfCancelled();
   onProgress?.({ phase: "zip", current: 0, total: 1, message: `Zipping ${files.length} files…` });
 
   // Build the ZIP
@@ -564,7 +653,8 @@ async function collectPptImages(
   requests: Array<{ url: string; path: string }>,
   session: CryoSmartSession,
   imageMap: Map<string, Uint8Array>,
-  onProgress: (p: { current: number; total: number; message: string }) => void
+  onProgress: (p: { current: number; total: number; message: string }) => void,
+  signal?: AbortSignal
 ) {
   if (requests.length === 0) {
     onProgress({ current: 0, total: 0, message: "No PPT images to fetch." });
@@ -576,10 +666,11 @@ async function collectPptImages(
   // for 40+ images).
   await pooledMap(requests, PPT_IMAGE_CONCURRENCY, async (req) => {
     try {
-      const bytes = await cryoSmartBytes(session, req.url);
+      const bytes = await cryoSmartBytes(session, req.url, { signal });
       imageMap.set(req.url, bytes);
       imageMap.set(req.path, bytes);
-    } catch {
+    } catch (err) {
+      if (isCancelError(err)) throw err; // Stop button — bail, don't skip
       // skip — a single missing image must not abort the rest
     }
     done++;

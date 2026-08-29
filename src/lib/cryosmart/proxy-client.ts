@@ -49,6 +49,16 @@ export interface CryoSmartFetchInit {
    *  1s–5min; default 10s). Pass a large value for big downloads — map /
    *  .mrc files routinely exceed the 10s default even on fast intranets. */
   timeoutMs?: number;
+  /** No-DATA stall watchdog for byte downloads (cryoSmartBytes only).
+   * If the response body produces no chunk for this long, the download is
+   * aborted as "stalled" even before timeoutMs elapses. A slow-but-flowing
+   * download never trips it (every chunk resets the window). Default 45s
+   * — see cryoSmartBytes for why this exists. */
+  stallMs?: number;
+  /** Byte-progress callback for cryoSmartBytes (throttle at the call
+   *  site; fires once per chunk with the cumulative byte count). Used by
+   * the ZIP builder to prove liveness while large maps stream. */
+  onBytes?: (totalBytes: number) => void;
 }
 
 /** True for URLs pointing at THIS app's own uploaded-image stores —
@@ -223,19 +233,195 @@ export async function cryoSmartJson<T = unknown>(
   return resp.json() as Promise<T>;
 }
 
-/** Fetch bytes (for maps, MRC, PNG, PDF). Returns Uint8Array. */
+/* ── Byte-download hardening (v3.17) ──────────────────────────────────
+ * The user's bundle build hung FOREVER at "Fetching maps 0% — Collecting
+ * maps…": the proxy route already aborts its UPSTREAM fetch after
+ * `timeoutMs`, but since v3.16 it STREAMS the body straight through, and
+ * the browser-side read (`resp.arrayBuffer()`) had NO signal of its own.
+ * If either leg stalls in a way that never closes the socket (CryoSmart
+ * wedged mid-body after sending headers, gateway half-open, dev-server
+ * hiccup), the await never settles, the maps pool never drains, and the
+ * progress bar sits at 0% with no escape hatch. cryoSmartBytes now owns
+ * a local AbortController and enforces THREE guarantees regardless of
+ * what the network does:
+ *
+ *   1. absolute cap   — abort at timeoutMs + 15s grace (the grace lets
+ *                       the proxy's own timeout error win the race and
+ *                       produce its clearer message);
+ *   2. stall watchdog — abort when NO chunk arrives for stallMs (45s
+ *                       default). A wedged server that already sent
+ *                       headers used to burn the FULL per-map window;
+ *                       now it costs stallMs, and the bundle builder
+ *                       skips the queue after a few of these;
+ *   3. external abort — an init.signal (user pressed Stop) aborts
+ *                       immediately with a proper AbortError.
+ *
+ * It also reads the body chunk-by-chunk and reports cumulative bytes via
+ * onBytes, so the UI can show "N MB received" liveness while big maps
+ * stream (progress used to tick only on COMPLETION — minutes of 0% even
+ * on a healthy run). */
+
+/** Default no-data window before a byte download is declared stalled. */
+export const DEFAULT_STALL_MS = 45_000;
+
+function isAbortReason(err: unknown): boolean {
+  return err instanceof Error && (err.name === "AbortError" || /aborted/i.test(err.message));
+}
+
+/** Fetch bytes (for maps, MRC, PNG, PDF). Returns Uint8Array.
+ *
+ * Throws Error("…download stalled — no data for <N>s…") on a silent body,
+ * a normal Error on HTTP failures (message keeps the `CryoSmart <status>`
+ * prefix the bundle builder pattern-matches for unreachable detection),
+ * and an AbortError when the caller cancels via init.signal. */
 export async function cryoSmartBytes(
   session: CryoSmartSession,
   cryosmartPath: string,
   init?: CryoSmartFetchInit
 ): Promise<Uint8Array> {
-  const resp = await cryoSmartFetch(session, cryosmartPath, init);
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(`CryoSmart ${resp.status} for ${cryosmartPath}: ${text.slice(0, 200)}`);
+  const timeoutMs = init?.timeoutMs;
+  const stallMs = init?.stallMs ?? DEFAULT_STALL_MS;
+  const ctrl = new AbortController();
+  let abortReason: "stalled" | "timeout" | "external" | null = null;
+
+  // Merge an external cancel signal (Stop button) into the local one so
+  // BOTH the fetch and any in-progress body read die together.
+  const onExternalAbort = () => {
+    abortReason = "external";
+    ctrl.abort();
+  };
+  if (init?.signal) {
+    if (init.signal.aborted) onExternalAbort();
+    else init.signal.addEventListener("abort", onExternalAbort, { once: true });
   }
-  const buf = await resp.arrayBuffer();
-  return new Uint8Array(buf);
+
+  // Absolute cap: timeoutMs (+grace) from request START — covers header
+  // wait AND body read no matter what the proxy does.
+  let capTimer: ReturnType<typeof setTimeout> | null = null;
+  if (timeoutMs && timeoutMs > 0) {
+    capTimer = setTimeout(() => {
+      if (!abortReason) abortReason = "timeout";
+      ctrl.abort();
+    }, timeoutMs + 15_000);
+  }
+
+  const cleanup = () => {
+    if (capTimer) clearTimeout(capTimer);
+    init?.signal?.removeEventListener("abort", onExternalAbort);
+  };
+  /** Map a watchdog/cancel abort to its proper error (shared by the
+   *  read-loop guard and the catch below). */
+  const mapAbort = (): Error | null => {
+    if (abortReason === "external") {
+      return new DOMException("Download cancelled", "AbortError");
+    }
+    if (abortReason === "stalled") {
+      return new Error(
+        `CryoSmart download of ${cryosmartPath} stalled — no data for ${Math.round(stallMs / 1000)}s`
+      );
+    }
+    if (abortReason === "timeout") {
+      return new Error(
+        `CryoSmart download of ${cryosmartPath} timed out after ${Math.round((timeoutMs ?? 0) / 1000)}s`
+      );
+    }
+    return null;
+  };
+
+  try {
+    const resp = await cryoSmartFetch(session, cryosmartPath, {
+      ...init,
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(`CryoSmart ${resp.status} for ${cryosmartPath}: ${text.slice(0, 200)}`);
+    }
+
+    // Small / no body (or non-streamable environment) — plain read.
+    if (!resp.body) {
+      const buf = await resp.arrayBuffer();
+      return new Uint8Array(buf);
+    }
+
+    // Chunked read with the no-data watchdog: every received chunk
+    // resets the window, so a SLOW download never trips it — only a
+    // silent one does.
+    //
+    // NOTE: the watchdog must ONLY abort the fetch signal — calling
+    // reader.cancel() here (a "defensive nudge" in the first draft)
+    // resolves the pending read() as a CLEAN EOF, which turned every
+    // watchdog kill into a "successful" TRUNCATED download. Instead,
+    // the post-loop guard below turns any surviving abort into the
+    // proper error: runtimes differ on whether an aborted fetch REJECTS
+    // the pending read (spec) or resolves it as done (some undici/Bun
+    // versions) — both paths are covered.
+    const reader = resp.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    const armStall = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        if (!abortReason) abortReason = "stalled";
+        ctrl.abort();
+      }, stallMs);
+    };
+    armStall();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          received += value.byteLength;
+          init?.onBytes?.(received);
+        }
+        armStall();
+      }
+    } finally {
+      if (stallTimer) clearTimeout(stallTimer);
+    }
+    // Post-loop guard: if the watchdog/cancel aborted the fetch but the
+    // runtime handed us a clean EOF instead of a rejection, do NOT ship
+    // the truncated bytes as a success. Same for a body that ends
+    // "cleanly" SHORT of its declared Content-Length (a proxy/upstream
+    // that closes early without an RST can look like a normal EOF).
+    const abortedRead = mapAbort();
+    if (abortedRead) throw abortedRead;
+    const declaredLen = Number(resp.headers.get("content-length") || "");
+    if (Number.isFinite(declaredLen) && declaredLen > 0 && received !== declaredLen) {
+      throw new Error(
+        `CryoSmart download of ${cryosmartPath} truncated — got ${received} of ${declaredLen} bytes`
+      );
+    }
+    if (received === 0 && chunks.length === 0) {
+      // Empty 2xx body — treat as zero bytes (caller decides if that is
+      // valid; historically arrayBuffer() returned an empty buffer here).
+      return new Uint8Array(0);
+    }
+    const out = new Uint8Array(received);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.byteLength;
+    }
+    return out;
+  } catch (err) {
+    const mapped = mapAbort();
+    if (mapped) throw mapped;
+    if (isAbortReason(err)) {
+      // The proxy's own AbortSignal.timeout fired mid-body (its 502
+      // contract only covers pre-header failures) — surface a readable
+      // per-item error instead of a raw "The operation was aborted".
+      throw new Error(
+        `CryoSmart download of ${cryosmartPath} aborted (upstream timeout${timeoutMs ? ` ${Math.round(timeoutMs / 1000)}s` : ""})`
+      );
+    }
+    throw err;
+  } finally {
+    cleanup();
+  }
 }
 
 /**

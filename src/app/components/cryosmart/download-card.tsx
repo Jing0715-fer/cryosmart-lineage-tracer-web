@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
-import { Package, Loader2, Download, AlertTriangle, CheckCircle2, FileArchive, Settings2, FileBox, Boxes, FileCheck2, PresentationIcon } from "lucide-react";
+import { Package, Loader2, Download, AlertTriangle, CheckCircle2, FileArchive, Settings2, FileBox, Boxes, FileCheck2, PresentationIcon, StopCircle } from "lucide-react";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildBundle, downloadBlob, type BundleProgress, type BundleResult } from "@/lib/cryosmart/bundle";
 import type { LoadedMetadata } from "./data-source-card";
@@ -112,6 +112,10 @@ export function DownloadCard({ summary, loaded }: Props) {
    *  to the currently-running build so a stale catch can't dismiss a
    *  newer run. */
   const buildEpochRef = useRef(0);
+  /** Aborts the RUNNING build (v3.17 Stop button). One controller per
+   *  build; handleCancel aborts it and bumps the epoch so late progress
+   *  events / the eventual rejection from the dying build are ignored. */
+  const abortRef = useRef<AbortController | null>(null);
 
   // Restore persisted selections AFTER hydration (see the useState note
   // above), then persist every subsequent change.
@@ -159,6 +163,8 @@ export function DownloadCard({ summary, loaded }: Props) {
       return;
     }
     const epoch = ++buildEpochRef.current;
+    const abort = new AbortController();
+    abortRef.current = abort;
     setBuilding(true);
     setResult(null);
     setProgress({ phase: "init", current: 0, total: 1, message: "Starting…" });
@@ -171,6 +177,7 @@ export function DownloadCard({ summary, loaded }: Props) {
           includeMaps: selections.includeMaps,
           includeFinalResults: selections.includeFinalResults,
           session: loaded?.session || null,
+          signal: abort.signal,
         },
         (p) => {
           // Drop progress events from a stale build (defensive — a
@@ -188,14 +195,37 @@ export function DownloadCard({ summary, loaded }: Props) {
       toast.success(`Downloaded ${res.filename} (${res.fileCount} files)`);
     } catch (err) {
       if (buildEpochRef.current !== epoch) return;
+      const cancelled = abort.signal.aborted || (err as { name?: string })?.name === "AbortError";
+      if (cancelled) {
+        // User pressed Stop — NOT a crash: clear progress so the derived
+        // buildCrashed banner stays hidden and the card returns to idle.
+        setProgress(null);
+        toast.info("Build cancelled — click Build to retry.");
+        return;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       toast.error(`Bundle build failed: ${msg}. The build state is lost — click Build again to retry. Raw data + image bytes are not re-captured automatically; rerun Smart Capture only if the lineage itself is gone.`);
     } finally {
       if (buildEpochRef.current === epoch) {
         setBuilding(false);
       }
+      if (abortRef.current === abort) abortRef.current = null;
     }
   }, [summary, selections, loaded]);
+
+  const handleCancel = useCallback(() => {
+    const abort = abortRef.current;
+    if (!abort) return;
+    // Kill every in-flight download (maps/images/PPTX/final-results all
+    // share this signal) and orphan the dying build's state updates —
+    // its catch/finally see a mismatched epoch and no-op.
+    abort.abort();
+    abortRef.current = null;
+    buildEpochRef.current++;
+    setBuilding(false);
+    setProgress(null); // keep the derived crash banner OFF — cancel ≠ crash
+    toast.info("Build cancelled — click Build to retry.");
+  }, []);
 
   const enabled = !!summary;
   const phaseLabel = progress?.phase === "report" ? "Generating reports"
@@ -353,6 +383,16 @@ export function DownloadCard({ summary, loaded }: Props) {
             {building ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Package className="mr-1.5 h-4 w-4" />}
             {building ? "Building…" : "Build & download ZIP"}
           </Button>
+          {building && (
+            <Button
+              variant="outline"
+              onClick={handleCancel}
+              className="h-9 border-amber-300 bg-amber-50 text-[13px] text-amber-800 hover:bg-amber-100 hover:text-amber-900"
+              title="Stop the current build — every in-flight download is aborted immediately"
+            >
+              <StopCircle className="mr-1.5 h-4 w-4" /> Stop build
+            </Button>
+          )}
           {result && !building && (
             <Button
               variant="outline"

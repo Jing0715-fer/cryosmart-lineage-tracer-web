@@ -1,6 +1,11 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { Toaster } from "@/components/ui/toaster";
+// SONNER toaster, not the radix one: every component in the app fires
+// `toast.*` from the "sonner" package, but the layout used to mount the
+// radix `<Toaster />` (the shadcn use-toast pipeline) which nothing ever
+// wrote into — so every toast in the whole app silently no-opped. The
+// sonner wrapper from components/ui/sonner.tsx is the matching sink.
+import { Toaster } from "@/components/ui/sonner";
 import { ThemeProvider } from "@/components/theme-provider";
 
 export const metadata: Metadata = {
