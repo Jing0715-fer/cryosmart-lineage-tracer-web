@@ -13,8 +13,23 @@
  * UI cards can import it without cycles.
  */
 
-/** Visual template ids for `buildLineageHtmlV2`. */
-export type ReportTemplateId = "paper" | "minimal" | "slate" | "classic";
+/** Visual template ids for `buildLineageHtmlV2`.
+ *  v3.22 adds three STRUCTURALLY distinct skins on top of the four v3.17
+ *  ones (not just recolours — each ships its own layout archetype):
+ *   - blueprint : 工程记录簿 — squared mono panels, dotted-grid paper,
+ *                 graphite title-block header, dashed connectors
+ *   - editorial : 画报/年报 — serif display type, ink masthead band,
+ *                 numbered stages & cards, generous cream whitespace
+ *   - focus     : 沉浸阅读 — single-column document flow, horizontal
+ *                 chapter rail at the top, warm paper measure */
+export type ReportTemplateId =
+  | "paper"
+  | "minimal"
+  | "slate"
+  | "classic"
+  | "blueprint"
+  | "editorial"
+  | "focus";
 
 /** Base body font-size of the generated report. */
 export type ReportFontScale = "compact" | "standard" | "comfortable";
@@ -62,6 +77,9 @@ const TEMPLATE_IDS: ReadonlySet<string> = new Set([
   "minimal",
   "slate",
   "classic",
+  "blueprint",
+  "editorial",
+  "focus",
 ]);
 const FONT_SCALES: ReadonlySet<string> = new Set([
   "compact",
@@ -199,6 +217,42 @@ export const REPORT_TEMPLATES: ReportTemplateInfo[] = [
       accent: "#0d9488",
       line: "#cbd5e1",
       fontClass: "font-sans",
+    },
+  },
+  {
+    id: "blueprint",
+    label: "Blueprint 工程",
+    desc: "等宽字标题黑块、方角面板、点阵纸面与虚线连线，实验记录簿风",
+    swatch: {
+      bg: "#f4f5f2",
+      fg: "#23262b",
+      accent: "#b3541e",
+      line: "#cdd2cc",
+      fontClass: "font-mono",
+    },
+  },
+  {
+    id: "editorial",
+    label: "Editorial 画报",
+    desc: "墨色报头、大号衬线标题、章节编号与奶油纸面，杂志式排版",
+    swatch: {
+      bg: "#f4efe6",
+      fg: "#231f18",
+      accent: "#9a3b26",
+      line: "#d2c7ae",
+      fontClass: "font-serif",
+    },
+  },
+  {
+    id: "focus",
+    label: "Focus 阅读",
+    desc: "单栏文档流、顶部横向章节导轨、暖纸阅读排版，适合通读",
+    swatch: {
+      bg: "#f7f3e9",
+      fg: "#33302a",
+      accent: "#31695c",
+      line: "#ded4be",
+      fontClass: "font-serif",
     },
   },
 ];

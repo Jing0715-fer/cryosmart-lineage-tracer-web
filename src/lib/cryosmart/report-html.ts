@@ -2105,9 +2105,20 @@ export interface ReportHtmlOptions {
    *  spec into the full stylesheet; the body markup is IDENTICAL across
    *  templates (content is never watered down — only the skin changes).
    *  v3.20 adds layout tokens: stickyHeader / boxedSections / flowTop and
-   *  the width-mode machinery in buildReportCss. */
+   *  the width-mode machinery in buildReportCss.
+   *  v3.22 adds `layout` — a genuine structural archetype switch (not a
+   *  recolour): "split" keeps the two-pane workspace (left outline +
+   *  right chain), "reading" reflows the SAME markup into a single-column
+   *  document with a horizontal chapter rail at the top. */
   interface ReportTemplateSpec {
-    id: "paper" | "minimal" | "slate";
+    id: Exclude<ReportTemplateId, "classic">;
+    /**
+     *  - "split"   : two-pane workspace (outline+flow left, cards right)
+     *  - "reading" : single-column document flow — the outline pane turns
+     *                into a horizontally scrolling chapter rail and job
+     *                cards span the full measure below (v3.22 "focus")
+     */
+    layout?: "split" | "reading";
     fontBody: string;
     /** base body font-size (px) at fontScale "standard" */
     baseFontPx: number;
@@ -2308,10 +2319,10 @@ export interface ReportHtmlOptions {
     panel2: "#1a212b",
     panel3: "#212a35",
     text: "#e6eaf0",
-    text2: "#c6cfd9",
-    text3: "#9aa5b4",
-    muted: "#727e8d",
-    muted2: "#4e5867",
+    text2: "#c9d2dc",
+    text3: "#a8b3c1",
+    muted: "#7e8a99",
+    muted2: "#515c6b",
     line: "#242c37",
     line2: "#323d4b",
     link: "#5eead4",
@@ -2348,7 +2359,240 @@ export interface ReportHtmlOptions {
     ].join("\n"),
   };
 
-  /** Font-scale multipliers for the three v3.17 skins. */
+  /** Blueprint — 工程记录簿（v3.22）：等宽标签、方角面板、点阵纸面、
+   *  石墨标题黑块 + 铁锈红注记、虚线连接线与直角角标。结构与 paper 的
+   *  “书册”感完全不同：面板全部方角 + 硬投影，分节编号用 SEC 01 计数器，
+   *  job 卡带四角角标（corner ticks），流程箭头改为虚线导轨。 */
+  const BLUEPRINT_SPEC: ReportTemplateSpec = {
+    id: "blueprint",
+    layout: "split",
+    fontBody:
+      'system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,"Helvetica Neue",Arial,sans-serif',
+    baseFontPx: 13.5,
+    centerHeader: false,
+    stickyHeader: true,
+    boxedSections: true,
+    flowTop: "78px",
+    bg: "#f4f5f2",
+    bg2: "#eceee8",
+    panel: "#ffffff",
+    panel2: "#f7f8f4",
+    panel3: "#eef0e9",
+    text: "#23262b",
+    text2: "#2f343b",
+    text3: "#545d66",
+    muted: "#6d757e",
+    muted2: "#9aa2a9",
+    line: "#d4d8d0",
+    line2: "#c2c8bf",
+    link: "#b3541e",
+    linkHover: "#8f4216",
+    linkUnderline: "hover",
+    btnBg: "#23262b",
+    btnText: "#f4f5f2",
+    btnBorder: "#23262b",
+    btnHoverBg: "#3c4148",
+    micro: "#4d7c0f",
+    microBg: "#f4f8ec",
+    microBorder: "#ccdcb0",
+    particle: "#a2540a",
+    particleBg: "#faf2e6",
+    particleBorder: "#e2cda6",
+    volume: "#136a5c",
+    volumeBg: "#eef6f3",
+    volumeBorder: "#b9d8d0",
+    smallBg: "#f2f4ee",
+    smallBorder: "#d4d8d0",
+    radius: "0px",
+    radiusSm: "0px",
+    radiusLg: "0px",
+    shadowSm: "2px 2px 0 -1px rgba(35,38,43,.08)",
+    shadow: "4px 4px 0 -1px rgba(35,38,43,.10)",
+    rowHover: "#f5f7f0",
+    thBg: "#eef0e9",
+    extra: [
+      // 点阵坐标纸页面背景（面板自身保持纯白，网格只在页面层露出；
+      // v3.22 review：降低到 .11，避免与面板抢视覚）
+      "body{background-image:radial-gradient(circle,rgba(35,38,43,.11) 1px,transparent 1.1px);background-size:22px 22px}",
+      // 石墨标题黑块（工程图纸 title block）+ 通栏铁锈红刻度带
+      "header{background:#23262b;border-bottom:0}",
+      "header .top{padding:16px 28px}",
+      ".title h1{color:#f4f5f2;letter-spacing:.02em;font-family:var(--font-mono)}",
+      ".title p{color:#aab1a7}",
+      ".title p b{color:#d7dbd2}",
+      ".title .note{color:#c4b39a}",
+      // 等宽大写分节标签 + SEC 编号
+      "body{counter-reset:stg}",
+      ".stage{counter-increment:stg}",
+      "h3{font-family:var(--font-mono)}",
+      ".stage h3::before{content:\"SEC \" counter(stg,decimal-leading-zero) \"  ·  \";color:#b3541e}",
+      // h3 渲染为贴签（tag）样式：实线小框 + 前置方块
+      ".source-block h3,.media-block h3,.map-block h3{display:inline-block;border:1px solid var(--line-2);padding:2px 9px;background:var(--panel)}",
+      ".source-block h3::before,.media-block h3::before,.map-block h3::before{content:\"\";display:inline-block;width:7px;height:7px;background:#b3541e;margin-right:7px;vertical-align:0}",
+      // job 卡四角角标（corner ticks，工程图定位角）
+      ".job-card{border-left-width:1px;border-left-style:solid}",
+      ".job-card::before,.job-card::after{content:\"\";position:absolute;width:13px;height:13px;pointer-events:none}",
+      ".job-card::before{top:-1px;left:-1px;border-top:2px solid var(--text);border-left:2px solid var(--text)}",
+      ".job-card::after{bottom:-1px;right:-1px;border-bottom:2px solid var(--text);border-right:2px solid var(--text)}",
+      // 流程箭头 → 虚线导轨 + 三角箭头
+      ".pf-arrow{color:transparent;position:relative;height:16px;margin:8px 0 12px}",
+      ".pf-arrow::before{content:\"\";position:absolute;left:8%;right:8%;top:50%;border-top:1px dashed var(--muted-2)}",
+      ".pf-arrow::after{content:\"\";position:absolute;right:7%;top:50%;transform:translateY(-3px);border-left:6px solid var(--muted-2);border-top:3px solid transparent;border-bottom:3px solid transparent}",
+      ".stage-arrow{display:none}",
+      // 顶栏铁锈红刻度带（紧贴黑块下方，与铁锈红分节编号呼应）
+      "header::after{content:\"\";position:absolute;left:0;right:0;bottom:-3px;height:3px;background:#b3541e}",
+      "table th{text-transform:uppercase;font-family:var(--font-mono)}",
+      "@page{margin:12mm}",
+    ].join("\n"),
+  };
+
+  /** Editorial — 画报/年报（v3.22）：墨色报头 + 大号衬线展示字体、
+   *  章节大数字编号（01/02…）、job 卡顶部色带与序号徽章、奶油纸面。
+   *  结构上与 split 系模板的差异：报头是整幅墨色 band（非细 bar）、
+   *  卡片用“上色带”而非“左色条”、分节以大号数字主导层级。 */
+  const EDITORIAL_SPEC: ReportTemplateSpec = {
+    id: "editorial",
+    layout: "split",
+    fontBody: 'Georgia,"Times New Roman","Songti SC","Noto Serif CJK SC",serif',
+    baseFontPx: 15,
+    centerHeader: false,
+    stickyHeader: true,
+    boxedSections: true,
+    flowTop: "96px",
+    bg: "#f4efe6",
+    bg2: "#ece5d6",
+    panel: "#fffdf8",
+    panel2: "#f8f3e8",
+    panel3: "#f1ead9",
+    text: "#231f18",
+    text2: "#39322a",
+    text3: "#6b6353",
+    muted: "#8d8471",
+    muted2: "#b8af9a",
+    line: "#e5ddcb",
+    line2: "#d3c8ae",
+    link: "#9a3b26",
+    linkHover: "#7c2e1d",
+    linkUnderline: "hover",
+    btnBg: "#231f18",
+    btnText: "#f6f1e5",
+    btnBorder: "#231f18",
+    btnHoverBg: "#3d352a",
+    micro: "#4a6b3a",
+    microBg: "#f0f4e8",
+    microBorder: "#c9d5b4",
+    particle: "#a06010",
+    particleBg: "#f9f0e0",
+    particleBorder: "#e0c9a4",
+    volume: "#34605f",
+    volumeBg: "#ecf3f1",
+    volumeBorder: "#b9cfc9",
+    smallBg: "#f4efe3",
+    smallBorder: "#ddd3bd",
+    radius: "10px",
+    radiusSm: "8px",
+    radiusLg: "14px",
+    shadowSm: "0 1px 2px rgba(58,49,32,.06)",
+    shadow: "0 10px 30px -12px rgba(58,49,32,.28)",
+    rowHover: "#f8f3e8",
+    thBg: "#f1ead9",
+    extra: [
+      // 墨色报头 band + 铁锈红下缘（整幅色带，非细线）
+      "header{background:#231f18;border-bottom:0}",
+      "header::after{content:\"\";position:absolute;left:0;right:0;bottom:-4px;height:4px;background:#9a3b26}",
+      "header .top{padding:26px 32px}",
+      ".title h1{color:#f7f2e6;font-size:1.9em;letter-spacing:-.015em;font-weight:700}",
+      ".title p{color:#b3a893}",
+      ".title p b{color:#d8cfb8}",
+      ".title .note{color:#c9b99a}",
+      // 章节大数字：stage 标题前置两位数字（01 02 …），层级一眼可读
+      "body{counter-reset:stg}",
+      ".stage{counter-increment:stg;padding:14px 16px 12px}",
+      ".stage h3{font-family:Georgia,serif;font-size:.78em}",
+      ".stage h3::before{content:counter(stg,decimal-leading-zero);display:inline-block;min-width:1.5em;margin-right:10px;font-size:1.75em;font-weight:700;line-height:1;color:#c8bfa6;vertical-align:-.12em}",
+      // job 卡：上色带（替代左色条）+ 序号徽章
+      "body{counter-reset:job}",
+      ".cards{counter-reset:job;gap:20px}",
+      ".job-card{counter-increment:job;border-left-width:1px;border-left-style:solid;border-top:4px solid var(--jc,var(--muted-2));padding-top:14px}",
+      ".job-card:hover{border-top-color:var(--jc,var(--muted-2))}",
+      ".job-head h2::before{content:counter(job,decimal-leading-zero);display:inline-block;margin-right:10px;padding:1px 8px;border:1px solid var(--line-2);border-radius:999px;font-size:.68em;letter-spacing:.08em;color:var(--text-3);vertical-align:.12em;font-family:var(--font-mono)}",
+      // 杂志图注：斜体衬线
+      ".imgbox figcaption{font-style:italic;font-family:Georgia,serif}",
+      // v3.22 review：表格去“网格感”——表头不用等宽大写，改衬线小体、
+      // 行分隔线减淡，与画报的软性容器协调
+      "th{text-transform:none;letter-spacing:.02em;font-size:.74em;color:var(--text-2)}",
+      ".source-table th{text-transform:none;letter-spacing:.02em;font-size:.74em;color:var(--text-2)}",
+      "th,td{border-bottom-color:var(--line)}",
+      // 印刷页边
+      "@page{margin:16mm}",
+    ].join("\n"),
+  };
+
+  /** Focus — 沉浸阅读（v3.22）：单栏文档流。左侧 outline 变为顶部横向
+   *  章节导轨（卡片横排、横向滚动），picture-flow 与 job 卡按文档顺序
+   *  通栏排布，暖纸色衬线正文、大行距，适合从上读到下。 */
+  const FOCUS_SPEC: ReportTemplateSpec = {
+    id: "focus",
+    layout: "reading",
+    fontBody:
+      '"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Songti SC","Noto Serif CJK SC",serif',
+    baseFontPx: 16,
+    centerHeader: false,
+    stickyHeader: true,
+    boxedSections: false,
+    flowTop: "78px",
+    bg: "#f7f3e9",
+    bg2: "#efe9db",
+    panel: "#fdfaf3",
+    panel2: "#f4efe2",
+    panel3: "#eee7d6",
+    text: "#33302a",
+    text2: "#443f36",
+    text3: "#6a6355",
+    muted: "#857d6c",
+    muted2: "#a89f8c",
+    line: "#e2d9c6",
+    line2: "#d3c8ae",
+    link: "#31695c",
+    linkHover: "#245247",
+    linkUnderline: "hover",
+    btnBg: "#31695c",
+    btnText: "#f7f3e9",
+    btnBorder: "#31695c",
+    btnHoverBg: "#245247",
+    micro: "#4a6b3a",
+    microBg: "#f0f2e4",
+    microBorder: "#c8d1b2",
+    particle: "#8a5a1c",
+    particleBg: "#f6eeda",
+    particleBorder: "#dcc9a2",
+    volume: "#31695c",
+    volumeBg: "#eaf0ea",
+    volumeBorder: "#b9cdc0",
+    smallBg: "#f1ebdc",
+    smallBorder: "#ddd2b9",
+    radius: "6px",
+    radiusSm: "5px",
+    radiusLg: "8px",
+    shadowSm: "0 1px 2px rgba(74,64,42,.05)",
+    shadow: "0 8px 24px -12px rgba(74,64,42,.22)",
+    rowHover: "#f4efe2",
+    thBg: "#f1ebdc",
+    extra: [
+      // 阅读模式专属：章节导轨横排 + 文档节奏（布局分支在
+      // buildTemplateCss 的 layout==="reading" 段生成，这里只做点缀）。
+      "header{border-bottom:2px solid var(--line-2)}",
+      ".title h1{font-size:1.62em;letter-spacing:-.008em}",
+      // 阅读节奏：卡片间更大呼吸 + 段落式开节
+      ".cards{gap:22px;padding:20px 22px}",
+      "h3{letter-spacing:.1em}",
+      // 阅读模式的图注使用衬线斜体（与正文同族）
+      ".imgbox figcaption{font-style:italic}",
+      "@page{margin:14mm}",
+    ].join("\n"),
+  };
+
+  /** Font-scale multipliers for the v3.17+ skins. */
   const REPORT_FONT_SCALE_MULT: Record<ReportFontScale, number> = {
     compact: 0.9,
     standard: 1,
@@ -2389,6 +2633,39 @@ export interface ReportHtmlOptions {
       ? ".source-block,.media-block,.map-block{margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel-2);padding:14px 16px}\n"
       : ".source-block,.media-block,.map-block{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}\n";
     const flowMax = spec.stickyHeader ? "calc(100vh - 94px)" : "calc(100vh - 32px)";
+    // v3.22 layout archetype switch. "reading" (focus) reflows the shared
+    // markup into a single-column document: the outline+flow pane becomes
+    // a static full-width document head whose stages lay out as a
+    // horizontally scrolling chapter rail; "split" keeps the v3.20
+    // two-pane workspace with a sticky left rail.
+    const isReading = spec.layout === "reading";
+    const workspaceCss = isReading
+      ? 
+        // reading: document flow — no two-pane grid, no sticky rail
+        `.workspace{${widthCap}margin:0 auto;display:block;padding:22px clamp(18px,3vw,52px) 72px;width:100%}\n` +
+        ".flow-pane{position:relative;top:auto;max-height:none;overflow:visible}\n" +
+        // chapter rail: stages side-by-side, horizontal scroll + snap.
+        // v3.22 review fix: stretch (not flex-start) — the stage boxes
+        // share the band height so shorter stages don't leave dead space
+        // beside taller ones (content stays top-aligned inside).
+        ".outline{display:flex;gap:12px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x proximity;align-items:stretch}\n" +
+        ".stage{flex:0 0 min(340px,82vw);margin-bottom:0;scroll-snap-align:start}\n" +
+        ".stage-arrow{display:none}\n" +
+        ".chain-pane{margin-top:22px}\n" +
+        // v3.22 review fix: the picture-flow stops being a tall vertical
+        // stack (huge dead space at full width) and becomes a responsive
+        // "chapter board" — pf-start + each round sit side-by-side in an
+        // auto-fit grid; the flow arrows are hidden because grid adjacency
+        // IS the reading order here. Each cell keeps its internal vertical
+        // step order (particle steps → select → classes → final).
+        ".picture-flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:14px;align-items:start}\n" +
+        ".picture-head{grid-column:1/-1}\n" +
+        ".pf-arrow{display:none}\n" +
+        ".pf-start,.pf-round{margin:0}\n"
+      : 
+        // split: two-pane workspace (v3.20 full-width layout)
+        `.workspace{${widthCap}margin:0 auto;display:grid;grid-template-columns:minmax(360px,min(24vw,540px)) minmax(0,1fr);gap:24px;padding:24px clamp(20px,2.5vw,44px) 64px;width:100%;align-items:start}\n` +
+        `.flow-pane{position:sticky;top:${spec.flowTop};max-height:${flowMax};overflow:auto}\n`;
     return (
       `:root{--bg:${spec.bg};--bg-2:${spec.bg2};--panel:${spec.panel};--panel-2:${spec.panel2};--panel-3:${spec.panel3};--text:${spec.text};--text-2:${spec.text2};--text-3:${spec.text3};--muted:${spec.muted};--muted-2:${spec.muted2};--line:${spec.line};--line-2:${spec.line2};--micro:${spec.micro};--micro-bg:${spec.microBg};--micro-border:${spec.microBorder};--particle:${spec.particle};--particle-bg:${spec.particleBg};--particle-border:${spec.particleBorder};--volume:${spec.volume};--volume-bg:${spec.volumeBg};--volume-border:${spec.volumeBorder};--small-bg:${spec.smallBg};--small-border:${spec.smallBorder};--radius:${spec.radius};--radius-sm:${spec.radiusSm};--radius-lg:${spec.radiusLg};--font-ui:${spec.fontBody};--font-mono:${REPORT_FONT_MONO};--shadow-sm:${spec.shadowSm};--shadow:${spec.shadow};--link:${spec.link};--link-hover:${spec.linkHover};--th-bg:${spec.thBg};--row-hover:${spec.rowHover};--btn-bg:${spec.btnBg};--btn-text:${spec.btnText};--btn-border:${spec.btnBorder};--btn-hover-bg:${spec.btnHoverBg}}\n` +
       "*{box-sizing:border-box;margin:0;padding:0;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}\n" +
@@ -2411,9 +2688,11 @@ export interface ReportHtmlOptions {
       // v3.20: FULL-WIDTH workspace — no 1240px cap by default. The left
       // outline pane is proportional (capped at 540px so it never gets
       // absurd on ultra-wide monitors); the chain pane takes the rest.
-      `.workspace{${widthCap}margin:0 auto;display:grid;grid-template-columns:minmax(360px,min(24vw,540px)) minmax(0,1fr);gap:24px;padding:24px clamp(20px,2.5vw,44px) 64px;width:100%;align-items:start}\n` +
+      // v3.22: layout archetype comes from workspaceCss — split (two-pane
+      // grid + sticky rail) or reading (single-column document + horizontal
+      // chapter rail).
+      workspaceCss +
       ".pane{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);overflow:hidden}\n" +
-      `.flow-pane{position:sticky;top:${spec.flowTop};max-height:${flowMax};overflow:auto}\n` +
       ".flow-pane::-webkit-scrollbar{width:6px}\n" +
       ".flow-pane::-webkit-scrollbar-track{background:transparent}\n" +
       ".flow-pane::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:3px}\n" +
@@ -2487,7 +2766,7 @@ export interface ReportHtmlOptions {
       ".pf-class figcaption{font-size:.66em;color:var(--muted);margin-top:5px}\n" +
       ".pf-class b{display:block;font-size:.88em;font-weight:700;color:var(--text);margin-top:2px;font-family:var(--font-mono)}\n" +
       ".pf-class span{display:block;font-size:.66em;color:var(--muted)}\n" +
-      ".pf-final-img img{display:block;width:280px;max-width:100%;height:220px;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2);margin:10px auto}\n" +
+      ".pf-final-img img{display:block;width:min(420px,86%);max-width:100%;height:250px;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2);margin:10px auto}\n" +
       ".cards{padding:16px;display:grid;gap:16px}\n" +
       // v3.21: fixed sidebar track — clamp(180px,22%,280px) instead of
       // the old `auto`. The auto track sized to each card's 输出到 content
@@ -2495,12 +2774,14 @@ export interface ReportHtmlOptions {
       // column had a DIFFERENT width in every job card (the user's "输出
       // 到这一栏的宽度不一致" complaint). A definite track resolves
       // identically for every card in the pane.
-      ".job-card{display:grid;grid-template-columns:minmax(0,1fr) clamp(180px,22%,280px);gap:14px;border:1px solid var(--line);border-left:4px solid var(--jc,var(--muted-2));border-radius:var(--radius-lg);background:var(--panel);padding:16px 18px;position:relative;scroll-margin-top:24px;transition:border-color .18s ease,box-shadow .2s ease}\n" +
+      ".job-card{display:grid;grid-template-columns:minmax(0,1fr) clamp(180px,22%,280px);gap:14px;border:1px solid var(--line);border-left:4px solid var(--jc,var(--muted-2));border-radius:var(--radius-lg);background:var(--panel);padding:16px 18px;position:relative;scroll-margin-top:92px;transition:border-color .18s ease,box-shadow .2s ease}\n" +
       ".job-card:hover{border-color:var(--line-2)}\n" +
       ".job-card.micrograph{--jc:var(--micro)}\n" +
       ".job-card.particle{--jc:var(--particle)}\n" +
       ".job-card.volume{--jc:var(--volume)}\n" +
-      ".job-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:2px}\n" +
+      // v3.22: hairline under the card head — a clear head/body hierarchy
+      // inside every job card (title+chips row vs. the section stack below).
+      ".job-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px;padding-bottom:11px;border-bottom:1px solid var(--line)}\n" +
       ".job-head h2{margin:0;min-width:0;font-size:1.06em;font-weight:700;line-height:1.3;color:var(--text);letter-spacing:-.01em;font-family:var(--font-mono)}\n" +
       ".metrics{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto}\n" +
       ".chip{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;border:1px solid var(--small-border);background:var(--small-bg);font-size:.72em;font-weight:600;white-space:nowrap;color:var(--text-2);font-family:var(--font-mono);letter-spacing:.01em}\n" +
@@ -2510,6 +2791,12 @@ export interface ReportHtmlOptions {
       ".chip.aux{background:var(--small-bg);border-color:var(--small-border);color:var(--muted)}\n" +
       sectionCss +
       "h3{margin:0 0 8px;font-size:.7em;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.09em}\n" +
+      ".source-block,.media-block,.map-block{min-width:0}\n" +
+      // v3.22 mobile fix: 4-column source tables exceed the narrow-screen
+      // measure and were silently CLIPPED by .pane{overflow:hidden}. Give
+      // the section its own horizontal scroll so the table stays reachable
+      // (harmless on desktop — nothing overflows there).
+      ".source-block{overflow-x:auto}\n" +
       ".source-table{width:100%;border-collapse:collapse;font-size:.84em;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--line)}\n" +
       ".source-table th,.source-table td{border-bottom:1px solid var(--line);padding:6px 10px;vertical-align:middle;text-align:left}\n" +
       ".source-table tr:last-child td{border-bottom:0}\n" +
@@ -2581,10 +2868,28 @@ export interface ReportHtmlOptions {
     );
   }
 
+  /** Token-driven skin registry — v3.22. Keyed by every non-classic
+   *  ReportTemplateId so the dispatch below can never fall through to a
+   *  wrong default when a new id is added (the classic skin keeps its own
+   *  legacy stylesheet above). */
+  const REPORT_TEMPLATE_SPECS: Record<
+    Exclude<ReportTemplateId, "classic">,
+    ReportTemplateSpec
+  > = {
+    paper: PAPER_SPEC,
+    minimal: MINIMAL_SPEC,
+    slate: SLATE_SPEC,
+    blueprint: BLUEPRINT_SPEC,
+    editorial: EDITORIAL_SPEC,
+    focus: FOCUS_SPEC,
+  };
+
   /** Resolve the stylesheet for any template id (classic = legacy CSS).
-   *  v3.20: the three new skins take a widthMode (default "full" — the
+   *  v3.20: the token skins take a widthMode (default "full" — the
    *  workspace spans the whole viewport; "wide"/"boxed" cap it at
-   *  1680/1280px for users who prefer a reading measure). */
+   *  1680/1280px for users who prefer a reading measure).
+   *  v3.22: dispatch through REPORT_TEMPLATE_SPECS — six token skins
+   *  (paper/minimal/slate/blueprint/editorial/focus). */
   export function buildReportCss(
     template: ReportTemplateId = "paper",
     fontScale: ReportFontScale = "standard",
@@ -2621,7 +2926,8 @@ export interface ReportHtmlOptions {
       return REPORT_HTML_V2_CSS + override;
     }
     const spec =
-      template === "minimal" ? MINIMAL_SPEC : template === "slate" ? SLATE_SPEC : PAPER_SPEC;
+      REPORT_TEMPLATE_SPECS[template as Exclude<ReportTemplateId, "classic">] ??
+      PAPER_SPEC;
     const fontPx = Math.round(spec.baseFontPx * (REPORT_FONT_SCALE_MULT[fontScale] ?? 1) * 10) / 10;
     return buildTemplateCss(spec, fontPx, widthMode);
   }
