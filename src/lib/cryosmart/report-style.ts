@@ -19,6 +19,14 @@ export type ReportTemplateId = "paper" | "minimal" | "slate" | "classic";
 /** Base body font-size of the generated report. */
 export type ReportFontScale = "compact" | "standard" | "comfortable";
 
+/** Content width of the generated report page.
+ *  - full   : use the whole browser width (default — wide monitors get no
+ *             letterboxed blank margins)
+ *  - wide   : cap at 1680px (very large screens keep a little breathing room)
+ *  - boxed  : cap at 1280px (classic document measure, best for reading)
+ */
+export type ReportWidthMode = "full" | "wide" | "boxed";
+
 /**
  * How images are delivered in the generated report.
  *  - embed  : base64 data-URLs when available (self-contained, large file)
@@ -32,6 +40,8 @@ export interface ReportStyleConfig {
   template: ReportTemplateId;
   fontScale: ReportFontScale;
   imageMode: ReportImageMode;
+  /** Content width preference (v3.20). */
+  widthMode: ReportWidthMode;
   /** Custom report title; empty → default "CryoSmart Lineage: P / J". */
   titleOverride: string;
   /** Optional note line under the title (author / date / remark). */
@@ -42,6 +52,7 @@ export const DEFAULT_REPORT_STYLE: ReportStyleConfig = {
   template: "paper",
   fontScale: "standard",
   imageMode: "embed",
+  widthMode: "full",
   titleOverride: "",
   subtitle: "",
 };
@@ -58,6 +69,7 @@ const FONT_SCALES: ReadonlySet<string> = new Set([
   "comfortable",
 ]);
 const IMAGE_MODES: ReadonlySet<string> = new Set(["embed", "remote", "none"]);
+const WIDTH_MODES: ReadonlySet<string> = new Set(["full", "wide", "boxed"]);
 
 /** Clamp an arbitrary (possibly persisted / stale) object to a valid config. */
 export function normalizeReportStyle(
@@ -77,6 +89,10 @@ export function normalizeReportStyle(
       imageMode && IMAGE_MODES.has(imageMode)
         ? imageMode
         : DEFAULT_REPORT_STYLE.imageMode,
+    widthMode: (() => {
+      const wm = value?.widthMode as ReportWidthMode | undefined;
+      return wm && WIDTH_MODES.has(wm) ? wm : DEFAULT_REPORT_STYLE.widthMode;
+    })(),
     titleOverride:
       typeof value?.titleOverride === "string"
         ? value.titleOverride.slice(0, 200)
@@ -140,36 +156,36 @@ export const REPORT_TEMPLATES: ReportTemplateInfo[] = [
   {
     id: "paper",
     label: "Paper 学术",
-    desc: "衬线排版、纸面留白、书册式表格，适合打印与归档",
+    desc: "衬线书册排版、双线题头、booktabs 表格，适合打印归档",
     swatch: {
       bg: "#ffffff",
-      fg: "#1a1a1a",
+      fg: "#1c1917",
       accent: "#7a2e2e",
-      line: "#d4d4d4",
+      line: "#d6d1ca",
       fontClass: "font-serif",
     },
   },
   {
     id: "minimal",
     label: "Minimal 极简",
-    desc: "系统无衬线、大量留白、近单色，屏幕阅读最干净",
+    desc: "无衬线、浅灰底白卡片、青绿点缀，屏幕阅读最干净",
     swatch: {
-      bg: "#ffffff",
+      bg: "#f7f7f8",
       fg: "#18181b",
       accent: "#0f766e",
-      line: "#e8eaed",
+      line: "#e4e4e7",
       fontClass: "font-sans",
     },
   },
   {
     id: "slate",
     label: "Slate 暗色",
-    desc: "深色面板、低对比文字、暗室演示与投屏友好",
+    desc: "深色多层面板、青绿荧光点缀，暗室投屏友好",
     swatch: {
-      bg: "#101418",
-      fg: "#e7ebf0",
+      bg: "#0f1318",
+      fg: "#e6eaf0",
       accent: "#5eead4",
-      line: "#2a313a",
+      line: "#333c4a",
       fontClass: "font-sans",
     },
   },

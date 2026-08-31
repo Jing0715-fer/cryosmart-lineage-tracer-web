@@ -117,7 +117,13 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
   const [embedFailed, setEmbedFailed] = useState(false);
 
   useEffect(() => {
-    if (!summary || !session || reportStyle.imageMode !== "embed") {
+    // v3.20: `session` is NO LONGER required — restored-from-history
+    // captures (no live session) still prefetch their app-served history
+    // image URLs so the report's blob:/file: contexts render the ui-tile /
+    // log images as embedded data-URLs instead of relative paths that
+    // cannot resolve there. Proxied intranet URLs are skipped inside
+    // imageToBase64 when no session exists.
+    if (!summary || reportStyle.imageMode !== "embed") {
       // Synchronous reset of local UI state when the summary/session goes
       // away or images are no longer embedded. This is a mount/dep-change
       // transition, not a cascading render.
@@ -133,7 +139,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
     setEmbeddedImages(null);
     setEmbedFailed(false);
     setEmbeddingProgress("Prefetching images for report preview…");
-    prefetchImagesForReport(session, summary, (p) => {
+    prefetchImagesForReport(session ?? null, summary, (p) => {
       if (!cancelled) setEmbeddingProgress(p.message ?? "Embedding images…");
     }, { stagedImport })
       .then((map) => {
@@ -170,6 +176,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
         template: reportStyle.template,
         fontScale: reportStyle.fontScale,
         imageMode: reportStyle.imageMode,
+        widthMode: reportStyle.widthMode,
         titleOverride: reportStyle.titleOverride,
         subtitle: reportStyle.subtitle,
         session: session ?? undefined,
@@ -184,6 +191,9 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
       return `<!doctype html><body style="font-family:monospace;padding:2rem;color:#b91c1c;">Failed to build report: ${(err as Error).message}</body>`;
     }
   }, [summary, embeddedImages, session, reportStyle]);
+
+  /* NOTE: session is a legit dependency of the prefetch above; keep the
+   * effect's dep list in sync if it changes. */
 
   const previewText = useMemo(() => {
     if (!summary) return "";
@@ -383,8 +393,19 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                 </div>
               </div>
 
-              {/* Font scale + image mode */}
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {/* Width / font scale / image mode */}
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <SegmentedControl
+                  icon={<Maximize2 className="h-3 w-3" />}
+                  label="页面宽度"
+                  options={[
+                    { value: "full", label: "全宽" },
+                    { value: "wide", label: "宽 (1680)" },
+                    { value: "boxed", label: "适中 (1280)" },
+                  ]}
+                  value={reportStyle.widthMode}
+                  onChange={(v) => updateReportStyle("widthMode", v as ReportStyleConfig["widthMode"])}
+                />
                 <SegmentedControl
                   icon={<Type className="h-3 w-3" />}
                   label="字号"
@@ -434,7 +455,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
               </div>
 
               {/* Image embedding status indicator — only meaningful in embed mode */}
-              {reportStyle.imageMode === "embed" && session && (
+              {reportStyle.imageMode === "embed" && (
                 <div className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] ${
                   embedFailed
                     ? "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
@@ -453,10 +474,11 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                   )}
                 </div>
               )}
-              {reportStyle.imageMode === "embed" && !session && (
+              {reportStyle.imageMode === "embed" && !session && !embeddedImages && !embedFailed && !embeddingProgress && null}
+              {reportStyle.imageMode === "embed" && !session && embeddedImages && Object.keys(embeddedImages).length === 0 && (
                 <div className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
                   <ImageIcon className="h-3 w-3 shrink-0" />
-                  <span>无活动会话 — 图片将直接引用 CryoSmart 原链接。如需自包含报告，请使用 &ldquo;Smart Capture&rdquo; 模式。</span>
+                  <span>无会话内嵌图片 — 未嵌入的图将引用可直达的链接。</span>
                 </div>
               )}
 

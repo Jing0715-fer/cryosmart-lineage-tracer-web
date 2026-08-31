@@ -291,6 +291,7 @@ async function assembleBundle(
     template: options.reportStyle?.template,
     fontScale: options.reportStyle?.fontScale,
     imageMode: options.reportStyle?.imageMode,
+    widthMode: options.reportStyle?.widthMode,
     titleOverride: options.reportStyle?.titleOverride || undefined,
     subtitle: options.reportStyle?.subtitle || undefined,
   };

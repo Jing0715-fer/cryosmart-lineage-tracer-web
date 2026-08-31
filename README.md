@@ -190,11 +190,13 @@ cryosmart-lineage-tracer-web/
 - log images 按 job 严格分组、只取最后一轮
 - 直接邮件 / IM 分享，**不需要后端托管**
 - **v3.19 模板系统**：报告不再内嵌于页面（旧的内嵌 iframe 已移除），在 **Lineage Preview → Report** 标签页选择样式与配置后，仅提供「新标签页打开」和「下载 HTML」两种出口。四种模板共享完全相同的正文标记（内容不缩水，仅换肤）：
-  - **Paper 学术**（默认）：衬线字体、纯白纸面、hairline 边框、书册式表格、打印友好（`@page` + `@media print`），无渐变/荧光/阴影
-  - **Minimal 极简**：系统无衬线、大留白、近单色，kind 色仅作 3px 左侧标记
-  - **Slate 暗色**：深色面板、低对比文字，暗室演示友好
+  - **Paper 学术**（默认）：衬线字体、纯白纸面、双线题头、hairline 边框、booktabs 表格、打印友好（`@page` + `@media print`），无渐变/荧光/阴影
+  - **Minimal 极简**：系统无衬线、灰底白卡三级层次、青绿题头刻线、盒装媒体区块，kind 色仅作标记
+  - **Slate 暗色**：三级明度深色面板、青绿渐隐题头线、悬停辉光，暗室演示友好
   - **Classic 旧版**：v3.16 原样式（渐变、荧光、自动深浅色）完整保留
-- **自定义配置**（localStorage 持久化，`cryosmart_report_style_v1`）：模板、字号（紧凑/标准/舒适）、图片模式（嵌入 data-URL / 引用原链接 / 不含图片）、自定义报告标题与附注。**Build & download ZIP** 的 HTML 报告自动沿用同一配置（打包时读取）
+- **自定义配置**（localStorage 持久化，`cryosmart_report_style_v1`）：模板、**页面宽度（全宽 / 宽 1680 / 适中 1280）**、字号（紧凑/标准/舒适）、图片模式（嵌入 data-URL / 引用原链接 / 不含图片）、自定义报告标题与附注。**Build & download ZIP** 的 HTML 报告自动沿用同一配置（打包时读取）
+- **v3.20 全宽与层次**：三种新模板默认**全宽利用屏幕**（无 1240px 封顶，左侧谱系栏按比例 `min(24vw, 540px)`、主链占满剩余宽度）；图片/地图网格改为 auto-fill 自适应列（map 240px、紧凑图 176px、class 砖 180px 起，宽屏自动多列），媒体框整体放大（map 预览井 130px、micrograph 网格 210px 起）；minimal/slate 的媒体/数据区块渲染为盒装内嵌面板（三层视觉深度）、slim sticky 题头 + 题头刻线；统一了 focus-visible 焦点环与细滚动条
+- **v3.20 修复（blob 报告图片回归）**：v3.19 移除内嵌 iframe 后，**从 Capture History 恢复**的报告在新标签页（blob: URL）里所有 UI title / log 图片全部静默消失 —— history 图片 URL 是相对路径，blob: 上下文无法解析。现在 `/api/cryosmart/history/<id>/image/` 与 session 图片一样会被**绝对化**（含「打开」链接与 map/class 预览链接），且无活动会话时也照常预取 history 图片做嵌入（嵌入模式恢复自包含导出）
 
 ### 4. Share（`share-url.ts`）
 

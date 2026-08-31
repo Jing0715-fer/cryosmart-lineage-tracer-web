@@ -11,6 +11,13 @@ import { cryoSmartFetch, type CryoSmartSession } from "./proxy-client";
  * Convert a CryoSmart image URL (full URL or path) to a base64 data URL via
  * the /api/cryosmart/[...path] proxy. Returns null on any failure.
  *
+ * `session` may be null (v3.20): app-served URLs (staged-session images,
+ * capture-history images, /demo assets) are fetched SAME-ORIGIN without any
+ * CryoSmart credentials, so a restored capture history entry can still
+ * embed its images even when no live session exists. Only the proxied
+ * CryoSmart branch requires a session with a baseUrl — it returns null
+ * (no fetch) when the session is absent.
+ *
  * Every fetch is bounded by a 10s abort timeout — an unreachable upstream
  * (e.g. the app server trying to reach an intranet CryoSmart it can't route
  * to) otherwise HANGS the connection pool slot for minutes, which is what
@@ -38,7 +45,7 @@ export interface ImageEmbedOptions {
 }
 
 export async function imageToBase64(
-  session: CryoSmartSession,
+  session: CryoSmartSession | null,
   cryosmartPath: string,
   opts?: ImageEmbedOptions
 ): Promise<string | null> {
@@ -119,6 +126,10 @@ export async function imageToBase64(
     // Re-attach the query so cryoSmartFetch can merge it with base/auth/cookie.
     const relativePath = existingQuery ? `${pathOnly}?${existingQuery}` : pathOnly;
 
+    // No live session (e.g. restored from capture history without a saved
+    // CryoSmart origin) → the proxied branch has nothing to proxy against.
+    if (!session || !session.baseUrl) return null;
+
     const resp = await cryoSmartFetch(session, relativePath);
     if (!resp.ok) return null;
 
@@ -148,6 +159,13 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 /**
  * Pre-fetch the images the report will actually DISPLAY and return a map of
  * { remoteUrl → base64DataUrl } for embedding in the HTML report.
+ *
+ * `session` is NULLABLE (v3.20): app-served URLs (staged-session images,
+ * capture-history images, /demo assets) are fetched same-origin without
+ * credentials, so a capture restored from history still embeds its images
+ * (the report's blob: / file:// contexts can't resolve relative app URLs —
+ * embedding is the only fully self-contained path). Proxied CryoSmart URLs
+ * are skipped when no session exists.
  *
  * The scope mirrors report-html.ts's rendering caps exactly — previously the
  * prefetch collected EVERY referenced image (a real capture can carry 900+
@@ -186,7 +204,7 @@ export interface PrefetchImagesOptions {
 export type PrefetchProgress = (p: { current?: number; total?: number; message?: string }) => void;
 
 export async function prefetchImagesForReport(
-  session: CryoSmartSession,
+  session: CryoSmartSession | null,
   summary: import("./types").LineageSummary,
   onProgress?: PrefetchProgress,
   opts?: PrefetchImagesOptions

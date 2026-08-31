@@ -213,5 +213,96 @@ console.log("── F. v3.15 invariants (default template) ──");
   check(html.includes(".imgs-block.block-gone") || html.includes("block-gone"), "block-gone auto-hide CSS present");
 }
 
+/* ── G. v3.20 full-width + layering + widthMode + history URLs ───── */
+console.log("── G. v3.20 full width / layering / widthMode / history-image fix ──");
+{
+  const paper = buildReportCss("paper", "standard", "full");
+  const minimal = buildReportCss("minimal", "standard", "full");
+  const slate = buildReportCss("slate", "standard", "full");
+
+  // The old 1240px cap is gone — the workspace uses the whole viewport.
+  for (const [name, css] of [["paper", paper], ["minimal", minimal], ["slate", slate]]) {
+    check(!css.includes("max-width:1240px"), `${name}: 1240px cap removed (full-width default)`);
+    const ws = css.match(/\.workspace\{([^}]*)\}/)?.[1] || "";
+    check(ws.includes("margin:0 auto"), `${name}: workspace centered`);
+  }
+
+  // Width modes: wide=1680, boxed=1280 (incl. classic override).
+  check(buildReportCss("paper", "standard", "wide").includes("max-width:1680px"), "paper wide → 1680px cap");
+  check(buildReportCss("paper", "standard", "boxed").includes("max-width:1280px"), "paper boxed → 1280px cap");
+  check(buildReportCss("minimal", "standard", "boxed").includes("max-width:1280px"), "minimal boxed → 1280px cap");
+  check(buildReportCss("slate", "standard", "wide").includes("max-width:1680px"), "slate wide → 1680px cap");
+  const classicBoxed = buildReportCss("classic", "standard", "boxed");
+  check(classicBoxed.includes(".workspace{max-width:1280px"), "classic boxed → appended workspace override");
+  check(!buildReportCss("classic", "standard", "full").includes("max-width:1280px"), "classic full → no cap override");
+
+  // Wider, self-filling grids (the width is actually USED).
+  check(paper.includes(".map-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr))"), "map-grid auto-fill 240px (grows with pane)");
+  check(paper.includes("minmax(176px,1fr)"), "imgs-c compact grid widened to 176px");
+  check(paper.includes(".pf-mic-imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr))"), "pf-mic-imgs auto-fill 210px");
+  check(paper.includes(".pf-classes{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))"), "pf-classes auto-fill 180px");
+  check(paper.includes("minmax(360px,min(24vw,540px))"), "left outline pane proportional, capped 540px");
+  check(paper.includes(".map-cell-img{display:flex;align-items:center;justify-content:center;height:130px"), "map preview well 130px (larger media)");
+
+  // Layering: minimal/slate box their sections; paper stays hairline-open.
+  check(minimal.includes(".source-block,.media-block,.map-block{margin-top:16px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel-2)"),
+    "minimal: media/map sections are boxed inset panels (layering)");
+  check(slate.includes("background:var(--panel-2);padding:14px 16px}"), "slate: boxed inset panels too");
+  check(!paper.includes(".source-block,.media-block,.map-block{margin-top:16px;border:1px solid"),
+    "paper: open hairline sections (no boxed insets)");
+
+  // Sticky slim headers for minimal/slate; paper static + double rule.
+  check(minimal.includes("header{background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:50}"), "minimal: sticky header");
+  check(slate.includes("position:sticky;top:0;z-index:50}"), "slate: sticky header");
+  check(paper.includes("header{background:var(--panel);border-bottom:1px solid var(--line);}"), "paper: static header (print-like)");
+  check(minimal.includes("header::after") && minimal.includes("width:84px;height:2px"), "minimal: 2px teal header tick");
+  check(slate.includes("header::after") && slate.includes("linear-gradient(90deg,var(--volume)"), "slate: teal fade header rule");
+
+  // Layered page tone: minimal has a gray page under white panels.
+  check(minimal.includes(":root{--bg:#f6f7f8") && minimal.includes("--panel:#ffffff"), "minimal: gray page + white panels (3-level depth)");
+  check(slate.includes(":root{--bg:#0f1318") && slate.includes("--panel-2:#1a212b"), "slate: three darkness levels");
+
+  // Global polish: focus rings + thin scrollbars everywhere.
+  for (const [name, css] of [["paper", paper], ["minimal", minimal], ["slate", slate]]) {
+    check(css.includes(":focus-visible{outline:2px solid"), `${name}: focus-visible outline`);
+    check(css.includes("scrollbar-width:thin"), `${name}: thin scrollbars`);
+  }
+
+  // v3.20 regression fix: capture-HISTORY image URLs must be absolutized for
+  // the blob:/file: contexts (v3.19 broke them → "UI title" images vanished).
+  {
+    const s = JSON.parse(JSON.stringify(summary));
+    const histUrl = "/api/cryosmart/history/h-1234/image/mic1";
+    s.nodes[0].representative_micrograph_images = [
+      { kind: "ui_tile", name: "mic1", url: histUrl, src: histUrl, original_url: histUrl },
+    ];
+    const html = buildLineageHtmlV2(s, { webAppOrigin: "https://app.example", imageMode: "remote" });
+    check(html.includes('src="https://app.example/api/cryosmart/history/h-1234/image/mic1"'),
+      "history image URL absolutized for blob:/file: contexts (ui-tile fix)");
+    check(html.includes('href="https://app.example/api/cryosmart/history/h-1234/image/mic1"'),
+      "history 打开-link absolutized too");
+    // Session URLs keep working exactly as before.
+    const s2 = JSON.parse(JSON.stringify(summary));
+    const sessUrl = "/api/cryosmart/import/session/tok9/image/mic1";
+    s2.nodes[0].representative_micrograph_images = [
+      { kind: "ui_tile", name: "mic1", url: sessUrl, src: sessUrl, original_url: sessUrl },
+    ];
+    const html2 = buildLineageHtmlV2(s2, { webAppOrigin: "https://app.example", imageMode: "remote" });
+    check(html2.includes('src="https://app.example/api/cryosmart/import/session/tok9/image/mic1"'),
+      "session image URL absolutized (unchanged behavior)");
+    // Remote intranet URLs are NOT touched.
+    check(html2.includes('src="http://x/m2"') || buildLineageHtmlV2(summary, { webAppOrigin: "https://app.example", imageMode: "remote" }).includes('src="http://x/m1"'),
+      "direct intranet URLs untouched by absolutization");
+  }
+
+  // widthMode threads through buildLineageHtmlV2 (the real exit points).
+  {
+    const full = buildLineageHtmlV2(summary, { widthMode: "full" });
+    const boxed = buildLineageHtmlV2(summary, { widthMode: "boxed" });
+    check(boxed.includes("max-width:1280px") && !full.includes("max-width:1280px"),
+      "buildLineageHtmlV2 threads widthMode (boxed vs full)");
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
