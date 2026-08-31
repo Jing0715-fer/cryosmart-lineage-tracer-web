@@ -343,9 +343,11 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                   报告样式模板
                   <span className="ml-auto font-normal normal-case tracking-normal text-slate-400">选择后立即生效，下载 / 新标签页查看完整效果</span>
                 </div>
-                <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
                   {REPORT_TEMPLATES.map((t) => {
                     const selected = reportStyle.template === t.id;
+                    const isNew =
+                      t.id === "blueprint" || t.id === "editorial" || t.id === "focus";
                     return (
                       <button
                         key={t.id}
@@ -375,6 +377,11 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                         </div>
                         <div className="flex items-center gap-1.5">
                           <span className={`text-[12.5px] font-medium ${selected ? "text-teal-700 dark:text-teal-300" : "text-slate-800 dark:text-slate-200"}`}>{t.label}</span>
+                          {isNew && (
+                            <Badge variant="outline" className="px-1.5 py-0 text-[9px] font-medium uppercase border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                              新
+                            </Badge>
+                          )}
                           {selected && (
                             <Badge variant="outline" className="px-1.5 py-0 text-[9px] font-medium uppercase border-teal-300 bg-teal-50 text-teal-700 dark:border-teal-700 dark:bg-teal-950/40 dark:text-teal-300">
                               当前
