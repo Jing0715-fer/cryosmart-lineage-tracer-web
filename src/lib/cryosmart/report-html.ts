@@ -2430,20 +2430,28 @@ export interface ReportHtmlOptions {
       ".outline{padding:14px}\n" +
       ".stage{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel-2);padding:12px;margin-bottom:10px}\n" +
       ".stage h3{margin:0 0 10px;font-size:.7em;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.09em}\n" +
-      ".phase{display:grid;grid-template-columns:92px minmax(0,1fr);gap:12px;align-items:start;border-top:1px solid var(--line);padding-top:10px;margin-top:10px}\n" +
+      // v3.21: the phase label sits ABOVE the grid (not in a 92px side
+      // column) so the stage-grid gets the full stage width, and the grid
+      // min is 140px → 2 mini-nodes per row at every width mode (the old
+      // 92px + minmax(190px) combo rendered one job per row in the left
+      // outline — the user's "左侧每行只显示一个 job 浪费空间" complaint).
+      ".phase{border-top:1px solid var(--line);padding-top:9px;margin-top:9px}\n" +
       ".phase:first-of-type{border-top:0;padding-top:0;margin-top:0}\n" +
-      ".phase-label{font-size:.7em;font-weight:700;color:var(--text-3);line-height:1.4;padding-top:6px;letter-spacing:.03em;text-transform:uppercase}\n" +
-      ".stage-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}\n" +
-      ".mini-node{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:10px;align-items:start;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:10px 12px;min-height:64px;color:var(--text);cursor:default;position:relative;overflow:hidden;transition:border-color .15s ease}\n" +
+      ".phase-label{display:inline-block;margin:2px 0 6px;font-size:.68em;font-weight:700;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;line-height:1.35}\n" +
+      ".stage-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}\n" +
+      // v3.21: compact vertical mini-node tile — uid / type / metric stack,
+      // ref pills wrap below (the old side-by-side pill column needed a
+      // ~200px card; the 2-per-row grid yields ~145-200px per tile).
+      ".mini-node{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:8px 10px 8px 12px;color:var(--text);cursor:default;position:relative;overflow:hidden;transition:border-color .15s ease}\n" +
       ".mini-node::before{content:\"\";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--kc,var(--muted-2))}\n" +
       ".mini-node.micrograph{--kc:var(--micro);border-color:var(--micro-border);background:var(--micro-bg)}\n" +
       ".mini-node.particle{--kc:var(--particle);border-color:var(--particle-border);background:var(--particle-bg)}\n" +
       ".mini-node.volume{--kc:var(--volume);border-color:var(--volume-border);background:var(--volume-bg)}\n" +
       ".mini-node:hover{border-color:var(--line-2)}\n" +
-      ".mini-node b{font-size:.88em;font-weight:700;display:block;grid-column:1;color:var(--text);font-family:var(--font-mono)}\n" +
-      ".mini-node span{font-size:.72em;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;grid-column:1;color:var(--text-2);margin-top:2px}\n" +
-      ".mini-node em{font-style:normal;font-size:.68em;color:var(--muted);display:block;grid-column:1;margin-top:3px;line-height:1.3}\n" +
-      ".mini-node p{grid-column:2;grid-row:1 / span 3;margin:0;display:grid;grid-template-columns:repeat(2,max-content);justify-content:end;align-content:start;gap:2px 3px;min-width:54px}\n" +
+      ".mini-node b{font-size:.82em;font-weight:700;color:var(--text);font-family:var(--font-mono);line-height:1.3}\n" +
+      ".mini-node span{font-size:.68em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-2);margin-top:1px}\n" +
+      ".mini-node em{font-style:normal;font-size:.64em;color:var(--muted);margin-top:2px;line-height:1.35}\n" +
+      ".mini-node p{margin:4px 0 0;display:flex;flex-wrap:wrap;gap:3px}\n" +
       ".ref-pill{display:block;border-radius:3px;padding:1px 5px;min-width:26px;text-align:center;font-size:.62em;line-height:1.2;font-style:normal;font-weight:700;border:1px solid;white-space:nowrap;letter-spacing:.02em;font-family:var(--font-mono)}\n" +
       ".ref-pill.exposure,.ref-pill.micrograph{color:var(--micro);background:var(--micro-bg);border-color:var(--micro-border)}\n" +
       ".ref-pill.particle{color:var(--particle);background:var(--particle-bg);border-color:var(--particle-border)}\n" +
@@ -2481,7 +2489,13 @@ export interface ReportHtmlOptions {
       ".pf-class span{display:block;font-size:.66em;color:var(--muted)}\n" +
       ".pf-final-img img{display:block;width:280px;max-width:100%;height:220px;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2);margin:10px auto}\n" +
       ".cards{padding:16px;display:grid;gap:16px}\n" +
-      ".job-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;border:1px solid var(--line);border-left:4px solid var(--jc,var(--muted-2));border-radius:var(--radius-lg);background:var(--panel);padding:16px 18px;position:relative;scroll-margin-top:24px;transition:border-color .18s ease,box-shadow .2s ease}\n" +
+      // v3.21: fixed sidebar track — clamp(180px,22%,280px) instead of
+      // the old `auto`. The auto track sized to each card's 输出到 content
+      // (218px for J1 vs 76px for the final node), so the main content
+      // column had a DIFFERENT width in every job card (the user's "输出
+      // 到这一栏的宽度不一致" complaint). A definite track resolves
+      // identically for every card in the pane.
+      ".job-card{display:grid;grid-template-columns:minmax(0,1fr) clamp(180px,22%,280px);gap:14px;border:1px solid var(--line);border-left:4px solid var(--jc,var(--muted-2));border-radius:var(--radius-lg);background:var(--panel);padding:16px 18px;position:relative;scroll-margin-top:24px;transition:border-color .18s ease,box-shadow .2s ease}\n" +
       ".job-card:hover{border-color:var(--line-2)}\n" +
       ".job-card.micrograph{--jc:var(--micro)}\n" +
       ".job-card.particle{--jc:var(--particle)}\n" +
@@ -2512,8 +2526,11 @@ export interface ReportHtmlOptions {
       ".up-route{display:block;font-weight:600;color:var(--text);border-bottom:1px solid var(--line-2);margin-bottom:5px;padding-bottom:4px;font-size:.84em;font-family:var(--font-mono)}\n" +
       ".up-list{display:grid;gap:4px}\n" +
       ".up-line{display:block;font-size:.84em;color:var(--text-3)}\n" +
-      ".job-out{border-left:2px solid var(--line);padding-left:14px;color:var(--text-2)}\n" +
+      ".job-out{border-left:2px solid var(--line);padding-left:14px;color:var(--text-2);min-width:0}\n" +
       ".job-out h3{white-space:nowrap}\n" +
+      // v3.21: the final-node placeholder renders as a quiet pill so the
+      // fixed-width sidebar looks intentional, not empty.
+      ".job-out .quiet{display:inline-block;margin-top:2px;padding:3px 10px;border:1px solid var(--line);border-radius:999px;font-size:.72em;font-weight:600;font-style:normal;color:var(--muted);letter-spacing:.03em}\n" +
       ".job-out div{margin:0 0 5px;padding:6px 10px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius-sm);font-size:.84em;transition:border-color .15s ease}\n" +
       ".job-out div:hover{border-color:var(--line-2);background:var(--panel-3)}\n" +
       ".quiet{color:var(--muted);font-style:italic}\n" +
@@ -2584,10 +2601,23 @@ export interface ReportHtmlOptions {
         widthMode === "boxed" || widthMode === "wide"
           ? `.workspace{max-width:${widthMode === "boxed" ? 1280 : 1680}px;margin:0 auto}\n`
           : "";
-      const override =
-        mult !== 1
-          ? `body{font-size:${Math.round(14 * mult * 10) / 10}px}\n.title .note{font-style:italic}\n${widthOverride}`
-          : `.title .note{font-style:italic}\n${widthOverride}`;
+      // v3.21: classic gets the same LAYOUT fixes as the v3.17 templates
+      // (appended, same-specificity-later-wins): the left outline shows 2
+      // mini-nodes per row (phase label above the grid, 140px auto-fill,
+      // compact flex tiles) and every job card's 输出到 sidebar sits in a
+      // fixed clamp(180px,22%,280px) track so the main column width is
+      // identical across cards. The legacy gradient look is untouched.
+      const layoutOverride =
+        ".phase{display:block}\n" +
+        ".phase-label{padding-top:0;margin:0 0 6px}\n" +
+        ".stage-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}\n" +
+        ".mini-node{display:flex;flex-direction:column;min-height:0;padding:8px 10px 8px 12px}\n" +
+        ".mini-node::before{opacity:1}\n" +
+        ".mini-node b,.mini-node span,.mini-node em{grid-column:auto}\n" +
+        ".mini-node p{grid-column:auto;grid-row:auto;display:flex;flex-wrap:wrap;justify-content:flex-start;align-content:flex-start;min-width:0;margin:4px 0 0}\n" +
+        ".job-card{grid-template-columns:minmax(0,1fr) clamp(180px,22%,280px)}\n" +
+        ".job-out .quiet{display:inline-block;margin-top:2px;padding:3px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px;font-weight:600;font-style:normal}\n";
+      const override = `${mult !== 1 ? `body{font-size:${Math.round(14 * mult * 10) / 10}px}\n` : ""}.title .note{font-style:italic}\n${widthOverride}${layoutOverride}`;
       return REPORT_HTML_V2_CSS + override;
     }
     const spec =

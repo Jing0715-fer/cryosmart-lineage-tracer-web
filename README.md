@@ -197,6 +197,7 @@ cryosmart-lineage-tracer-web/
 - **自定义配置**（localStorage 持久化，`cryosmart_report_style_v1`）：模板、**页面宽度（全宽 / 宽 1680 / 适中 1280）**、字号（紧凑/标准/舒适）、图片模式（嵌入 data-URL / 引用原链接 / 不含图片）、自定义报告标题与附注。**Build & download ZIP** 的 HTML 报告自动沿用同一配置（打包时读取）
 - **v3.20 全宽与层次**：三种新模板默认**全宽利用屏幕**（无 1240px 封顶，左侧谱系栏按比例 `min(24vw, 540px)`、主链占满剩余宽度）；图片/地图网格改为 auto-fill 自适应列（map 240px、紧凑图 176px、class 砖 180px 起，宽屏自动多列），媒体框整体放大（map 预览井 130px、micrograph 网格 210px 起）；minimal/slate 的媒体/数据区块渲染为盒装内嵌面板（三层视觉深度）、slim sticky 题头 + 题头刻线；统一了 focus-visible 焦点环与细滚动条
 - **v3.20 修复（blob 报告图片回归）**：v3.19 移除内嵌 iframe 后，**从 Capture History 恢复**的报告在新标签页（blob: URL）里所有 UI title / log 图片全部静默消失 —— history 图片 URL 是相对路径，blob: 上下文无法解析。现在 `/api/cryosmart/history/<id>/image/` 与 session 图片一样会被**绝对化**（含「打开」链接与 map/class 预览链接），且无活动会话时也照常预取 history 图片做嵌入（嵌入模式恢复自包含导出）
+- **v3.21 版式修正（列宽一致性 + 左栏双列）**：① 主链 job 卡片的「输出到」侧栏改为**固定轨道** `clamp(180px, 22%, 280px)` —— 旧版 `auto` 轨道按各卡内容自适应（218px vs 76px），导致每张卡的主内容列宽各不相同；现在所有卡片侧栏同宽对齐、主列等宽。② 左侧 Lineage Outline 改为**每行 2 个 job 砖**：phase 标签移到网格上方（释放 92px 侧栏），stage-grid 以 140px auto-fill 铺列（390px 手机 → 143px 砖、1920px 全宽 → ~198px 砖），mini-node 重排为紧凑竖向砖（uid/类型/指标堆叠、引用药丸折行到下方）。终节点的「最终节点」占位渲染为安静药丸，固定宽侧栏不再显得空。四种模板同步生效（classic 以追加覆盖方式获得同样的版式，外观不变）
 
 ### 4. Share（`share-url.ts`）
 

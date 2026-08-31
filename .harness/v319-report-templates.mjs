@@ -304,5 +304,54 @@ console.log("── G. v3.20 full width / layering / widthMode / history-image f
   }
 }
 
+/* ── H. v3.21 outline 2-per-row + consistent 输出到 sidebar track ─── */
+console.log("── H. v3.21 outline 2 jobs/row + fixed job-out track ──");
+{
+  const paper = buildReportCss("paper", "standard", "full");
+  const minimal = buildReportCss("minimal", "standard", "full");
+  const slate = buildReportCss("slate", "standard", "full");
+  const classic = buildReportCss("classic", "standard", "full");
+
+  // 1. The 输出到 sidebar sits in a FIXED clamp track — the legacy `auto`
+  //    track sized to each card's content (218px vs 76px), so every job
+  //    card's main column had a different width.
+  for (const [name, css] of [["paper", paper], ["minimal", minimal], ["slate", slate]]) {
+    check(css.includes(".job-card{display:grid;grid-template-columns:minmax(0,1fr) clamp(180px,22%,280px)"),
+      `${name}: job-card sidebar = fixed clamp(180px,22%,280px) track (was content-sized auto)`);
+    check(css.includes(".job-out .quiet{display:inline-block"),
+      `${name}: final-node placeholder styled as a pill (not bare italic)`);
+  }
+  check(classic.includes(".job-card{grid-template-columns:minmax(0,1fr) clamp(180px,22%,280px)}"),
+    "classic: appended override carries the same fixed sidebar track");
+
+  // 2. Left outline: phase label ABOVE the grid (no 92px side column) and a
+  //    140px auto-fill grid → 2 mini-nodes per row at every width mode
+  //    (390px mobile → 143px tiles, 1920px full → ~198px tiles).
+  for (const [name, css] of [["paper", paper], ["minimal", minimal], ["slate", slate]]) {
+    check(css.includes(".stage-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr))"),
+      `${name}: stage-grid min 140px (2 tiles per row)`);
+    check(!css.includes("grid-template-columns:92px minmax(0,1fr)"),
+      `${name}: phase side-label column removed (label sits above the grid)`);
+    check(css.includes(".phase{border-top:1px solid var(--line);padding-top:9px"),
+      `${name}: phase renders as a block with hairline separator`);
+    check(css.includes(".mini-node{display:flex;flex-direction:column"),
+      `${name}: mini-node is a compact vertical tile`);
+    check(css.includes(".mini-node p{margin:4px 0 0;display:flex;flex-wrap:wrap;gap:3px}"),
+      `${name}: ref pills wrap below the tile text (no side-by-side pill column)`);
+  }
+  check(classic.includes(".phase{display:block}") &&
+    classic.includes(".stage-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))") &&
+    classic.includes(".mini-node{display:flex;flex-direction:column;min-height:0"),
+    "classic: appended outline overrides (block phase, 140px grid, flex tiles)");
+
+  // 3. The legacy one-per-row geometry is really gone.
+  for (const [name, css] of [["paper", paper], ["minimal", minimal], ["slate", slate]]) {
+    check(!css.includes("minmax(190px,1fr))") || !css.includes(".stage-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr))"),
+      `${name}: old 190px one-per-row stage-grid gone`);
+    check(!css.includes(".mini-node p{grid-column:2"),
+      `${name}: mini-node ref-pill side column gone`);
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
