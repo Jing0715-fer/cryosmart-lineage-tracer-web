@@ -8,10 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
-import { Package, Loader2, Download, AlertTriangle, CheckCircle2, FileArchive, Settings2, FileBox, Boxes, FileCheck2, PresentationIcon, StopCircle } from "lucide-react";
+import { Package, Loader2, Download, AlertTriangle, CheckCircle2, FileArchive, Settings2, FileBox, Boxes, FileCheck2, PresentationIcon, StopCircle, Palette } from "lucide-react";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildBundle, downloadBlob, type BundleProgress, type BundleResult } from "@/lib/cryosmart/bundle";
 import { createBundleSink, type BundleSinkKind } from "@/lib/cryosmart/zip-sink";
+import { loadReportStyle, reportTemplateLabel } from "@/lib/cryosmart/report-style";
 import type { LoadedMetadata } from "./data-source-card";
 
 /** Human size for toasts / progress lines ("8.4 MB", "1.2 GB"). */
@@ -116,6 +117,22 @@ export function DownloadCard({ summary, loaded }: Props) {
   const [building, setBuilding] = useState(false);
   const [progress, setProgress] = useState<BundleProgress | null>(null);
   const [result, setResult] = useState<BundleResult | null>(null);
+  /** v3.17: current report template label — read from the SAME persisted
+   *  config the Report tab writes, so this card honestly reflects what the
+   *  ZIP's HTML report will look like. Refreshed on mount + whenever the
+   *  card re-renders after a tab switch (cheap localStorage read). */
+  const [reportTemplate, setReportTemplate] = useState<string>("");
+  useEffect(() => {
+    setReportTemplate(reportTemplateLabel(loadReportStyle().template));
+  }, []);
+  useEffect(() => {
+    // Also re-read when the window regains focus (user may have changed
+    // the template in the Report tab of the same page — no focus change —
+    // so ALSO re-read right before each build in handleBuild).
+    const onFocus = () => setReportTemplate(reportTemplateLabel(loadReportStyle().template));
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
   /** Bumped on every fresh "Build & download" click; ties the abort flag
    *  to the currently-running build so a stale catch can't dismiss a
    *  newer run. */
@@ -188,6 +205,11 @@ export function DownloadCard({ summary, loaded }: Props) {
       // createBundleSink never throws — worst case it degrades to memory.
       const sink = await createBundleSink();
       setSinkKind(sink.kind);
+      // v3.19: read the report style FRESH at build time — the user may
+      // have changed the template in the Report tab since this card
+      // mounted. The ZIP's HTML report uses whatever is configured now.
+      const reportStyle = loadReportStyle();
+      setReportTemplate(reportTemplateLabel(reportStyle.template));
       const res = await buildBundle(
         summary,
         {
@@ -198,6 +220,7 @@ export function DownloadCard({ summary, loaded }: Props) {
           session: loaded?.session || null,
           signal: abort.signal,
           sink,
+          reportStyle,
         },
         (p) => {
           // Drop progress events from a stale build (defensive — a
@@ -311,6 +334,16 @@ export function DownloadCard({ summary, loaded }: Props) {
               );
             })}
           </div>
+        </div>
+
+        {/* v3.17: the ZIP's HTML report follows the template + options the
+            user configured in the Report tab (shared localStorage). */}
+        <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+          <Palette className="h-3.5 w-3.5 shrink-0 text-teal-500" />
+          <span className="truncate">
+            HTML 报告样式：<strong className="font-medium">{reportTemplate || "Paper 学术"}</strong>
+            （在上方 Lineage Preview → Report 标签页中修改模板、字号、图片与标题，打包时自动沿用）
+          </span>
         </div>
 
         <div>

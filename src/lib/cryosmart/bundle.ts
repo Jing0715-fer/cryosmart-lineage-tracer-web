@@ -12,6 +12,7 @@
  */
 
 import type { LineageSummary } from "./types";
+import type { ReportStyleConfig } from "./report-style";
 import {
   buildLineageHtmlV2,
   localImageFilename,
@@ -60,6 +61,11 @@ export interface BundleOptions {
    * .mrc results) degrade to DOWNLOAD_LINKS.txt entries instead of OOMing
    * the tab. Ignored for the OPFS sink (disk-backed). Test hook. */
   memZipBudgetBytes?: number;
+  /** v3.19: the user's report style (template / font / image mode /
+   *  title) — the ZIP's HTML report is generated with the same skin the
+   *  user configured in the Report tab. Defaults to the paper template
+   *  when omitted. */
+  reportStyle?: ReportStyleConfig;
 }
 
 export interface BundleFile {
@@ -277,7 +283,18 @@ async function assembleBundle(
   // path (with an onerror fallback to the remote URL) for any image that
   // didn't get embedded as a base64 data URL — the downloadable ZIP ships
   // the `images/` folder alongside the HTML so the report works offline.
-  let htmlOpts: ReportHtmlOptions = { bundleMode: options.includeImages };
+  // v3.17: the ZIP report uses the user's chosen style (template / font /
+  // title / image mode). imageMode "none" strips <img> tags from the report
+  // (the images/ folder itself is still controlled by includeImages); other
+  // modes keep the bundleMode local-file references + remote fallback.
+  const styleOpts: ReportHtmlOptions = {
+    template: options.reportStyle?.template,
+    fontScale: options.reportStyle?.fontScale,
+    imageMode: options.reportStyle?.imageMode,
+    titleOverride: options.reportStyle?.titleOverride || undefined,
+    subtitle: options.reportStyle?.subtitle || undefined,
+  };
+  let htmlOpts: ReportHtmlOptions = { ...styleOpts, bundleMode: options.includeImages };
   if (options.includeImages && options.session) {
     onProgress?.({ phase: "images", current: 0, total: 0, message: "Prefetching images for report..." });
     const embeddedImages = await prefetchImagesForReport(options.session, summary, (p) =>
@@ -288,7 +305,7 @@ async function assembleBundle(
         message: p.message ?? "Embedding images…",
       })
     );
-    htmlOpts = { embeddedImages, session: options.session, bundleMode: true };
+    htmlOpts = { ...styleOpts, embeddedImages, session: options.session, bundleMode: true };
   }
   await addFile(`${base}_report.html`, buildLineageHtmlV2(summary, htmlOpts));
 

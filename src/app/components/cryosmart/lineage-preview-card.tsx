@@ -1,16 +1,23 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useTheme } from "next-themes";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Download, ExternalLink, Copy, Activity, Microscope, Box, Layers, Maximize2, FileCode2, ImageIcon, Loader2, CheckCircle2, AlertCircle, X, Square } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Download, Copy, Activity, Microscope, Box, Layers, Maximize2, ImageIcon, Loader2, CheckCircle2, AlertCircle, X, Square, Palette, Type } from "lucide-react";
 import { toast } from "sonner";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildLineageHtmlV2, type ReportHtmlOptions } from "@/lib/cryosmart/report-html";
+import {
+  loadReportStyle,
+  saveReportStyle,
+  REPORT_TEMPLATES,
+  DEFAULT_REPORT_STYLE,
+  type ReportStyleConfig,
+} from "@/lib/cryosmart/report-style";
 import { prefetchImagesForReport } from "@/lib/cryosmart/image-embed";
 import type { CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 import { makePreview } from "@/lib/cryosmart/lineage";
@@ -54,7 +61,34 @@ interface Props {
 
 export function LineagePreviewCard({ summary, session, importInfo, importStatus, onStopImport, stagedImport }: Props) {
   const [reportTab, setReportTab] = useState("stats");
-  const { resolvedTheme } = useTheme();
+
+  /* ── v3.17 report style (template / font / image mode / title) ──────
+   * The report is no longer rendered inside the page (the old auto-sized
+   * iframe is gone) — the user configures the style here, then opens the
+   * report in a new tab or downloads the HTML. Persisted so reloads (and
+   * the ZIP bundle, which reads it at build time) keep the choice. */
+  const [reportStyle, setReportStyle] = useState<ReportStyleConfig>(DEFAULT_REPORT_STYLE);
+  useEffect(() => {
+    // Restore AFTER hydration (SSR renders defaults — reading localStorage
+    // in the useState initializer would be a hydration mismatch). Same
+    // nested-in-if pattern as DownloadCard's persisted-selections restore.
+    const persisted = loadReportStyle();
+    if (JSON.stringify(persisted) !== JSON.stringify(DEFAULT_REPORT_STYLE)) {
+      // Synchronous one-time restore after hydration (mirrors the
+      // DownloadCard pattern); flagged by react-hooks/set-state-in-effect
+      // but deliberate — the ONLY alternative (initializer read) breaks SSR
+      // hydration.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setReportStyle(persisted);
+    }
+  }, []);
+  const updateReportStyle = <K extends keyof ReportStyleConfig>(key: K, value: ReportStyleConfig[K]) => {
+    setReportStyle((prev) => {
+      const next = { ...prev, [key]: value };
+      saveReportStyle(next);
+      return next;
+    });
+  };
 
   /* ── Live capture progress strip ───────────────────────────────────
    * The ONE progress UI in the app (banner + configure-card copies were
@@ -74,49 +108,23 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
     ? Math.min(100, Math.round((progress.done / Math.max(1, progress.total)) * 100))
     : null;
 
-  // Auto-resize the report iframe to fit its content. The report HTML
-  // posts { type: 'cryosmart-report-height', height } via postMessage once
-  // it loads (and on every resize / image load). We listen for it here and
-  // grow the iframe so the report flows naturally in the page — no cramped
-  // fixed-height iframe, no double scrollbar. Clamped to [320, 50000] so a
-  // misbehaving report can't collapse the iframe to 0 or grow it absurdly;
-  // the upper bound is deliberately generous — real reports with many job
-  // cards measure ~6000px, and a lower cap (previously 4000) silently
-  // clipped them and re-introduced the internal scrollbar.
-  const [iframeHeight, setIframeHeight] = useState(600);
-  useEffect(() => {
-    function onMessage(event: MessageEvent) {
-      const data = event.data as { type?: string; height?: number } | null;
-      if (!data || data.type !== "cryosmart-report-height") return;
-      const h = typeof data.height === "number" ? data.height : 0;
-      if (h > 0) {
-        // Clamp to a sensible range (see comment above for the bounds).
-        const next = Math.max(320, Math.min(50000, Math.round(h)));
-        // Only update if the change is meaningful (>4px) to avoid render thrash.
-        setIframeHeight((prev) => (Math.abs(prev - next) > 4 ? next : prev));
-      }
-    }
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, []);
-
   // Pre-fetch referenced images as base64 data URLs when a live session is
-  // available. The resulting map is passed to buildLineageHtmlV2 so <img src>
-  // becomes a data: URL — eliminating the iframe-referrer/CORS failure that
-  // previously made images appear broken even though the URL was valid.
+  // available AND the report is configured to embed them (v3.17: "remote"/
+  // "none" modes skip the prefetch entirely — no wasted bandwidth, the
+  // report rebuilds instantly from the live source instead).
   const [embeddedImages, setEmbeddedImages] = useState<Record<string, string> | null>(null);
   const [embeddingProgress, setEmbeddingProgress] = useState<string>("");
   const [embedFailed, setEmbedFailed] = useState(false);
 
   useEffect(() => {
-    if (!summary || !session) {
-      // Synchronous reset of local UI state when the summary or session goes
-      // away. This is a mount/dep-change transition, not a cascading render.
+    if (!summary || !session || reportStyle.imageMode !== "embed") {
+      // Synchronous reset of local UI state when the summary/session goes
+      // away or images are no longer embedded. This is a mount/dep-change
+      // transition, not a cascading render.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setEmbeddedImages(null);
       setEmbeddingProgress("");
       setEmbedFailed(false);
-      setIframeHeight(600);
       return;
     }
     let cancelled = false;
@@ -124,7 +132,6 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
     // above, a dep-change transition.
     setEmbeddedImages(null);
     setEmbedFailed(false);
-    setIframeHeight(600);
     setEmbeddingProgress("Prefetching images for report preview…");
     prefetchImagesForReport(session, summary, (p) => {
       if (!cancelled) setEmbeddingProgress(p.message ?? "Embedding images…");
@@ -144,41 +151,44 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
     return () => {
       cancelled = true;
     };
-  }, [summary, session, stagedImport]);
+  }, [summary, session, stagedImport, reportStyle.imageMode]);
 
   const reportHtml = useMemo(() => {
     if (!summary) return "";
     try {
       // The app's own origin — session-image URLs in the report become
       // ABSOLUTE so they survive the blob: context of the "Open" button
-      // (relative srcs resolve fine in the srcdoc iframe but NOT against a
-      // blob: opaque path). Undefined during SSR / non-browser prerender,
-      // where the report is never actually rendered anyway.
+      // (relative srcs resolve fine in a same-document context but NOT
+      // against a blob: opaque path). Undefined during SSR / non-browser
+      // prerender, where the report is never actually rendered anyway.
       const webAppOrigin =
         typeof window !== "undefined" ? window.location.origin : undefined;
-      const opts: ReportHtmlOptions | undefined = embeddedImages
-        ? { embeddedImages, session: session ?? undefined, webAppOrigin }
-        : session
-          ? { session, webAppOrigin }
-          : webAppOrigin
-            ? { webAppOrigin }
-            : undefined;
+      // v3.17: the report is configured by the user (template / font /
+      // image mode / title). Only "embed" mode consumes the prefetched
+      // data-URLs — "remote" and "none" deliberately ignore them.
+      const baseOpts: ReportHtmlOptions = {
+        template: reportStyle.template,
+        fontScale: reportStyle.fontScale,
+        imageMode: reportStyle.imageMode,
+        titleOverride: reportStyle.titleOverride,
+        subtitle: reportStyle.subtitle,
+        session: session ?? undefined,
+        webAppOrigin,
+      };
+      const opts: ReportHtmlOptions | undefined =
+        reportStyle.imageMode === "embed" && embeddedImages
+          ? { ...baseOpts, embeddedImages }
+          : baseOpts;
       return buildLineageHtmlV2(summary, opts);
     } catch (err) {
       return `<!doctype html><body style="font-family:monospace;padding:2rem;color:#b91c1c;">Failed to build report: ${(err as Error).message}</body>`;
     }
-  }, [summary, embeddedImages, session]);
+  }, [summary, embeddedImages, session, reportStyle]);
 
   const previewText = useMemo(() => {
     if (!summary) return "";
     try { return makePreview(summary); } catch { return ""; }
   }, [summary]);
-
-  const reportSrcDoc = useMemo(() => {
-    if (!reportHtml) return "";
-    // srcDoc renders the standalone HTML in an isolated iframe.
-    return reportHtml;
-  }, [reportHtml]);
 
   if (!summary) {
     return (
@@ -245,7 +255,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
           </div>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          Interactive view of the traced lineage — same data layout as the original extension&apos;s report: left outline + right chain cards. Use <strong>Share</strong> to generate a linkable URL.
+          Interactive view of the traced lineage — graph, stats, FSC and the exportable HTML report. Configure the report style in the <strong>Report</strong> tab, then open or download it; use <strong>Share</strong> to generate a linkable URL.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -310,63 +320,121 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
           </TabsContent>
 
           <TabsContent value="report" className="mt-3">
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-[11px] text-slate-500">
-                  Standalone HTML report rendered in an iframe — the same file you&apos;ll download as <code className="font-mono text-[10px]">{summary.project_uid}_{summary.start_uid}_lineage_report.html</code>
+            {/* v3.17: the report is NO LONGER embedded in the page (the big
+                auto-sized iframe is gone). The user picks a template +
+                options here, then opens the standalone HTML in a new tab or
+                downloads it. The same configuration flows into the ZIP
+                bundle's report (read from localStorage at build time). */}
+            <div className="space-y-3">
+              {/* Template picker */}
+              <div>
+                <div className="mb-2 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                  <Palette className="h-3 w-3" />
+                  报告样式模板
+                  <span className="ml-auto font-normal normal-case tracking-normal text-slate-400">选择后立即生效，下载 / 新标签页查看完整效果</span>
                 </div>
-                <div className="flex gap-1.5">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-[11px]"
-                    onClick={() => {
-                      // Open the report in a new tab via a Blob URL. This is
-                      // more reliable than window.open()+document.write()
-                      // (which popup blockers sometimes neuter into a blank
-                      // window), and the resulting tab has a real browsing
-                      // context so the full-width CSS + referrerpolicy
-                      // handling work correctly. The blob URL is revoked
-                      // after 30s — long enough for the tab to navigate
-                      // back to it if the user reloads, short enough not to
-                      // leak memory.
-                      const blob = new Blob([reportHtml], { type: "text/html;charset=utf-8" });
-                      const url = URL.createObjectURL(blob);
-                      const w = window.open(url, "_blank");
-                      if (!w) {
-                        // Popup blocked — fall back to a same-tab navigation
-                        // via a synthetic link click.
-                        const a = document.createElement("a");
-                        a.href = url;
-                        a.target = "_blank";
-                        a.rel = "noopener";
-                        a.click();
-                      }
-                      setTimeout(() => URL.revokeObjectURL(url), 30000);
-                    }}
-                  >
-                    <Maximize2 className="mr-1 h-3 w-3" /> Open
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-[11px]"
-                    onClick={() => {
-                      const blob = new Blob([reportHtml], { type: "text/html" });
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement("a");
-                      a.href = url;
-                      a.download = `CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_report.html`;
-                      a.click();
-                      URL.revokeObjectURL(url);
-                    }}
-                  >
-                    <Download className="mr-1 h-3 w-3" /> HTML
-                  </Button>
+                <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+                  {REPORT_TEMPLATES.map((t) => {
+                    const selected = reportStyle.template === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        aria-pressed={selected}
+                        onClick={() => updateReportStyle("template", t.id)}
+                        className={`group rounded-lg border p-2 text-left transition-colors ${
+                          selected
+                            ? "border-teal-400 bg-teal-50/60 ring-1 ring-teal-300 dark:border-teal-600 dark:bg-teal-950/40 dark:ring-teal-800"
+                            : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:hover:border-slate-600"
+                        }`}
+                      >
+                        {/* Mini style swatch — a pure-CSS mock of the template's
+                            palette (NOT the report itself). */}
+                        <div
+                          className="mb-2 flex h-14 flex-col justify-between overflow-hidden rounded-md border p-2"
+                          style={{ background: t.swatch.bg, borderColor: t.swatch.line }}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span className={`${t.swatch.fontClass} text-[13px] font-semibold leading-none`} style={{ color: t.swatch.fg }}>Aa</span>
+                            <span className="h-[3px] w-8 rounded-full" style={{ background: t.swatch.accent }} />
+                          </div>
+                          <div className="space-y-1">
+                            <div className="h-[3px] w-full rounded-full" style={{ background: t.swatch.line }} />
+                            <div className="h-[3px] w-2/3 rounded-full" style={{ background: t.swatch.line }} />
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-[12.5px] font-medium ${selected ? "text-teal-700 dark:text-teal-300" : "text-slate-800 dark:text-slate-200"}`}>{t.label}</span>
+                          {selected && (
+                            <Badge variant="outline" className="px-1.5 py-0 text-[9px] font-medium uppercase border-teal-300 bg-teal-50 text-teal-700 dark:border-teal-700 dark:bg-teal-950/40 dark:text-teal-300">
+                              当前
+                            </Badge>
+                          )}
+                          {t.id === "paper" && !selected && (
+                            <Badge variant="outline" className="px-1.5 py-0 text-[9px] font-medium uppercase border-slate-300 bg-slate-50 text-slate-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-400">
+                              默认
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="mt-0.5 text-[10.5px] leading-snug text-slate-500 dark:text-slate-400">{t.desc}</p>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
-              {/* Image embedding status indicator */}
-              {session && (
+
+              {/* Font scale + image mode */}
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <SegmentedControl
+                  icon={<Type className="h-3 w-3" />}
+                  label="字号"
+                  options={[
+                    { value: "compact", label: "紧凑" },
+                    { value: "standard", label: "标准" },
+                    { value: "comfortable", label: "舒适" },
+                  ]}
+                  value={reportStyle.fontScale}
+                  onChange={(v) => updateReportStyle("fontScale", v as ReportStyleConfig["fontScale"])}
+                />
+                <SegmentedControl
+                  icon={<ImageIcon className="h-3 w-3" />}
+                  label="图片"
+                  options={[
+                    { value: "embed", label: "嵌入 (自包含)" },
+                    { value: "remote", label: "链接 (小体积)" },
+                    { value: "none", label: "不含图片" },
+                  ]}
+                  value={reportStyle.imageMode}
+                  onChange={(v) => updateReportStyle("imageMode", v as ReportStyleConfig["imageMode"])}
+                />
+              </div>
+
+              {/* Custom title + note */}
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-medium text-slate-500 dark:text-slate-400">报告标题</span>
+                  <Input
+                    value={reportStyle.titleOverride}
+                    onChange={(e) => updateReportStyle("titleOverride", e.target.value)}
+                    placeholder={`CryoSmart Lineage: ${summary.project_uid} / ${summary.start_uid}`}
+                    className="h-8 text-[12px]"
+                    maxLength={200}
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[11px] font-medium text-slate-500 dark:text-slate-400">附注（作者 / 日期 / 备注）</span>
+                  <Input
+                    value={reportStyle.subtitle}
+                    onChange={(e) => updateReportStyle("subtitle", e.target.value)}
+                    placeholder="可选，显示在报告标题下方"
+                    className="h-8 text-[12px]"
+                    maxLength={300}
+                  />
+                </label>
+              </div>
+
+              {/* Image embedding status indicator — only meaningful in embed mode */}
+              {reportStyle.imageMode === "embed" && session && (
                 <div className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] ${
                   embedFailed
                     ? "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
@@ -374,9 +442,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                       ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
                       : "border-slate-300 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
                 }`}>
-                  {embedFailed ? (
-                    <ImageIcon className="h-3 w-3 shrink-0" />
-                  ) : embeddedImages ? (
+                  {embedFailed || embeddedImages ? (
                     <ImageIcon className="h-3 w-3 shrink-0" />
                   ) : (
                     <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
@@ -387,20 +453,68 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                   )}
                 </div>
               )}
-              {!session && (
+              {reportStyle.imageMode === "embed" && !session && (
                 <div className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
                   <ImageIcon className="h-3 w-3 shrink-0" />
-                  <span>Images load directly from CryoSmart (no live session). If images appear broken, right-click → open in new tab, or use the &ldquo;Smart Capture&rdquo; mode to embed them.</span>
+                  <span>无活动会话 — 图片将直接引用 CryoSmart 原链接。如需自包含报告，请使用 &ldquo;Smart Capture&rdquo; 模式。</span>
                 </div>
               )}
-              <iframe
-                key={`report-${resolvedTheme || "light"}-${embeddedImages ? "embedded" : "remote"}`}
-                srcDoc={reportSrcDoc}
-                title="Lineage Report"
-                style={{ height: `${iframeHeight}px` }}
-                className="w-full rounded-lg border border-slate-300 bg-white transition-[height] duration-150 ease-out dark:border-slate-700"
-                sandbox="allow-same-origin allow-scripts allow-popups allow-downloads"
-              />
+
+              {/* Actions: open in new tab / download */}
+              <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-slate-50/60 p-2.5 dark:border-slate-700 dark:bg-slate-900/60">
+                <Button
+                  size="sm"
+                  className="h-8 bg-teal-600 text-[12px] hover:bg-teal-700"
+                  onClick={() => {
+                    // Open the report in a new tab via a Blob URL. This is
+                    // more reliable than window.open()+document.write()
+                    // (which popup blockers sometimes neuter into a blank
+                    // window), and the resulting tab has a real browsing
+                    // context so the full-width CSS + referrerpolicy
+                    // handling work correctly. The blob URL is revoked
+                    // after 30s — long enough for the tab to navigate
+                    // back to it if the user reloads, short enough not to
+                    // leak memory.
+                    const blob = new Blob([reportHtml], { type: "text/html;charset=utf-8" });
+                    const url = URL.createObjectURL(blob);
+                    const w = window.open(url, "_blank");
+                    if (!w) {
+                      // Popup blocked — fall back to a synthetic link click.
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.target = "_blank";
+                      a.rel = "noopener";
+                      a.click();
+                    }
+                    setTimeout(() => URL.revokeObjectURL(url), 30000);
+                  }}
+                >
+                  <Maximize2 className="mr-1.5 h-3.5 w-3.5" /> 新标签页打开报告
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 text-[12px]"
+                  onClick={() => {
+                    const blob = new Blob([reportHtml], { type: "text/html" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_report.html`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    toast.success(`Downloaded CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_report.html`);
+                  }}
+                >
+                  <Download className="mr-1.5 h-3.5 w-3.5" /> 下载 HTML
+                </Button>
+                <span className="ml-auto text-[10.5px] text-slate-400 dark:text-slate-500">
+                  <code className="font-mono">CryoSmart_{summary.project_uid}_{summary.start_uid}_lineage_report.html</code>
+                </span>
+              </div>
+              <p className="text-[10.5px] leading-snug text-slate-400 dark:text-slate-500">
+                报告不再嵌入页面内展示 — 配置样式后通过上方按钮打开或下载。「Build &amp; download ZIP」中的 HTML 报告会使用同一份样式配置。
+              </p>
             </div>
           </TabsContent>
 
@@ -662,6 +776,54 @@ function OverviewPanel({ summary }: { summary: LineageSummary }) {
           ))}
           {classSplits.length === 0 && <div className="text-[10.5px] text-slate-400">No class split jobs.</div>}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── SegmentedControl ─────────────────────────────────────────────────
+ * v3.17: a compact pill-group used by the Report tab's customisation
+ * options (font scale / image mode). Renders as a labelled row with one
+ * toggle button per option — keyboard accessible (real <button>s with
+ * aria-pressed), 36px touch targets. */
+function SegmentedControl({
+  icon,
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  options: Array<{ value: string; label: string }>;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 dark:border-slate-700 dark:bg-slate-900">
+      <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+        {icon}
+        {label}
+      </span>
+      <div className="ml-auto flex gap-1" role="group" aria-label={label}>
+        {options.map((opt) => {
+          const active = value === opt.value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              aria-pressed={active}
+              onClick={() => onChange(opt.value)}
+              className={`h-7 min-w-[44px] rounded-md px-2 text-[11px] font-medium transition-colors ${
+                active
+                  ? "bg-teal-600 text-white hover:bg-teal-700"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+              }`}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
       </div>
     </div>
   );

@@ -39,6 +39,11 @@ import type {
   NormalizedLineageEdge,
   Select2DSummary,
 } from "./types";
+import type {
+  ReportFontScale,
+  ReportImageMode,
+  ReportTemplateId,
+} from "./report-style";
 
 import {
   MAJOR_JOB_TYPES,
@@ -67,6 +72,26 @@ import {
 } from "./lineage";
 
 export interface ReportHtmlOptions {
+  /**
+   * v3.17 — visual template skin (default "paper"). "classic" keeps the
+   * pre-3.17 stylesheet verbatim (gradients + auto light/dark); the three
+   * new skins (paper / minimal / slate) are flat, restrained, print-clean
+   * designs generated from a token spec.
+   */
+  template?: ReportTemplateId;
+  /** Base font-size scale (default "standard"). */
+  fontScale?: ReportFontScale;
+  /**
+   * Image delivery mode (default "embed"):
+   *  - embed  : use `embeddedImages` data-URLs when available (self-contained)
+   *  - remote : always reference the source URL (smaller file)
+   *  - none   : strip image tags entirely — data tables/captions stay
+   */
+  imageMode?: ReportImageMode;
+  /** Custom report title (default: "CryoSmart Lineage: <P> / <J>"). */
+  titleOverride?: string;
+  /** Optional note line under the title (author / date / remark). */
+  subtitle?: string;
   /** { remoteUrl -> base64 data-URL } map from prefetchImagesForReport() */
   embeddedImages?: Record<string, string>;
   /**
@@ -1337,6 +1362,12 @@ export interface ReportHtmlOptions {
    *  Inside an `.imgs-block` (log images / micrographs media blocks) the
    *  heading count is rewritten as figures disappear, and the whole block
    *  hides once its last figure is gone. */
+  /** v3.17: imageMode "none" strips every <img> from the report (data
+   *  tables, captions and counts are untouched). */
+  function imagesEnabled(opts?: ReportHtmlOptions): boolean {
+    return (opts?.imageMode ?? "embed") !== "none";
+  }
+
   export function reportImgTag(
     nodeUid: string,
     name: string,
@@ -1346,6 +1377,7 @@ export interface ReportHtmlOptions {
     opts?: ReportHtmlOptions,
   ): string {
     if (!remoteSrc) return "";
+    if (!imagesEnabled(opts)) return "";
     const cls = className ? ` class="${escHtml(className)}"` : "";
     // Shared "final failure" handler: hide the figure (or <a>, or the img),
     // keep .imgs-block headings truthful, and collapse empty image blocks.
@@ -1364,8 +1396,10 @@ export interface ReportHtmlOptions {
       "if(m){h.textContent=h.textContent.replace(m[0],'('+v+(m[2]?' / '+m[2]:'')+')');}}" +
       "if(!v){b.classList.add('block-gone');}}";
     // Prefer embedded base64 when available so the image renders standalone
-    // (works in iframe, new window, and downloaded bundle alike).
-    if (opts?.embeddedImages?.[remoteSrc]) {
+    // (works in iframe, new window, and downloaded bundle alike). v3.17:
+    // only in "embed" mode — "remote" deliberately skips the data-URLs so
+    // the file stays small and images resolve against the live source.
+    if ((opts?.imageMode ?? "embed") === "embed" && opts?.embeddedImages?.[remoteSrc]) {
       return `<img${cls} src="${escHtml(opts.embeddedImages[remoteSrc])}" alt="${escHtml(alt)}" loading="lazy" decoding="async" data-embedded="1">`;
     }
     // Bundle mode: the downloadable ZIP ships an `images/` folder alongside
@@ -1432,6 +1466,7 @@ export interface ReportHtmlOptions {
     opts?: ReportHtmlOptions,
     variant?: "compact",
   ): string {
+    if (!imagesEnabled(opts)) return "";
     const good = (images || [])
       .filter((item): item is ImageAsset => Boolean(item && item.url && (item as ImageAsset).src))
       .slice(0, limit);
@@ -1608,18 +1643,19 @@ export interface ReportHtmlOptions {
           item.result_name && item.result_name !== "map"
             ? `${item.group}.${item.result_name}`
             : item.group;
-        // The local filename MUST come from mapPreviewAssetName() — bundle.ts
-        // saves the ZIP preview image under the same name (offline report).
-        const preview = item.preview_url
-          ? `<a class="map-cell-img" href="${escHtml(item.preview_original_url || item.preview_url)}" target="_blank">${reportImgTag(
-              node.uid,
-              mapPreviewAssetName(item),
-              item.preview_src || item.preview_url,
-              "map-preview",
-              `${label} preview`,
-              opts
-            )}</a>`
-          : `<span class="map-cell-img map-cell-none">无预览</span>`;
+        // v3.17: imageMode "none" degrades to the text placeholder instead
+        // of an <img> (the cell keeps its label + download link — data intact).
+        const preview =
+          item.preview_url && imagesEnabled(opts)
+            ? `<a class="map-cell-img" href="${escHtml(item.preview_original_url || item.preview_url)}" target="_blank">${reportImgTag(
+                node.uid,
+                mapPreviewAssetName(item),
+                item.preview_src || item.preview_url,
+                "map-preview",
+                `${label} preview`,
+                opts
+              )}</a>`
+            : `<span class="map-cell-img map-cell-none">${imagesEnabled(opts) ? "无预览" : "图片已省略"}</span>`;
         return `<div class="map-cell">${preview}<div class="map-cell-name" title="${escHtml(
           label,
         )}">${escHtml(label)}</div><a class="map-dl" href="${escHtml(
@@ -1755,8 +1791,9 @@ export interface ReportHtmlOptions {
     const node = reportFirstMicrographNode(summary);
     if (!node) return "";
     const imgs = (node.representative_micrograph_images || []).slice(0, 3);
-    const imgHtml = imgs.length
-      ? `<div class="pf-mic-imgs">${imgs
+    const imgHtml =
+      imgs.length && imagesEnabled(opts)
+        ? `<div class="pf-mic-imgs">${imgs
           .map((item) =>
             reportPictureImg(
               node.uid,
@@ -1796,8 +1833,9 @@ export interface ReportHtmlOptions {
       Number.isInteger(input) && Number.isInteger(selected as number) && input
         ? `${Math.round(((selected as number) / input!) * 1000) / 10}%`
         : "";
-    const img = s.selected_classes_image
-      ? `<div class="pf-select-img">${reportPictureImg(
+    const img =
+      s.selected_classes_image && imagesEnabled(opts)
+        ? `<div class="pf-select-img">${reportPictureImg(
           node.uid,
           // Same name as the media block ("templates_selected") so both
           // <img> tags share ONE local file in the offline ZIP bundle.
@@ -2033,6 +2071,413 @@ export interface ReportHtmlOptions {
   }
 
   /* ================================================================== */
+  /*  v3.17 report templates — token-driven skins (paper/minimal/slate)  */
+  /* ================================================================== */
+
+  /** Design tokens for one v3.17 report skin. `buildTemplateCss()` turns a
+   *  spec into the full stylesheet; the body markup is IDENTICAL across
+   *  templates (content is never watered down — only the skin changes). */
+  interface ReportTemplateSpec {
+    id: "paper" | "minimal" | "slate";
+    fontBody: string;
+    /** base body font-size (px) at fontScale "standard" */
+    baseFontPx: number;
+    /** paper: centered academic title block */
+    centerHeader: boolean;
+    bg: string;
+    bg2: string;
+    panel: string;
+    panel2: string;
+    panel3: string;
+    text: string;
+    text2: string;
+    text3: string;
+    muted: string;
+    muted2: string;
+    line: string;
+    line2: string;
+    link: string;
+    linkHover: string;
+    linkUnderline: "none" | "hover" | "always";
+    /** primary button (.download-all) */
+    btnBg: string;
+    btnText: string;
+    btnBorder: string;
+    btnHoverBg: string;
+    micro: string;
+    microBg: string;
+    microBorder: string;
+    particle: string;
+    particleBg: string;
+    particleBorder: string;
+    volume: string;
+    volumeBg: string;
+    volumeBorder: string;
+    smallBg: string;
+    smallBorder: string;
+    radius: string;
+    radiusSm: string;
+    radiusLg: string;
+    shadowSm: string;
+    shadow: string;
+    rowHover: string;
+    thBg: string;
+    /** extra CSS appended verbatim (template-specific flourishes) */
+    extra?: string;
+  }
+
+  const REPORT_FONT_MONO =
+    '"SF Mono","JetBrains Mono",Monaco,"Cascadia Code","Roboto Mono",Consolas,monospace';
+
+  /** Paper — 学术纸面：serif、纯白纸面、hairline 边框、书册式表格。 */
+  const PAPER_SPEC: ReportTemplateSpec = {
+    id: "paper",
+    fontBody: 'Georgia,"Times New Roman","Songti SC","Noto Serif CJK SC",serif',
+    baseFontPx: 15,
+    centerHeader: true,
+    bg: "#ffffff",
+    bg2: "#f7f6f3",
+    panel: "#ffffff",
+    panel2: "#fbfaf8",
+    panel3: "#f4f2ee",
+    text: "#1c1917",
+    text2: "#292524",
+    text3: "#57534e",
+    muted: "#79716b",
+    muted2: "#a8a29e",
+    line: "#e5e2dd",
+    line2: "#d6d1ca",
+    link: "#7a2e2e",
+    linkHover: "#5d2222",
+    linkUnderline: "always",
+    btnBg: "#ffffff",
+    btnText: "#292524",
+    btnBorder: "#292524",
+    btnHoverBg: "#f4f2ee",
+    micro: "#3f5c34",
+    microBg: "#f3f7f0",
+    microBorder: "#ccd9c3",
+    particle: "#8a5800",
+    particleBg: "#faf4e8",
+    particleBorder: "#e0d0ab",
+    volume: "#1f5750",
+    volumeBg: "#eef4f2",
+    volumeBorder: "#bfd4cf",
+    smallBg: "#f4f2ee",
+    smallBorder: "#d6d1ca",
+    radius: "2px",
+    radiusSm: "2px",
+    radiusLg: "3px",
+    shadowSm: "none",
+    shadow: "none",
+    rowHover: "#f7f6f3",
+    thBg: "#f4f2ee",
+    extra: [
+      // Academic flourishes: double rule under the title block, booktabs-style
+      // table heads, print page setup.
+      "header{border-bottom:3px double var(--line-2)}",
+      ".source-table th,table th{background:transparent;border-bottom:1.5px solid var(--line-2)}",
+      ".source-table{border:0}",
+      ".source-table thead th{border-top:1.5px solid var(--line-2)}",
+      ".classes{border:0}",
+      "th{background:transparent;border-top:1.5px solid var(--line-2)}",
+      "tr:hover td{background:var(--row-hover)}",
+      "@page{margin:14mm}",
+    ].join("\n"),
+  };
+
+  /** Minimal — 极简：系统无衬线、大量留白、近单色（marker-only kind 色）。 */
+  const MINIMAL_SPEC: ReportTemplateSpec = {
+    id: "minimal",
+    fontBody:
+      '-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,"Helvetica Neue",Arial,sans-serif',
+    baseFontPx: 14,
+    centerHeader: false,
+    bg: "#ffffff",
+    bg2: "#fafafa",
+    panel: "#ffffff",
+    panel2: "#fafafa",
+    panel3: "#f4f4f5",
+    text: "#18181b",
+    text2: "#27272a",
+    text3: "#52525b",
+    muted: "#71717a",
+    muted2: "#a1a1aa",
+    line: "#e9eaec",
+    line2: "#d4d4d8",
+    link: "#0f766e",
+    linkHover: "#115e59",
+    linkUnderline: "hover",
+    btnBg: "#18181b",
+    btnText: "#fafafa",
+    btnBorder: "#18181b",
+    btnHoverBg: "#3f3f46",
+    micro: "#15803d",
+    microBg: "transparent",
+    microBorder: "#e9eaec",
+    particle: "#b45309",
+    particleBg: "transparent",
+    particleBorder: "#e9eaec",
+    volume: "#0f766e",
+    volumeBg: "transparent",
+    volumeBorder: "#e9eaec",
+    smallBg: "#f4f4f5",
+    smallBorder: "#e4e4e7",
+    radius: "6px",
+    radiusSm: "4px",
+    radiusLg: "8px",
+    shadowSm: "0 1px 2px 0 rgba(0,0,0,.03)",
+    shadow: "0 2px 10px -2px rgba(0,0,0,.08)",
+    rowHover: "#fafafa",
+    thBg: "#fafafa",
+  };
+
+  /** Slate — 暗色专业：深色面板、低对比文字、暗室演示友好。 */
+  const SLATE_SPEC: ReportTemplateSpec = {
+    id: "slate",
+    fontBody:
+      '-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,"Helvetica Neue",Arial,sans-serif',
+    baseFontPx: 14,
+    centerHeader: false,
+    bg: "#0f1318",
+    bg2: "#151a20",
+    panel: "#161b22",
+    panel2: "#1a2029",
+    panel3: "#222935",
+    text: "#e6eaf0",
+    text2: "#c3cbd6",
+    text3: "#8b95a3",
+    muted: "#6e7887",
+    muted2: "#4d5666",
+    line: "#262d38",
+    line2: "#333c4a",
+    link: "#5eead4",
+    linkHover: "#99f6e4",
+    linkUnderline: "hover",
+    btnBg: "#0d9488",
+    btnText: "#e6fffb",
+    btnBorder: "#0d9488",
+    btnHoverBg: "#0f766e",
+    micro: "#4ade80",
+    microBg: "rgba(74,222,128,.07)",
+    microBorder: "rgba(74,222,128,.28)",
+    particle: "#fbbf24",
+    particleBg: "rgba(251,191,36,.07)",
+    particleBorder: "rgba(251,191,36,.28)",
+    volume: "#2dd4bf",
+    volumeBg: "rgba(45,212,191,.07)",
+    volumeBorder: "rgba(45,212,191,.28)",
+    smallBg: "rgba(148,163,184,.07)",
+    smallBorder: "rgba(148,163,184,.2)",
+    radius: "8px",
+    radiusSm: "6px",
+    radiusLg: "10px",
+    shadowSm: "0 1px 2px 0 rgba(0,0,0,.35)",
+    shadow: "0 4px 18px -6px rgba(0,0,0,.5)",
+    rowHover: "#1a2029",
+    thBg: "#222935",
+  };
+
+  /** Font-scale multipliers for the three v3.17 skins. */
+  const REPORT_FONT_SCALE_MULT: Record<ReportFontScale, number> = {
+    compact: 0.9,
+    standard: 1,
+    comfortable: 1.14,
+  };
+
+  /** Generate the full v3.17 stylesheet for one skin. Covers every class the
+   *  body markup emits (outline / picture-flow / job cards / tables / image
+   *  grids / map cells / gone-markers / responsive + print). */
+  function buildTemplateCss(spec: ReportTemplateSpec, fontPx: number): string {
+    const linkDeco =
+      spec.linkUnderline === "always"
+        ? "text-decoration:underline"
+        : "text-decoration:none";
+    const linkHoverDeco = spec.linkUnderline === "none" ? "" : "text-decoration:underline";
+    const headerCss = spec.centerHeader
+      ? ".top{display:block;text-align:center;padding:24px 24px 18px}"
+      : ".top{display:flex;align-items:center;gap:20px;padding:18px 24px}";
+    return (
+      `:root{--bg:${spec.bg};--bg-2:${spec.bg2};--panel:${spec.panel};--panel-2:${spec.panel2};--panel-3:${spec.panel3};--text:${spec.text};--text-2:${spec.text2};--text-3:${spec.text3};--muted:${spec.muted};--muted-2:${spec.muted2};--line:${spec.line};--line-2:${spec.line2};--micro:${spec.micro};--micro-bg:${spec.microBg};--micro-border:${spec.microBorder};--particle:${spec.particle};--particle-bg:${spec.particleBg};--particle-border:${spec.particleBorder};--volume:${spec.volume};--volume-bg:${spec.volumeBg};--volume-border:${spec.volumeBorder};--small-bg:${spec.smallBg};--small-border:${spec.smallBorder};--radius:${spec.radius};--radius-sm:${spec.radiusSm};--radius-lg:${spec.radiusLg};--font-ui:${spec.fontBody};--font-mono:${REPORT_FONT_MONO};--shadow-sm:${spec.shadowSm};--shadow:${spec.shadow};--link:${spec.link};--link-hover:${spec.linkHover};--th-bg:${spec.thBg};--row-hover:${spec.rowHover};--btn-bg:${spec.btnBg};--btn-text:${spec.btnText};--btn-border:${spec.btnBorder};--btn-hover-bg:${spec.btnHoverBg}}\n` +
+      "*{box-sizing:border-box;margin:0;padding:0}\n" +
+      "html{scroll-behavior:smooth;background:var(--bg)}\n" +
+      `body{background:var(--bg);color:var(--text);font:${fontPx}px/1.65 var(--font-ui);-webkit-font-smoothing:antialiased;min-height:100vh}\n` +
+      `a{color:var(--link);${linkDeco}}\n` +
+      `a:hover{color:var(--link-hover);${linkHoverDeco}}\n` +
+      "header{background:var(--panel);border-bottom:1px solid var(--line)}\n" +
+      `${headerCss}\n` +
+      ".title h1{font-size:1.5em;font-weight:600;letter-spacing:-.01em;color:var(--text)}\n" +
+      ".title p{margin-top:6px;color:var(--muted);font-size:.85em}\n" +
+      ".title p b{color:var(--text-3);font-weight:600;font-variant-numeric:tabular-nums}\n" +
+      ".title .note{margin-top:4px;color:var(--text-3);font-size:.85em;font-style:italic}\n" +
+      ".workspace{max-width:1240px;margin:0 auto;display:grid;grid-template-columns:minmax(340px,23vw) minmax(0,1fr);gap:20px;padding:20px 24px 40px;width:100%;align-items:start}\n" +
+      ".pane{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);overflow:hidden}\n" +
+      ".flow-pane{position:sticky;top:16px;max-height:calc(100vh - 32px);overflow:auto;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}\n" +
+      ".flow-pane::-webkit-scrollbar{width:6px}\n" +
+      ".flow-pane::-webkit-scrollbar-track{background:transparent}\n" +
+      ".flow-pane::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:3px}\n" +
+      ".flow-pane::-webkit-scrollbar-thumb:hover{background:var(--muted-2)}\n" +
+      ".pane-head,.chain-head{display:flex;align-items:baseline;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line)}\n" +
+      ".pane-head h2,.chain-head h2{margin:0;font-size:1em;font-weight:600;color:var(--text)}\n" +
+      ".chain-head .hint{color:var(--text-3);margin-left:auto;font-size:.8em}\n" +
+      ".legend{display:flex;gap:10px;margin-left:auto}\n" +
+      ".legend span{display:inline-flex;align-items:center;gap:5px;font-size:.75em;color:var(--muted);letter-spacing:.03em}\n" +
+      ".legend span::before{content:\"\";width:8px;height:8px;border-radius:2px;background:var(--kc,var(--muted-2))}\n" +
+      ".legend .micrograph{--kc:var(--micro)}\n" +
+      ".legend .particle{--kc:var(--particle)}\n" +
+      ".legend .volume{--kc:var(--volume)}\n" +
+      ".outline{padding:12px}\n" +
+      ".stage{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel-2);padding:10px;margin-bottom:8px}\n" +
+      ".stage h3{margin:0 0 10px;font-size:.72em;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.07em}\n" +
+      ".phase{display:grid;grid-template-columns:88px minmax(0,1fr);gap:10px;align-items:start;border-top:1px solid var(--line);padding-top:10px;margin-top:10px}\n" +
+      ".phase:first-of-type{border-top:0;padding-top:0;margin-top:0}\n" +
+      ".phase-label{font-size:.72em;font-weight:700;color:var(--text-3);line-height:1.3;padding-top:6px;letter-spacing:.02em;text-transform:uppercase}\n" +
+      ".stage-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}\n" +
+      ".mini-node{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:8px;align-items:start;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:10px;min-height:64px;color:var(--text);cursor:default;position:relative;overflow:hidden}\n" +
+      ".mini-node::before{content:\"\";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--kc,var(--muted-2))}\n" +
+      ".mini-node.micrograph{--kc:var(--micro);border-color:var(--micro-border);background:var(--micro-bg)}\n" +
+      ".mini-node.particle{--kc:var(--particle);border-color:var(--particle-border);background:var(--particle-bg)}\n" +
+      ".mini-node.volume{--kc:var(--volume);border-color:var(--volume-border);background:var(--volume-bg)}\n" +
+      ".mini-node b{font-size:.9em;font-weight:700;display:block;grid-column:1;color:var(--text);font-family:var(--font-mono)}\n" +
+      ".mini-node span{font-size:.72em;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;grid-column:1;color:var(--text-2);margin-top:2px}\n" +
+      ".mini-node em{font-style:normal;font-size:.68em;color:var(--muted);display:block;grid-column:1;margin-top:3px;line-height:1.3}\n" +
+      ".mini-node p{grid-column:2;grid-row:1 / span 3;margin:0;display:grid;grid-template-columns:repeat(2,max-content);justify-content:end;align-content:start;gap:2px 3px;min-width:54px}\n" +
+      ".ref-pill{display:block;border-radius:3px;padding:1px 4px;min-width:26px;text-align:center;font-size:.62em;line-height:1.2;font-style:normal;font-weight:700;border:1px solid;white-space:nowrap;letter-spacing:.02em;font-family:var(--font-mono)}\n" +
+      ".ref-pill.exposure,.ref-pill.micrograph{color:var(--micro);background:var(--micro-bg);border-color:var(--micro-border)}\n" +
+      ".ref-pill.particle{color:var(--particle);background:var(--particle-bg);border-color:var(--particle-border)}\n" +
+      ".ref-pill.volume{color:var(--volume);background:var(--volume-bg);border-color:var(--volume-border)}\n" +
+      ".ref-pill.template,.ref-pill.other{color:var(--muted);background:var(--small-bg);border-color:var(--small-border)}\n" +
+      ".stage-arrow{text-align:center;color:var(--muted-2);font-weight:600;font-size:14px;margin:-2px 0 6px}\n" +
+      ".picture-flow{margin:10px 0 0;border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--panel);padding:12px}\n" +
+      ".picture-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:10px}\n" +
+      ".picture-head h2{margin:0;font-size:.95em;font-weight:600;color:var(--text)}\n" +
+      ".picture-head span{font-size:.75em;color:var(--text-3)}\n" +
+      ".pf-start,.pf-round,.pf-step,.pf-map-job,.pf-final{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);padding:12px;margin:0 0 10px}\n" +
+      ".pf-big{font-size:1.2em;font-weight:700;color:var(--text);text-align:center;font-family:var(--font-mono)}\n" +
+      ".pf-note{font-size:.8em;color:var(--text-3);line-height:1.5;text-align:center;margin-top:4px}\n" +
+      ".pf-mic-imgs{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:8px 0}\n" +
+      ".pf-mic-imgs img{width:100%;aspect-ratio:4/3;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2)}\n" +
+      ".pf-arrow{text-align:center;font-size:16px;line-height:1;color:var(--muted-2);margin:4px 0 8px}\n" +
+      ".pf-round-head h3{margin:0 0 8px;font-size:1em;font-weight:600;color:var(--text)}\n" +
+      ".pf-subhead{font-size:.7em;font-weight:700;text-align:center;margin:0 0 6px;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em}\n" +
+      ".pf-particle-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:8px}\n" +
+      ".pf-particle-step{display:block;border:1px solid var(--line);border-left:3px solid var(--particle);border-radius:var(--radius);background:var(--panel);padding:10px;color:var(--text)}\n" +
+      ".pf-particle-step b{display:block;font-size:.85em;font-weight:700;font-family:var(--font-mono);color:var(--particle)}\n" +
+      ".pf-particle-step span{display:block;font-size:.72em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-2);margin-top:3px}\n" +
+      ".pf-particle-step em{display:block;font-style:normal;font-size:.72em;color:var(--muted);margin-top:2px}\n" +
+      ".pf-step-title{font-weight:700;font-size:.78em;text-align:center;margin-bottom:4px;color:var(--text-2);text-transform:uppercase;letter-spacing:.04em;font-family:var(--font-mono)}\n" +
+      ".pf-select-img img{display:block;width:100%;max-height:170px;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2);margin-top:6px}\n" +
+      ".pf-classes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px}\n" +
+      ".pf-class{margin:0;padding:8px;border:1px solid var(--line);background:var(--panel);border-radius:var(--radius-sm);text-align:center}\n" +
+      ".pf-class.selected{border-color:var(--particle);box-shadow:inset 0 0 0 1px var(--particle)}\n" +
+      ".pf-class img{display:block;width:100%;height:78px;object-fit:contain;background:var(--bg-2);border-radius:3px}\n" +
+      ".pf-class figcaption{font-size:.68em;color:var(--muted);margin-top:4px}\n" +
+      ".pf-class b{display:block;font-size:.9em;font-weight:700;color:var(--text);margin-top:2px;font-family:var(--font-mono)}\n" +
+      ".pf-class span{display:block;font-size:.68em;color:var(--muted)}\n" +
+      ".pf-final-img img{display:block;width:180px;max-width:100%;height:150px;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2);margin:8px auto}\n" +
+      ".cards{padding:12px;display:grid;gap:12px}\n" +
+      ".job-card{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;border:1px solid var(--line);border-left:3px solid var(--jc,var(--muted-2));border-radius:var(--radius-lg);background:var(--panel);padding:14px;position:relative;scroll-margin-top:24px}\n" +
+      ".job-card.micrograph{--jc:var(--micro)}\n" +
+      ".job-card.particle{--jc:var(--particle)}\n" +
+      ".job-card.volume{--jc:var(--volume)}\n" +
+      ".job-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}\n" +
+      ".job-head h2{margin:0;font-size:1.05em;font-weight:700;color:var(--text);font-family:var(--font-mono)}\n" +
+      ".metrics{display:flex;flex-wrap:wrap;gap:6px}\n" +
+      ".chip{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;border:1px solid var(--small-border);background:var(--small-bg);font-size:.75em;font-weight:600;white-space:nowrap;color:var(--text-2);font-family:var(--font-mono);letter-spacing:.01em}\n" +
+      ".chip.micrograph{background:var(--micro-bg);border-color:var(--micro-border);color:var(--micro)}\n" +
+      ".chip.particle{background:var(--particle-bg);border-color:var(--particle-border);color:var(--particle)}\n" +
+      ".chip.volume,.chip.class{background:var(--volume-bg);border-color:var(--volume-border);color:var(--volume)}\n" +
+      ".chip.aux{background:var(--small-bg);border-color:var(--small-border);color:var(--muted)}\n" +
+      ".source-block,.media-block,.map-block{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}\n" +
+      "h3{margin:0 0 6px;font-size:.72em;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em}\n" +
+      ".source-table{width:100%;border-collapse:collapse;font-size:.85em;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--line)}\n" +
+      ".source-table th,.source-table td{border-bottom:1px solid var(--line);padding:5px 8px;vertical-align:middle;text-align:left}\n" +
+      ".source-table tr:last-child td{border-bottom:0}\n" +
+      ".source-table th{background:var(--th-bg);color:var(--text-3);font-weight:600;font-size:.7em;text-transform:uppercase;letter-spacing:.05em}\n" +
+      ".source-table tr:hover td{background:var(--row-hover)}\n" +
+      ".kind-cell{width:54px;text-align:center;font-weight:700}\n" +
+      ".kind-cell i{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:5px;vertical-align:middle}\n" +
+      ".kind-cell.exposure i{background:var(--micro)}\n" +
+      ".kind-cell.particle i{background:var(--particle)}\n" +
+      ".kind-cell.volume i{background:var(--volume)}\n" +
+      ".kind-cell.template i,.kind-cell.other i{background:var(--muted-2)}\n" +
+      ".source-table em{font-style:normal;color:var(--muted);margin-left:6px;font-size:.78em}\n" +
+      ".up-cell{color:var(--text-2);line-height:1.5}\n" +
+      ".up-route{display:block;font-weight:600;color:var(--text);border-bottom:1px solid var(--line-2);margin-bottom:4px;padding-bottom:3px;font-size:.85em;font-family:var(--font-mono)}\n" +
+      ".up-list{display:grid;gap:3px}\n" +
+      ".up-line{display:block;font-size:.85em;color:var(--text-3)}\n" +
+      ".job-out{border-left:2px solid var(--line);padding-left:12px;color:var(--text-2)}\n" +
+      ".job-out h3{white-space:nowrap}\n" +
+      ".job-out div{margin:0 0 4px;padding:5px 8px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius-sm);font-size:.85em}\n" +
+      ".job-out div:hover{border-color:var(--line-2)}\n" +
+      ".quiet{color:var(--muted);font-style:italic}\n" +
+      ".class-toolbar{margin-top:8px;display:flex;align-items:center;gap:6px}\n" +
+      ".class-toolbar span{font-weight:600;font-size:.85em;color:var(--text-2);margin-right:auto}\n" +
+      ".classes{margin-top:6px;border:1px solid var(--line);border-radius:var(--radius-sm);overflow:auto}\n" +
+      "table{width:100%;border-collapse:collapse;font-size:.85em}\n" +
+      "th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left}\n" +
+      "th{background:var(--th-bg);color:var(--text-3);font-weight:600;font-size:.7em;text-transform:uppercase;letter-spacing:.04em}\n" +
+      "tr:hover td{background:var(--row-hover)}\n" +
+      ".horizontal-table th:first-child{left:0;position:sticky;z-index:2;background:var(--th-bg)}\n" +
+      ".horizontal-table td,.horizontal-table th{min-width:74px;text-align:center}\n" +
+      ".download-head{display:flex;align-items:center;gap:8px;margin-top:8px}\n" +
+      ".download-all{border:1px solid var(--btn-border);background:var(--btn-bg);color:var(--btn-text);border-radius:var(--radius-sm);padding:6px 14px;font-size:.8em;font-weight:600;cursor:pointer;font-family:var(--font-mono);transition:background-color .15s ease}\n" +
+      ".download-all:hover{background:var(--btn-hover-bg)}\n" +
+      ".download-links{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}\n" +
+      ".download-links a{padding:4px 10px;border:1px solid var(--line-2);border-radius:var(--radius-sm);font-size:.75em;font-weight:500;color:var(--text-2);font-family:var(--font-mono);text-decoration:none}\n" +
+      ".download-links a:hover{border-color:var(--link);color:var(--link);text-decoration:none}\n" +
+      ".imgs{display:flex;gap:10px;flex-wrap:wrap}\n" +
+      ".imgs-c{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px}\n" +
+      ".cls-sec{margin-top:6px}\n" +
+      ".cls-head{display:flex;align-items:center;gap:8px;margin:2px 0 4px;font-size:.68em;font-weight:700;color:var(--text-3);text-transform:uppercase;letter-spacing:.05em}\n" +
+      ".cls-head .cnt{margin-left:auto;font-weight:500;color:var(--muted);font-family:var(--font-mono);font-size:.95em}\n" +
+      ".imgbox{flex:1 1 180px;min-width:140px;max-width:240px;margin:0;padding:6px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel-2)}\n" +
+      ".imgbox:hover{border-color:var(--line-2)}\n" +
+      ".imgbox img{display:block;width:100%;aspect-ratio:4/3;object-fit:contain;background:var(--bg-2);border:1px solid var(--line);border-radius:var(--radius-sm)}\n" +
+      ".imgbox figcaption{margin-top:5px;font-size:.75em;color:var(--muted);font-weight:500;font-family:var(--font-mono)}\n" +
+      ".imgbox.sm{padding:4px;border-radius:var(--radius-sm)}\n" +
+      ".imgbox.sm img{border-radius:3px}\n" +
+      ".imgbox.sm figcaption{margin-top:3px;font-size:.68em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n" +
+      ".class-preview,.map-preview{max-width:94px;max-height:70px;object-fit:contain;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--bg-2)}\n" +
+      ".map-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:6px}\n" +
+      ".map-cell{border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel-2);padding:6px;text-align:center}\n" +
+      ".map-cell:hover{border-color:var(--line-2)}\n" +
+      ".map-cell-img{display:flex;align-items:center;justify-content:center;height:78px;background:var(--bg-2);border-radius:3px;overflow:hidden}\n" +
+      ".map-cell-img .map-preview{max-width:100%;max-height:78px;width:auto;height:auto}\n" +
+      ".map-cell-none{display:flex;align-items:center;justify-content:center;height:78px;background:var(--bg-2);border-radius:3px;color:var(--muted);font-size:.7em}\n" +
+      ".map-cell-name{margin-top:4px;font-size:.7em;color:var(--text-2);font-family:var(--font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n" +
+      ".map-dl{display:inline-block;margin-top:3px;font-size:.7em;font-weight:600;color:var(--link);text-decoration:underline}\n" +
+      ".map-dl:hover{color:var(--link-hover)}\n" +
+      ".img-gone{display:none!important}\n" +
+      ".imgs-block.block-gone{display:none!important}\n" +
+      "@media(max-width:1180px){.workspace{grid-template-columns:1fr;width:100%}.flow-pane{position:relative;top:auto;max-height:none}.job-card{grid-template-columns:minmax(0,1fr)}}\n" +
+      "@media print{header{position:static}.workspace{grid-template-columns:1fr;padding:0}.flow-pane{position:relative;top:auto;max-height:none;overflow:visible}.download-all,.download-links{display:none}a{color:inherit}}\n" +
+      (spec.extra ? `${spec.extra}\n` : "")
+    );
+  }
+
+  /** Resolve the stylesheet for any template id (classic = legacy CSS). */
+  export function buildReportCss(
+    template: ReportTemplateId = "paper",
+    fontScale: ReportFontScale = "standard",
+  ): string {
+    if (template === "classic") {
+      const mult = REPORT_FONT_SCALE_MULT[fontScale] ?? 1;
+      // Same-specificity later rules override the legacy `font:14px/1.6 …`
+      // shorthand; append only when a non-default scale is requested.
+      const override =
+        mult !== 1
+          ? `body{font-size:${Math.round(14 * mult * 10) / 10}px}\n.title .note{font-style:italic}\n`
+          : ".title .note{font-style:italic}\n";
+      return REPORT_HTML_V2_CSS + override;
+    }
+    const spec =
+      template === "minimal" ? MINIMAL_SPEC : template === "slate" ? SLATE_SPEC : PAPER_SPEC;
+    const fontPx = Math.round(spec.baseFontPx * (REPORT_FONT_SCALE_MULT[fontScale] ?? 1) * 10) / 10;
+    return buildTemplateCss(spec, fontPx);
+  }
+
+  /* ================================================================== */
   /*  V2 main entry point                                                */
   /* ================================================================== */
 
@@ -2067,7 +2512,12 @@ export interface ReportHtmlOptions {
    * — which broke BOTH the iframe auto-resize AND every 一键下载 button).
    * Keep it balanced; prefer appending statements rather than editing tails.
    */
-  const REPORT_HTML_V2_SCRIPT = `document.addEventListener("click",(event)=>{const button=event.target.closest(".download-all");if(button){event.preventDefault();const urls=(button.dataset.urls||"").split("|").filter(Boolean);const names=(button.dataset.names||"").split("|").filter(Boolean);urls.forEach((url,index)=>{if(!url||url.startsWith("#"))return;const name=names[index]||url.split("/").pop()||"download";setTimeout(()=>{fetch(url).then(r=>{if(!r.ok){window.open(url,"_blank");return}return r.blob()}).then(blob=>{if(blob){const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}}).catch(()=>window.open(url,"_blank"))},index*200);});}});document.addEventListener("click",function(e){var t=e.target;if(!t||!t.closest)return;var a=t.closest('a[href^="#"]');if(!a)return;var href=a.getAttribute("href");if(!href||href==="#")return;var el=document.getElementById(href.slice(1));if(el){e.preventDefault();try{el.scrollIntoView({behavior:"smooth",block:"start"});}catch(err){el.scrollIntoView();}}});(function(){function report(){try{var h=Math.max(document.documentElement&&document.documentElement.scrollHeight||0,document.body&&document.body.scrollHeight||0,document.documentElement&&document.documentElement.offsetHeight||0);if(window.parent&&window.parent!==window){window.parent.postMessage({type:"cryosmart-report-height",height:(h|0)},"*");}}catch(e){}}var t=null;function debounce(){if(t)clearTimeout(t);t=setTimeout(report,80);}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",report);}else{report();}window.addEventListener("load",report);window.addEventListener("resize",debounce);if(window.ResizeObserver&&document.body){try{new ResizeObserver(debounce).observe(document.body);}catch(e){}}document.addEventListener("load",function(e){if(e.target&&e.target.tagName==="IMG"){debounce();}},true);})();`;
+  const REPORT_HTML_V2_SCRIPT = `document.addEventListener("click",(event)=>{const button=event.target.closest(".download-all");if(button){event.preventDefault();const urls=(button.dataset.urls||"").split("|").filter(Boolean);const names=(button.dataset.names||"").split("|").filter(Boolean);urls.forEach((url,index)=>{if(!url||url.startsWith("#"))return;const name=names[index]||url.split("/").pop()||"download";setTimeout(()=>{fetch(url).then(r=>{if(!r.ok){window.open(url,"_blank");return}return r.blob()}).then(blob=>{if(blob){const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}}).catch(()=>window.open(url,"_blank"))},index*200);});}});document.addEventListener("click",function(e){var t=e.target;if(!t||!t.closest)return;var a=t.closest('a[href^="#"]');if(!a)return;var href=a.getAttribute("href");if(!href||href==="#")return;var el=document.getElementById(href.slice(1));if(el){e.preventDefault();try{el.scrollIntoView({behavior:"smooth",block:"start"});}catch(err){el.scrollIntoView();}}});`;
+  // v3.17: the height-reporting IIFE that used to live at the tail of this
+  // script was REMOVED — the web UI no longer embeds the report in an
+  // auto-resizing iframe (download / new-tab only), so nobody listens to
+  // those postMessages anymore. Keep the download-all + anchor-scroll
+  // handlers; keep the string balanced (see the comment above).
 
   /**
    * Build the V2 lineage report — a standalone HTML page with a left outline
@@ -2085,13 +2535,27 @@ export interface ReportHtmlOptions {
       .sort((a, b) => uidOrder(a) - uidOrder(b))
       .map((node) => reportJobCard(node, summary, state, opts))
       .join("");
-    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CryoSmart ${escHtml(
-      summary.project_uid,
-    )} ${escHtml(summary.start_uid)} Lineage</title><script>(function(){try{var t=localStorage.getItem('theme');var d=t==='dark'||(t==='system'||!t)&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;if(d)document.documentElement.classList.add('dark');else document.documentElement.classList.add('light')}catch(e){}})();</script><style>${REPORT_HTML_V2_CSS}</style></head><body><header><div class="top"><div class="title"><h1>CryoSmart Lineage: ${escHtml(
-      summary.project_uid,
-    )} / ${escHtml(summary.start_uid)}</h1><p>${(summary.nodes || []).length} nodes · ${
+    const template: ReportTemplateId = opts?.template ?? "paper";
+    const css = buildReportCss(template, opts?.fontScale ?? "standard");
+    // Only the classic skin auto-switches light/dark — paper/minimal/slate
+    // are intentionally locked to their native palette.
+    const themeInit =
+      template === "classic"
+        ? "<script>(function(){try{var t=localStorage.getItem('theme');var d=t==='dark'||(t==='system'||!t)&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;if(d)document.documentElement.classList.add('dark');else document.documentElement.classList.add('light')}catch(e){}})();</script>"
+        : "";
+    const defaultTitle = `CryoSmart Lineage: ${summary.project_uid} / ${summary.start_uid}`;
+    const title = (opts?.titleOverride || "").trim() || defaultTitle;
+    const subtitle = (opts?.subtitle || "").trim();
+    const dateText = new Date().toISOString().slice(0, 10);
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escHtml(
+      title.slice(0, 120),
+    )}</title>${themeInit}<style>${css}</style></head><body><header><div class="top"><div class="title"><h1>${escHtml(
+      title,
+    )}</h1><p>${(summary.nodes || []).length} nodes · ${
       (summary.edges || []).length
-    } data links · visible main-node tracing</p></div></div></header><main class="workspace"><section class="pane flow-pane"><div class="pane-head"><h2>Lineage Outline</h2><div class="legend"><span class="micrograph">micrographs</span><span class="particle">particles</span><span class="volume">map</span></div></div><div class="outline">${reportOutline(
+    } data links · visible main-node tracing · generated ${dateText}</p>${
+      subtitle ? `<p class="note">${escHtml(subtitle)}</p>` : ""
+    }</div></div></header><main class="workspace"><section class="pane flow-pane"><div class="pane-head"><h2>Lineage Outline</h2><div class="legend"><span class="micrograph">micrographs</span><span class="particle">particles</span><span class="volume">map</span></div></div><div class="outline">${reportOutline(
       summary,
       state,
     )}</div>${reportPictureFlow(summary, state, opts)}</section><section class="pane chain-pane"><div class="chain-head"><h2>Main Data Chain</h2><span class="hint">小节点会折叠到可见主节点；左侧标签只指向左侧已有节点。</span></div><div class="cards">${cards}</div></section></main><script>${REPORT_HTML_V2_SCRIPT}</script></body></html>`;

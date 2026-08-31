@@ -184,11 +184,17 @@ cryosmart-lineage-tracer-web/
 - **Content-Type 无关上传**：CryoSmart 服务端对 `/api/log_image/` 不回 Content-Type，脚本自己从魔数嗅探 MIME 再构造 data URL 上传
 - **防登出**：脚本黑名单机制绝不触碰 auth/logout 类请求
 
-### 3. Report HTML（`report-html.ts`）
+### 3. Report HTML（`report-html.ts` + `report-style.ts`）
 
 - 单文件 HTML，含 base64 内嵌图、懒加载、Referrer-Policy、`onerror` 远程回退
 - log images 按 job 严格分组、只取最后一轮
 - 直接邮件 / IM 分享，**不需要后端托管**
+- **v3.19 模板系统**：报告不再内嵌于页面（旧的内嵌 iframe 已移除），在 **Lineage Preview → Report** 标签页选择样式与配置后，仅提供「新标签页打开」和「下载 HTML」两种出口。四种模板共享完全相同的正文标记（内容不缩水，仅换肤）：
+  - **Paper 学术**（默认）：衬线字体、纯白纸面、hairline 边框、书册式表格、打印友好（`@page` + `@media print`），无渐变/荧光/阴影
+  - **Minimal 极简**：系统无衬线、大留白、近单色，kind 色仅作 3px 左侧标记
+  - **Slate 暗色**：深色面板、低对比文字，暗室演示友好
+  - **Classic 旧版**：v3.16 原样式（渐变、荧光、自动深浅色）完整保留
+- **自定义配置**（localStorage 持久化，`cryosmart_report_style_v1`）：模板、字号（紧凑/标准/舒适）、图片模式（嵌入 data-URL / 引用原链接 / 不含图片）、自定义报告标题与附注。**Build & download ZIP** 的 HTML 报告自动沿用同一配置（打包时读取）
 
 ### 4. Share（`share-url.ts`）
 
