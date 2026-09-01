@@ -88,7 +88,7 @@ console.log("── A. capture script (phase reporting + speed) ──");
   try { new Function(script); check("script parses (new Function)", true); }
   catch (e) { check("script parses (new Function)", false, e.message); }
 
-  check("script self-identifies as v3.29", script.includes("Smart Capture v3.29"));
+  check("script self-identifies as v3.29+", /Smart Capture v3\.(29|30)/.test(script));
 
   // ── phase() helper: fire-and-forget + change-rate-limited ──
   const phaseFn = script.indexOf("function phase(kind, detail)");
@@ -206,7 +206,7 @@ console.log("── A. capture script (phase reporting + speed) ──");
     "panel copy explains the sub-step activity line",
     panelSrc.includes("exact current sub-step") && panelSrc.includes("liveness age"),
   );
-  check("site banner is v3.29", chromeSrc.includes("v3.29"));
+  check("site banner is v3.29+", /v3\.(29|30)/.test(chromeSrc));
 }
 
 /* ── Part B: live REST flow (dev server) ───────────────────────── */

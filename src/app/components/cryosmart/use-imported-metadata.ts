@@ -1070,10 +1070,22 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                     reasons.push(
                       `${untraced} jobs outside the traced lineage were skipped by design`
                     );
-                  if (noBytes > 0)
+                  if (noBytes > 0) {
+                    // v3.30: when the script's LAST sub-step was the byte
+                    // drain, its detail line says WHY the bytes are missing
+                    // (dead image endpoint / breaker trip / throttle) —
+                    // surface it verbatim right where the user reads the
+                    // number, instead of a generic "missing or too large".
+                    const drainNote =
+                      sessionStatus.script_phase === "drain" &&
+                      typeof sessionStatus.phase_detail === "string" &&
+                      sessionStatus.phase_detail
+                        ? ` — ${sessionStatus.phase_detail}`
+                        : "";
                     reasons.push(
-                      `${noBytes} image(s) have no preview bytes (missing or too large on the CryoSmart server)`
+                      `${noBytes} image(s) have no preview bytes (missing or too large on the CryoSmart server)${drainNote}`
                     );
+                  }
                   message =
                     `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} of the ${req.jobs.length} ${scopeLabel}jobs` +
                     (reasons.length ? ` — ${reasons.join("; ")}` : "") +
@@ -1177,9 +1189,16 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               // short grace window the complete-report pass widens the
               // denominator to the whole project and the "fetching X/N"
               // line resumes, so the note names the wrap-up, not a wait.
+              // v3.30: at ZERO bytes landed the message names the wait —
+              // the refs are safe, every fetch is time-boxed, and a slow
+              // or stalled CryoSmart image endpoint only delays previews.
+              // The bare "uploading image previews 0/712…" previously
+              // sat unchanged for minutes and read exactly like a hang.
               const message =
                 scanDone && imgs > 0 && upl < imgs
-                  ? `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews ${upl}/${imgs}${lineageNote}…`
+                  ? upl === 0
+                    ? `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews 0/${imgs}${lineageNote} — no preview bytes yet (the CryoSmart image endpoint is slow or stalled; refs are captured)…`
+                    : `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews ${upl}/${imgs}${lineageNote}…`
                   : scanDone && imgs > 0
                     ? `Loaded ${sessionStatus.total_jobs} jobs — all ${imgs} log images ready${lineageNote}; the script is wrapping up…`
                     : sessionStatus.log_jobs_done === 0 && phaseDetail

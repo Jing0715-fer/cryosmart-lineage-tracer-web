@@ -34,7 +34,7 @@ export function SiteHeader() {
               CryoSmart Lineage Tracer <span className="text-teal-600 dark:text-teal-400">Web</span>
             </span>
             <span className="hidden text-[11px] text-slate-500 dark:text-slate-400 sm:block">
-              Cross-browser reimplementation · v3.29
+              Cross-browser reimplementation · v3.30
             </span>
           </div>
         </div>

@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.29 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.30 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -232,7 +232,23 @@ export function SmartCapturePanel() {
 // deep-scans the store ONCE instead of once per job, the scan loop's
 // cached check drops its redundant deep walk, the trace-wait poll is
 // 3s → 1.2s, and the re-trace grace window is 60s → 15s (coverage comes
-// from the complete-report pass — the wait only ordered things).
+// from the complete-report pass — the wait only ordered things). v3.30:
+// DEAD-ENDPOINT RESILIENCE — the byte-fetch deadline now covers the WHOLE
+// attempt (headers + body read + base64; v3.25's timer stopped at headers,
+// so a mid-body stall hung every worker FOREVER: "uploading image previews
+// 0/712" frozen, then the app's 10-min stall error). A dead image endpoint
+// trips a circuit breaker (24 straight empty fetches, 0 bytes stored →
+// skip the tail in seconds instead of crawling ~10+ minutes); the rescue
+// and byte-drain windows post 25s heartbeats while their counts sit still
+// ("waiting for the first preview byte — 8 fetch(es) in flight, none
+// answered yet · quiet for 45s") so a slow endpoint reads as SLOW, not
+// dead; background-tab throttling is detected and named (the browser
+// clamps this tab's timers to ~1/min — keep the tab visible for full
+// speed); the tab TITLE mirrors the current sub-step so a backgrounded
+// capture shows its liveness in the tab bar; and the {all:true} log-request
+// widening is retried ×3 with its RESULT checked (a silently failed widen
+// used to leave the strip's denominator stuck at the traced lineage while
+// 500+ jobs streamed off the books).
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -473,6 +489,14 @@ export function SmartCapturePanel() {
     var key = String(kind || '') + ' | ' + String(detail || '');
     if (key === __lastPhaseKey) return;
     __lastPhaseKey = key;
+    // v3.30: mirror the sub-step into the TAB TITLE. The capture tab is
+    // usually left in the background while the user watches the web app
+    // tab — the ticking title in the tab bar shows at a glance that the
+    // capture is alive (and titles are far less throttled than timers),
+    // which is exactly the reassurance a multi-minute byte drain needs.
+    try {
+      document.title = 'CryoSmart capture · ' + String(kind || '') + ': ' + String(detail || '').slice(0, 80);
+    } catch (e) {}
     try {
       post('/phase', { phase: String(kind || '').slice(0, 40), detail: String(detail || '').slice(0, 220) })
         .catch(function() {});
@@ -1218,6 +1242,31 @@ export function SmartCapturePanel() {
   var imgWorkers = 0;
   var imgPosted = 0;                          // in-flight POSTs
   var imgUploaded = 0, imgFailed = 0;
+  // v3.30: dead-endpoint circuit breaker. When NOTHING has ever landed and
+  // 3 full worker rounds (24 fetches) all came back empty, the image
+  // endpoint is not answering — crawling the whole queue at ~5 images/min
+  // then burns 10+ minutes of the user's time for bytes that are not
+  // coming (the user's "uploading image previews 0/712 … stuck → error"
+  // run). Trip → skip the rest (refs stay captured; a re-run re-fetches),
+  // and say so in the phase detail + console. Also trips after 60 straight
+  // failures when the endpoint dies MID-capture after partial success.
+  var imgConsecNull = 0;
+  var imgBreakerTripped = false;
+  var IMG_BREAKER_N = 24;
+
+  function tripImgBreaker(why) {
+    if (imgBreakerTripped) return;
+    imgBreakerTripped = true;
+    var skipped = imgQueue.length;
+    if (skipped) {
+      imgFailed += skipped;   // counted honestly in the final summary
+      imgQueue.length = 0;    // fail-fast the pending refs (in-flight fetches still finish)
+    }
+    console.warn('[CryoSmart] ' + why + ' — skipping the remaining ' + skipped +
+      ' preview byte(s) (the refs stay captured; re-login to CryoSmart and re-run the script to fetch them).');
+    phase('drain', 'the CryoSmart image endpoint is not responding — skipped the remaining ' +
+      skipped + ' preview byte(s) (refs are kept; a re-run can fetch them)');
+  }
 
   // v3.12: resolve the real image type from the BYTES, never from the
   // server's Content-Type. The real CryoSmart deployment serves
@@ -1319,9 +1368,23 @@ export function SmartCapturePanel() {
     function run() {
       // v3.25: 45s → 30s per attempt — with retries the worst case per
       // image is ~93s; a hung fetch must not eat the whole drain budget.
-      return fetchT('/api/log_image/' + encodeURIComponent(ref.fileid), { credentials: 'include' }, 30000)
+      // v3.30: the deadline now covers the WHOLE attempt — headers, the
+      // BODY read (r.blob()/arrayBuffer()) and the base64 pass. v3.25's
+      // fetchT cleared its abort timer the moment HEADERS arrived, so a
+      // server that stalled mid-body left the body read pending FOREVER:
+      // every worker hung, zero bytes landed, zero failures were counted,
+      // and the strip froze on "uploading image previews 0/712" until the
+      // app's 10-minute stall detector declared the capture dead. The
+      // controller stays armed until the data URL is built — a stalled
+      // body now aborts at the deadline and feeds the normal retry path.
+      var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      var tid = ctrl ? setTimeout(function() { try { ctrl.abort(); } catch (e2) {} }, 30000) : null;
+      function clearT() { if (tid) { clearTimeout(tid); tid = null; } }
+      var o = { credentials: 'include' };
+      if (ctrl) o.signal = ctrl.signal;
+      var p = fetch('/api/log_image/' + encodeURIComponent(ref.fileid), o)
         .then(function(r) {
-          if (r.ok) return r.blob();
+          if (r.ok) return r.blob();   // bounded: the armed abort signal rejects a stalled body read
           if (r.status === 408 || r.status === 429 || r.status >= 500) {
             throw new Error('HTTP ' + r.status);
           }
@@ -1340,14 +1403,19 @@ export function SmartCapturePanel() {
             if (!mime) return null;
             return blobToDataUrl(b, mime, bytes);
           });
-        })
-        .catch(function(e) {
-          tries++;
-          if (tries < IMG_FETCH_TRIES) {
-            return sleepMs(800 * tries).then(run);
-          }
-          return null;
         });
+      return p.then(
+        function(v) { clearT(); return v; },
+        function(e) { clearT(); throw e; }
+      ).catch(function(e) {
+        // NOTE: attached INSIDE run() so every recursive retry re-arms its
+        // own catch (a catch outside run() would only cover attempt #1).
+        tries++;
+        if (tries < IMG_FETCH_TRIES) {
+          return sleepMs(800 * tries).then(run);
+        }
+        return null;
+      });
     }
     return run();
   }
@@ -1395,8 +1463,14 @@ export function SmartCapturePanel() {
       if (data) {
         imgBatch.push({ fileid: ref.fileid, data: data, name: ref.name || null });
         if (imgBatch.length >= 6) flushImageBatch();
+        imgConsecNull = 0;   // v3.30: a live endpoint resets the breaker chain
       } else {
         imgFailed++;
+        imgConsecNull++;
+        if (!imgBreakerTripped &&
+            ((imgUploaded === 0 && imgConsecNull >= IMG_BREAKER_N) || imgConsecNull >= 60)) {
+          tripImgBreaker('The CryoSmart image endpoint has not answered ' + imgConsecNull + ' byte fetch(es) in a row');
+        }
       }
       imgWorker();
     });
@@ -1476,11 +1550,30 @@ export function SmartCapturePanel() {
     // ("231 ok · 40 in flight") tells the user the capture is actively
     // pushing bytes, not idling. Updated only when a byte lands/fails so
     // the 250ms drain tick never spams the /phase endpoint.
+    // v3.30: a FROZEN dmark no longer goes silent either. While the counts
+    // sit still (every worker inside its 30s-bounded attempt against a
+    // slow or stalled image endpoint) a heartbeat line posts every 25s
+    // with the elapsed quiet time — the changing seconds make each POST a
+    // fresh heartbeat for the app's liveness age AND its stall detector.
+    // The setTimeout-gap measurement catches the OTHER freeze class: this
+    // CryoSmart tab backgrounded, its timers clamped to ~1/min by the
+    // browser — the heartbeat still flows, but the user is told to bring
+    // the tab back to the foreground for full speed.
     var drainMark = -1;
+    var drainStart = Date.now();
+    var lastBeatAt = drainStart;
+    var lastCheckAt = drainStart;
+    var throttleNoted = false;
     return new Promise(function(resolve) {
       (async function check() {
         flushImageBatch();
         var now = Date.now();
+        var tickGap = now - lastCheckAt;
+        lastCheckAt = now;
+        if (!throttleNoted && tickGap > 8000) {
+          throttleNoted = true;
+          phase('drain', 'this CryoSmart tab is being throttled by the browser (it was left in the background) — capture steps run up to 60x slower; keep the tab visible for full speed');
+        }
         if (watchRequest && now - lastReqPoll >= 3000) {
           lastReqPoll = now;
           var std = await fetchStatus(true);
@@ -1500,15 +1593,28 @@ export function SmartCapturePanel() {
         var idle = imgQueue.length === 0 && imgWorkers === 0 && imgPosted === 0;
         var polledRecently = !watchRequest || (lastReqPoll > 0 && Date.now() - lastReqPoll < 3000);
         if ((idle && polledRecently && !lastPollHadExtras) || Date.now() > deadline) {
-          console.log('[CryoSmart] Image bytes uploaded: ' + imgUploaded + ' ok, ' + imgFailed + ' failed/skipped.');
+          console.log('[CryoSmart] Image bytes uploaded: ' + imgUploaded + ' ok, ' + imgFailed + ' failed/skipped' +
+            (imgBreakerTripped ? ' (the dead-endpoint breaker skipped the tail — see the warning above)' : '') + '.');
           resolve();
           return;
         }
         var dmark = imgUploaded + imgFailed;
+        var inFlight = imgQueue.length + imgWorkers + imgBatch.length;
         if (dmark !== drainMark) {
           drainMark = dmark;
+          lastBeatAt = now;
           phase('drain', 'uploading image preview bytes — ' + imgUploaded + ' ok · ' +
-            (imgQueue.length + imgWorkers + imgBatch.length) + ' in flight…');
+            inFlight + ' in flight…');
+        } else if (now - lastBeatAt >= 25000) {
+          // v3.30 heartbeat — nothing landed/failed for 25s: say so. With
+          // zero bytes so far the line names the wait explicitly ("none
+          // answered yet") so "uploading image previews 0/N" explains
+          // itself instead of reading as a hang.
+          lastBeatAt = now;
+          phase('drain', (imgUploaded === 0
+              ? 'waiting for the first preview byte — ' + inFlight + ' fetch(es) in flight, none answered yet'
+              : 'uploading image preview bytes — ' + imgUploaded + ' ok · ' + inFlight + ' still in flight') +
+            ' · quiet for ' + Math.round((now - drainStart) / 1000) + 's');
         }
         setTimeout(check, 250);
       })();
@@ -2023,8 +2129,29 @@ export function SmartCapturePanel() {
         }
       }
       var rescueEnd = Date.now() + 90000;
+      // v3.30: heartbeat through the rescue window. Its 2s sleeps make it
+      // the scan's longest legitimately-silent stretch — and when this tab
+      // is BACKGROUNDed, the browser clamps those sleeps to ~1/min, so a
+      // "90s" rescue can run 45+ minutes with zero session contact (the
+      // app's stall detector then fires the hard "capture script stopped
+      // responding" error on a script that is merely throttled). A 25s-
+      // cadence phase line keeps the liveness age honest and names the
+      // throttle the moment a sleep over-runs.
+      var rescueBeat = Date.now();
+      var rescueThrottle = false;
       while (noLog.length && Date.now() < rescueEnd) {
+        var sleepStart = Date.now();
         await sleepMs(2000);
+        if (!rescueThrottle && Date.now() - sleepStart > 8000) {
+          rescueThrottle = true;
+          phase('rescue', 'this CryoSmart tab is being throttled by the browser (background tab) — the late-log re-check runs up to 60x slower; keep the tab visible for full speed');
+        }
+        var rnow = Date.now();
+        if (rnow - rescueBeat >= 25000) {
+          rescueBeat = rnow;
+          phase('rescue', noLog.length + ' job(s) still awaiting late log delivery — ' +
+            Math.max(0, Math.round((rescueEnd - rnow) / 1000)) + 's left of the rescue window…');
+        }
         var stillMissing = [];
         for (var n2 = 0; n2 < noLog.length; n2++) {
           var mu = noLog[n2];
@@ -2125,8 +2252,28 @@ export function SmartCapturePanel() {
   if (!FINISH_NOW) {
     var rest3 = ALL_UIDS.filter(function(u) { return !scanned[u]; });
     if (rest3.length) {
-      try { await post('/request-logs', { all: true }); } catch (e) {
-        console.warn('[CryoSmart] Could not widen the log request — scanning the remaining jobs anyway.');
+      // v3.30: the widening POST gets the same 3-try policy as every other
+      // session POST, and its RESULT is checked — post() resolves the
+      // parsed JSON even for a 4xx, so the old single try could "succeed"
+      // (no throw) while the store never widened. A failed widening left
+      // the strip's denominator at 72 while the rest pass streamed 500+
+      // jobs off the books: the message read "uploading 0/712 for the
+      // traced lineage" over a capture that was actively scanning.
+      var widened = false;
+      for (var wr = 0; wr < 3 && !widened; wr++) {
+        try {
+          var pr = await post('/request-logs', { all: true });
+          if (pr && pr.ok) widened = true;
+        } catch (e) {}
+        if (!widened && wr < 2) {
+          phase('rest', 're-trying to widen the log request to every job (' + (wr + 2) + '/3)…');
+          await sleepMs(1000 + wr * 2000);
+        }
+      }
+      if (!widened) {
+        console.warn('[CryoSmart] Could not widen the log request — scanning the remaining jobs anyway' +
+          ' (the progress totals may lag; the web app\'s "Fetch all" button can still widen it).');
+        phase('rest', 'could not widen the log request — scanning the remaining jobs anyway (the progress totals may lag behind)');
       }
       console.log('[CryoSmart] Complete-report pass — fetching log images for the remaining ' + rest3.length + ' of ' + ALL_UIDS.length + ' job(s)' +
         ' (the report includes every job; large projects take several more minutes).');
@@ -2166,6 +2313,10 @@ export function SmartCapturePanel() {
     }
   }
 
+  // v3.30: the tab title told the story all capture long — close it out
+  // with the outcome (visible from the tab bar even while backgrounded).
+  try { document.title = 'CryoSmart capture · complete — ' + imgUploaded + ' image(s) with bytes · see the web app tab'; } catch (e) {}
+
   // v3.7: loud zero-image diagnostic — an empty capture (or empty bytes)
   // should be OBVIOUS in the console, not discovered later in the report.
   if (LINEAGE_MODE && !knownRequested) {
@@ -2176,7 +2327,11 @@ export function SmartCapturePanel() {
   } else if (imgUploaded === 0 && (logRefsStreamed || 0) > 0) {
     console.warn('[CryoSmart] ⚠ ' + logRefsStreamed + ' log-image refs were captured but ZERO image bytes uploaded —' +
       '\\n   previews will be missing. The CryoSmart /api/log_image/ endpoint rejected every fetch' +
-      '\\n   (expired session or removed files). Re-login to CryoSmart and re-run the script.');
+      (imgBreakerTripped
+        ? '\\n   (the dead-endpoint breaker tripped — the endpoint stopped answering mid-capture).'
+        : '\\n   (expired session or removed files).') +
+      '\\n   Re-login to CryoSmart and re-run the script.' +
+      '\\n   Also keep this tab VISIBLE while a capture runs — backgrounded tabs are throttled by the browser.');
   } else if ((logRefsStreamed || 0) === 0 && knownRequested) {
     console.warn('[CryoSmart] ⚠ ZERO log images were found for the ' + knownRequested.length + ' traced job(s).' +
       '\\n   Those jobs may genuinely have no image logs — or this build keeps them where the' +

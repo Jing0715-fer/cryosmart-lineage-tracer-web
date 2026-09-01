@@ -54,7 +54,7 @@ console.log("── A. capture script (v3.28 scan coverage fixes) ──");
   try { new Function(script); check("script parses (new Function)", true); }
   catch (e) { check("script parses (new Function)", false, e.message); }
 
-  check(script.includes("Smart Capture v3.29"), "script self-identifies as v3.29 (current)");
+  check(/Smart Capture v3\.(29|30)/.test(script), "script self-identifies as v3.29+ (current)");
   check(
     /BUDGET_MS = budgetMs \|\| Math\.max\(300000, pending\.length \* 150000\);/.test(script),
     "traced-pass ceiling scales: max(300s, jobs x 150s)",
@@ -98,7 +98,7 @@ console.log("── A. capture script (v3.28 scan coverage fixes) ──");
     path.join(__dirname, "..", "src", "app", "components", "cryosmart", "site-chrome.tsx"),
     "utf8"
   );
-  check(chromeSrc.includes("v3.29"), "site banner bumped to v3.29");
+  check(/v3\.(29|30)/.test(chromeSrc), "site banner bumped to v3.29+");
   const hookSrc = fs.readFileSync(
     path.join(__dirname, "..", "src", "app", "components", "cryosmart", "use-imported-metadata.ts"),
     "utf8"

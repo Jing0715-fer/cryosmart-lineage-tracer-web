@@ -36,9 +36,13 @@ function mockFetch() {
   const r = responses.shift();
   if (!r) return Promise.resolve({ ok: false, status: 404, blob: () => Promise.resolve(null) });
   if (r.reject) return Promise.reject(r.reject);
+  // v3.30: body-read rejection class — what the abort signal produces on a stalled body
+  if (r.blobReject) return Promise.resolve({ ok: true, status: r.status, blob: () => Promise.reject(r.blobReject) });
   return Promise.resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, blob: () => Promise.resolve(r.blob) });
 }
-function fetchT(url, opts, ms) { return mockFetch(); }
+// v3.30: fetchImageData now calls the GLOBAL fetch directly (its AbortController
+// deadline covers headers + body); shadow it in the module scope.
+function fetchMock(url, opts) { return mockFetch(); }
 function sleepMs(ms) { return new Promise((r) => setTimeout(r, Math.min(ms, 5))); } // fast-forward
 
 // the real sniffImageMime from the generated script
@@ -107,7 +111,7 @@ const factory = new Function(
 // simpler approach: build a fresh module per test with its own state
 function buildModule(fetchImpl, postImpl) {
   const mod = new Function(
-    "fetchT", "sleepMs", "sniffImageMime", "refMimeHint", "IMG_MAX_BYTES", "IMG_FETCH_TRIES", "post", "console",
+    "fetch", "sleepMs", "sniffImageMime", "refMimeHint", "IMG_MAX_BYTES", "IMG_FETCH_TRIES", "post", "console",
     `
     ${sniffImageMimeSrc}
     ${blobToDataUrlSrc}
@@ -125,7 +129,6 @@ function buildModule(fetchImpl, postImpl) {
   )(fetchImpl, sleepMs, eval(`(${sniffImageMimeSrc.replace("function sniffImageMime", "function")})`), () => null, IMG_MAX_BYTES, IMG_FETCH_TRIES, postImpl, console);
   return mod;
 }
-
 (async () => {
   let pass = 0, fail = 0;
   const check = (name, cond) => { if (cond) { pass++; console.log("  ✓", name); } else { fail++; console.log("  ✗", name); } };
@@ -137,7 +140,7 @@ function buildModule(fetchImpl, postImpl) {
     { status: 200, blob: pngBlob },
   ];
   {
-    const m = buildModule(fetchT, post);
+    const m = buildModule(fetchMock, post);
     const url = await m.fetchImageData({ fileid: "abc", name: "x.png" });
     check("502→200 retries and succeeds", url != null && url.startsWith("data:image/png;base64,"));
     check("exactly 2 fetch attempts", calls === 2);
@@ -148,7 +151,7 @@ function buildModule(fetchImpl, postImpl) {
   calls = 0;
   responses = [{ status: 404, blob: null }];
   {
-    const m = buildModule(fetchT, post);
+    const m = buildModule(fetchMock, post);
     const url = await m.fetchImageData({ fileid: "gone" });
     check("404 → null", url == null);
     check("404 → single fetch (no retry)", calls === 1);
@@ -158,7 +161,7 @@ function buildModule(fetchImpl, postImpl) {
   calls = 0;
   responses = [{ reject: new Error("ECONNRESET") }, { reject: new Error("ECONNRESET") }, { reject: new Error("ECONNRESET") }];
   {
-    const m = buildModule(fetchT, post);
+    const m = buildModule(fetchMock, post);
     const url = await m.fetchImageData({ fileid: "flaky" });
     check("3× network error → null", url == null);
     check("exactly 3 attempts", calls === 3);
@@ -173,16 +176,44 @@ function buildModule(fetchImpl, postImpl) {
   };
   responses = [{ status: 200, blob: textBlob }];
   {
-    const m = buildModule(fetchT, post);
+    const m = buildModule(fetchMock, post);
     const url = await m.fetchImageData({ fileid: "txt" });
     check("non-image bytes → null", url == null);
+  }
+
+  // ── 4b. v3.30: a REJECTED body read (what the armed abort produces on a
+  // stalled body) is a retryable failure — 3 attempts then null ──
+  calls = 0;
+  responses = [
+    { status: 200, blobReject: new Error("aborted body read") },
+    { status: 200, blobReject: new Error("aborted body read") },
+    { status: 200, blobReject: new Error("aborted body read") },
+  ];
+  {
+    const m = buildModule(fetchMock, post);
+    const url = await m.fetchImageData({ fileid: "stall" });
+    check("body-read rejection ×3 → null", url == null);
+    check("body-read rejection retried (exactly 3 attempts)", calls === 3);
+  }
+
+  // ── 4c. v3.30: a rejected body read then a healthy response succeeds ──
+  calls = 0;
+  responses = [
+    { status: 200, blobReject: new Error("aborted body read") },
+    { status: 200, blob: pngBlob },
+  ];
+  {
+    const m = buildModule(fetchMock, post);
+    const url = await m.fetchImageData({ fileid: "stall2" });
+    check("body-read rejection → retry succeeds", url != null && url.startsWith("data:image/png;base64,"));
+    check("exactly 2 attempts", calls === 2);
   }
 
   // ── 5. flushImageBatch retries a lost POST ──
   postCalls = 0;
   postResponses = [{ reject: new Error("network blip") }, { ok: true, stored: 2 }];
   {
-    const m = buildModule(fetchT, post);
+    const m = buildModule(fetchMock, post);
     m.setBatch([
       { fileid: "a", data: "data:image/png;base64,iVBORw0KGgo=", name: "a.png" },
       { fileid: "b", data: "data:image/png;base64,iVBORw0KGgo=", name: "b.png" },
@@ -198,7 +229,7 @@ function buildModule(fetchImpl, postImpl) {
   postCalls = 0;
   postResponses = [{ reject: new Error("x") }, { reject: new Error("x") }, { reject: new Error("x") }];
   {
-    const m = buildModule(fetchT, post);
+    const m = buildModule(fetchMock, post);
     m.setBatch([{ fileid: "a", data: "data:image/png;base64,iVBORw0KGgo=" }]);
     await m.flushImageBatch();
     await new Promise((r) => setTimeout(r, 60));
