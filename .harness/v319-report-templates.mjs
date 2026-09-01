@@ -69,8 +69,8 @@ console.log("── A. report-style module ──");
     "invalid values clamped to defaults, non-strings emptied");
   const long = normalizeReportStyle({ titleOverride: "x".repeat(500), subtitle: "y".repeat(500) });
   check(long.titleOverride.length === 200 && long.subtitle.length === 300, "title/subtitle length caps (200/300)");
-  check(REPORT_TEMPLATES.length === 4 && REPORT_TEMPLATES.map((t) => t.id).join(",") === "paper,minimal,slate,classic",
-    "4 template infos in stable order");
+  check(REPORT_TEMPLATES.length === 7 && REPORT_TEMPLATES.map((t) => t.id).join(",") === "paper,minimal,slate,classic,blueprint,editorial,focus",
+    "7 template infos in stable order (v3.22 added blueprint/editorial/focus after classic)");
   check(reportTemplateLabel("slate") === "Slate 暗色" && reportTemplateLabel("paper") === "Paper 学术", "template label lookup");
   check(DEFAULT_REPORT_STYLE.template === "paper", "default template is paper (new design)");
 }
@@ -80,7 +80,10 @@ console.log("── B. buildReportCss per-template signatures ──");
 {
   const paper = buildReportCss("paper");
   check(paper.includes("Georgia") && paper.includes("serif"), "paper: serif font stack");
-  check(!paper.includes("gradient(") && !paper.includes("backdrop-filter"), "paper: no gradients / no blur (AI-ish effects removed)");
+  // v3.23: the lightbox ships a functional backdrop-blur scrim — scope the
+  // "no AI-ish effects" check to the PAGE css (before the lightbox block).
+  const paperPageCss = paper.slice(0, paper.indexOf(".lb-root{position:fixed"));
+  check(!paperPageCss.includes("gradient(") && !paperPageCss.includes("backdrop-filter"), "paper: page css has no gradients / no blur (AI-ish effects removed; lightbox scrim excepted)");
   check(paper.includes("3px double"), "paper: academic double rule under header");
   check(paper.includes("@media print"), "paper: print rules shipped");
   check(paper.includes(":root{--bg:#ffffff"), "paper: white paper background");
@@ -166,7 +169,10 @@ console.log("── D. imageMode embed / remote / none ──");
   check(remote.includes('src="http://x/0"'), "remote: direct source URL referenced");
 
   const none = buildLineageHtmlV2(summary, { imageMode: "none", embeddedImages: embedded });
-  check(!none.includes("<img"), "none: zero <img> tags");
+  // v3.23: the lightbox script embeds an '<img class="lb-img">' DOM literal
+  // inside the <script> — strip scripts before counting rendered tags.
+  const noneBody = none.replace(/<script>[\s\S]*?<\/script>/g, "");
+  check(!noneBody.includes("<img"), "none: zero <img> tags in the markup");
   check(!none.includes('class="cls-sec"') && !none.includes("Log images"), "none: image-only blocks collapse (no empty shells)");
   check(none.includes('class="job-card ') && none.includes("Main Data Chain"), "none: job cards + data still shipped");
   check(!none.includes("base64,AAA"), "none: no embedded bytes");
@@ -182,7 +188,7 @@ console.log("── D. imageMode embed / remote / none ──");
     check(b.includes("data-remote-src"), `bundleMode ${mode}: remote fallback attribute present`);
   }
   const bNone = buildLineageHtmlV2(summary, { imageMode: "none", bundleMode: true, embeddedImages: embedded });
-  check(!bNone.includes("<img"), "bundleMode none: still no <img> tags");
+  check(!bNone.replace(/<script>[\s\S]*?<\/script>/g, "").includes("<img"), "bundleMode none: still no <img> tags");
 }
 
 /* ── E. inline script ─────────────────────────────────────────────── */
@@ -351,6 +357,92 @@ console.log("── H. v3.21 outline 2 jobs/row + fixed job-out track ──");
     check(!css.includes(".mini-node p{grid-column:2"),
       `${name}: mini-node ref-pill side column gone`);
   }
+}
+
+/* ── I. v3.23 lightbox — click-to-enlarge on every report image ──── */
+console.log("── I. v3.23 lightbox (所有图片点击放大) ──");
+{
+  const ALL7 = ["paper", "minimal", "slate", "blueprint", "editorial", "focus", "classic"];
+  // 1. The FULL inline script carries the lightbox IIFE and still parses.
+  const { _REPORT_HTML_V2_SCRIPT } = reportHtml;
+  check(_REPORT_HTML_V2_SCRIPT.includes('querySelectorAll("main img")'),
+    "script: lightbox collects every main img");
+  check(_REPORT_HTML_V2_SCRIPT.includes('classList.contains("lb-img")'),
+    "script: the lightbox's own img is excluded from re-opening");
+  check(_REPORT_HTML_V2_SCRIPT.includes('closest(".img-gone,.block-gone")'),
+    "script: hidden/failed images are skipped");
+  check(_REPORT_HTML_V2_SCRIPT.includes("Math.round(scale*100)"),
+    "script: zoom-percentage feedback in the counter");
+  check(_REPORT_HTML_V2_SCRIPT.includes("Math.min(8,Math.max(1,k))"),
+    "script: zoom clamped to 1..8×");
+  check(_REPORT_HTML_V2_SCRIPT.includes('"Escape"') && _REPORT_HTML_V2_SCRIPT.includes('"ArrowLeft"') && _REPORT_HTML_V2_SCRIPT.includes('"ArrowRight"'),
+    "script: ESC + arrow-key navigation");
+  check(_REPORT_HTML_V2_SCRIPT.includes("setPointerCapture"),
+    "script: pointer capture for pan-when-zoomed");
+  check(_REPORT_HTML_V2_SCRIPT.includes("cur.full&&im.getAttribute(\"src\")!==cur.disp"),
+    "script: full-URL first, display-src fallback on error");
+  check(_REPORT_HTML_V2_SCRIPT.includes("\\u6253\\u5f00"),
+    "script: 打开 suffix stripped from captions (unicode escape survived the template hop)");
+  try { new Function(_REPORT_HTML_V2_SCRIPT); ok("script: full script parses (balanced braces)"); }
+  catch (e) { bad(`script: parse failed — ${e.message}`); }
+
+  // 2. Every template ships the lightbox CSS + the zoom-in cursor.
+  for (const tpl of ALL7) {
+    const css = buildReportCss(tpl, "standard", "full");
+    check(css.includes(".lb-root{position:fixed;inset:0;z-index:900"),
+      `${tpl}: lightbox overlay CSS present`);
+    check(css.includes("object-fit:contain") && css.includes("width:100%;height:100%"),
+      `${tpl}: frame-fill img (small images upscale)`);
+    check(css.includes("backdrop-filter:blur(12px)"),
+      `${tpl}: backdrop blur scrim`);
+    check(css.includes("main img{cursor:zoom-in"),
+      `${tpl}: zoom-in cursor affordance on report images`);
+    check(css.includes(".lb-hint") || css.includes("lb-hint"),
+      `${tpl}: hint (点击缩放 · ESC 关闭) styled`);
+    // the print block sits BEFORE the lightbox css in the token skins
+    // (and its rules contain nested braces) — scan the print block's text
+    // directly instead of a brace-regex.
+    const printIdx = css.indexOf("@media print");
+    check(printIdx >= 0 && css.slice(printIdx, printIdx + 500).includes(".lb-root"),
+      `${tpl}: print rules hide the lightbox`);
+  }
+
+  // 3. Per-skin lightbox tints keep the archetypes distinct. Extract the
+  //    lightbox css from the STRUCTURAL rule onward (the print rule earlier
+  //    in the stylesheet also mentions .lb-root, which broke a naive
+  //    split-based extraction in the first draft of these checks).
+  const lbOf = (tpl) => {
+    const css = buildReportCss(tpl, "standard", "full");
+    const i = css.indexOf(".lb-root{position:fixed");
+    return i < 0 ? "" : css.slice(i);
+  };
+  const paperLb = lbOf("paper");
+  check(paperLb.includes(".lb-frame{padding:10px;background:#fcfaf6"),
+    "paper: white mat frame (mounted print)");
+  check(paperLb.includes(".lb-cap{font-style:italic"),
+    "paper: serif italic lightbox caption");
+  const lbBp = lbOf("blueprint");
+  check(lbBp.includes("text-transform:uppercase") && lbBp.includes("var(--font-mono)"),
+    "blueprint: mono uppercase lightbox caption");
+  check(lbBp.includes(".lb-btn{border-radius:0"),
+    "blueprint: squared lightbox chrome");
+  check(lbOf("editorial").includes(".lb-cap{font-style:italic"),
+    "editorial: italic serif lightbox caption");
+  check(lbOf("focus").includes(".lb-cap{font-style:italic"),
+    "focus: italic serif lightbox caption");
+
+  // 4. The full html embeds the lightbox script (blob/new-tab/file all self-contained).
+  const html = buildLineageHtmlV2(summary, { template: "minimal" });
+  check(html.includes(".lb-root") && html.includes("lb-hint"),
+    "html: lightbox script + DOM string embedded");
+  const scriptTag = (html.match(/<script>([\s\S]*?)<\/script>/) || [])[1] || "";
+  try { new Function(scriptTag); ok("html: embedded <script> parses"); }
+  catch (e) { bad(`html: embedded script parse failed — ${e.message}`); }
+
+  // 5. The image anchors still exist (lightbox intercepts the click but the
+  //    original href is used as the full-res source first).
+  check(/<a href="[^"]*" target="_blank"/.test(html),
+    "html: image anchor hrefs preserved (full-res source for the lightbox)");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

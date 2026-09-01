@@ -3,7 +3,9 @@
  * Shared by v322-preview-gen.mjs (writes per-template HTML) and the
  * share-url helper (loads it into the live app via #s= hash).
  */
-/* ── tiny PNG factory (8×8 / 64×48 solid or two-tone images) ────────── */
+/* ── micrograph-like PNG factory (v3.23: smooth noise fields + particle
+ *    specks + Gaussian class blobs — renders like real cryo-EM data so
+ *    template screenshots / VLM design reviews judge the real look) ── */
 const crcTable = [];
 for (let n = 0; n < 256; n++) {
   let c = n;
@@ -50,18 +52,119 @@ function png(w, h, fill) {
     ]).toString("base64")
   );
 }
-const img = (fill) => png(96, 72, fill);
-const M1 = img((x, y) => [70 + (x % 24) * 3, 80 + (y % 30) * 2, 96]);
-const M2 = img((x, y) => [60, 100 + (x % 20) * 4, 120]);
-const M3 = img((x, y) => [40 + (x % 30) * 2, 90, 150 + (y % 36) * 2]);
-const FSC0 = img((x, y) => [200 - x, 60 + y * 2, 90]);
-const FSC1 = img((x, y) => [160 - x, 40 + y * 2, 130]);
-const CLS = (i) => img((x, y) => [90 + i * 20, 60 + (x % 24) * 3, 140 + i * 10]);
-const VOL = img((x, y) => {
-  const d = Math.abs(x - 48) + Math.abs(y - 36);
-  return d < 26 ? [230, 190 - d * 2, 90] : [40, 60, 70];
-});
-const SEL = img((x, y) => [50 + (y % 20) * 6, 110, 90 + (x % 30) * 3]);
+/* seeded xorshift rng */
+const rng = (seed) => {
+  let s = (seed >>> 0) || 1;
+  return () => {
+    s ^= s << 13; s >>>= 0;
+    s ^= (s >>> 17);
+    s ^= s << 5; s >>>= 0;
+    return s / 4294967296;
+  };
+};
+/* smooth low-frequency field: coarse random grid, smoothstep-upsampled */
+function field(w, h, cell, seed) {
+  const gw = Math.ceil(w / cell) + 2, gh = Math.ceil(h / cell) + 2;
+  const r = rng(seed);
+  const g = new Float32Array(gw * gh);
+  for (let i = 0; i < g.length; i++) g[i] = r();
+  const sm = (t) => t * t * (3 - 2 * t);
+  return (x, y) => {
+    const fx = x / cell, fy = y / cell;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const sx = sm(fx - x0), sy = sm(fy - y0);
+    const v00 = g[y0 * gw + x0], v10 = g[y0 * gw + x0 + 1];
+    const v01 = g[(y0 + 1) * gw + x0], v11 = g[(y0 + 1) * gw + x0 + 1];
+    return (v00 * (1 - sx) + v10 * sx) * (1 - sy) + (v01 * (1 - sx) + v11 * sx) * sy;
+  };
+}
+/* dark speck field: sparse bright particles, like raw ice micrographs */
+const specks = (w, h, seed, cell = 5, pow = 3) => {
+  const f = field(w, h, cell, seed);
+  return (x, y) => Math.pow(f(x, y), pow);
+};
+const W = 240, H = 180;
+/* raw micrograph: ice gradient + particles + vignette + grain */
+const micro = (seed, tint = [1.0, 1.02, 1.08]) => {
+  const f = field(W, H, 22, seed);
+  const sp = specks(W, H, seed ^ 0x9e37, 5, 3);
+  const r = rng(seed ^ 0x51ed);
+  return png(W, H, (x, y) => {
+    const v = Math.max(0, Math.min(255,
+      46 + 88 * f(x, y) + 130 * sp(x, y) + (r() - 0.5) * 14));
+    const dx = (x / W - 0.5) * 2, dy = (y / H - 0.5) * 2;
+    const vig = 1 - 0.22 * Math.min(1, Math.sqrt(dx * dx + dy * dy));
+    return [v * tint[0] * vig, v * tint[1] * vig, v * tint[2] * vig];
+  });
+};
+/* 2D class average: dark bg + bright Gaussian core + faint ring + grain */
+const cls = (i, n = 4) => {
+  const sig = 14 + (i % n) * 5.5;
+  const r = rng(0xabc0 + i * 97);
+  const cx = W / 2, cy = H / 2;
+  return png(W, H, (x, y) => {
+    const d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+    const core = 235 * Math.exp(-d2 / (2 * sig * sig));
+    const ring = 46 * Math.exp(-Math.pow(d2 / (2 * sig * sig) - 1.15, 2) / 0.12);
+    const v = Math.max(0, Math.min(255, 14 + core + ring + (r() - 0.5) * 10));
+    return [v * 0.98, v, v * 0.96];
+  });
+};
+/* FSC curve plot: white bg, axes, descending correlation curve + band */
+const plot = (seed, phase = 0) => {
+  const r = rng(seed);
+  const curve = (x) => H * (0.16 + 0.68 * Math.exp(-((x / W) * 2.6 + phase * 0.5)));
+  return png(W, H, (x, y) => {
+    let v = 252;
+    // axes
+    if (x < 3 || y > H - 3 || Math.abs(y - H * 0.16) < 1) v = 168;
+    // curve + 3σ band
+    const c = curve(x);
+    const band = 4 + 8 * (x / W);
+    if (Math.abs(y - c) < 1.6) v = 24;
+    else if (Math.abs(y - c) < band) v = 210;
+    // dots along the curve
+    if (Math.abs(y - c) < 1.6 && x % 12 < 3) v = 8;
+    v += (r() - 0.5) * 6;
+    return [v, v, v];
+  });
+};
+/* map/volume slice: dark bg + bright blob + green tint */
+const vol = (seed) => {
+  const r = rng(seed);
+  const cx = W / 2, cy = H / 2, sig = 30;
+  return png(W, H, (x, y) => {
+    const d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+    const core = 205 * Math.exp(-d2 / (2 * sig * sig));
+    const shell = 60 * Math.exp(-Math.pow(d2 / (2 * sig * sig) - 0.7, 2) / 0.1);
+    const v = Math.max(0, Math.min(255, 16 + core + shell + (r() - 0.5) * 12));
+    return [v * 0.72, v * 0.94, v * 0.86];
+  });
+};
+/* select-2D montage: three small blobs on gray */
+const sel = (seed) => {
+  const r = rng(seed);
+  const spots = [W * 0.26, W * 0.5, W * 0.74];
+  return png(W, H, (x, y) => {
+    let v = 40;
+    for (const sx of spots) {
+      const d2 = (x - sx) * (x - sx) + (y - H * 0.5) * (y - H * 0.5) * 1.6;
+      v += 190 * Math.exp(-d2 / (2 * 20 * 20));
+    }
+    v += (r() - 0.5) * 10;
+    v = Math.max(0, Math.min(255, v));
+    return [v * 0.97, v, v * 0.98];
+  });
+};
+const img = () => 0;
+const M1 = micro(11, [1.0, 1.01, 1.06]);
+const M2 = micro(23, [1.02, 1.0, 1.04]);
+const M3 = micro(37, [0.99, 1.0, 1.1]);
+const FSC0 = plot(101, 0);
+const FSC1 = plot(103, 1);
+const CLS = (i) => cls(i, 5);
+const VOL = vol(7);
+const SEL = sel(9);
 const tile = (kind, name, src, url) => ({ kind, name, url: url || src, src, original_url: url || src });
 
 const NO_PARAMS = { box_size_pix: null, extracted_box_size_pix: null, bin_factor: null, bin_inferred: false };
