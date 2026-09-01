@@ -6,7 +6,9 @@
  * after the traced lineage's images stream, the script widens the session's
  * log request to EVERY captured job ({all:true}, same endpoint as the app's
  * Fetch-all button) and scans the remaining jobs. The re-trace grace window
- * shrank 3 min → 60s, the byte-drain ceiling grew 420s → 600s, the rest pass
+ * shrank 3 min → 60s (v3.29: 60s → 15s — coverage comes from the rest
+ * pass, the window only buys ORDER), the byte-drain ceiling grew 420s → 600s,
+ * the rest pass
  * gets a 20-minute scan budget, and __csCaptureFinish() stops the scan at
  * the next job boundary.
  *
@@ -56,8 +58,11 @@ console.log("── A. capture script (v3.27 complete-report pass) ──");
   check("rest pass filters to unscanned jobs (ALL_UIDS − scanned)", restFilterIdx > 0);
 
   // grace window + drain ceilings
-  check("re-trace grace window is 60s (was 3 min)", script.includes("Date.now() + 60000;   // v3.7: 45s"));
-  check("old 3-min grace constant gone", !script.includes("Date.now() + 180000;"));
+  check(
+    "re-trace grace window is 15s (v3.29: was 60s — coverage comes from the rest pass)",
+    script.includes("Date.now() + 15000;") && script.includes("graceEnd = Date.now() + 15000"),
+  );
+  check("old 60s / 3-min grace constants gone", !script.includes("Date.now() + 60000;") && !script.includes("Date.now() + 180000;"));
   check("byte-drain ceiling is 600s (was 420s)", script.includes("drainImageUploads(600000);"));
   check("old 420s drain constant gone", !script.includes("drainImageUploads(420000)"));
 

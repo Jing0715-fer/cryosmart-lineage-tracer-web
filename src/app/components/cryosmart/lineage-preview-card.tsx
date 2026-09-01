@@ -661,6 +661,14 @@ function ImportProgressStrip({
   onStop?: () => void;
   onDismiss: () => void;
 }) {
+  /* v3.29: live activity clock — ticks only while a script phase detail is
+   * on screen, driving the "Ns ago" liveness age next to it. Must run
+   * before the early return below (hook order). */
+  const phaseActive =
+    status === "polling" &&
+    !!progress?.phaseDetail &&
+    !!(progress?.phaseAt && progress.phaseAt > 0);
+  const activityNow = useElapsedTick(phaseActive);
   if (!visible || !message) return null;
   const done = status === "loaded";
   const failed = status === "error" || status === "expired";
@@ -762,6 +770,22 @@ function ImportProgressStrip({
           </button>
         )}
       </div>
+      {status === "polling" && progress?.phaseDetail && (
+        /* v3.29: script sub-step activity row — the counters (0/72 · 0%)
+           stay frozen through loader calibration, slow per-job waits and
+           the byte drain; this line names WHAT is running right now plus
+           a ticking liveness age so the capture never reads as dead. */
+        <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[10.5px] font-medium text-teal-700/90 dark:text-teal-300/85">
+          <span className="relative flex h-1.5 w-1.5 shrink-0" aria-hidden="true">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-teal-400 opacity-75" />
+            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-teal-500" />
+          </span>
+          <span className="min-w-0 flex-1 truncate">{progress.phaseDetail}</span>
+          {phaseActive && progress.phaseAt ? (
+            <ActivityAge phaseAt={progress.phaseAt} now={activityNow || Date.now()} />
+          ) : null}
+        </div>
+      )}
       {progress && pct !== null && (
         <div className="mt-2.5">
           <div className="h-2 w-full overflow-hidden rounded-full bg-white/90 ring-1 ring-inset ring-teal-100 dark:bg-slate-800 dark:ring-teal-900/50">
@@ -783,6 +807,27 @@ function ImportProgressStrip({
       )}
       {applying && <StripApplyingRow applying={applying} />}
     </div>
+  );
+}
+
+/** v3.29: liveness age for the strip's script-phase activity row — "3s ago"
+ *  while the script's phase POSTs are fresh, degrading to an amber "quiet
+ *  for 2m" once the sub-step itself has gone silent (a hint that the
+ *  capture tab may have died, complementing the stall detector). */
+function ActivityAge({ phaseAt, now }: { phaseAt: number; now: number }) {
+  const ageSec = Math.max(0, (now - phaseAt) / 1000);
+  if (ageSec < 90) {
+    return (
+      <span className="shrink-0 font-mono text-[10px] text-teal-600/70 dark:text-teal-400/60">
+        · {Math.max(1, Math.round(ageSec))}s ago
+      </span>
+    );
+  }
+  const mins = Math.round(ageSec / 60);
+  return (
+    <span className="shrink-0 font-mono text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+      · quiet for {mins}m
+    </span>
   );
 }
 

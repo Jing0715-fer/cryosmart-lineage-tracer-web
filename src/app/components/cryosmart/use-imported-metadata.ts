@@ -53,6 +53,17 @@ interface SessionStatus {
   log_images_uploaded: number;
   log_jobs_with_images: number;
   note: string;
+  /** v3.29: the capture script's current sub-step kind ("prepare",
+   *  "calibrating", "scan", "rescue", "grace", "rest", "drain") —
+   *  reported via POST .../phase during the stretches where the aggregate
+   *  counters cannot move (loader calibration, per-job slow waits). */
+  script_phase?: string;
+  /** v3.29: human detail for script_phase ("scanning 13/72 · J13
+   *  (class_3d)"). */
+  phase_detail?: string;
+  /** v3.29: epoch-ms of the last phase POST — the strip renders a
+   *  liveness age ("3s ago") from it. */
+  phase_at?: number;
   /** v3.5: job whose CryoSmart page the script ran on (auto-trace anchor). */
   end_job_uid?: string | null;
   /** v3.5: log images are fetched only for the requested lineage jobs. */
@@ -72,6 +83,14 @@ export interface ImportProgress {
   images: number;
   /** Log image bytes uploaded so far (same-origin renderable). */
   uploaded: number;
+  /** v3.29: the script's current sub-step kind ("calibrating", "scan",
+   *  "rescue", "grace", "rest", "drain") — null until the script reports
+   *  its first phase. */
+  phase?: string | null;
+  /** v3.29: human detail ("scanning 13/72 · J13 (class_3d)"). */
+  phaseDetail?: string | null;
+  /** v3.29: epoch-ms of the last phase POST (liveness age). */
+  phaseAt?: number | null;
 }
 
 /**
@@ -756,7 +775,10 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               p.done === n.done &&
               p.total === n.total &&
               p.images === n.images &&
-              p.uploaded === n.uploaded) ||
+              p.uploaded === n.uploaded &&
+              p.phase === n.phase &&
+              p.phaseDetail === n.phaseDetail &&
+              p.phaseAt === n.phaseAt) ||
             (!p && !n);
           if (
             prev.status === next.status &&
@@ -897,6 +919,10 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
           // `updated_at` while it waits for the user's trace, and every
           // log/image batch mutates the counters, so a live capture always
           // changes this fingerprint.
+          // v3.29: phase POSTS count as liveness here — a script deep in
+          // loader calibration (or a 20s slow-log wait) reports its
+          // sub-step but cannot move any counter, and must not trip the
+          // 10-min dead-tab timeout.
           const sig = [
             sessionStatus.status,
             sessionStatus.log_jobs_done,
@@ -906,6 +932,8 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             sessionStatus.note,
             sessionStatus.updated_at ?? 0,
             sessionStatus.log_request?.revision ?? 0,
+            sessionStatus.script_phase ?? "",
+            sessionStatus.phase_detail ?? "",
           ].join("|");
           // v3.16.1: progress-only fingerprint (NO updated_at) — heartbeat
           // bumps must not mask frozen COUNTERS. When the scan is finished
@@ -1126,6 +1154,19 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 sessionStatus.lineage_mode && !allRequested
                   ? sessionStatus.total_jobs
                   : null;
+              // v3.29: the script's current sub-step ("calibrating the log
+              // loader on J45 — action 'getJobDetail' arg shape 2/6…",
+              // "scanning 13/72 · J13 (class_3d)", "rescue", "grace",
+              // "rest", "drain"). While NO job has streamed yet the
+              // generic "fetching log images 0/72…" line says nothing —
+              // the phase detail replaces it so the calibration stretch
+              // (30–120s on a real build) explains itself; afterwards the
+              // generic line resumes and the detail moves to the strip's
+              // activity row.
+              const phaseDetail =
+                typeof sessionStatus.phase_detail === "string" && sessionStatus.phase_detail
+                  ? sessionStatus.phase_detail
+                  : null;
               // Phase-aware message: the scan can finish minutes before the
               // script completes (re-trace grace window + byte upload
               // drain) — say what is actually happening instead of a
@@ -1141,10 +1182,14 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   ? `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews ${upl}/${imgs}${lineageNote}…`
                   : scanDone && imgs > 0
                     ? `Loaded ${sessionStatus.total_jobs} jobs — all ${imgs} log images ready${lineageNote}; the script is wrapping up…`
-                    : `Loaded ${sessionStatus.total_jobs} jobs — fetching log images${lineageNote} ` +
-                      `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
-                      (imgs > 0 ? ` (${imgs} captured)` : "") +
-                      "…";
+                    : sessionStatus.log_jobs_done === 0 && phaseDetail
+                      ? `Loaded ${sessionStatus.total_jobs} jobs — ${phaseDetail}${
+                          phaseDetail.endsWith("…") || phaseDetail.endsWith(".") ? "" : "…"
+                        }`
+                      : `Loaded ${sessionStatus.total_jobs} jobs — fetching log images${lineageNote} ` +
+                        `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
+                        (imgs > 0 ? ` (${imgs} captured)` : "") +
+                        "…";
               applyState({
                 status: "polling",
                 message,
@@ -1155,6 +1200,9 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   total: Math.max(1, sessionStatus.log_jobs_total),
                   images: sessionStatus.log_images_count,
                   uploaded: sessionStatus.log_images_uploaded,
+                  phase: sessionStatus.script_phase || null,
+                  phaseDetail,
+                  phaseAt: sessionStatus.phase_at || null,
                 },
                 endJobUid: endJobUidSeen,
                 uploadStalled,

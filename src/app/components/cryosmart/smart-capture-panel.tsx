@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.28 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.29 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -218,7 +218,21 @@ export function SmartCapturePanel() {
 // flat wall-clock guard could fire FIRST and silently drop the tail of
 // the lineage; each job's retrieval is additionally wrapped so one
 // throwing job records itself as no-log and the scan CONTINUES instead
-// of dying mid-list.
+// of dying mid-list. v3.29: SUB-STEP VISIBILITY + SPEED — every counter
+// in the web app's progress strip sits at 0/72 · 0% for the whole
+// loader-calibration stretch (lazy-job classification + action×shape
+// calibration + HTTP fallback probing, 30–120s on a real build before the
+// first /logs batch can stream), which read as "stuck". The script now
+// fire-and-forgets its current sub-step to POST /phase ("calibrating on
+// J45 — action 'getJobDetail' arg shape 2/6…" / "scanning 13/72 · J13
+// (class_3d)" / rescue / grace / rest / drain) and the strip renders it
+// live with a "Ns ago" liveness age; every phase POST doubles as a
+// heartbeat. Speed: the 8 HTTP log-probe paths fire CONCURRENTLY (worst
+// case 15s instead of 8 × 15s per job), the lazy-job classification
+// deep-scans the store ONCE instead of once per job, the scan loop's
+// cached check drops its redundant deep walk, the trace-wait poll is
+// 3s → 1.2s, and the re-trace grace window is 60s → 15s (coverage comes
+// from the complete-report pass — the wait only ordered things).
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -445,6 +459,24 @@ export function SmartCapturePanel() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {})
     }, 120000).then(function(r) { return r.json(); });
+  }
+
+  // v3.29: report the CURRENT sub-step to the session (fire-and-forget).
+  // The web app's progress strip renders phase_detail live with a "Ns ago"
+  // liveness age — the loader-calibration stretch (30–120s on a real build
+  // where every counter still reads 0/72 · 0%) no longer looks like a hang.
+  // Rate-limited by CHANGE ONLY (same phase+detail → no POST), and every
+  // POST bumps the session clock so phases double as heartbeats during
+  // stretches where no counter can move. Never awaited, never fatal.
+  var __lastPhaseKey = '';
+  function phase(kind, detail) {
+    var key = String(kind || '') + ' | ' + String(detail || '');
+    if (key === __lastPhaseKey) return;
+    __lastPhaseKey = key;
+    try {
+      post('/phase', { phase: String(kind || '').slice(0, 40), detail: String(detail || '').slice(0, 220) })
+        .catch(function() {});
+    } catch (e) {}
   }
 
   // ── Log-image machinery (used by STEP 3) ───────────────────────────
@@ -1042,8 +1074,11 @@ export function SmartCapturePanel() {
   // path segment first ("logStore.logsByJob.J12"), then by the entries'
   // own job_uid field — single-uid arrays only, so a shared event stream
   // is never misattributed to every job.
-  function deepLogsFor(uid) {
-    var all = scanForImageLogArrays(stores);
+  // v3.29: split into deepLogsForIn(all, uid) so callers that ALREADY hold
+  // a scanForImageLogArrays result (the lazy-job filter) can reuse it —
+  // one deep walk of the whole store instead of one PER JOB (72 walks
+  // ≈ several seconds of pure tree-walking before the scan even starts).
+  function deepLogsForIn(all, uid) {
     var i, e, en, eu;
     for (i = 0; i < all.length; i++) {
       var p = '.' + (all[i].path || '') + '.';
@@ -1076,6 +1111,9 @@ export function SmartCapturePanel() {
     }
     return null;
   }
+  function deepLogsFor(uid) {
+    return deepLogsForIn(scanForImageLogArrays(stores), uid);
+  }
 
   function storeSummary(storeList) {
     var lines = [];
@@ -1101,19 +1139,32 @@ export function SmartCapturePanel() {
       '/api/job/' + encodeURIComponent(uid) + '/logs',
       '/api/logs?job=' + encodeURIComponent(uid)
     ];
-    return paths.reduce(function(chain, p) {
-      return chain.then(function(logs) {
-        if (logs) return logs;
-        return fetchT(p, { credentials: 'include' }, 15000)
+    // v3.29: fire ALL paths CONCURRENTLY (first valid hit wins) instead of
+    // chaining them one-by-one. The chain's worst case was 8 × 15s = 120s
+    // PER JOB on a slow/hanging server — with ~500 no-log jobs falling to
+    // the probe in the complete-report pass, that was hours of pure
+    // waiting. Concurrent: the wall-clock worst case is one 15s timeout,
+    // and on healthy servers the round trips overlap (8 sequential RTTs
+    // → ~1). The 8 GETs are read-only and trivial for the server; losing
+    // requests once a hit resolves is harmless.
+    return new Promise(function(resolve) {
+      var remaining = paths.length, won = false;
+      paths.forEach(function(p) {
+        fetchT(p, { credentials: 'include' }, 15000)
           .then(function(r) { return r.ok ? r.json() : null; })
           .then(function(d) {
-            if (!d) return null;
-            var arr = d.data || d.logs || (Array.isArray(d) ? d : null);
-            return looksLikeLogs(arr) ? arr : null;
+            if (d) {
+              var arr = d.data || d.logs || (Array.isArray(d) ? d : null);
+              if (looksLikeLogs(arr) && !won) { won = true; resolve(arr); }
+            }
           })
-          .catch(function() { return null; });
+          .catch(function() {})
+          .then(function() {
+            remaining--;
+            if (remaining === 0 && !won) resolve(null);
+          });
       });
-    }, Promise.resolve(null));
+    });
   }
 
   // Streaming batch upload — the web UI shows live progress from these.
@@ -1420,6 +1471,12 @@ export function SmartCapturePanel() {
     var lastReqPoll = 0;
     var lastPollHadExtras = false;
     var watchRequest = LINEAGE_MODE && knownRequested;
+    // v3.29: byte-drain visibility — during the drain the strip's own
+    // counters DO move (log_images_uploaded), but naming the queue depth
+    // ("231 ok · 40 in flight") tells the user the capture is actively
+    // pushing bytes, not idling. Updated only when a byte lands/fails so
+    // the 250ms drain tick never spams the /phase endpoint.
+    var drainMark = -1;
     return new Promise(function(resolve) {
       (async function check() {
         flushImageBatch();
@@ -1446,6 +1503,12 @@ export function SmartCapturePanel() {
           console.log('[CryoSmart] Image bytes uploaded: ' + imgUploaded + ' ok, ' + imgFailed + ' failed/skipped.');
           resolve();
           return;
+        }
+        var dmark = imgUploaded + imgFailed;
+        if (dmark !== drainMark) {
+          drainMark = dmark;
+          phase('drain', 'uploading image preview bytes — ' + imgUploaded + ' ok · ' +
+            (imgQueue.length + imgWorkers + imgBatch.length) + ' in flight…');
         }
         setTimeout(check, 250);
       })();
@@ -1572,7 +1635,11 @@ export function SmartCapturePanel() {
           knownRequested = st.log_request.jobs.slice();
         }
       }
-      await sleepMs(3000);
+      // v3.29: 3s → 1.2s — the auto-trace lands seconds after the jobs
+      // upload; a 3s poll added dead time to the very first visible
+      // phase ("waiting for Trace Lineage" strip). The status GET is a
+      // tiny local request; polling it faster is free.
+      await sleepMs(1200);
     }
     if (knownRequested) {
       if (CAPTURE_ALL_LATE) {
@@ -1610,18 +1677,29 @@ export function SmartCapturePanel() {
     // nothing to harvest; the loader CALIBRATION must only run on truly
     // lazy jobs — a pre-cached job would make whatever action was tried
     // first look like the working loader.
-    function cachedLogsFor(uid) {
+    // v3.29: cachedLogsFor takes an OPTIONAL pre-collected deep-scan array
+    // list (the lazy filter below scans the whole store ONCE and shares
+    // the result); quickLogsFor is the cheap variant (classic map keys +
+    // embedded image_logs only, NO deep walk) for the scan loop's top —
+    // the loop's late-chance deep check below still covers every shape
+    // the quick check cannot see, so no coverage is lost.
+    function quickLogsFor(uid) {
       var c = readLogState(uid);
       if (c && c.length) return c;
-      for (var ii = 0; ii < jobs.length; ii++) {
-        if (jobs[ii].uid === uid && Array.isArray(jobs[ii].image_logs) && jobs[ii].image_logs.length) {
-          return jobs[ii].image_logs;
+      for (var iq = 0; iq < jobs.length; iq++) {
+        if (jobs[iq].uid === uid && Array.isArray(jobs[iq].image_logs) && jobs[iq].image_logs.length) {
+          return jobs[iq].image_logs;
         }
       }
+      return null;
+    }
+    function cachedLogsFor(uid, deepArrays) {
+      var q = quickLogsFor(uid);
+      if (q) return q;
       // v3.9: cached in ANY state shape — a previous script run or an
       // opened job view may hold logs the classic keys never expose
       // (the re-run "0 images" regression).
-      var deep = deepLogsFor(uid);
+      var deep = deepArrays ? deepLogsForIn(deepArrays, uid) : deepLogsFor(uid);
       if (deep && deep.length) return deep;
       return null;
     }
@@ -1633,7 +1711,12 @@ export function SmartCapturePanel() {
       sh.push({ uid: uid, project_uid: projectId });
       return sh;
     }
-    var lazy = pending.filter(function(u) { return !scanned[u] && !cachedLogsFor(u); });
+    // v3.29: ONE deep walk for the whole lazy-job classification (was one
+    // PER pending job — 72 full store walks ≈ seconds of dead tree-
+    // walking while the strip read "0/72 · 0%").
+    phase('prepare', 'checking ' + pending.length + ' job(s) for already-cached logs…');
+    var lazyScan = scanForImageLogArrays(stores);
+    var lazy = pending.filter(function(u) { return !scanned[u] && !cachedLogsFor(u, lazyScan); });
     console.log('[CryoSmart] Logs already in memory for ' + (pending.length - lazy.length) + ' job(s); ' + lazy.length + ' to load via the log API.');
 
     var socketMsgs = [];
@@ -1641,6 +1724,10 @@ export function SmartCapturePanel() {
     if (lazy.length > 0 && !winning) {
     var actions = findLogActions();
     console.log('[CryoSmart] Log loader candidates:', actions.map(function(a) { return a.name; }).join(', ') || 'none');
+    // v3.29: this whole calibration stretch runs BEFORE any /logs batch
+    // can stream (the strip's counters all read 0/N · 0%) — report each
+    // action×shape attempt so the user sees exactly what is being tried.
+    phase('calibrating', 'finding the log loader — ' + (actions.length || 0) + ' candidate action(s)…');
 
     // v3.2: sniff WebSocket message types while scanning — on some builds
     // the logs arrive via WS (e.g. insert_events); this shows what actually
@@ -1689,6 +1776,10 @@ export function SmartCapturePanel() {
       var shapes = shapesFor(calibUid);
       for (var a = 0; a < actions.length; a++) {
         for (var s = 0; s < shapes.length; s++) {
+          // v3.29: per-combo progress — a full action×shape sweep can take
+          // a minute+ on builds with many candidate actions; without this
+          // the strip sat at "0/72 · 0%" the whole time.
+          phase('calibrating', 'calibrating on ' + calibUid + ' — action "' + actions[a].name + '" arg shape ' + (s + 1) + '/' + shapes.length + '…');
           var base = snapshotLogs(stores);
           var ret = null;
           try {
@@ -1751,6 +1842,7 @@ export function SmartCapturePanel() {
     if (!winning) {
       // HTTP fallback against every calibration candidate.
       for (var pi = 0; pi < calibTries && !winning; pi++) {
+        phase('calibrating', 'probing HTTP log endpoints for ' + calibPool[pi] + ' (all 8 paths in parallel)…');
         var probe = await httpLogProbe(calibPool[pi]);
         if (probe) {
           winning = { http: true };
@@ -1817,6 +1909,13 @@ export function SmartCapturePanel() {
           ' job(s). The complete-report pass below (or a re-run) picks the rest up — nothing is lost.');
         break;
       }
+      // v3.29: per-job sub-step — a slow job (loader second chance up to
+      // 20s, 8s diff windows, 15s HTTP probes) would otherwise freeze the
+      // strip's counters on one number; naming the CURRENT job + type
+      // keeps the activity line moving and tells the user exactly where
+      // the scan is.
+      phase('scan', 'scanning ' + (j + 1) + '/' + pending.length + ' · ' + uid2 +
+        (typeByUid[uid2] ? ' (' + typeByUid[uid2] + ')' : ''));
       // v3.28: per-job fault isolation — one throwing job (weird store
       // state, malformed log payload, an unguarded helper) used to kill the
       // WHOLE scan loop: the exception escaped to the phase-level catch and
@@ -1824,7 +1923,13 @@ export function SmartCapturePanel() {
       // a failing job records itself as no-log and the scan CONTINUES.
       var logs2 = null, imgs2 = [];
       try {
-        logs2 = cachedLogsFor(uid2);
+      // v3.29: quickLogsFor (classic map keys + embedded image_logs, NO
+      // deep walk) — the lazy filter already classified every pending job
+      // against a full deep scan at the top of this pass; a deep-cached job
+      // is never lazy, so the loop-top check only needs the cheap paths.
+      // The late-chance deep check further below still covers any shape
+      // this misses, so coverage is identical to cachedLogsFor here.
+      logs2 = quickLogsFor(uid2);
       if (!logs2 && winning) {
         if (winning.http) {
           logs2 = await httpLogProbe(uid2);
@@ -1842,6 +1947,11 @@ export function SmartCapturePanel() {
                 // giving up; this was the systematic "hetero_refine /
                 // ab-init have no log images" failure: the loader worked,
                 // it was just slow.
+                // v3.29: name the wait — a 20s stall on one job is the
+                // scan's longest single silence, and without this line the
+                // strip looks frozen exactly there.
+                phase('scan', 'scanning ' + (j + 1) + '/' + pending.length + ' · ' + uid2 +
+                  ' — logs are slow to arrive, waiting up to 20s…');
                 rv = coerceLogs(await withTimeout(rr.catch(function() {}), 20000));
               }
               if (looksLikeLogs(rv)) logs2 = rv;
@@ -1900,6 +2010,9 @@ export function SmartCapturePanel() {
     // shape for up to 90s before giving up (v3.13: 40s → 90s — the real
     // build's abinit deliveries regularly outlived 40s).
     if (noLog.length) {
+      // v3.29: the rescue is a fixed 90s window where the strip's counters
+      // legitimately cannot move — name it so it reads as deliberate.
+      phase('rescue', noLog.length + ' job(s) delivered no readable logs yet — re-checking for late deliveries (up to 90s)…');
       console.log('[CryoSmart] ' + noLog.length + ' job(s) had no readable logs yet (large payloads can be slow) — re-checking for up to 90s…');
       if (winning && !winning.http) {
         for (var n1 = 0; n1 < noLog.length; n1++) {
@@ -1956,12 +2069,19 @@ export function SmartCapturePanel() {
   if (LINEAGE_MODE && knownRequested && !FINISH_NOW) {
     if ((logRefsStreamed || 0) > 0) {
       console.log('[CryoSmart] All lineage log images streamed — they are already visible in the web app tab (the graph and report refresh live as bytes arrive).' +
-        ' Waiting up to 1 more minute for a possible re-trace, then scanning the remaining jobs for complete reports…');
+        ' Waiting up to 15s for a possible re-trace, then scanning the remaining jobs for complete reports…');
     }
-    var graceEnd = Date.now() + 60000;   // v3.7: 45s → 3 min. v3.27: 3 min → 60s — the complete-report pass below scans every remaining job anyway, so a late re-trace only affects ORDER, not coverage.
+    // v3.29: 60s → 15s — coverage never depended on this window (the
+    // complete-report pass below scans every remaining job regardless;
+    // a late re-trace / Fetch-all click is ALSO adopted during the byte
+    // drain's request polling), so the window only buys ORDER. 15s is
+    // plenty for a deliberate re-trace and removes 45s of dead wait
+    // from EVERY capture.
+    phase('grace', 'lineage scan complete — brief re-trace window (15s), then the remaining jobs for the complete report…');
+    var graceEnd = Date.now() + 15000;
     var served = knownRequested.slice();
     while (Date.now() < graceEnd && !FINISH_NOW) {
-      await sleepMs(3000);
+      await sleepMs(1500);
       if (FINISH_NOW) break;
       if (CAPTURE_ALL_LATE) {
         var rest = ALL_UIDS.filter(function(u) { return !scanned[u]; });
@@ -1983,7 +2103,7 @@ export function SmartCapturePanel() {
         pending = extra;
         console.log('[CryoSmart] Re-trace detected — fetching ' + extra.length + ' more job(s).');
         try { await scanLogs(); } catch (e) {}
-        graceEnd = Date.now() + 60000;
+        graceEnd = Date.now() + 15000;
       }
     }
   }
@@ -2010,6 +2130,10 @@ export function SmartCapturePanel() {
       }
       console.log('[CryoSmart] Complete-report pass — fetching log images for the remaining ' + rest3.length + ' of ' + ALL_UIDS.length + ' job(s)' +
         ' (the report includes every job; large projects take several more minutes).');
+      // v3.29: the rest pass is the LONGEST stretch of a big capture —
+      // name it before the per-job phases take over (the strip's own
+      // denominator widens via the {all:true} request at the same time).
+      phase('rest', 'complete-report pass — scanning the remaining ' + rest3.length + ' of ' + ALL_UIDS.length + ' job(s)…');
       pending = rest3;
       try { await scanLogs(Math.max(1200000, rest3.length * 150000)); } catch (e) {
         console.warn('[CryoSmart] Complete-report pass failed (non-fatal):', e && e.message);
@@ -2190,7 +2314,10 @@ export function SmartCapturePanel() {
               lands, auto-traces from your page job, and log images stream in
               <strong> for the traced lineage first, then for every remaining
               job</strong> — so the report carries every image that exists
-              (large projects take a few extra minutes). Multi-round jobs
+              (large projects take a few extra minutes). The strip names the
+              <strong> exact current sub-step</strong> (loader calibration,
+              the job being scanned, bytes uploading — with a liveness age)
+              so a long step never reads as frozen. Multi-round jobs
               fetch only their
               <strong>final round / final iteration / last numbered plot</strong> ("Per particle
               scale factors 007" keeps only 007) and non-image result files
