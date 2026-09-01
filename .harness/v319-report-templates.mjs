@@ -69,9 +69,9 @@ console.log("── A. report-style module ──");
     "invalid values clamped to defaults, non-strings emptied");
   const long = normalizeReportStyle({ titleOverride: "x".repeat(500), subtitle: "y".repeat(500) });
   check(long.titleOverride.length === 200 && long.subtitle.length === 300, "title/subtitle length caps (200/300)");
-  check(REPORT_TEMPLATES.length === 7 && REPORT_TEMPLATES.map((t) => t.id).join(",") === "paper,minimal,slate,classic,blueprint,editorial,focus",
-    "7 template infos in stable order (v3.22 added blueprint/editorial/focus after classic)");
-  check(reportTemplateLabel("slate") === "Slate 暗色" && reportTemplateLabel("paper") === "Paper 学术", "template label lookup");
+  check(REPORT_TEMPLATES.length === 8 && REPORT_TEMPLATES.map((t) => t.id).join(",") === "paper,minimal,slate,classic,blueprint,editorial,focus,industrial",
+    "8 template infos in stable order (v3.24 added industrial after focus)");
+  check(reportTemplateLabel("slate") === "Slate 暗色" && reportTemplateLabel("industrial") === "Industrial 工业", "template label lookup");
   check(DEFAULT_REPORT_STYLE.template === "paper", "default template is paper (new design)");
 }
 
@@ -362,7 +362,7 @@ console.log("── H. v3.21 outline 2 jobs/row + fixed job-out track ──");
 /* ── I. v3.23 lightbox — click-to-enlarge on every report image ──── */
 console.log("── I. v3.23 lightbox (所有图片点击放大) ──");
 {
-  const ALL7 = ["paper", "minimal", "slate", "blueprint", "editorial", "focus", "classic"];
+  const ALL7 = ["paper", "minimal", "slate", "blueprint", "editorial", "focus", "industrial", "classic"];
   // 1. The FULL inline script carries the lightbox IIFE and still parses.
   const { _REPORT_HTML_V2_SCRIPT } = reportHtml;
   check(_REPORT_HTML_V2_SCRIPT.includes('querySelectorAll("main img")'),
@@ -430,6 +430,24 @@ console.log("── I. v3.23 lightbox (所有图片点击放大) ──");
     "editorial: italic serif lightbox caption");
   check(lbOf("focus").includes(".lb-cap{font-style:italic"),
     "focus: italic serif lightbox caption");
+
+  // 3b. v3.24 industrial — gunmetal + safety-orange archetype signatures.
+  const ind = buildReportCss("industrial", "standard", "full");
+  check(ind.includes(":root{--bg:#151618"), "industrial: gunmetal dark background tokens");
+  check(ind.includes("repeating-linear-gradient(-45deg,#ff7a1a 0 11px,#191b1e 11px 22px)"),
+    "industrial: 45° safety-orange hazard stripe under the header");
+  check(ind.includes(".job-head{position:relative;background:linear-gradient(180deg,#282b30,#22252a)"),
+    "industrial: riveted nameplate strip on job-card heads");
+  check(ind.includes(".job-head::before,.job-head::after"),
+    "industrial: rivet dots on the nameplate");
+  check(ind.includes("--radius:0px"), "industrial: squared machined corners (radius 0)");
+  check(ind.includes("inset 0 1px 0 rgba(255,255,255,.05)"), "industrial: steel-bevel shadows");
+  check(!ind.includes("#5eead4") && !ind.includes("#0f1318"), "industrial: distinct from slate palette");
+  const indLb = lbOf("industrial");
+  check(indLb.includes(".lb-frame{border-top:3px solid var(--lb-accent)"),
+    "industrial: lightbox frame carries the safety-orange top rail");
+  check(indLb.includes(".lb-cap{font-family:var(--font-mono);text-transform:uppercase"),
+    "industrial: mono uppercase lightbox caption");
 
   // 4. The full html embeds the lightbox script (blob/new-tab/file all self-contained).
   const html = buildLineageHtmlV2(summary, { template: "minimal" });

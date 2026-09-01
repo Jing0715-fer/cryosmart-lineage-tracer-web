@@ -347,7 +347,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                   {REPORT_TEMPLATES.map((t) => {
                     const selected = reportStyle.template === t.id;
                     const isNew =
-                      t.id === "blueprint" || t.id === "editorial" || t.id === "focus";
+                      t.id === "blueprint" || t.id === "editorial" || t.id === "focus" || t.id === "industrial";
                     return (
                       <button
                         key={t.id}
@@ -531,7 +531,11 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                     a.href = url;
                     a.download = `CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_report.html`;
                     a.click();
-                    URL.revokeObjectURL(url);
+                    // v3.24: revoke AFTER a delay (same policy as the bundle
+                    // path) — the synchronous revoke raced the browser's
+                    // download handshake in Safari-class engines and could
+                    // cancel the download of the just-clicked blob URL.
+                    setTimeout(() => URL.revokeObjectURL(url), 30000);
                     toast.success(`Downloaded CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_report.html`);
                   }}
                 >

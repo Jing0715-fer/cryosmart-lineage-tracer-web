@@ -42,6 +42,26 @@ export interface ImageEmbedOptions {
    *  about to arrive via the capture script's own uploads anyway — grinding
    *  the proxy only stalls the report/modal embed behind a wall of 502s. */
   skipDirectCryosmart?: boolean;
+  /** v3.24: external abort (the bundle builder's Stop button). Merged with
+   *  the internal 10s timeout so a cancelled build stops prefetching
+   *  immediately instead of grinding N/8 × 10s of zombie fetches into an
+   *  already-idle progress card. */
+  signal?: AbortSignal;
+}
+
+/** Merge the external abort signal with the per-request timeout. Prefers
+ *  native AbortSignal.any (Chrome 116+/FF 124+); falls back to a manual
+ *  controller bridge for older engines. */
+function anySignalWithTimeout(external: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  if (!external) return timeout;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([external, timeout]);
+  const ctrl = new AbortController();
+  const abortFromExternal = () => ctrl.abort();
+  if (external.aborted) ctrl.abort();
+  else external.addEventListener("abort", abortFromExternal, { once: true });
+  timeout.addEventListener("abort", () => ctrl.abort(), { once: true });
+  return ctrl.signal;
 }
 
 export async function imageToBase64(
@@ -67,7 +87,7 @@ export async function imageToBase64(
     if (/^\/api\/cryosmart\/(?:import\/session|history)\/[^/]+\/image\//i.test(pathOnly)) {
       const resp = await fetch(pathOnly, {
         credentials: "same-origin",
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: anySignalWithTimeout(opts?.signal, FETCH_TIMEOUT_MS),
       });
       if (!resp.ok) return null;
       const buf = await resp.arrayBuffer();
@@ -82,7 +102,7 @@ export async function imageToBase64(
     if (/^\/(?!api\/)/i.test(pathOnly)) {
       const resp = await fetch(pathOnly, {
         credentials: "same-origin",
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: anySignalWithTimeout(opts?.signal, FETCH_TIMEOUT_MS),
       });
       if (!resp.ok) return null;
       const buf = await resp.arrayBuffer();
@@ -130,7 +150,9 @@ export async function imageToBase64(
     // CryoSmart origin) → the proxied branch has nothing to proxy against.
     if (!session || !session.baseUrl) return null;
 
-    const resp = await cryoSmartFetch(session, relativePath);
+    const resp = await cryoSmartFetch(session, relativePath, {
+      signal: opts?.signal,
+    });
     if (!resp.ok) return null;
 
     const buf = await resp.arrayBuffer();
@@ -198,6 +220,9 @@ export interface PrefetchImagesOptions {
    *  grind 10s proxy timeouts while their bytes are already on the way via
    *  the session-image channel. */
   stagedImport?: boolean;
+  /** v3.24: external abort — the bundle builder's Stop button. Stops the
+   *  worker pool from pulling new URLs and aborts in-flight fetches. */
+  signal?: AbortSignal;
 }
 
 /** Structured progress: pass any subset of current/total/message. */
@@ -313,11 +338,15 @@ export async function prefetchImagesForReport(
 
   async function worker() {
     while (index < urlList.length) {
+      // v3.24: a cancelled build stops pulling new URLs — the pool drains
+      // as soon as the in-flight fetches observe the merged abort signal.
+      if (opts?.signal?.aborted) return;
       const myIndex = index++;
       const url = urlList[myIndex];
       onProgress?.({ current: done, total: urlList.length, message: `Embedding image ${done + 1}/${urlList.length}…` });
       const dataUrl = await imageToBase64(session, url, {
         skipDirectCryosmart: opts?.stagedImport === true,
+        signal: opts?.signal,
       });
       if (dataUrl) {
         out[url] = dataUrl;

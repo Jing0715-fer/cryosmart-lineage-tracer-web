@@ -189,7 +189,7 @@ cryosmart-lineage-tracer-web/
 - 单文件 HTML，含 base64 内嵌图、懒加载、Referrer-Policy、`onerror` 远程回退
 - log images 按 job 严格分组、只取最后一轮
 - 直接邮件 / IM 分享，**不需要后端托管**
-- **v3.19 模板系统**：报告不再内嵌于页面（旧的内嵌 iframe 已移除），在 **Lineage Preview → Report** 标签页选择样式与配置后，仅提供「新标签页打开」和「下载 HTML」两种出口。七套模板共享完全相同的正文标记（内容不缩水，仅换肤换骨架）：
+- **v3.19 模板系统**：报告不再内嵌于页面（旧的内嵌 iframe 已移除），在 **Lineage Preview → Report** 标签页选择样式与配置后，仅提供「新标签页打开」和「下载 HTML」两种出口。八套模板共享完全相同的正文标记（内容不缩水，仅换肤换骨架）：
   - **Paper 学术**（默认）：衬线字体、纯白纸面、双线题头、hairline 边框、booktabs 表格、打印友好（`@page` + `@media print`），无渐变/荧光/阴影
   - **Minimal 极简**：系统无衬线、灰底白卡三级层次、青绿题头刻线、盒装媒体区块，kind 色仅作标记
   - **Slate 暗色**：三级明度深色面板、青绿渐隐题头线、悬停辉光，暗室演示友好
@@ -197,11 +197,13 @@ cryosmart-lineage-tracer-web/
   - **Blueprint 工程记录簿**（v3.22）：0px 直角面板 + 硬偏移阴影 + 点阵坐标纸底、石墨题头块 + 铁锈红刻度带、`SEC 01` 等宽编号分节、卡片四角角标
   - **Editorial 画报/年报**（v3.22）：墨色报头 band + 大号衬线展示字体、章节大数字 `01/02…`、job 卡顶部色带与序号徽章、奶油纸面
   - **Focus 沉浸阅读**（v3.22）：单栏文档流（顶部横向章节导轨 + 章节板式图片流，与双栏工作台结构性不同的第三种版式原型）、暖纸色衬线正文、大行距
+  - **Industrial 工业控制台**（v3.24）：枪灰钢板暗色面板（中性暖炭灰三级钢板）、**45° 安全橙警示条纹**题头下缘、job 卡顶部**铆钉铭牌**（nameplate strip + 左右铆钉）、LED 状态灯分节标记与题头指示灯、拉丝金属页面纹理、方角机加工倒角（inset 高光 + 硬投影）、安全橙机器按钮；lightbox 查看器同样随皮肤着色（石墨速罩 + 橙色顶轨 + 等宽大写字幕）
 - **自定义配置**（localStorage 持久化，`cryosmart_report_style_v1`）：模板、**页面宽度（全宽 / 宽 1680 / 适中 1280）**、字号（紧凑/标准/舒适）、图片模式（嵌入 data-URL / 引用原链接 / 不含图片）、自定义报告标题与附注。**Build & download ZIP** 的 HTML 报告自动沿用同一配置（打包时读取）
 - **v3.20 全宽与层次**：三种新模板默认**全宽利用屏幕**（无 1240px 封顶，左侧谱系栏按比例 `min(24vw, 540px)`、主链占满剩余宽度）；图片/地图网格改为 auto-fill 自适应列（map 240px、紧凑图 176px、class 砖 180px 起，宽屏自动多列），媒体框整体放大（map 预览井 130px、micrograph 网格 210px 起）；minimal/slate 的媒体/数据区块渲染为盒装内嵌面板（三层视觉深度）、slim sticky 题头 + 题头刻线；统一了 focus-visible 焦点环与细滚动条
 - **v3.20 修复（blob 报告图片回归）**：v3.19 移除内嵌 iframe 后，**从 Capture History 恢复**的报告在新标签页（blob: URL）里所有 UI title / log 图片全部静默消失 —— history 图片 URL 是相对路径，blob: 上下文无法解析。现在 `/api/cryosmart/history/<id>/image/` 与 session 图片一样会被**绝对化**（含「打开」链接与 map/class 预览链接），且无活动会话时也照常预取 history 图片做嵌入（嵌入模式恢复自包含导出）
 - **v3.21 版式修正（列宽一致性 + 左栏双列）**：① 主链 job 卡片的「输出到」侧栏改为**固定轨道** `clamp(180px, 22%, 280px)` —— 旧版 `auto` 轨道按各卡内容自适应（218px vs 76px），导致每张卡的主内容列宽各不相同；现在所有卡片侧栏同宽对齐、主列等宽。② 左侧 Lineage Outline 改为**每行 2 个 job 砖**：phase 标签移到网格上方（释放 92px 侧栏），stage-grid 以 140px auto-fill 铺列（390px 手机 → 143px 砖、1920px 全宽 → ~198px 砖），mini-node 重排为紧凑竖向砖（uid/类型/指标堆叠、引用药丸折行到下方）。终节点的「最终节点」占位渲染为安静药丸，固定宽侧栏不再显得空。四种模板同步生效（classic 以追加覆盖方式获得同样的版式，外观不变）
-- **v3.23 图片点击放大（lightbox，所有模板）**：报告里**任何一张图**（UI title 图、log 图、class 网格、map 预览、select-2D、最终结果图）点击后全屏放大查看 —— 深色磨砂遮罩 + 定尺寸画框（`object-fit:contain`，小图自动放大填满）、**点击缩放（以点击点为中心，1–8×）+ 滚轮缩放 + 拖拽平移 + 触摸滑动翻页**、‹/› 与 ←/→ 键翻图、ESC 关闭、底部字幕栏（job 名 · 图名 · 位置计数 · 实时缩放百分比）与「点击缩放 · ESC 关闭」提示。七套模板的查看器各自随皮肤着色（Paper 白卡纸画框 + 衬线斜体字幕、Blueprint 等宽大写字幕 + 直角按钮、Editorial/Focus 衬线斜体字幕等），打印时自动隐藏。实现为自包含内联脚本，blob 新标签页 / 下载的 HTML 文件 / ZIP 内报告全部可用；图片优先加载原图链接、失败自动回退到页面已渲染的源
+- **v3.23 图片点击放大（lightbox，所有模板）**：报告里**任何一张图**（UI title 图、log 图、class 网格、map 预览、select-2D、最终结果图）点击后全屏放大查看 —— 深色磨砂遮罩 + 定尺寸画框（`object-fit:contain`，小图自动放大填满）、**点击缩放（以点击点为中心，1–8×）+ 滚轮缩放 + 拖拽平移 + 触摸滑动翻页**、‹/› 与 ←/→ 键翻图、ESC 关闭、底部字幕栏（job 名 · 图名 · 位置计数 · 实时缩放百分比）与「点击缩放 · ESC 关闭」提示。八套模板的查看器各自随皮肤着色（Paper 白卡纸画框 + 衬线斜体字幕、Blueprint/Industrial 等宽大写字幕 + 直角按钮、Editorial/Focus 衬线斜体字幕等），打印时自动隐藏。实现为自包含内联脚本，blob 新标签页 / 下载的 HTML 文件 / ZIP 内报告全部可用；图片优先加载原图链接、失败自动回退到页面已渲染的源
+- **v3.24 代码审查修复（ZIP64 + 流式收尾 + 安全加固）**：① **ZIP64**（`zip.ts`）—— v3.18 流式 ZIP 去掉了内存上限，但所有 size/offset 仍是 32 位字段，>4 GiB 的档案「构建成功却解压即坏」（central directory 偏移被截断取模）。现在按 APPNOTE 4.5 发出 ZIP64 扩展字段（本地头双 size）、中央目录溢出字段、ZIP64 EOCD 记录 + locator；小档案字节级不变（与 makeZip 完全一致），并由 CPython `zipfile` 独立读回验证。② **Final_Result 阶段流式收尾**（`bundle.ts`）—— 旧代码把 6 个 .mrc 终图 + 5 个图全部缓冲在内存里才写盘（峰值 = 全部之和，正是 66-map OOM 的同类）；改为有序生产者/消费者（并发下载不变，写入按路径排序逐个落盘，写完即释放）。③ **SSRF 凭证外发防护**（`capture-history.ts`）—— 导入的 capture JSON 里的 `remote_image_urls` 原先会把存储的 Authorization/Cookie 转发给**任意** http(s) URL；现在仅允许与该 capture 自身 `cryosmart_origin` 同源的链接携带凭证，且重定向手动逐跳校验同源、8 MB 上限改为流式截断（谎报 Content-Length 也逃不掉）。④ **分享链接解压炸弹**（`share-url.ts`）—— `#s=` 载荷解压时实时计数，超过 20 MB 立即中止（原来先整块解压再校验，~2 MB 哈希即可 OOM 接收方标签页）。⑤ **可中止的图片预取**（`image-embed.ts` / `bundle.ts`）—— Stop 按钮现在会传入 AbortSignal，取消后不再有 N/8 × 10s 的僵尸请求打进已闲置的进度卡。⑥ **Stop 后立即重建**（`download-card.tsx`）—— 新构建会先（最长 3s）等待被取消构建的 OPFS 锁释放，不再因为 `createWritable()` 报 InvalidStateError 而静默降级到 1 GB 内存 sink。⑦ blob URL 统一延迟 30s 释放（报告下载 / 谱系图 PNG 导出在 Safari 系引擎下同步 revoke 可能取消下载；导出失败路径原先永不释放）
 
 ### 4. Share（`share-url.ts`）
 

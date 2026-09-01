@@ -298,13 +298,20 @@ async function assembleBundle(
   let htmlOpts: ReportHtmlOptions = { ...styleOpts, bundleMode: options.includeImages };
   if (options.includeImages && options.session) {
     onProgress?.({ phase: "images", current: 0, total: 0, message: "Prefetching images for report..." });
-    const embeddedImages = await prefetchImagesForReport(options.session, summary, (p) =>
-      onProgress?.({
-        phase: "images",
-        current: p.current ?? 0,
-        total: p.total ?? 0,
-        message: p.message ?? "Embedding images…",
-      })
+    const embeddedImages = await prefetchImagesForReport(
+      options.session,
+      summary,
+      (p) =>
+        onProgress?.({
+          phase: "images",
+          current: p.current ?? 0,
+          total: p.total ?? 0,
+          message: p.message ?? "Embedding images…",
+        }),
+      // v3.24: thread the build's AbortSignal (Stop button) into the
+      // prefetch pool — previously a cancelled build left up to N/8 × 10s
+      // of zombie image fetches running into an already-idle card.
+      { signal: options.signal ?? undefined }
     );
     htmlOpts = { ...styleOpts, embeddedImages, session: options.session, bundleMode: true };
   }
@@ -711,34 +718,56 @@ async function assembleBundle(
           path: `Final_Result/${g.kind}/${g.suffix}.${g.ext}`,
         });
       }
-      const finalFiles: BundleFile[] = [];
-      await pooledMap(finalTargets, FINAL_RESULT_CONCURRENCY, async (t) => {
+      // v3.24: sort targets by archive path UP FRONT so the ordered
+      // consumer below writes a deterministic ZIP (the v3.16 invariant)
+      // while still streaming each payload to the sink the moment its
+      // turn comes. The old code buffered ALL six .mrc maps + plots in a
+      // finalFiles[] array until the pool drained — peak heap = their sum,
+      // the same tab-OOM class ("Previous build did not finish") that
+      // v3.18 eliminated for the maps phase.
+      finalTargets.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      type FinalSlot = { bytes?: Uint8Array; failed?: boolean };
+      const slotReady: Array<(r: FinalSlot) => void> = [];
+      const slots: Array<Promise<FinalSlot> | null> = finalTargets.map(
+        () => new Promise<FinalSlot>((res) => slotReady.push(res))
+      );
+      const producer = pooledMap(finalTargets, FINAL_RESULT_CONCURRENCY, async (t, i) => {
         try {
           const bytes = await cryoSmartBytes(finalSession, t.url, {
             signal: options.signal,
           });
-          finalFiles.push({ path: t.path, data: bytes });
+          slotReady[i]({ bytes });
         } catch (err) {
           if (isCancelError(err)) throw err; // Stop button — bail, not a 404
-          // expected to fail for non-refine jobs
+          slotReady[i]({ failed: true }); // expected to fail for non-refine jobs
         }
       });
-      // pooledMap completes out of order — sort for deterministic ZIP content.
-      finalFiles.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+      let finalFetched = 0;
       let finalBudgetSkipped = 0;
-      for (const f of finalFiles) {
-        if (f.data instanceof Uint8Array && !fitsBudget(f.data.length)) {
-          finalBudgetSkipped++;
-          continue;
+      // Ordered consumer: writes slot 0, 1, 2… as they land, releasing each
+      // big buffer right after its ZIP entry hits the sink. Downloads stay
+      // parallel (4×); only the WRITES are ordered. On a cancel/error the
+      // producer rejects and Promise.all unwinds without the consumer.
+      const consumer = (async () => {
+        for (let i = 0; i < finalTargets.length; i++) {
+          const r = await slots[i];
+          slots[i] = null; // drop the promise reference for GC
+          if (!r || r.failed || !r.bytes) continue;
+          finalFetched++;
+          if (!fitsBudget(r.bytes.length)) {
+            finalBudgetSkipped++;
+            continue;
+          }
+          await addFile(finalTargets[i].path, r.bytes);
         }
-        await addFile(f.path, f.data);
-      }
+      })();
+      await Promise.all([producer, consumer]);
       if (finalBudgetSkipped > 0) {
         warnMemBudgetOnce("final results");
         warnings.push(`${finalBudgetSkipped} final-result file(s) skipped: in-memory ZIP budget exceeded (no manual link available for these)`);
       }
       const summaryText = `Final result scan for ${projectId}/${startUid}.\n` +
-        `Fetched ${finalFiles.length} files.\n` +
+        `Fetched ${finalFetched} files.\n` +
         `Generated at ${new Date().toISOString()}.\n`;
       await addFile(`Final_Result/final_result_summary.txt`, summaryText);
     }
