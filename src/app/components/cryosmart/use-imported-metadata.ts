@@ -120,6 +120,16 @@ export interface ImportState {
    * exited after its /complete POST failed 3×. The strip surfaces this
    * with an amber badge and emphasizes the Stop button. */
   uploadStalled?: boolean;
+  /** v3.26: total job count when the "Fetch all jobs' log images" action is
+   * available (live lineage-scoped session whose log_request does not yet
+   * cover every captured job). Null otherwise. Clicking the strip button
+   * POSTs {all:true} to request-logs; the capture script picks the extras
+   * up via its re-trace grace window / byte-drain poll and scans them. */
+  fetchAllJobs?: number | null;
+  /** v3.26: a Fetch-all request was sent for THIS session — the strip
+   * button stays disabled ("Requested ✓") until the next poll tick sees
+   * the unioned request (and drops the button). */
+  fetchAllRequested?: boolean;
 }
 
 interface UseImportedOpts {
@@ -483,6 +493,11 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
   /** Monotonic apply sequence: progress callbacks from an older fetch are
    *  dropped once a newer apply (or the final stop) has begun. */
   const applySeqRef = useRef(0);
+  /** v3.26: a Fetch-all request was acknowledged for the CURRENT session
+   *  (reset whenever a new session's polling loop starts). Read by the poll
+   *  loop's applyState so the strip button flips to "Requested ✓"
+   *  immediately instead of waiting for the next status tick. */
+  const fetchAllDoneRef = useRef(false);
 
   const onLoadedRef = useRef(opts?.onLoaded);
   useEffect(() => {
@@ -707,6 +722,8 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
       let progressLastActivity = Date.now();
       /** consecutive session-endpoint 404s (stale-URL early exit below). */
       let staged404Count = 0;
+      // v3.26: fresh session → fresh Fetch-all acknowledgement state.
+      fetchAllDoneRef.current = false;
 
       // ── Progressive data application ─────────────────────────────
       // The graph/report are built from `loaded`, which used to refresh
@@ -998,23 +1015,53 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 const withLogs = sessionStatus.log_jobs_with_images;
                 const uploaded = sessionStatus.log_images_uploaded;
                 const req = sessionStatus.log_request;
-                const lineageNote =
-                  sessionStatus.lineage_mode && req && req.jobs.length > 0
-                    ? ` (traced lineage — ${req.jobs.length} of ${jobsCount} jobs scanned)`
-                    : "";
+                // v3.26: the summary now EXPLAINS its own numbers — the
+                // user's recurring "why did only 41 of 72 jobs get images?"
+                // question (31 jobs with no readable logs, untraced jobs
+                // skipped by design, refs without preview bytes) is answered
+                // right where the final message lands, instead of requiring
+                // a console scroll through the capture script's notes.
+                const lineageScoped =
+                  !!sessionStatus.lineage_mode && !!req && req.jobs.length > 0;
+                let message: string;
+                if (nLogs > 0 && lineageScoped) {
+                  const noLogCount = Math.max(0, req.jobs.length - withLogs);
+                  const untraced = Math.max(0, jobsCount - req.jobs.length);
+                  const noBytes = Math.max(0, nLogs - uploaded);
+                  const reasons: string[] = [];
+                  if (noLogCount > 0)
+                    reasons.push(
+                      `${noLogCount} of the traced jobs have no readable log images (import/ctf jobs usually have none — the CryoSmart console lists them)`
+                    );
+                  if (untraced > 0)
+                    reasons.push(
+                      `${untraced} jobs outside the traced lineage were skipped by design`
+                    );
+                  if (noBytes > 0)
+                    reasons.push(
+                      `${noBytes} image(s) have no preview bytes (missing or too large on the CryoSmart server)`
+                    );
+                  message =
+                    `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} of the ${req.jobs.length} traced jobs` +
+                    (reasons.length ? ` — ${reasons.join("; ")}` : "") +
+                    ` (${uploaded} with previews).`;
+                } else if (nLogs > 0) {
+                  message =
+                    `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} jobs` +
+                    (uploaded > 0 && uploaded < nLogs
+                      ? ` (${uploaded} with previews).`
+                      : ".");
+                } else {
+                  message =
+                    sessionStatus.log_jobs_done > 0
+                      ? `Captured ${jobsCount} jobs — no log images readable on this build (see the CryoSmart console diagnostics).`
+                      : sessionStatus.lineage_mode && !sessionStatus.log_request
+                        ? `Captured ${jobsCount} jobs — no Trace Lineage ran during the capture window, so no log images were fetched. Re-run the script and trace (or call __csCaptureAll() in the CryoSmart console).`
+                        : `Captured ${jobsCount} jobs (no log images available).`;
+                }
                 applyState({
                   status: "loaded",
-                  message:
-                    nLogs > 0
-                      ? `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} jobs${lineageNote}` +
-                          (uploaded > 0 && uploaded < nLogs
-                            ? ` (${uploaded} with previews).`
-                            : ".")
-                      : sessionStatus.log_jobs_done > 0
-                        ? `Captured ${jobsCount} jobs — no log images readable on this build (see the CryoSmart console diagnostics).`
-                        : sessionStatus.lineage_mode && !sessionStatus.log_request
-                          ? `Captured ${jobsCount} jobs — no Trace Lineage ran during the capture window, so no log images were fetched. Re-run the script and trace (or call __csCaptureAll() in the CryoSmart console).`
-                          : `Captured ${jobsCount} jobs (no log images available).`,
+                  message,
                   token,
                   startedAt,
                   progress: null,
@@ -1050,6 +1097,10 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 progress: null,
                 endJobUid: endJobUidSeen,
                 uploadStalled: false,
+                fetchAllJobs: sessionStatus.lineage_mode
+                  ? sessionStatus.total_jobs
+                  : null,
+                fetchAllRequested: fetchAllDoneRef.current,
               });
             } else {
               const imgs = sessionStatus.log_images_count;
@@ -1059,15 +1110,26 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 sessionStatus.log_jobs_done >= sessionStatus.log_jobs_total;
               const lineageNote =
                 sessionStatus.lineage_mode && req ? " for the traced lineage" : "";
+              // v3.26: is every captured job already in the log request?
+              // (fetch-all clicked, or the trace genuinely covered the
+              // whole project — either way the button is pointless).
+              const allRequested =
+                !!req && sessionStatus.total_jobs > 0 && req.jobs.length >= sessionStatus.total_jobs;
+              const fetchAllJobs =
+                sessionStatus.lineage_mode && !allRequested
+                  ? sessionStatus.total_jobs
+                  : null;
               // Phase-aware message: the scan can finish minutes before the
               // script completes (re-trace grace window + byte upload
               // drain) — say what is actually happening instead of a
-              // stale "fetching… 24/24".
+              // stale "fetching… 24/24". v3.26: the "all ready" wording
+              // now names the grace window — this is the silent multi-minute
+              // stretch that previously read as "stuck".
               const message =
                 scanDone && imgs > 0 && upl < imgs
                   ? `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews ${upl}/${imgs}${lineageNote}…`
                   : scanDone && imgs > 0
-                    ? `Loaded ${sessionStatus.total_jobs} jobs — all ${imgs} log images ready${lineageNote}, finalizing…`
+                    ? `Loaded ${sessionStatus.total_jobs} jobs — all ${imgs} log images ready${lineageNote}; the script finishes after a short re-trace grace window…`
                     : `Loaded ${sessionStatus.total_jobs} jobs — fetching log images${lineageNote} ` +
                       `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
                       (imgs > 0 ? ` (${imgs} captured)` : "") +
@@ -1085,6 +1147,8 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 },
                 endJobUid: endJobUidSeen,
                 uploadStalled,
+                fetchAllJobs,
+                fetchAllRequested: fetchAllDoneRef.current,
               });
             }
           } else {
@@ -1223,5 +1287,46 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     clearPersistedImportToken();
   }, [fetchSessionData]);
 
-  return { ...state, applying, stop: stopImport };
+  /* ── v3.26: "Fetch all jobs' log images" ────────────────────────────
+   * The user's recurring "why did only 41 of 72 traced jobs (and none of
+   * the 520 untraced ones) get log images?" — the capture is lineage-
+   * scoped by design, and the only escape hatch was the console-only
+   * __csCaptureAll(). This publishes {all:true} to the session's log
+   * request: the running script sees the unioned list (trace-wait loop,
+   * re-trace grace window, or the v3.26 byte-drain poll) and scans every
+   * remaining job. Only meaningful while the script is still attached —
+   * after /complete the button disappears with the polling state. */
+  const requestAllLogs = useCallback(async (): Promise<void> => {
+    const token = stopRef.current.token;
+    if (!token || fetchAllDoneRef.current) return;
+    try {
+      const resp = await fetch(
+        `/api/cryosmart/import/session/${encodeURIComponent(token)}/request-logs`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ all: true }),
+        }
+      );
+      const data = (await resp.json()) as { ok?: boolean; log_request?: { jobs?: unknown[] }; error?: string };
+      if (data?.ok) {
+        fetchAllDoneRef.current = true;
+        const n = Array.isArray(data.log_request?.jobs) ? data.log_request.jobs.length : 0;
+        // Optimistic UI: flip the button to "Requested ✓" without waiting
+        // for the next 700ms poll tick to publish fetchAllRequested.
+        setState((prev) =>
+          prev.status === "polling" ? { ...prev, fetchAllRequested: true } : prev
+        );
+        toast.success(
+          `Requested log images for all ${n} job(s) — the capture script picks them up within seconds and the progress above extends. Large projects can take several minutes.`
+        );
+      } else {
+        toast.error(data?.error || "Could not request all jobs' log images.");
+      }
+    } catch {
+      toast.error("Could not reach the capture session — try again.");
+    }
+  }, []);
+
+  return { ...state, applying, stop: stopImport, requestAllLogs };
 }

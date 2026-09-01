@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.25 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.26 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast), but log images are fetched ONLY for the jobs
 // the traced lineage needs: the script waits for the web app's Trace
@@ -193,7 +193,12 @@ export function SmartCapturePanel() {
 // second chance for slow loader calls + 8s diff windows for huge-log job
 // types (the hetero/abinit "no log images" class of bugs), 10× bigger
 // deep-scan caps so >2000-entry shared streams stay visible, and a 90s
-// slow-log rescue window.
+// slow-log rescue window. v3.26: the web app's progress strip has a
+// "Fetch all N jobs" button — it unions every captured job into the
+// session's log request, and the script adopts those jobs whether it is
+// still waiting for the trace, in its re-trace grace window, OR draining
+// image bytes (the drain now polls the request too, so a late click still
+// scans; /complete only fires once every requested job has been served).
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -1381,12 +1386,41 @@ export function SmartCapturePanel() {
   }
 
   // Wait (bounded) for every queued image to be fetched + posted.
+  // v3.26: while draining, KEEP WATCHING the session's log request — the
+  // web app's "Fetch all N jobs" button (and a late re-trace) can land
+  // AFTER the 3-minute grace window closed but BEFORE /complete; the
+  // drain is the script's last live phase, so it adopts those jobs here
+  // too (scan them, then keep draining their bytes). Resolve now also
+  // requires a FRESH request poll that saw no unscanned jobs — a click
+  // that landed between polls is no longer silently missed.
   function drainImageUploads(budgetMs) {
     var deadline = Date.now() + (budgetMs || 90000);
+    var lastReqPoll = 0;
+    var lastPollHadExtras = false;
+    var watchRequest = LINEAGE_MODE && knownRequested;
     return new Promise(function(resolve) {
-      (function check() {
+      (async function check() {
         flushImageBatch();
-        if ((imgQueue.length === 0 && imgWorkers === 0 && imgPosted === 0) || Date.now() > deadline) {
+        var now = Date.now();
+        if (watchRequest && now - lastReqPoll >= 3000) {
+          lastReqPoll = now;
+          var std = await fetchStatus(true);
+          var reqd = (std && std.log_request && std.log_request.jobs) || [];
+          var extras = [];
+          for (var x = 0; x < reqd.length; x++) {
+            if (reqd[x] && !scanned[reqd[x]]) extras.push(reqd[x]);
+          }
+          lastPollHadExtras = extras.length > 0;
+          if (lastPollHadExtras) {
+            console.log('[CryoSmart] Log request grew during byte drain — scanning ' + extras.length + ' more job(s) (Fetch all / re-trace).');
+            pending = extras;
+            try { await scanLogs(); } catch (e) {}
+            deadline = Date.now() + (budgetMs || 90000);
+          }
+        }
+        var idle = imgQueue.length === 0 && imgWorkers === 0 && imgPosted === 0;
+        var polledRecently = !watchRequest || (lastReqPoll > 0 && Date.now() - lastReqPoll < 3000);
+        if ((idle && polledRecently && !lastPollHadExtras) || Date.now() > deadline) {
           console.log('[CryoSmart] Image bytes uploaded: ' + imgUploaded + ' ok, ' + imgFailed + ' failed/skipped.');
           resolve();
           return;

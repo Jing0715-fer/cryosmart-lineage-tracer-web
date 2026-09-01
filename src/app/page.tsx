@@ -203,10 +203,13 @@ export default function Home() {
                     progress: importState.progress,
                     uploadStalled: importState.uploadStalled,
                     applying: importState.applying,
+                    fetchAllJobs: importState.fetchAllJobs,
+                    fetchAllRequested: importState.fetchAllRequested,
                   }
             }
             importStatus={importState.status}
             onStopImport={importState.status === "polling" ? importState.stop : undefined}
+            onRequestAllLogs={importState.status === "polling" ? importState.requestAllLogs : undefined}
             stagedImport={importState.token !== null}
           />
           <DownloadCard summary={summary} loaded={loaded} />

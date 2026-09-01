@@ -50,6 +50,11 @@ interface Props {
      *  multi-second apply of a big capture is visible HERE, where the
      *  popup page has auto-scrolled to. */
     applying?: ApplyProgress | null;
+    /** v3.26: job count when the "Fetch all jobs' images" action is
+     *  available on a live lineage-scoped capture (null = hide). */
+    fetchAllJobs?: number | null;
+    /** v3.26: the request was sent — button shows the requested state. */
+    fetchAllRequested?: boolean;
   } | null;
   /** Capture lifecycle state — "polling" renders the live strip;
    *  "loaded"/"error"/"expired" render the final message (dismissable). */
@@ -63,9 +68,14 @@ interface Props {
    * keeps whatever data arrived so far (the user's "stuck at 263/268 with
    * no way to stop" case). Rendered as a Stop button on the polling strip. */
   onStopImport?: () => void;
+  /** v3.26: expands a lineage-scoped capture to EVERY job's log images —
+   * publishes {all:true} to the session's log request; the still-running
+   * capture script picks the extras up and scans them. Rendered as a
+   * "Fetch all N jobs" button on the polling strip. */
+  onRequestAllLogs?: () => void;
 }
 
-export function LineagePreviewCard({ summary, session, importInfo, importStatus, onStopImport, stagedImport }: Props) {
+export function LineagePreviewCard({ summary, session, importInfo, importStatus, onStopImport, onRequestAllLogs, stagedImport }: Props) {
   const [reportTab, setReportTab] = useState("stats");
 
   /* ── v3.17 report style (template / font / image mode / title) ──────
@@ -227,6 +237,9 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
             pct={importPct}
             stalled={importInfo?.uploadStalled}
             applying={importInfo?.applying || null}
+            fetchAllJobs={importInfo?.fetchAllJobs ?? null}
+            fetchAllRequested={importInfo?.fetchAllRequested}
+            onRequestAllLogs={onRequestAllLogs}
             onStop={onStopImport}
             onDismiss={() => setDismissedKey(stripKey)}
           />
@@ -284,6 +297,9 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
           pct={importPct}
           stalled={importInfo?.uploadStalled}
           applying={importInfo?.applying || null}
+          fetchAllJobs={importInfo?.fetchAllJobs ?? null}
+          fetchAllRequested={importInfo?.fetchAllRequested}
+          onRequestAllLogs={onRequestAllLogs}
           onStop={onStopImport}
           onDismiss={() => setDismissedKey(stripKey)}
         />
@@ -620,6 +636,9 @@ function ImportProgressStrip({
   pct,
   stalled,
   applying,
+  fetchAllJobs,
+  fetchAllRequested,
+  onRequestAllLogs,
   onStop,
   onDismiss,
 }: {
@@ -632,6 +651,12 @@ function ImportProgressStrip({
   stalled?: boolean;
   /** v3.25: /data snapshot apply in flight — second row with byte progress. */
   applying?: ApplyProgress | null;
+  /** v3.26: job count when the "Fetch all jobs' images" action is available. */
+  fetchAllJobs?: number | null;
+  /** v3.26: request already sent — button shows the requested state. */
+  fetchAllRequested?: boolean;
+  /** v3.26: expand the log-image request to every captured job. */
+  onRequestAllLogs?: () => void;
   /** v3.16.1: manual stop — stop waiting and keep the data captured so far. */
   onStop?: () => void;
   onDismiss: () => void;
@@ -686,6 +711,28 @@ function ImportProgressStrip({
             </span>
             no progress
           </span>
+        )}
+        {status === "polling" && fetchAllJobs != null && fetchAllJobs > 0 && onRequestAllLogs && (
+          <button
+            type="button"
+            onClick={onRequestAllLogs}
+            disabled={fetchAllRequested}
+            title="Log images are fetched only for the traced lineage — this expands the request to every captured job (the running capture script picks them up automatically; large projects take several minutes)"
+            aria-label="Fetch log images for all captured jobs"
+            className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-emerald-300 bg-white/80 px-2.5 text-[11.5px] font-medium text-emerald-700 transition-colors hover:bg-white disabled:cursor-default disabled:opacity-75 dark:border-emerald-700 dark:bg-slate-900/70 dark:text-emerald-300 dark:hover:bg-slate-800 dark:disabled:opacity-80"
+          >
+            {fetchAllRequested ? (
+              <CheckCircle2 className="h-3 w-3" />
+            ) : (
+              <Layers className="h-3 w-3" />
+            )}
+            <span className="hidden sm:inline">
+              {fetchAllRequested ? "Requested" : `Fetch all ${fetchAllJobs} jobs`}
+            </span>
+            <span className="sm:hidden">
+              {fetchAllRequested ? "Done" : "Fetch all"}
+            </span>
+          </button>
         )}
         {status === "polling" && onStop && (
           <button
