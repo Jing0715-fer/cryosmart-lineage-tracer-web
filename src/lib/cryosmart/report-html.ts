@@ -2613,6 +2613,100 @@ export interface ReportHtmlOptions {
     comfortable: 1.14,
   };
 
+  /** Industrial — 工业控制台（v3.24）：枪灰钢板 + 安全橙警示条。与 slate
+   *  （冷蓝暗色 + 青绿荧光）和 blueprint（浅色工程纸面 + 点阵）都不同：
+   *  中性暖炭灰底 + 拉丝金属纹理、机柜面板式深色题头带 45° 警示条纹、
+   *  job 卡顶部铆钉铭牌（nameplate strip）、LED 状态灯分节标记、方角
+   *  钢板倒角（inset 高光 + 硬投影）。所有结构器件都是暗色机柜语言。 */
+  const INDUSTRIAL_SPEC: ReportTemplateSpec = {
+    id: "industrial",
+    layout: "split",
+    fontBody:
+      'system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,"Helvetica Neue",Arial,sans-serif',
+    baseFontPx: 13.5,
+    centerHeader: false,
+    stickyHeader: true,
+    boxedSections: true,
+    flowTop: "84px",
+    // gunmetal: neutral warm charcoal, three plate levels
+    bg: "#151618",
+    bg2: "#101113",
+    panel: "#1e2124",
+    panel2: "#24272b",
+    panel3: "#2b2f34",
+    text: "#e8e6e1",
+    text2: "#cfccc5",
+    text3: "#a5a29a",
+    muted: "#7d7a73",
+    muted2: "#57544e",
+    line: "#33373c",
+    line2: "#454b52",
+    link: "#ff8a3d",
+    linkHover: "#ffb26b",
+    linkUnderline: "hover",
+    // safety-orange machine button: raised chrome + hard press edge
+    btnBg: "#ff7a1a",
+    btnText: "#1a120a",
+    btnBorder: "#ff7a1a",
+    btnHoverBg: "#ffa04d",
+    micro: "#8ec46a",
+    microBg: "rgba(142,196,106,.09)",
+    microBorder: "rgba(142,196,106,.34)",
+    particle: "#e6b93f",
+    particleBg: "rgba(230,185,63,.09)",
+    particleBorder: "rgba(230,185,63,.34)",
+    volume: "#4fc0a5",
+    volumeBg: "rgba(79,192,165,.09)",
+    volumeBorder: "rgba(79,192,165,.34)",
+    smallBg: "rgba(255,255,255,.045)",
+    smallBorder: "#3a3f45",
+    radius: "0px",
+    radiusSm: "0px",
+    radiusLg: "0px",
+    // steel bevel: top inner highlight + drop shadow (machined plate)
+    shadowSm: "inset 0 1px 0 rgba(255,255,255,.05),0 1px 3px rgba(0,0,0,.5)",
+    shadow: "inset 0 1px 0 rgba(255,255,255,.05),0 6px 18px -6px rgba(0,0,0,.65)",
+    rowHover: "#26292d",
+    thBg: "#2b2f34",
+    extra: [
+      // 拉丝金属页面纹理（极淡 45° 细纹，只落在页面层）
+      "body{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.016) 0 1px,transparent 1px 6px)}",
+      // 机柜面板题头：深钢板 + 底缘 45° 安全橙警示条纹（hazard tape）
+      "header{background:#22252a;border-bottom:0}",
+      "header::after{content:\"\";position:absolute;left:0;right:0;bottom:-5px;height:5px;background:repeating-linear-gradient(-45deg,#ff7a1a 0 11px,#191b1e 11px 22px)}",
+      "header .top{padding:16px 28px}",
+      ".title h1{color:#f0eee9;letter-spacing:.03em;font-family:var(--font-mono);text-transform:uppercase}",
+      ".title h1::before{content:\"\";display:inline-block;width:9px;height:9px;border-radius:50%;background:#8ec46a;box-shadow:0 0 9px rgba(142,196,106,.85);margin-right:12px;vertical-align:.04em}",
+      ".title p{color:#9b978e}",
+      ".title p b{color:#c9c5bb}",
+      ".title .note{color:#b3a58f}",
+      // 面板头：抬升钢板条 + 橙色 LED 指示块
+      ".pane-head,.chain-head{border-bottom:1px solid #3a3f45;background:linear-gradient(180deg,#2a2d31,#232629)}",
+      ".pane-head h2::before,.chain-head h2::before{content:\"\";display:inline-block;width:8px;height:8px;background:#ff7a1a;box-shadow:0 0 7px rgba(255,122,26,.6);margin-right:9px}",
+      ".pane{box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 4px 14px rgba(0,0,0,.5)}",
+      // 分节标签：等宽刻字 + 圆形 LED 灯（与 blueprint 的方块标记区分）
+      "h3{font-family:var(--font-mono)}",
+      ".source-block h3::before,.media-block h3::before,.map-block h3::before{content:\"\";display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff7a1a;box-shadow:0 0 6px rgba(255,122,26,.55);margin-right:8px;vertical-align:.08em}",
+      // job 卡顶部铆钉铭牌（nameplate strip）：负外边距吃满卡宽，
+      // 深色抬升钢板 + 左右两颗铆钉
+      ".job-card{border-left-width:1px;border-left-style:solid}",
+      ".job-head{position:relative;background:linear-gradient(180deg,#282b30,#22252a);border:1px solid #363b41;border-left:0;border-right:0;margin:-16px -18px 12px;padding:11px 18px 10px}",
+      ".job-head::before,.job-head::after{content:\"\";position:absolute;top:8px;width:6px;height:6px;border-radius:50%;background:#565c64;box-shadow:inset 0 1px 1px rgba(255,255,255,.28),0 0 3px rgba(0,0,0,.7)}",
+      ".job-head::before{left:8px}",
+      ".job-head::after{right:8px}",
+      // 安全橙机器按钮：凸起铬面 + 硬压边
+      ".download-all{box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 2px 0 #b35612}",
+      ".download-all:active{transform:translateY(1px);box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 1px 0 #b35612}",
+      // 表格：机加工网格（等宽大写表头 + 顶缘高光）
+      "table th,.source-table th{text-transform:uppercase;font-family:var(--font-mono)}",
+      ".source-table th{box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}",
+      // 图片井：更深的车间暗窗，衬托电镜图
+      ".imgbox img,.pf-mic-imgs img,.map-cell-img{background:#0d0e10}",
+      ".map-cell:hover{border-color:var(--volume-border)}",
+      "@page{margin:12mm}",
+    ].join("\n"),
+  };
+
   /** Generate the full v3.17 stylesheet for one skin. Covers every class the
    *  body markup emits (outline / picture-flow / job cards / tables / image
    *  grids / map cells / gone-markers / responsive + print).
@@ -2710,6 +2804,21 @@ export interface ReportHtmlOptions {
       btnBg: "rgba(28,23,16,.97)",
       btnLine: "#6e6250",
       extra: ".lb-cap{font-style:italic}\n",
+    },
+    // industrial: neutral graphite scrim, mono uppercase caption, squared
+    // chrome with a safety-orange top rail on the frame (hazard language)
+    industrial: {
+      back: "rgba(8,8,9,.97)",
+      text: "#ece9e2",
+      muted: "#948f85",
+      well: "#232323",
+      btnBg: "rgba(30,32,34,.97)",
+      btnLine: "#5b6067",
+      extra:
+        ".lb-frame{border-top:3px solid var(--lb-accent)}\n" +
+        ".lb-cap{font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em}\n" +
+        ".lb-btn{border-radius:0}\n" +
+        ".lb-btn:hover{box-shadow:0 0 0 1px var(--lb-accent) inset}\n",
     },
   };
   const LIGHTBOX_TINT_DEFAULT: LightboxTint = LIGHTBOX_TINTS.minimal;
@@ -3043,14 +3152,15 @@ export interface ReportHtmlOptions {
     blueprint: BLUEPRINT_SPEC,
     editorial: EDITORIAL_SPEC,
     focus: FOCUS_SPEC,
+    industrial: INDUSTRIAL_SPEC,
   };
 
   /** Resolve the stylesheet for any template id (classic = legacy CSS).
    *  v3.20: the token skins take a widthMode (default "full" — the
    *  workspace spans the whole viewport; "wide"/"boxed" cap it at
    *  1680/1280px for users who prefer a reading measure).
-   *  v3.22: dispatch through REPORT_TEMPLATE_SPECS — six token skins
-   *  (paper/minimal/slate/blueprint/editorial/focus). */
+   *  v3.22: dispatch through REPORT_TEMPLATE_SPECS — seven token skins
+   *  (paper/minimal/slate/blueprint/editorial/focus/industrial). */
   export function buildReportCss(
     template: ReportTemplateId = "paper",
     fontScale: ReportFontScale = "standard",
