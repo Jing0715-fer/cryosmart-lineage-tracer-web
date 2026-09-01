@@ -25,7 +25,8 @@ import { copyToClipboard } from "@/lib/cryosmart/clipboard";
 import { LineageGraph } from "./lineage-graph";
 import { ShareLineageButton } from "./share-lineage-button";
 import { FscPlotViewer } from "./fsc-plot-viewer";
-import type { ImportProgress } from "./use-imported-metadata";
+import type { ImportProgress, ApplyProgress } from "./use-imported-metadata";
+import { formatBytes, useElapsedTick, applyElapsedSeconds, applySpeedBps } from "./apply-progress-format";
 
 export type ImportStatusKind = "idle" | "polling" | "loaded" | "error" | "expired" | "not-found";
 
@@ -44,6 +45,11 @@ interface Props {
     /** v3.16.1: counters frozen with the upload incomplete — the strip
      * shows an amber badge and emphasizes the Stop button. */
     uploadStalled?: boolean;
+    /** v3.25: a /data snapshot apply is running (download → parse →
+     *  render) — the strip adds a second row with byte progress so the
+     *  multi-second apply of a big capture is visible HERE, where the
+     *  popup page has auto-scrolled to. */
+    applying?: ApplyProgress | null;
   } | null;
   /** Capture lifecycle state — "polling" renders the live strip;
    *  "loaded"/"error"/"expired" render the final message (dismissable). */
@@ -220,6 +226,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
             progress={progress}
             pct={importPct}
             stalled={importInfo?.uploadStalled}
+            applying={importInfo?.applying || null}
             onStop={onStopImport}
             onDismiss={() => setDismissedKey(stripKey)}
           />
@@ -276,6 +283,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
           progress={progress}
           pct={importPct}
           stalled={importInfo?.uploadStalled}
+          applying={importInfo?.applying || null}
           onStop={onStopImport}
           onDismiss={() => setDismissedKey(stripKey)}
         />
@@ -611,6 +619,7 @@ function ImportProgressStrip({
   progress,
   pct,
   stalled,
+  applying,
   onStop,
   onDismiss,
 }: {
@@ -621,6 +630,8 @@ function ImportProgressStrip({
   pct: number | null;
   /** v3.16.1: capture counters frozen with the upload incomplete. */
   stalled?: boolean;
+  /** v3.25: /data snapshot apply in flight — second row with byte progress. */
+  applying?: ApplyProgress | null;
   /** v3.16.1: manual stop — stop waiting and keep the data captured so far. */
   onStop?: () => void;
   onDismiss: () => void;
@@ -720,6 +731,57 @@ function ImportProgressStrip({
               {progress.images} {progress.images === 1 ? "image" : "images"} captured
               {progress.uploaded > 0 ? ` · ${progress.uploaded} ready` : ""}
             </span>
+          </div>
+        </div>
+      )}
+      {applying && <StripApplyingRow applying={applying} />}
+    </div>
+  );
+}
+
+/** v3.25: the strip's apply-phase row — mirrors the DataSourceCard badge
+ *  for users who landed on #preview (the capture popup auto-scrolls here,
+ *  so the data card may be off-screen). Shows byte progress while the
+ *  snapshot downloads and an elapsed timer through parse + render. */
+function StripApplyingRow({ applying }: { applying: ApplyProgress }) {
+  const now = useElapsedTick(true);
+  const base = now || applying.startedAt;
+  const secs = applyElapsedSeconds(applying, base);
+  const speed = applySpeedBps(applying, base);
+  const pct =
+    applying.phase === "download" && applying.total && applying.total > 0
+      ? Math.min(100, Math.round((applying.received / applying.total) * 100))
+      : null;
+  const jobsLabel = applying.jobs != null ? `${applying.jobs} jobs` : "snapshot";
+  return (
+    <div className="mt-2 rounded-lg bg-white/70 px-2.5 py-2 ring-1 ring-inset ring-teal-100 dark:bg-slate-900/50 dark:ring-teal-900/50">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-teal-800 dark:text-teal-200">
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+        <span className="font-medium">
+          {applying.phase === "download"
+            ? `Receiving ${jobsLabel} (${formatBytes(applying.total ?? applying.received)}) · ${secs.toFixed(1)}s…`
+            : `Applying ${jobsLabel} to the graph · ${secs.toFixed(1)}s…`}
+        </span>
+        {applying.phase === "download" && pct != null && (
+          <span className="ml-auto rounded bg-teal-100/80 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-teal-700 dark:bg-teal-900/60 dark:text-teal-300">
+            {pct}%
+          </span>
+        )}
+      </div>
+      {applying.phase === "download" && (
+        <div className="mt-1.5">
+          <div className="h-1 w-full overflow-hidden rounded-full bg-teal-100/80 dark:bg-slate-800">
+            <div
+              className="h-full rounded-full bg-teal-500 transition-[width] duration-300 ease-out"
+              style={{ width: pct != null ? `${pct}%` : "100%" }}
+            />
+          </div>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-x-3 font-mono text-[10px] text-teal-800/70 dark:text-teal-300/60">
+            <span>
+              {formatBytes(applying.received)}
+              {applying.total ? ` / ${formatBytes(applying.total)}` : ""}
+            </span>
+            {speed > 0 && <span>{formatBytes(speed)}/s</span>}
           </div>
         </div>
       )}

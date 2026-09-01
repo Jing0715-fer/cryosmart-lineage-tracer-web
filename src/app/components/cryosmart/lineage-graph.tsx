@@ -43,7 +43,7 @@
  * when a session is supplied (for inline image embedding in detail mode).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -681,7 +681,7 @@ function routeEdgeLane(
 
 
 /* ── Component ────────────────────────────────────────────────────────── */
-export function LineageGraph({ summary, session, stagedImport }: Props) {
+function LineageGraphImpl({ summary, session, stagedImport }: Props) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
 
@@ -2158,6 +2158,13 @@ export function LineageGraph({ summary, session, stagedImport }: Props) {
     </div>
   );
 }
+
+/** PERF (v3.25): memoized — the apply-phase progress state (and its ~5 Hz
+ *  elapsed timer) re-renders the page every 200 ms while a big snapshot
+ *  streams in. `summary`/`session`/`stagedImport` are referentially stable
+ *  across those ticks, so the memo skips re-running this 1500-line render
+ *  (hundreds of SVG nodes + edges) until the data itself changes. */
+export const LineageGraph = memo(LineageGraphImpl);
 
 /* ── Sub-components ───────────────────────────────────────────────────── */
 

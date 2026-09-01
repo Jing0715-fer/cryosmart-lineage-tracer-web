@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.14 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.25 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast), but log images are fetched ONLY for the jobs
 // the traced lineage needs: the script waits for the web app's Trace
@@ -1106,9 +1106,18 @@ export function SmartCapturePanel() {
       var u3 = items[q3] && items[q3].uid;
       if (u3) refsByUid[u3] = (refsByUid[u3] || 0) + n3;
     }
-    return post('/logs', { items: items }).catch(function(e) {
-      console.warn('[CryoSmart] Log batch upload failed (non-fatal):', e && e.message);
-    });
+    // v3.25: log-batch POST retry — a lost batch meant the refs (and thus
+    // every image of those jobs) vanished from the session even though the
+    // BYTES still uploaded. Same 3-attempt policy as the image batches.
+    function postLogs(n) {
+      return post('/logs', { items: items }).catch(function(e) {
+        if (n < 2) {
+          return sleepMs(1000 + n * 2000).then(function() { return postLogs(n + 1); });
+        }
+        console.warn('[CryoSmart] Log batch upload failed after 3 tries (non-fatal):', e && e.message);
+      });
+    }
+    return postLogs(0);
   }
 
   // ── Image-BYTE upload (v3.3; v3.4 raises workers + budget) ───
@@ -1120,7 +1129,12 @@ export function SmartCapturePanel() {
   // serves them same-origin and they render everywhere (graph job detail,
   // HTML report, downloads).
   var IMG_MAX_BYTES = 4 * 1024 * 1024;      // skip images larger than ~4MB
-  var IMG_WORKERS = 6;                        // concurrent byte fetchers (v3.4)
+  // v3.25: 6 → 8 concurrent byte fetchers. Workers used to serialize behind
+  // the slowest per-image stage (fetch + the old char-by-char base64 loop);
+  // with native base64 below + retry backoff, 8 workers overlap both — the
+  // intranet API handles this trivially and large captures drain visibly
+  // faster. Retry hiccups no longer stall a whole worker slot.
+  var IMG_WORKERS = 8;                        // concurrent byte fetchers (v3.4; v3.25: 6→8)
   var imgQueue = [];                          // pending refs
   var imgBatch = [];                          // fetched, awaiting POST
   var imgWorkers = 0;
@@ -1183,54 +1197,117 @@ export function SmartCapturePanel() {
     return null;
   }
 
+  // v3.25: RETRY + native base64.
+  // Retry: image byte fetches previously got ONE attempt — a transient
+  // hiccup (connection reset, 502/503 from the intranet API, a proxy blip)
+  // permanently dropped that image's preview. Now up to 3 attempts
+  // (0.8s/2s backoff) for RETRYABLE failures only: network errors and
+  // 408/429/5xx. A 404/403 (file genuinely gone) still fails fast.
+  // Speed: base64 encoding used a char-by-char btoa loop — 100-200ms of
+  // main-thread work per multi-MB image, × 900 images per capture.
+  // FileReader.readAsDataURL encodes natively (~10-20ms per MB); the mime
+  // prefix is then rewritten with the SNIFFED type (the blob's own
+  // Content-Type is often empty or application/octet-stream here).
+  var IMG_FETCH_TRIES = 3;
+
+  function blobToDataUrl(b, mime, bytes) {
+    return new Promise(function(resolve) {
+      try {
+        var fr = new FileReader();
+        fr.onload = function() {
+          var s = String(fr.result || '');
+          var cut = s.indexOf(',');
+          // 'data:<whatever>;base64,<payload>' → 'data:<mime>;base64,<payload>'
+          resolve(cut > 0 ? 'data:' + mime + s.slice(cut) : null);
+        };
+        fr.onerror = function() { resolve(null); };
+        fr.readAsDataURL(b);
+      } catch (e) { resolve(null); }
+    }).then(function(url) {
+      if (url) return url;
+      // Fallback: the old manual encode (browsers without FileReader).
+      var bin = '';
+      var CH = 32768;
+      for (var i = 0; i < bytes.length; i += CH) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+      }
+      return 'data:' + mime + ';base64,' + btoa(bin);
+    });
+  }
+
   function fetchImageData(ref) {
     if (!ref || !ref.fileid) return Promise.resolve(null);
-    return fetchT('/api/log_image/' + encodeURIComponent(ref.fileid), { credentials: 'include' }, 45000)
-      .then(function(r) { return r.ok ? r.blob() : null; })
-      .then(function(b) {
-        if (!b || b.size === 0 || b.size > IMG_MAX_BYTES) return null;
-        if (!b.arrayBuffer) return null;
-        return b.arrayBuffer().then(function(buf) {
-          var bytes = new Uint8Array(buf);
-          // Type priority: magic bytes > server Content-Type (when image/*)
-          // > the ref's own filetype/extension evidence.
-          var mime = sniffImageMime(bytes) ||
-            (b.type && b.type.indexOf('image/') === 0 ? b.type : null) ||
-            refMimeHint(ref);
-          if (!mime) return null;
-          var bin = '';
-          var CH = 32768;
-          for (var i = 0; i < bytes.length; i += CH) {
-            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    var tries = 0;
+    function run() {
+      // v3.25: 45s → 30s per attempt — with retries the worst case per
+      // image is ~93s; a hung fetch must not eat the whole drain budget.
+      return fetchT('/api/log_image/' + encodeURIComponent(ref.fileid), { credentials: 'include' }, 30000)
+        .then(function(r) {
+          if (r.ok) return r.blob();
+          if (r.status === 408 || r.status === 429 || r.status >= 500) {
+            throw new Error('HTTP ' + r.status);
           }
-          return 'data:' + mime + ';base64,' + btoa(bin);
+          return null;   // 404/403 — permanent, do not retry
+        })
+        .then(function(b) {
+          if (!b || b.size === 0 || b.size > IMG_MAX_BYTES) return null;
+          if (!b.arrayBuffer) return null;
+          return b.arrayBuffer().then(function(buf) {
+            var bytes = new Uint8Array(buf);
+            // Type priority: magic bytes > server Content-Type (when image/*)
+            // > the ref's own filetype/extension evidence.
+            var mime = sniffImageMime(bytes) ||
+              (b.type && b.type.indexOf('image/') === 0 ? b.type : null) ||
+              refMimeHint(ref);
+            if (!mime) return null;
+            return blobToDataUrl(b, mime, bytes);
+          });
+        })
+        .catch(function(e) {
+          tries++;
+          if (tries < IMG_FETCH_TRIES) {
+            return sleepMs(800 * tries).then(run);
+          }
+          return null;
         });
-      })
-      .catch(function() { return null; });
+    }
+    return run();
   }
 
   function flushImageBatch() {
     if (!imgBatch.length) return;
     var items = imgBatch; imgBatch = [];
     imgPosted++;
-    post('/images', { items: items })
-      .then(function(r) {
-        // v3.7: count what the server actually STORED — a stored count of 0
-        // used to fall through to items.length and report rejected uploads
-        // as "ok", hiding byte-loss from the console summary.
-        if (r && r.ok) {
-          var storedCount = (typeof r.stored === 'number') ? r.stored : items.length;
-          imgUploaded += storedCount;
-          if (storedCount < items.length) {
-            imgFailed += items.length - storedCount;
-            console.warn('[CryoSmart] Image store accepted ' + storedCount + ' of ' + items.length +
-              ' image(s) in a batch (size cap or invalid data URL).');
+    // v3.25: batch POST retry — a single lost /images POST (network blip,
+    // 120s timeout) used to discard up to 6 images' bytes permanently.
+    // The store dedupes by fileid, so re-POSTing is idempotent.
+    function postBatch(n) {
+      return post('/images', { items: items })
+        .then(function(r) {
+          // v3.7: count what the server actually STORED — a stored count of 0
+          // used to fall through to items.length and report rejected uploads
+          // as "ok", hiding byte-loss from the console summary.
+          if (r && r.ok) {
+            var storedCount = (typeof r.stored === 'number') ? r.stored : items.length;
+            imgUploaded += storedCount;
+            if (storedCount < items.length) {
+              imgFailed += items.length - storedCount;
+              console.warn('[CryoSmart] Image store accepted ' + storedCount + ' of ' + items.length +
+                ' image(s) in a batch (size cap or invalid data URL).');
+            }
+          } else {
+            throw new Error('server rejected the batch');
           }
-        }
-        else imgFailed += items.length;
-      })
-      .catch(function() { imgFailed += items.length; })
-      .then(function() { imgPosted--; });
+        })
+        .catch(function(e) {
+          if (n < 2) {
+            return sleepMs(1000 + n * 2000).then(function() { return postBatch(n + 1); });
+          }
+          imgFailed += items.length;
+          console.warn('[CryoSmart] Image batch upload failed after 3 tries (' + items.length + ' image(s) lost):', e && e.message);
+        });
+    }
+    postBatch(0).then(function() { imgPosted--; });
   }
 
   function imgWorker() {

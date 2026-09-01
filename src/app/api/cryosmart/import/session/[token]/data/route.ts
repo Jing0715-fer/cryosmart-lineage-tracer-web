@@ -12,7 +12,19 @@ import {
  *   - called once by the UI as soon as has_data=true (graph renders while
  *     log images keep streaming in), and again when status=complete.
  * The session itself is cleaned up by TTL.
+ *
+ * v3.25: the body is now STREAMED through a ReadableStream in 256 KiB
+ * chunks with an exact `Content-Length` (and `Content-Encoding: identity`
+ * so no intermediary re-compresses it behind our backs). Big captures are
+ * multi-megabyte JSON (590 jobs ≈ 7 MB) — with a plain NextResponse.json
+ * the browser's fetch shows NOTHING until the whole body arrives, which
+ * reads as "the popup page is frozen". With a readable body the frontend
+ * drives its own progress UI via `response.body.getReader()` and shows
+ * real "4.3 MB / 7.0 MB · 1.2 MB/s" feedback. Payload content is 100%
+ * unchanged (same object, same JSON) — only the transfer is chunked.
  */
+const STREAM_CHUNK_BYTES = 256 * 1024;
+
 export async function GET(
   _req: NextRequest,
   ctx: { params: Promise<{ token: string }> }
@@ -27,38 +39,61 @@ export async function GET(
   }
 
   const d = session.data;
-  return NextResponse.json(
-    {
-      ok: true,
-      token,
-      captured_at: d.captured_at || null,
-      status: session.status,
-      log_jobs_done: session.logJobsDone,
-      log_jobs_total: session.logJobsTotal,
-      log_images_count: session.logImagesCount,
-      log_images_uploaded: session.logImagesUploaded,
-      data: {
-        project_uid: d.project_uid,
-        experiment_uid: d.experiment_uid,
-        jobs: d.jobs,
-        raw: d.jobs ? { jobs: d.jobs } : undefined,
-        source_url: d.source_url,
-        captured_at: d.captured_at,
-        discovered_job_count: d.discovered_job_count,
-        // Session info for image/map proxy downloads
-        cryosmart_origin: d.cryosmart_origin,
-        cryosmart_auth: d.cryosmart_auth || undefined,
-        cryosmart_cookie: d.cryosmart_cookie || undefined,
-        // Log images streamed so far (may still grow until status=complete)
-        job_log_images: session.jobLogImages,
-        // Fileids whose BYTES were uploaded — the UI points these at the
-        // same-origin /image/<fileid> endpoint instead of the (usually
-        // mixed-content-blocked) direct CryoSmart URL.
-        uploaded_image_ids: Array.from(session.imageStore.keys()),
-      },
+  const payload = JSON.stringify({
+    ok: true,
+    token,
+    captured_at: d.captured_at || null,
+    status: session.status,
+    log_jobs_done: session.logJobsDone,
+    log_jobs_total: session.logJobsTotal,
+    log_images_count: session.logImagesCount,
+    log_images_uploaded: session.logImagesUploaded,
+    data: {
+      project_uid: d.project_uid,
+      experiment_uid: d.experiment_uid,
+      jobs: d.jobs,
+      raw: d.jobs ? { jobs: d.jobs } : undefined,
+      source_url: d.source_url,
+      captured_at: d.captured_at,
+      discovered_job_count: d.discovered_job_count,
+      // Session info for image/map proxy downloads
+      cryosmart_origin: d.cryosmart_origin,
+      cryosmart_auth: d.cryosmart_auth || undefined,
+      cryosmart_cookie: d.cryosmart_cookie || undefined,
+      // Log images streamed so far (may still grow until status=complete)
+      job_log_images: session.jobLogImages,
+      // Fileids whose BYTES were uploaded — the UI points these at the
+      // same-origin /image/<fileid> endpoint instead of the (usually
+      // mixed-content-blocked) direct CryoSmart URL.
+      uploaded_image_ids: Array.from(session.imageStore.keys()),
     },
-    { headers: IMPORT_SESSION_CORS }
-  );
+  });
+
+  const bytes = new TextEncoder().encode(payload);
+  const total = bytes.byteLength;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let i = 0; i < total; i += STREAM_CHUNK_BYTES) {
+        controller.enqueue(bytes.subarray(i, Math.min(i + STREAM_CHUNK_BYTES, total)));
+      }
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      // Exact uncompressed length — the frontend's byte-progress math
+      // (received / total) depends on this staying truthful.
+      "Content-Length": String(total),
+      // Forbid transparent compression: a gzipped transfer would make the
+      // received byte count diverge from Content-Length and break progress.
+      "Content-Encoding": "identity",
+      "Cache-Control": "no-store",
+      ...IMPORT_SESSION_CORS,
+    },
+  });
 }
 
 export async function OPTIONS() {

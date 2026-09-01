@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
+import { toast } from "sonner";
 import type { LoadedMetadata } from "@/app/components/cryosmart/data-source-card";
 import type { CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 
@@ -71,6 +72,30 @@ export interface ImportProgress {
   images: number;
   /** Log image bytes uploaded so far (same-origin renderable). */
   uploaded: number;
+}
+
+/**
+ * v3.25: live feedback for the /data APPLY phase. A big capture (590 jobs,
+ * ~7 MB of JSON) spends seconds in download → JSON.parse → merge →
+ * LineageGraph re-render — all previously invisible, which reads as "the
+ * popup page is dead until I refresh". While an apply is running the
+ * poller publishes this snapshot so DataSourceCard and the capture
+ * progress strip can show "Receiving 590 jobs (7.0 MB) · 3.2s…" plus a
+ * real "4.3 MB / 7.0 MB · 1.2 MB/s" download bar (the /data endpoint now
+ * streams its body with an exact Content-Length for exactly this).
+ */
+export interface ApplyProgress {
+  /** Jobs in the snapshot being applied — the session's total_jobs hint
+   *  while downloading, the ACTUAL job count once parsing begins. */
+  jobs: number | null;
+  /** Bytes received so far (== total once the download finished). */
+  received: number;
+  /** Total payload bytes from Content-Length (null when unknown). */
+  total: number | null;
+  /** download = body still streaming; parse = JSON.parse + graph render. */
+  phase: "download" | "parse";
+  /** Date.now() when this apply's fetch started (elapsed-timer anchor). */
+  startedAt: number;
 }
 
 export interface ImportState {
@@ -268,6 +293,60 @@ export function sessionImageBase(token: string): string {
   return `/api/cryosmart/import/session/${encodeURIComponent(token)}/image/`;
 }
 
+/**
+ * Read a fetch Response body as text while reporting the received byte
+ * count (drives the download-progress bar). Falls back to resp.text()
+ * when no streaming reader is available (ancient browsers / test mocks).
+ */
+async function readBodyWithProgress(
+  resp: Response,
+  onProgress: (received: number) => void
+): Promise<string> {
+  if (!resp.body || typeof resp.body.getReader !== "function") {
+    const t = await resp.text();
+    onProgress(t.length);
+    return t;
+  }
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.byteLength > 0) {
+      chunks.push(value);
+      received += value.byteLength;
+      onProgress(received);
+    }
+  }
+  const merged = new Uint8Array(received);
+  let off = 0;
+  for (const c of chunks) {
+    merged.set(c, off);
+    off += c.byteLength;
+  }
+  return new TextDecoder("utf-8").decode(merged);
+}
+
+/** Wait ~two animation frames so a state update PAINTS before the caller
+ * blocks the main thread (JSON.parse of a 7 MB body). Hidden tabs never
+ * fire rAF — the wall-clock fallback keeps backgrounded capture tabs
+ * moving. */
+function yieldToPaint(maxWaitMs = 150): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+    }
+    setTimeout(finish, maxWaitMs);
+  });
+}
+
 /** Image-base prefix for a RESTORED capture-history entry's stored bytes. */
 export function historyImageBase(entryId: string): string {
   return `/api/cryosmart/history/${encodeURIComponent(entryId)}/image/`;
@@ -397,10 +476,159 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     endJobUid: null,
   });
 
+  /* v3.25: apply-phase progress — deliberately OUTSIDE ImportState so the
+   * poller's change-deduped applyState() never has to reason about it,
+   * and so a superseded apply can never resurrect stale progress. */
+  const [applying, setApplying] = useState<ApplyProgress | null>(null);
+  /** Monotonic apply sequence: progress callbacks from an older fetch are
+   *  dropped once a newer apply (or the final stop) has begun. */
+  const applySeqRef = useRef(0);
+
   const onLoadedRef = useRef(opts?.onLoaded);
   useEffect(() => {
     onLoadedRef.current = opts?.onLoaded;
   }, [opts?.onLoaded]);
+
+  /* ── v3.25: the ONE place a /data snapshot is fetched + applied ──────
+   * Streaming read with byte progress, an explicit parse phase, the
+   * first-apply toast, and a badge that stays up until the heavy graph
+   * re-render has painted. The poll loop's progressive passes, the final
+   * /complete apply AND the manual stop all route through here. */
+  const fetchSessionData = useCallback(
+    async (
+      token: string,
+      expectedJobs: number | null,
+      callOpts?: { firstApply?: boolean; isCancelled?: () => boolean }
+    ): Promise<PendingData | null> => {
+      const seq = ++applySeqRef.current;
+      const now0 =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      /** setApplying, but no-ops once a NEWER apply has started. */
+      const commit = (next: SetStateAction<ApplyProgress | null>) => {
+        if (applySeqRef.current !== seq) return;
+        setApplying(next);
+      };
+      commit({
+        jobs: expectedJobs,
+        received: 0,
+        total: null,
+        phase: "download",
+        startedAt: Date.now(),
+      });
+
+      let resp: Response;
+      try {
+        resp = await fetch(
+          `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
+          { credentials: "same-origin", cache: "no-store" }
+        );
+      } catch {
+        commit(null);
+        return null;
+      }
+      if (!resp.ok) {
+        commit(null);
+        return null;
+      }
+      const totalHeader = Number(resp.headers.get("Content-Length"));
+      const total =
+        Number.isFinite(totalHeader) && totalHeader > 0 ? totalHeader : null;
+
+      // Byte progress, throttled to ~4 Hz — a callback per network chunk
+      // would re-render the page 110+ times for a 7 MB body.
+      let lastEmit = 0;
+      let received = 0;
+      let text: string;
+      try {
+        text = await readBodyWithProgress(resp, (r) => {
+          received = r;
+          const t = Date.now();
+          if (t - lastEmit >= 250) {
+            lastEmit = t;
+            commit((prev) =>
+              prev ? { ...prev, received: r, total: total ?? prev.total } : prev
+            );
+          }
+        });
+      } catch {
+        commit(null);
+        return null;
+      }
+
+      // Download finished → parsing. Let the "parsing…" state paint
+      // BEFORE the JSON.parse block freezes the timer.
+      commit((prev) =>
+        prev
+          ? {
+              ...prev,
+              received: received || text.length,
+              total: total ?? Math.max(received, text.length),
+              phase: "parse",
+            }
+          : prev
+      );
+      await yieldToPaint();
+
+      let data: PendingData;
+      try {
+        data = JSON.parse(text) as PendingData;
+      } catch {
+        commit(null);
+        return null;
+      }
+      if (
+        !(data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0)
+      ) {
+        commit(null);
+        return null;
+      }
+      const jobsCount = data.data.jobs.length;
+      const bytesCount = total ?? Math.max(received, text.length);
+      commit((prev) =>
+        prev
+          ? { ...prev, jobs: jobsCount, received: bytesCount, total: bytesCount }
+          : prev
+      );
+
+      // The genuinely heavy step: mergeLogImagesIntoRaw + page setState +
+      // the LineageGraph re-render of hundreds of nodes.
+      if (callOpts?.isCancelled?.()) {
+        commit(null);
+        return null;
+      }
+      onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
+
+      // Keep the "Receiving…" badge up until the re-render has PAINTED —
+      // rAF fires after the next paint, the nested setTimeout(0) runs
+      // after React commits it. The 3 s wall-clock fallback covers
+      // hidden tabs (whose rAF never fires).
+      const clear = () => commit(null);
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => setTimeout(clear, 0));
+      } else {
+        setTimeout(clear, 0);
+      }
+      setTimeout(clear, 3000);
+
+      if (callOpts?.firstApply) {
+        const seconds = Math.max(
+          0.1,
+          ((typeof performance !== "undefined" ? performance.now() : Date.now()) -
+            now0) /
+            1000
+        );
+        const finish = () =>
+          toast.success(`Loaded ${jobsCount} jobs in ${seconds.toFixed(1)}s`);
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(finish);
+        } else {
+          setTimeout(finish, 0);
+        }
+      }
+      return data;
+    },
+    []
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -528,20 +756,18 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
         });
       };
 
-      /** Fetch the current cumulative session snapshot and apply it. */
-      const applyStagedData = async (): Promise<PendingData | null> => {
-        const dataResp = await fetch(
-          `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
-          { credentials: "same-origin", cache: "no-store" }
-        );
-        if (!dataResp.ok) return null;
-        const data = (await dataResp.json()) as PendingData;
-        if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
-          onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
-          return data;
-        }
-        return null;
-      };
+      /** Fetch the current cumulative session snapshot and apply it.
+       * v3.25: routes through fetchSessionData — streaming byte progress,
+       * parse-phase indicator, first-apply toast and the stop-race
+       * cancellation check all live there. */
+      const applyStagedData = (
+        expectedJobs: number | null = null,
+        firstApply = false
+      ): Promise<PendingData | null> =>
+        fetchSessionData(token, expectedJobs, {
+          firstApply,
+          isCancelled: () => cancelled,
+        });
 
       /** Fingerprint of "what data the session holds right now" — any
        * change means the streamed log images grew and `loaded` is stale. */
@@ -708,7 +934,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               // the strip — losing them now would look like the original
               // "captured 320 but nothing shows" bug).
               try {
-                await applyStagedData();
+                await applyStagedData(sessionStatus.total_jobs);
               } catch {
                 // nothing to rescue
               }
@@ -735,7 +961,9 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             lastDataFetchAt = Date.now();
             try {
               if (cancelled) return;
-              await applyStagedData();
+              // firstApply → the "Loaded N jobs in X.Xs" toast fires once
+              // the initial snapshot has rendered.
+              await applyStagedData(sessionStatus.total_jobs, true);
             } catch {
               // non-fatal: retried by the progressive pass below
             }
@@ -751,7 +979,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             lastDataFetchAt = Date.now();
             try {
               if (cancelled) return;
-              await applyStagedData();
+              await applyStagedData(sessionStatus.total_jobs);
             } catch {
               // transient — the next counter change or /complete re-applies
             }
@@ -763,7 +991,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             // word on what the capture collected.
             try {
               if (cancelled) return;
-              const data = await applyStagedData();
+              const data = await applyStagedData(sessionStatus.total_jobs);
               if (data) {
                 const jobsCount = data.data.jobs?.length ?? 0;
                 const nLogs = sessionStatus.log_images_count;
@@ -915,7 +1143,9 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     return () => {
       cancelled = true;
     };
-  }, [state.status, state.token, state.startedAt]);
+    // fetchSessionData is a stable useCallback([]) — listed for the
+    // exhaustive-deps linter, it never re-triggers this effect.
+  }, [state.status, state.token, state.startedAt, fetchSessionData]);
 
   /* ── v3.16.1: manual stop ("Stop waiting & keep captured data") ──────
    * The user's "stuck at 263/268 with no way to stop" case: a live capture
@@ -944,39 +1174,36 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     // Best-effort final snapshot: fetch + apply the cumulative data (the
     // poll loop has been applying it live all along — this is a last
     // refresh so anything uploaded in the final seconds is not lost).
+    // v3.25: routed through fetchSessionData, so the stop's own /data read
+    // gets the applying indicator AND supersedes any in-flight poll apply
+    // (applySeq) — the newest snapshot can no longer be overwritten by a
+    // stale poll fetch finishing late.
     try {
-      const dataResp = await fetch(
-        `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
-        { credentials: "same-origin", cache: "no-store" }
-      );
-      if (dataResp.ok) {
-        const data = (await dataResp.json()) as PendingData;
-        if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
-          onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
-          const jobsCount = data.data.jobs.length;
-          const uploaded = data.data.uploaded_image_ids?.length ?? 0;
-          const refs = Object.values(data.data.job_log_images || {}).reduce(
-            (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
-            0
-          );
-          const withLogs = Object.values(data.data.job_log_images || {}).filter(
-            (arr) => Array.isArray(arr) && arr.length > 0
-          ).length;
-          setState({
-            status: "loaded",
-            message:
-              refs > 0
-                ? `Stopped waiting — kept ${jobsCount} jobs + ${refs} log images from ${withLogs} jobs (${uploaded} with previews). The capture script may still be running in its tab; re-run Smart Capture to fetch the rest.`
-                : `Stopped waiting — kept ${jobsCount} jobs (no log images captured yet). Re-run Smart Capture to collect them.`,
-            token,
-            startedAt,
-            progress: null,
-            endJobUid,
-            uploadStalled: false,
-          });
-          clearPersistedImportToken();
-          return;
-        }
+      const data = await fetchSessionData(token, null);
+      if (data) {
+        const jobsCount = data.data.jobs?.length ?? 0;
+        const uploaded = data.data.uploaded_image_ids?.length ?? 0;
+        const refs = Object.values(data.data.job_log_images || {}).reduce(
+          (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
+          0
+        );
+        const withLogs = Object.values(data.data.job_log_images || {}).filter(
+          (arr) => Array.isArray(arr) && arr.length > 0
+        ).length;
+        setState({
+          status: "loaded",
+          message:
+            refs > 0
+              ? `Stopped waiting — kept ${jobsCount} jobs + ${refs} log images from ${withLogs} jobs (${uploaded} with previews). The capture script may still be running in its tab; re-run Smart Capture to fetch the rest.`
+              : `Stopped waiting — kept ${jobsCount} jobs (no log images captured yet). Re-run Smart Capture to collect them.`,
+          token,
+          startedAt,
+          progress: null,
+          endJobUid,
+          uploadStalled: false,
+        });
+        clearPersistedImportToken();
+        return;
       }
     } catch {
       // fall through to the error report below
@@ -994,7 +1221,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
       uploadStalled: false,
     });
     clearPersistedImportToken();
-  }, []);
+  }, [fetchSessionData]);
 
-  return { ...state, stop: stopImport };
+  return { ...state, applying, stop: stopImport };
 }
