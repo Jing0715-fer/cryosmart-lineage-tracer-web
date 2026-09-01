@@ -717,7 +717,7 @@ function ImportProgressStrip({
             type="button"
             onClick={onRequestAllLogs}
             disabled={fetchAllRequested}
-            title="Log images are fetched only for the traced lineage — this expands the request to every captured job (the running capture script picks them up automatically; large projects take several minutes)"
+            title="The traced lineage's log images are fetched first — this widens the request to every captured job immediately, merging them into the first pass (the script now scans the remaining jobs by default anyway; this button just skips the wait)"
             aria-label="Fetch log images for all captured jobs"
             className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-emerald-300 bg-white/80 px-2.5 text-[11.5px] font-medium text-emerald-700 transition-colors hover:bg-white disabled:cursor-default disabled:opacity-75 dark:border-emerald-700 dark:bg-slate-900/70 dark:text-emerald-300 dark:hover:bg-slate-800 dark:disabled:opacity-80"
           >

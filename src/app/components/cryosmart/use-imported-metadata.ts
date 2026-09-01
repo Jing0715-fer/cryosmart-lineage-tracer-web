@@ -1023,15 +1023,20 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 // a console scroll through the capture script's notes.
                 const lineageScoped =
                   !!sessionStatus.lineage_mode && !!req && req.jobs.length > 0;
+                // v3.27: the complete-report pass widens the request to every
+                // job — "traced" wording only while the request is a real
+                // subset (early stop / legacy capture).
+                const wholeProject = lineageScoped && jobsCount > 0 && req.jobs.length >= jobsCount;
                 let message: string;
                 if (nLogs > 0 && lineageScoped) {
+                  const scopeLabel = wholeProject ? "" : "traced ";
                   const noLogCount = Math.max(0, req.jobs.length - withLogs);
                   const untraced = Math.max(0, jobsCount - req.jobs.length);
                   const noBytes = Math.max(0, nLogs - uploaded);
                   const reasons: string[] = [];
                   if (noLogCount > 0)
                     reasons.push(
-                      `${noLogCount} of the traced jobs have no readable log images (import/ctf jobs usually have none — the CryoSmart console lists them)`
+                      `${noLogCount} of the ${scopeLabel}jobs have no readable log images (import/ctf jobs usually have none — the CryoSmart console lists them)`
                     );
                   if (untraced > 0)
                     reasons.push(
@@ -1042,7 +1047,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                       `${noBytes} image(s) have no preview bytes (missing or too large on the CryoSmart server)`
                     );
                   message =
-                    `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} of the ${req.jobs.length} traced jobs` +
+                    `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} of the ${req.jobs.length} ${scopeLabel}jobs` +
                     (reasons.length ? ` — ${reasons.join("; ")}` : "") +
                     ` (${uploaded} with previews).`;
                 } else if (nLogs > 0) {
@@ -1088,7 +1093,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               applyState({
                 status: "polling",
                 message:
-                  `Loaded ${sessionStatus.total_jobs} jobs — waiting for Trace Lineage (log images are fetched only for the traced lineage)` +
+                  `Loaded ${sessionStatus.total_jobs} jobs — waiting for Trace Lineage (its log images are fetched first; every remaining job follows)` +
                   (endJobUidSeen
                     ? `… auto-tracing from ${endJobUidSeen}.`
                     : ` — pick a Start Job below and click Trace Lineage.`),
@@ -1109,7 +1114,9 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 sessionStatus.log_jobs_total > 0 &&
                 sessionStatus.log_jobs_done >= sessionStatus.log_jobs_total;
               const lineageNote =
-                sessionStatus.lineage_mode && req ? " for the traced lineage" : "";
+                sessionStatus.lineage_mode && req && req.jobs.length < sessionStatus.total_jobs
+                  ? " for the traced lineage"
+                  : "";
               // v3.26: is every captured job already in the log request?
               // (fetch-all clicked, or the trace genuinely covered the
               // whole project — either way the button is pointless).
@@ -1125,11 +1132,15 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               // stale "fetching… 24/24". v3.26: the "all ready" wording
               // now names the grace window — this is the silent multi-minute
               // stretch that previously read as "stuck".
+              // v3.27: the "all ready" case is now TRANSIENT — after the
+              // short grace window the complete-report pass widens the
+              // denominator to the whole project and the "fetching X/N"
+              // line resumes, so the note names the wrap-up, not a wait.
               const message =
                 scanDone && imgs > 0 && upl < imgs
                   ? `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews ${upl}/${imgs}${lineageNote}…`
                   : scanDone && imgs > 0
-                    ? `Loaded ${sessionStatus.total_jobs} jobs — all ${imgs} log images ready${lineageNote}; the script finishes after a short re-trace grace window…`
+                    ? `Loaded ${sessionStatus.total_jobs} jobs — all ${imgs} log images ready${lineageNote}; the script is wrapping up…`
                     : `Loaded ${sessionStatus.total_jobs} jobs — fetching log images${lineageNote} ` +
                       `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
                       (imgs > 0 ? ` (${imgs} captured)` : "") +

@@ -118,6 +118,27 @@ console.log("── B. buildReportCss per-template signatures ──");
   check(buildReportCss("slate", "comfortable").includes("font:16px"), "slate comfortable → 16px");
   check(buildReportCss("classic", "comfortable").includes("body{font-size:16px}"), "classic comfortable → body override 16px");
   check(!buildReportCss("classic", "standard").includes("body{font-size:"), "classic standard → no font override");
+
+  // v3.27: the Lineage Outline (left .flow-pane) must actually SCROLL.
+  // The base .pane{overflow:hidden} (rounded-corner clip) is emitted BEFORE
+  // the layout branch's .flow-pane{…overflow:auto|visible} so the LATER
+  // rule wins the cascade — the previous order let .pane clip the outline
+  // at max-height with no scrollbar in every v3.17+ skin (classic's V2 CSS
+  // was ordered correctly, which is why only the skins were broken).
+  for (const tpl of ["paper", "minimal", "slate", "classic", "blueprint", "editorial", "focus", "industrial"]) {
+    const css = buildReportCss(tpl);
+    const paneBase = css.indexOf(".pane{background:var(--panel)");
+    check(paneBase >= 0, `${tpl}: base .pane rule present`);
+    if (paneBase < 0) continue;
+    if (tpl === "focus") {
+      const reading = css.indexOf(".flow-pane{position:relative;top:auto;max-height:none;overflow:visible}");
+      check(reading > paneBase, `${tpl}: reading-mode .flow-pane overflow:visible wins over .pane overflow:hidden`);
+    } else {
+      const sticky = css.indexOf(".flow-pane{position:sticky");
+      check(sticky > paneBase, `${tpl}: .flow-pane overflow:auto (sticky rail) wins over .pane overflow:hidden`);
+      check(css.includes(".flow-pane::-webkit-scrollbar"), `${tpl}: flow-pane scrollbar styling shipped`);
+    }
+  }
 }
 
 /* ── C. content parity across templates ───────────────────────────── */

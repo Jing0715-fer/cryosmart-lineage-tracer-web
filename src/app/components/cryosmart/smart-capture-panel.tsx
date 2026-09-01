@@ -149,13 +149,15 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.26 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.27 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
-// project immediately (fast), but log images are fetched ONLY for the jobs
-// the traced lineage needs: the script waits for the web app's Trace
-// Lineage action to publish the lineage job list to the session, then
-// scans just those jobs (a 46-job project with 900+ images typically needs
-// only ~10 jobs). Multi-round jobs keep ONLY their latest round's log
+// project immediately (fast); log images are fetched for the traced
+// lineage FIRST (the script waits for the web app's Trace Lineage action
+// to publish the lineage job list to the session, then scans just those
+// jobs — the graph + report become useful within seconds), and v3.27 then
+// scans EVERY REMAINING job in a complete-report pass (the report renders
+// a card for every job, so unfetched logs used to read as "this job has
+// no images" — wrong: its logs were simply never fetched). Multi-round jobs keep ONLY their latest round's log
 // entries (re-runs re-emit the same titles and the older rounds' files are
 // gone from the server) AND only their FINAL iteration's images (titles/
 // file names carry iteration numbers — "Iteration 000" is the FIRST,
@@ -199,6 +201,16 @@ export function SmartCapturePanel() {
 // still waiting for the trace, in its re-trace grace window, OR draining
 // image bytes (the drain now polls the request too, so a late click still
 // scans; /complete only fires once every requested job has been served).
+// v3.27: COMPLETE REPORTS BY DEFAULT — after the traced lineage's images
+// stream, the script widens the session's log request to every captured
+// job ({all:true}) and scans the remaining jobs too (the report renders a
+// card for every job, so unfetched logs used to read as "this job has no
+// images" — wrong: its logs were simply never fetched). The re-trace grace
+// window shrinks 3 min → 60s (a late re-trace only affects ORDER now —
+// coverage comes from the rest pass), the byte-drain ceiling grows
+// 420s → 600s, the complete-report pass gets its own 20-minute budget,
+// and __csCaptureFinish() before it still keeps the old fast
+// lineage-only behavior.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -330,12 +342,14 @@ export function SmartCapturePanel() {
     }
     currentJobUid = knownJob;   // null when the uid is not one of THIS project's jobs
   }
-  // v3.5 lineage mode: on big projects log images are fetched ONLY for
-  // the jobs the traced lineage needs (wait for Trace Lineage). Small
-  // projects capture everything — the wait isn't worth it.
+  // v3.5 lineage mode: on big projects the FIRST log pass covers only the
+  // traced lineage (wait for Trace Lineage) so the graph + report become
+  // useful fast; v3.27 adds a complete-report pass that scans every
+  // remaining job afterwards. Small projects capture everything in one
+  // pass — the wait isn't worth it.
   var LINEAGE_MODE = jobs.length > 15;
   console.log('[CryoSmart] Page job: ' + (currentJobUid || 'not detected') +
-    ' · lineage-scoped log capture: ' + (LINEAGE_MODE ? 'ON (' + jobs.length + ' jobs)' : 'off (small project)'));
+    ' · log capture: ' + (LINEAGE_MODE ? 'traced lineage first, then every remaining job (' + jobs.length + ' jobs)' : 'all ' + jobs.length + ' jobs (small project)'));
 
   // ── STEP 0: open the progress tab NOW ──────────────────────────────
   // Popup blockers only honour window.open() during the brief user-gesture
@@ -1532,8 +1546,8 @@ export function SmartCapturePanel() {
     var WAIT_MS = 20 * 60 * 1000;   // v3.7: 20 min — a slow first trace should not forfeit the log fetch
     var waitStart = Date.now();
     var misses = 0;
-    console.log('[CryoSmart] Waiting for Trace Lineage — log images are fetched only for the traced lineage.');
-    console.log('[CryoSmart]   escape hatches: __csCaptureAll() = every job · __csCaptureFinish() = stop now');
+    console.log('[CryoSmart] Waiting for Trace Lineage — the traced lineage images are fetched first; every remaining job follows.');
+    console.log('[CryoSmart]   escape hatches: __csCaptureAll() = every job in the FIRST pass · __csCaptureFinish() = stop now');
     while (!knownRequested && !FINISH_NOW) {
       if (Date.now() - waitStart > WAIT_MS) {
         console.log('[CryoSmart] No Trace Lineage within 20 min — completing without log images.');
@@ -1572,7 +1586,7 @@ export function SmartCapturePanel() {
   var winning = null;   // {action, shapeIdx, mode:'state'|'return'|'diff'} or {http:true}
   var scanned = {};
 
-  async function scanLogs() {
+  async function scanLogs(budgetMs) {
     if (pending.length === 0) return;
 
     // v3.13: job-type map + huge-log detector — hetero_refine / abinit /
@@ -1768,11 +1782,19 @@ export function SmartCapturePanel() {
     // v3.13: budget 3 min → 5 min — huge-log jobs now take up to 20s per
     // loader call + 8s diff windows, and the budget must not cut the scan
     // short before the late-pipeline hetero/abinit jobs are reached.
-    var t0 = Date.now(), BUDGET_MS = 300000;
+    // v3.27: the budget is caller-extensible — the complete-report pass
+    // (hundreds of remaining jobs) passes its own 20-minute ceiling.
+    var t0 = Date.now(), BUDGET_MS = budgetMs || 300000;
     var noLog = [];   // v3.11: jobs whose logs never became readable
     for (var j = 0; j < pending.length; j++) {
       var uid2 = pending[j];
       if (scanned[uid2]) continue;
+      // v3.27: __csCaptureFinish() during the scan stops it at the next
+      // job boundary (previously it only took effect between phases).
+      if (FINISH_NOW) {
+        console.log('[CryoSmart] __csCaptureFinish — stopping the log scan after ' + j + '/' + pending.length + ' job(s).');
+        break;
+      }
       if (Date.now() - t0 > BUDGET_MS) {
         console.log('[CryoSmart] Log collection time budget reached — stopping after ' + j + '/' + pending.length + ' job(s).');
         break;
@@ -1905,9 +1927,9 @@ export function SmartCapturePanel() {
   if (LINEAGE_MODE && knownRequested && !FINISH_NOW) {
     if ((logRefsStreamed || 0) > 0) {
       console.log('[CryoSmart] All lineage log images streamed — they are already visible in the web app tab (the graph and report refresh live as bytes arrive).' +
-        ' Waiting up to 3 more minutes for a possible re-trace before completing…');
+        ' Waiting up to 1 more minute for a possible re-trace, then scanning the remaining jobs for complete reports…');
     }
-    var graceEnd = Date.now() + 180000;   // v3.7: 45s → 3 min — re-traces while reviewing land reliably
+    var graceEnd = Date.now() + 60000;   // v3.7: 45s → 3 min. v3.27: 3 min → 60s — the complete-report pass below scans every remaining job anyway, so a late re-trace only affects ORDER, not coverage.
     var served = knownRequested.slice();
     while (Date.now() < graceEnd && !FINISH_NOW) {
       await sleepMs(3000);
@@ -1932,7 +1954,33 @@ export function SmartCapturePanel() {
         pending = extra;
         console.log('[CryoSmart] Re-trace detected — fetching ' + extra.length + ' more job(s).');
         try { await scanLogs(); } catch (e) {}
-        graceEnd = Date.now() + 180000;
+        graceEnd = Date.now() + 60000;
+      }
+    }
+  }
+
+  // ── STEP 3.7 (v3.27): complete-report pass — scan the REMAINING jobs ─
+  // The report renders a card for every job, so images missing on
+  // unscanned jobs read as "this job has no images" — when really its
+  // logs were never fetched (the user's 520 untraced jobs). After the
+  // traced lineage's images have streamed (fast first report), widen the
+  // session's log request to EVERY captured job — the same {all:true}
+  // endpoint the app's "Fetch all N jobs" button uses, so the progress
+  // denominator covers the whole project and the final summary explains
+  // itself — then scan whatever is left. __csCaptureFinish() above keeps
+  // the old fast lineage-only behavior; a small time budget (20 min)
+  // guards against pathological servers.
+  if (!FINISH_NOW) {
+    var rest3 = ALL_UIDS.filter(function(u) { return !scanned[u]; });
+    if (rest3.length) {
+      try { await post('/request-logs', { all: true }); } catch (e) {
+        console.warn('[CryoSmart] Could not widen the log request — scanning the remaining jobs anyway.');
+      }
+      console.log('[CryoSmart] Complete-report pass — fetching log images for the remaining ' + rest3.length + ' of ' + ALL_UIDS.length + ' job(s)' +
+        ' (the report includes every job; large projects take several more minutes).');
+      pending = rest3;
+      try { await scanLogs(1200000); } catch (e) {
+        console.warn('[CryoSmart] Complete-report pass failed (non-fatal):', e && e.message);
       }
     }
   }
@@ -1945,7 +1993,10 @@ export function SmartCapturePanel() {
   // v3.13: 240s → 420s — with lineage scans now allowed 5 minutes (slow
   // hetero/abinit loaders), the byte drain must not expire first: bytes
   // queued by late jobs need their window too.
-  await drainImageUploads(420000);
+  // v3.27: 420s → 600s — the complete-report pass adds a whole project's
+  // worth of refs to the byte queue; the drain still resolves the moment
+  // the queue goes idle, the ceiling just covers the larger tail.
+  await drainImageUploads(600000);
 
   // ── STEP 4: mark the session complete ──────────────────────────────
   // The web UI stops polling and shows the final summary. v3.8 retries:
@@ -1985,9 +2036,13 @@ export function SmartCapturePanel() {
       zeroRefUids.join(', ') + '. (import/ctf-style jobs usually have none; refine/abinit jobs should —' +
       ' if one of those is listed, open its job view in CryoSmart and re-run the script.)');
   }
+  var scannedCount = Object.keys(scanned).length;
   console.log('[CryoSmart] Capture complete' +
-    (LINEAGE_MODE && knownRequested && !CAPTURE_ALL_LATE
-      ? ' — lineage-scoped: ' + knownRequested.length + ' of ' + ALL_UIDS.length + ' jobs scanned'
+    (LINEAGE_MODE && ALL_UIDS.length > 0
+      ? ' — ' + scannedCount + ' of ' + ALL_UIDS.length + ' job(s) scanned for log images' +
+        (scannedCount < ALL_UIDS.length
+          ? ' (the rest were cut by the time budget or __csCaptureFinish — re-run the script to complete them)'
+          : '')
       : '') +
     ' · ' + (logRefsStreamed || 0) + ' log image(s) · ' + imgUploaded + ' with bytes' +
     " · multi-round/multi-iteration/numbered-series jobs keep only their FINAL round's images" +
@@ -2101,12 +2156,13 @@ export function SmartCapturePanel() {
               A new tab opens <strong>immediately</strong> and shows live
               progress. The lineage graph renders as soon as job metadata
               lands, auto-traces from your page job, and log images stream in
-              <strong> only for the traced lineage</strong> — the other jobs
-              are skipped; multi-round jobs fetch only their
+              <strong> for the traced lineage first, then for every remaining
+              job</strong> — so the report carries every image that exists
+              (large projects take a few extra minutes). Multi-round jobs
+              fetch only their
               <strong>final round / final iteration / last numbered plot</strong> ("Per particle
               scale factors 007" keeps only 007) and non-image result files
-              (pdf/xml/txt) are never fetched,
-              saving minutes on large projects.
+              (pdf/xml/txt) are never fetched.
             </p>
             <p className="mt-0.5 text-[11px] text-teal-600">
               Maps, tile images and job log images are captured with session credentials (auth + cookie) forwarded for downloads.

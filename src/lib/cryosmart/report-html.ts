@@ -2949,8 +2949,16 @@ export interface ReportHtmlOptions {
       // v3.22: layout archetype comes from workspaceCss — split (two-pane
       // grid + sticky rail) or reading (single-column document + horizontal
       // chapter rail).
-      workspaceCss +
+      // v3.27 FIX: the base .pane{overflow:hidden} (rounded-corner clip)
+      // must be emitted BEFORE workspaceCss so the layout branch's
+      // .flow-pane{…overflow:auto|visible} wins the cascade — the previous
+      // order let .pane{overflow:hidden} (same specificity, later) override
+      // it, silently clipping the Lineage Outline at max-height with NO
+      // scrollbar in every v3.17+ skin. Classic's V2 CSS was ordered
+      // correctly (.flow-pane AFTER .pane), which is why only the skins
+      // were broken ("有的模板 Lineage Outline 缺少滚动条").
       ".pane{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);overflow:hidden}\n" +
+      workspaceCss +
       ".flow-pane::-webkit-scrollbar{width:6px}\n" +
       ".flow-pane::-webkit-scrollbar-track{background:transparent}\n" +
       ".flow-pane::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:3px}\n" +
