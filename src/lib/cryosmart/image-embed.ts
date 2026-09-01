@@ -6,6 +6,7 @@
  */
 
 import { cryoSmartFetch, type CryoSmartSession } from "./proxy-client";
+import { outputPreviewFallbackImages } from "./report-html";
 
 /**
  * Convert a CryoSmart image URL (full URL or path) to a base64 data URL via
@@ -199,8 +200,12 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
  * Scope per node (matching reportMediaBlock / reportClassTable /
  * reportMapDownloads / reportImageBoxes):
  *   - node.images: log-image refs (log_image + image_log kinds) → first 24;
- *     other kinds are not rendered by the report (they feed the graph
- *     card / modal instead) → skipped.
+ *     other kinds are not rendered by the report when log images exist
+ *     (they feed the graph card / modal instead) → skipped.
+ *   - v3.28: node.images ui_tile + output_group kinds → the report's
+ *     OUTPUT-GROUP FALLBACK renders them (first 6, same selection rules
+ *     via outputPreviewFallbackImages) when the job has no log images —
+ *     they must embed too, or the downloaded report loses them.
  *   - representative_micrograph_images → first 3.
  *   - select_2d → the 3 tile images.
  *   - classes → every mrc_preview (the classes table renders all rows).
@@ -244,11 +249,16 @@ export async function prefetchImagesForReport(
   for (const node of summary.nodes || []) {
     // From node.images — log images only (log_image + image_log kinds,
     // mirroring reportMediaBlock), capped at the report's per-job display
-    // limit (non-log node.images are not rendered by the report).
+    // limit; when a job has NO log images the v3.28 output-group fallback
+    // renders its preview assets instead, so those are collected too
+    // (mirroring the rendered scope exactly via the shared helper).
     const logImages = (node.images || []).filter(
       (img) => img.kind === "log_image" || img.kind === "image_log"
     );
     for (const img of logImages.slice(0, REPORT_LOG_IMAGE_LIMIT)) {
+      add(img.url, img.src);
+    }
+    for (const img of outputPreviewFallbackImages(node)) {
       add(img.url, img.src);
     }
 
@@ -283,6 +293,9 @@ export async function prefetchImagesForReport(
       (img) => img.kind === "log_image" || img.kind === "image_log"
     );
     for (const img of logImages.slice(0, REPORT_LOG_IMAGE_LIMIT)) {
+      add(img.url, img.src);
+    }
+    for (const img of outputPreviewFallbackImages(sj)) {
       add(img.url, img.src);
     }
     if (sj.select_2d) {

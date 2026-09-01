@@ -1508,6 +1508,60 @@ export interface ReportHtmlOptions {
       .join("")}</div>`;
   }
 
+  /** v3.28: max output-group fallback images rendered per job card (and
+   *  prefetched for embedding) — mirrors how the other media blocks cap
+   *  themselves (3 micrographs, 24 log images, 3 select-2D tiles). */
+  export const OUTPUT_PREVIEW_FALLBACK_LIMIT = 6;
+
+  /** v3.28: log-image fallback assets for a job card. When a job has NO
+   *  log images (its logs were never scanned, or it genuinely has none —
+   *  import/ctf-style), the card used to render completely IMAGELESS even
+   *  though CryoSmart itself shows previews for the job (the ui_tile /
+   *  output_group bytes ride the SAME capture pipeline since v3.12 and
+   *  land in node.images). Returns the preview assets that should
+   *  substitute — [] when the job has log images or its images are
+   *  already rendered by another block (import micrographs / Select 2D
+   *  tiles / classes table / map grid), so the fallback never duplicates
+   *  an existing image. Shared with image-embed.ts so the prefetch scope
+   *  mirrors the rendered scope exactly. */
+  export function outputPreviewFallbackImages(node: LineageNode): ImageAsset[] {
+    const images = node.images || [];
+    const logImages = images.filter(
+      (item) => item.kind === "log_image" || item.kind === "image_log"
+    );
+    if (logImages.length > 0) return [];
+    // Import jobs: the micrograph block renders their ui tiles.
+    if (
+      node.job_type === "import_micrographs" &&
+      (node.representative_micrograph_images || []).some((item) => item && item.src)
+    ) {
+      return [];
+    }
+    // Class jobs: the classes table renders per-class mrc previews — the
+    // card is not imageless when any row carries one.
+    if ((node.classes || []).some((cls) => cls.mrc_preview_url)) return [];
+    // Map jobs (no classes): the map grid renders output-group previews.
+    if (
+      !(node.classes || []).length &&
+      normalMapAssets(node).some((item) => item.preview_url)
+    ) {
+      return [];
+    }
+    // select_2D jobs: the Select 2D block renders the three template tiles.
+    const select2dNames = node.select_2d
+      ? ["templates_selected", "templates_excluded", "particles_selected"]
+      : [];
+    return images
+      .filter(
+        (item) =>
+          (item.kind === "ui_tile" || item.kind === "output_group") &&
+          item.url &&
+          item.src &&
+          !select2dNames.includes(item.name)
+      )
+      .slice(0, OUTPUT_PREVIEW_FALLBACK_LIMIT);
+  }
+
   /** Micrograph preview + Select 2D media block. */
   export function reportMediaBlock(node: LineageNode, opts?: ReportHtmlOptions): string {
     const chunks: string[] = [];
@@ -1576,6 +1630,33 @@ export interface ReportHtmlOptions {
               : `Log images (${logImages.length})`;
           chunks.push(`<div class="media-block imgs-block"><h3>${escHtml(heading)}</h3>${html}</div>`);
         }
+      }
+    }
+
+    // v3.28: OUTPUT-GROUP FALLBACK — "log images missing → show the output
+    // group image instead". A job card with no log images used to render
+    // IMAGELESS even when CryoSmart has previews for the job (their bytes
+    // ride the same capture pipeline), reading as "this job has no
+    // images" — wrong: only its LOG images were missing. The fallback
+    // renders the job's ui_tile / output_group previews (deduped against
+    // the other media blocks by outputPreviewFallbackImages), with a
+    // heading that names the substitution. Carries imgs-block so failed
+    // images auto-hide it and the (N) count stays truthful.
+    if (logImages.length === 0) {
+      const fallback = outputPreviewFallbackImages(node);
+      const html = reportImageBoxes(
+        node.uid,
+        fallback,
+        OUTPUT_PREVIEW_FALLBACK_LIMIT,
+        opts,
+        "compact"
+      );
+      if (html) {
+        chunks.push(
+          `<div class="media-block imgs-block"><h3>Output group 预览 (${escHtml(
+            String(fallback.length)
+          )}) — 未捕获到 log 图像，以输出预览代替</h3>${html}</div>`
+        );
       }
     }
 

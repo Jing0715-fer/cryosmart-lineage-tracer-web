@@ -45,9 +45,10 @@ console.log("── A. capture script (v3.27 complete-report pass) ──");
 
   // the widening POST precedes the rest-pass scan
   const widenIdx = script.indexOf("post('/request-logs', { all: true })");
-  const restScanIdx = script.indexOf("scanLogs(1200000)");
+  // v3.28: the rest pass's ceiling is now job-count-scaled (min 20 min)
+  const restScanIdx = script.indexOf("scanLogs(Math.max(1200000, rest3.length * 150000))");
   check("script posts {all:true} to /request-logs", widenIdx > 0);
-  check("rest pass calls scanLogs with a 20-min budget", restScanIdx > 0);
+  check("rest pass calls scanLogs with a job-scaled ceiling", restScanIdx > 0);
   check("widening POST happens BEFORE the rest-pass scan", widenIdx > 0 && restScanIdx > widenIdx);
 
   // rest pass filters to unscanned jobs only
@@ -71,7 +72,20 @@ console.log("── A. capture script (v3.27 complete-report pass) ──");
 
   // scanLogs budget is caller-extensible
   check("scanLogs takes a budgetMs argument", /async function scanLogs\(budgetMs\) \{/.test(script));
-  check("default budget still 300s", /BUDGET_MS = budgetMs \|\| 300000;/.test(script));
+  // v3.28: the default budget scales with the job count (150s/job, min 5
+  // min) — the flat 300s cap deterministically cut a 72-job traced scan
+  // at 41 ("40-something completed, 30-something never ran")
+  check(
+    "default budget scales with pending.length (150s per job, min 300s)",
+    /BUDGET_MS = budgetMs \|\| Math\.max\(300000, pending\.length \* 150000\);/.test(script),
+  );
+  check("flat 300s budget gone", !/BUDGET_MS = budgetMs \|\| 300000;/.test(script));
+  // v3.28: per-job fault isolation — a throwing job must not kill the loop
+  check(
+    "per-job retrieval wrapped in try/catch (scan survives a throwing job)",
+    script.includes("var logs2 = null, imgs2 = [];") &&
+      script.includes("(recorded as no-log; the scan continues)"),
+  );
 
   // the completion summary reports the ACTUAL scanned count
   check(

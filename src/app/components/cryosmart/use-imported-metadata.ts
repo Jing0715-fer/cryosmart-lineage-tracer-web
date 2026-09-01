@@ -1036,7 +1036,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   const reasons: string[] = [];
                   if (noLogCount > 0)
                     reasons.push(
-                      `${noLogCount} of the ${scopeLabel}jobs have no readable log images (import/ctf jobs usually have none — the CryoSmart console lists them)`
+                      `${noLogCount} of the ${scopeLabel}jobs have no readable log images (import/ctf jobs usually have none — the CryoSmart console lists them; the report shows their output-group previews instead)`
                     );
                   if (untraced > 0)
                     reasons.push(

@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.27 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.28 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -210,7 +210,15 @@ export function SmartCapturePanel() {
 // coverage comes from the rest pass), the byte-drain ceiling grows
 // 420s → 600s, the complete-report pass gets its own 20-minute budget,
 // and __csCaptureFinish() before it still keeps the old fast
-// lineage-only behavior.
+// lineage-only behavior. v3.28: the per-scan time budget now SCALES with
+// the job count (jobs x 150s, min 5 min) instead of a flat 5 minutes —
+// the flat cap deterministically guillotined a real 72-job traced scan at
+// 41/72 ("only 40-something completed, 30-something never ran"), every
+// job being individually bounded by its own loader/probe timeouts, the
+// flat wall-clock guard could fire FIRST and silently drop the tail of
+// the lineage; each job's retrieval is additionally wrapped so one
+// throwing job records itself as no-log and the scan CONTINUES instead
+// of dying mid-list.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -1783,8 +1791,17 @@ export function SmartCapturePanel() {
     // loader call + 8s diff windows, and the budget must not cut the scan
     // short before the late-pipeline hetero/abinit jobs are reached.
     // v3.27: the budget is caller-extensible — the complete-report pass
-    // (hundreds of remaining jobs) passes its own 20-minute ceiling.
-    var t0 = Date.now(), BUDGET_MS = budgetMs || 300000;
+    // (hundreds of remaining jobs) passes its own ceiling.
+    // v3.28: the DEFAULT now scales with the job count (150s per job, min
+    // 5 min). Every job is individually bounded by its own timeouts
+    // (loader second chance 20s + diff window 8s + HTTP probe 8 paths x
+    // 15s + flush retries), so a scan of N jobs can never legitimately
+    // exceed N x 150s — the old flat 5-minute cap fired BELOW that bound
+    // and deterministically cut the user's 72-job traced lineage at 41
+    // (the remaining 31 jobs were never scanned — "only 40-something
+    // completed, 30-something never ran"). The scaled ceiling keeps the
+    // pathological-server guard while never firing on a healthy scan.
+    var t0 = Date.now(), BUDGET_MS = budgetMs || Math.max(300000, pending.length * 150000);
     var noLog = [];   // v3.11: jobs whose logs never became readable
     for (var j = 0; j < pending.length; j++) {
       var uid2 = pending[j];
@@ -1796,10 +1813,18 @@ export function SmartCapturePanel() {
         break;
       }
       if (Date.now() - t0 > BUDGET_MS) {
-        console.log('[CryoSmart] Log collection time budget reached — stopping after ' + j + '/' + pending.length + ' job(s).');
+        console.log('[CryoSmart] Log scan safety ceiling reached (this only fires on a pathological server) — stopping after ' + j + '/' + pending.length +
+          ' job(s). The complete-report pass below (or a re-run) picks the rest up — nothing is lost.');
         break;
       }
-      var logs2 = cachedLogsFor(uid2);
+      // v3.28: per-job fault isolation — one throwing job (weird store
+      // state, malformed log payload, an unguarded helper) used to kill the
+      // WHOLE scan loop: the exception escaped to the phase-level catch and
+      // every job after it went unscanned. The retrieval body is wrapped so
+      // a failing job records itself as no-log and the scan CONTINUES.
+      var logs2 = null, imgs2 = [];
+      try {
+        logs2 = cachedLogsFor(uid2);
       if (!logs2 && winning) {
         if (winning.http) {
           logs2 = await httpLogProbe(uid2);
@@ -1855,10 +1880,14 @@ export function SmartCapturePanel() {
         var lateLogs = deepLogsFor(uid2);
         if (lateLogs && lateLogs.length) logs2 = lateLogs;
       }
+        if (logs2 && logs2.length) imgs2 = extractLogImages(logs2, uid2);
+      } catch (e) {
+        console.warn('[CryoSmart] Log scan failed for job ' + uid2 + ' (recorded as no-log; the scan continues):', e && e.message);
+      }
       scanned[uid2] = true;
       queueJobAssets(uid2);
       if (!logs2 || !logs2.length) noLog.push(uid2);
-      batch.push({ uid: uid2, images: logs2 ? extractLogImages(logs2, uid2) : [] });
+      batch.push({ uid: uid2, images: imgs2 });
       await flushLogs(false);
       if ((j + 1) % 20 === 0) console.log('[CryoSmart] Log scan progress: ' + (j + 1) + '/' + pending.length + ' job(s)...');
     }
@@ -1968,8 +1997,11 @@ export function SmartCapturePanel() {
   // endpoint the app's "Fetch all N jobs" button uses, so the progress
   // denominator covers the whole project and the final summary explains
   // itself — then scan whatever is left. __csCaptureFinish() above keeps
-  // the old fast lineage-only behavior; a small time budget (20 min)
-  // guards against pathological servers.
+  // the old fast lineage-only behavior; a job-count-scaled ceiling
+  // (v3.28: min 20 min, 150s per remaining job) guards against pathological
+  // servers without ever firing on a healthy scan — the v3.27 flat 20-min
+  // cap was the same class of bug as the traced pass's flat 5-min one
+  // (a 551-job rest pass at 2.2s+ per job could again be cut mid-list).
   if (!FINISH_NOW) {
     var rest3 = ALL_UIDS.filter(function(u) { return !scanned[u]; });
     if (rest3.length) {
@@ -1979,7 +2011,7 @@ export function SmartCapturePanel() {
       console.log('[CryoSmart] Complete-report pass — fetching log images for the remaining ' + rest3.length + ' of ' + ALL_UIDS.length + ' job(s)' +
         ' (the report includes every job; large projects take several more minutes).');
       pending = rest3;
-      try { await scanLogs(1200000); } catch (e) {
+      try { await scanLogs(Math.max(1200000, rest3.length * 150000)); } catch (e) {
         console.warn('[CryoSmart] Complete-report pass failed (non-fatal):', e && e.message);
       }
     }
