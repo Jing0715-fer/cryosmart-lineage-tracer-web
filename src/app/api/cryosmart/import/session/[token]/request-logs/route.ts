@@ -21,7 +21,10 @@ import {
  * client-side. Fire-and-forget from the UI (a failure just means the old
  * capture-everything behaviour — never a failed trace).
  *
- * Request body: { jobs: ["J46", "J38", ...] }
+ * Request body: { jobs: ["J46", "J38", ...] } — or { all: true }, the
+ * v3.26 "Fetch all jobs" button's form: union EVERY captured job uid into
+ * the request so the script scans the whole project (the uids live
+ * server-side on the session; the browser never needs to know them).
  */
 export async function POST(
   req: NextRequest,
@@ -46,7 +49,19 @@ export async function POST(
     );
   }
 
-  const jobs = (body as { jobs?: unknown } | null)?.jobs;
+  const bodyObj = body as { jobs?: unknown; all?: unknown } | null;
+  let jobs: unknown;
+  if (bodyObj?.all === true) {
+    // { all: true } — every job captured in this session. An empty capture
+    // falls through to the 400 below (nothing to request).
+    jobs = Array.isArray(session.data.jobs)
+      ? (session.data.jobs as Array<{ uid?: unknown }>)
+          .map((j) => (j && typeof j.uid === "string" ? j.uid : null))
+          .filter((u): u is string => !!u)
+      : [];
+  } else {
+    jobs = bodyObj?.jobs;
+  }
   if (!Array.isArray(jobs) || jobs.length === 0) {
     return NextResponse.json(
       { ok: false, error: "No jobs array found in the payload." },

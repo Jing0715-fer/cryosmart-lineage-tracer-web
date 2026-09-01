@@ -21,7 +21,12 @@
  *   - editorial : 画报/年报 — serif display type, ink masthead band,
  *                 numbered stages & cards, generous cream whitespace
  *   - focus     : 沉浸阅读 — single-column document flow, horizontal
- *                 chapter rail at the top, warm paper measure */
+ *                 chapter rail at the top, warm paper measure
+ *  v3.24 adds the 8th template:
+ *   - industrial: 工业控制台 — gunmetal dark plates + safety-orange
+ *                 hazard stripes, riveted nameplate job heads, LED
+ *                 status dots, brushed-metal page texture
+ */
 export type ReportTemplateId =
   | "paper"
   | "minimal"
@@ -29,7 +34,8 @@ export type ReportTemplateId =
   | "classic"
   | "blueprint"
   | "editorial"
-  | "focus";
+  | "focus"
+  | "industrial";
 
 /** Base body font-size of the generated report. */
 export type ReportFontScale = "compact" | "standard" | "comfortable";
@@ -80,6 +86,7 @@ const TEMPLATE_IDS: ReadonlySet<string> = new Set([
   "blueprint",
   "editorial",
   "focus",
+  "industrial",
 ]);
 const FONT_SCALES: ReadonlySet<string> = new Set([
   "compact",
@@ -253,6 +260,18 @@ export const REPORT_TEMPLATES: ReportTemplateInfo[] = [
       accent: "#31695c",
       line: "#ded4be",
       fontClass: "font-serif",
+    },
+  },
+  {
+    id: "industrial",
+    label: "Industrial 工业",
+    desc: "枪灰钢板面板、安全橙警示条与铆钉铭牌，机柜控制台风",
+    swatch: {
+      bg: "#17181a",
+      fg: "#e8e6e1",
+      accent: "#ff7a1a",
+      line: "#43484f",
+      fontClass: "font-mono",
     },
   },
 ];

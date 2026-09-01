@@ -22,6 +22,14 @@ import type { LineageSummary } from "./types";
 const HASH_PREFIX = "s=";
 const MAX_URL_BYTES = 48000; // stay well under 64 KB browser limit
 
+/** v3.24 decompression-bomb guard: deflate expands ~1000×, and a crafted
+ *  ~2 MB `#s=` hash could inflate to gigabytes BEFORE the JSON shape check
+ *  ever ran (the old code buffered the full decompressed stream via
+ *  arrayBuffer()). Real summaries are ≤ ~100 KB inflated — 20 MB is a
+ *  200× margin, and anything past it fails over to the (harmless)
+ *  compressed-garbage path → JSON.parse fails → null. */
+const MAX_INFLATED_BYTES = 20 * 1024 * 1024;
+
 /* ---------------- encode ---------------- */
 
 export async function encodeSummaryToHash(summary: LineageSummary): Promise<string> {
@@ -144,11 +152,25 @@ async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
     return bytes;
   }
   try {
-    const stream = new Blob([bytes as unknown as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    // v3.24: count bytes WHILE inflating — abort the stream once the
+    // output passes MAX_INFLATED_BYTES instead of buffering it all first.
+    let inflated = 0;
+    const cap = new TransformStream({
+      transform(chunk: Uint8Array, controller: TransformStreamDefaultController) {
+        inflated += chunk.byteLength;
+        if (inflated > MAX_INFLATED_BYTES) {
+          throw new Error("share payload exceeds decompression cap");
+        }
+        controller.enqueue(chunk);
+      },
+    });
+    const stream = new Blob([bytes as unknown as BlobPart]).stream()
+      .pipeThrough(new DecompressionStream("deflate-raw"))
+      .pipeThrough(cap);
     const buf = await new Response(stream).arrayBuffer();
     return new Uint8Array(buf);
   } catch {
-    // Not deflate-raw — try raw (uncompressed) fallback.
+    // Not deflate-raw (or over the cap) — try raw (uncompressed) fallback.
     return bytes;
   }
 }

@@ -72,6 +72,25 @@ export function zipU32(value: number): Uint8Array {
   ]);
 }
 
+/** Encode a 64-bit unsigned integer as an 8-byte little-endian Uint8Array.
+ *  Uses split hi/lo 32-bit halves so values up to 2^53 (Number.MAX_SAFE_INTEGER)
+ *  stay exact — far beyond any realistic archive size. Needed by the ZIP64
+ *  fields (v3.24). */
+export function zipU64(value: number): Uint8Array {
+  const lo = value % 0x100000000;
+  const hi = Math.floor(value / 0x100000000);
+  return new Uint8Array([
+    lo & 0xff,
+    (lo >>> 8) & 0xff,
+    (lo >>> 16) & 0xff,
+    (lo >>> 24) & 0xff,
+    hi & 0xff,
+    (hi >>> 8) & 0xff,
+    (hi >>> 16) & 0xff,
+    (hi >>> 24) & 0xff,
+  ]);
+}
+
 /* ------------------------------------------------------------------ */
 /* Byte-array helpers                                                 */
 /* ------------------------------------------------------------------ */
@@ -168,6 +187,22 @@ interface CentralEntry {
  * and at the end: central directory (one header per entry) + EOCD.
  * A single `dosDateTime()` stamp is computed at construction and reused
  * for every entry so output stays deterministic across the build.
+ *
+ * v3.24 — ZIP64 (APPNOTE 4.5.x): the v3.18 streaming sink removed the
+ * memory bound that used to keep archives under ~4 GB, but every size /
+ * offset field was still 32-bit, so a >4 GiB archive "succeeded" and
+ * unzipped as garbage (offsets truncated modulo 2³² in the central
+ * directory + EOCD). Now:
+ *   - an entry whose size ≥ 0xFFFFFFFF carries its sizes in a ZIP64
+ *     extended-information extra field on the LOCAL header (both fields,
+ *     per APPNOTE 4.5.3) with the 32-bit slots set to 0xFFFFFFFF;
+ *   - central entries with overflowing size or offset emit the matching
+ *     ZIP64 extra (only the overflowed fields, in fixed order);
+ *   - entry count ≥ 0xFFFF or central dir offset/size ≥ 0xFFFFFFFF
+ *     triggers the ZIP64 EOCD record + locator before the classic EOCD
+ *     (whose fields become 0xFFFF / 0xFFFFFFFF placeholders).
+ * Small archives stay byte-identical to the v3.18 layout (no ZIP64
+ * records, no extra fields, version-needed 20).
  */
 export class StreamingZipWriter {
   private readonly sink: ZipByteSink;
@@ -175,6 +210,9 @@ export class StreamingZipWriter {
   private readonly entries: CentralEntry[] = [];
   private offset = 0;
   private state: "open" | "finished" | "aborted" = "open";
+  /** Test-only: force every ZIP64 path on regardless of real sizes so the
+   *  record layouts can be byte-verified without 4 GiB payloads. */
+  private readonly forceZip64: boolean;
   /**
    * Serializes `add` calls. Download pools (maps ×4, images ×4, PPT ×4…)
    * complete out of order and their `add` calls would otherwise interleave
@@ -185,9 +223,10 @@ export class StreamingZipWriter {
    */
   private chain: Promise<void> = Promise.resolve();
 
-  constructor(sink: ZipByteSink) {
+  constructor(sink: ZipByteSink, opts?: { forceZip64?: boolean }) {
     this.sink = sink;
     this.stamp = dosDateTime();
+    this.forceZip64 = opts?.forceZip64 === true;
   }
 
   /** Running total of archive bytes handed to the sink so far. */
@@ -224,23 +263,38 @@ export class StreamingZipWriter {
     const nameBytes = utf8Bytes(name);
     const bytes = data instanceof Uint8Array ? data : utf8Bytes(data);
     const crc = zipCrc32(bytes);
+    const entryOffset = this.offset;
+    // v3.24 ZIP64 local header: entry size ≥ 4 GiB-1 → sizes move into the
+    // ZIP64 extended-information extra field (BOTH fields per APPNOTE 4.5.3
+    // — the local-header variant must always carry uncompressed + compressed)
+    // and the 32-bit slots become 0xFFFFFFFF. At add() time the full payload
+    // is in hand, so no data descriptors are involved.
+    const sizeOverflow = this.forceZip64 || bytes.length >= 0xffffffff;
+    const localExtra = sizeOverflow
+      ? concatBytes([
+          zipU16(0x0001), // ZIP64 extended information header id
+          zipU16(16), // extra payload size: uncompressed (8) + compressed (8)
+          zipU64(bytes.length), // uncompressed size
+          zipU64(bytes.length), // compressed size (STORE — identical)
+        ])
+      : null;
 
     // Local file header (signature 0x04034b50) — field order mirrors makeZip.
     const localHeader = concatBytes([
       zipU32(0x04034b50),
-      zipU16(20), // version needed to extract (2.0)
+      zipU16(sizeOverflow ? 45 : 20), // version needed to extract (4.5 = ZIP64)
       zipU16(0), // general purpose bit flag (no flags)
       zipU16(0), // compression method (0 = STORE)
       zipU16(this.stamp.time),
       zipU16(this.stamp.date),
       zipU32(crc),
-      zipU32(bytes.length), // compressed size
-      zipU32(bytes.length), // uncompressed size
+      zipU32(sizeOverflow ? 0xffffffff : bytes.length), // compressed size
+      zipU32(sizeOverflow ? 0xffffffff : bytes.length), // uncompressed size
       zipU16(nameBytes.length),
-      zipU16(0), // extra field length
+      zipU16(localExtra ? localExtra.length : 0), // extra field length
       nameBytes,
+      ...(localExtra ? [localExtra] : []),
     ]);
-    const entryOffset = this.offset;
     await this.sink.write(localHeader);
     await this.sink.write(bytes);
     this.offset += localHeader.length + bytes.length;
@@ -261,38 +315,94 @@ export class StreamingZipWriter {
     this.state = "finished";
     const centralStart = this.offset;
     for (const e of this.entries) {
+      // v3.24 ZIP64 central entry: ONLY the fields whose 32-bit slot would
+      // overflow are replaced by 0xFFFFFFFF and carried (in fixed order:
+      // uncompressed, compressed, relative offset) in the ZIP64 extra —
+      // unlike the local header, which always carries both sizes.
+      const sizeOverflow = this.forceZip64 || e.size >= 0xffffffff;
+      const offsetOverflow = this.forceZip64 || e.offset >= 0xffffffff;
+      let centralExtra: Uint8Array | null = null;
+      if (sizeOverflow || offsetOverflow) {
+        const fields: Uint8Array[] = [];
+        if (sizeOverflow) {
+          fields.push(zipU64(e.size)); // uncompressed size
+          fields.push(zipU64(e.size)); // compressed size (STORE — identical)
+        }
+        if (offsetOverflow) fields.push(zipU64(e.offset)); // local header offset
+        centralExtra = concatBytes([
+          zipU16(0x0001), // ZIP64 extended information header id
+          zipU16(fields.reduce((n, f) => n + f.length, 0)),
+          ...fields,
+        ]);
+      }
       const centralHeader = concatBytes([
         zipU32(0x02014b50),
         zipU16(20), // version made by
-        zipU16(20), // version needed to extract
+        zipU16(centralExtra ? 45 : 20), // version needed to extract (4.5 = ZIP64)
         zipU16(0), // general purpose bit flag
         zipU16(0), // compression method
         zipU16(this.stamp.time),
         zipU16(this.stamp.date),
         zipU32(e.crc),
-        zipU32(e.size), // compressed size
-        zipU32(e.size), // uncompressed size
+        zipU32(sizeOverflow ? 0xffffffff : e.size), // compressed size
+        zipU32(sizeOverflow ? 0xffffffff : e.size), // uncompressed size
         zipU16(e.nameBytes.length),
-        zipU16(0), // extra field length
+        zipU16(centralExtra ? centralExtra.length : 0), // extra field length
         zipU16(0), // file comment length
         zipU16(0), // disk number start
         zipU16(0), // internal file attributes
         zipU32(0), // external file attributes
-        zipU32(e.offset), // relative offset of local header
+        zipU32(offsetOverflow ? 0xffffffff : e.offset), // relative offset of local header
         e.nameBytes,
+        ...(centralExtra ? [centralExtra] : []),
       ]);
       await this.sink.write(centralHeader);
       this.offset += centralHeader.length;
     }
     const centralSize = this.offset - centralStart;
+    // v3.24 ZIP64 EOCD: entry count ≥ 0xFFFF or central offset/size ≥
+    // 0xFFFFFFFF → emit the ZIP64 EOCD record + locator and fall back to
+    // 0xFFFF / 0xFFFFFFFF placeholders in the classic EOCD (readers that
+    // understand ZIP64 follow the locator; the rest refuse loudly instead
+    // of silently misreading truncated offsets).
+    const needZip64Eocd =
+      this.forceZip64 ||
+      this.entries.length >= 0xffff ||
+      centralSize >= 0xffffffff ||
+      centralStart >= 0xffffffff;
+    if (needZip64Eocd) {
+      const zip64EocdOffset = this.offset;
+      const zip64Eocd = concatBytes([
+        zipU32(0x06064b50), // ZIP64 end of central directory record
+        zipU64(44), // size of this record AFTER the size field
+        zipU16(45), // version made by (4.5)
+        zipU16(45), // version needed to extract (4.5)
+        zipU32(0), // number of this disk
+        zipU32(0), // disk with start of central directory
+        zipU64(this.entries.length), // entries on this disk
+        zipU64(this.entries.length), // total entries
+        zipU64(centralSize), // size of central directory
+        zipU64(centralStart), // offset of central directory
+      ]);
+      await this.sink.write(zip64Eocd);
+      this.offset += zip64Eocd.length;
+      const zip64Locator = concatBytes([
+        zipU32(0x07064b50), // ZIP64 end of central directory locator
+        zipU32(0), // disk with the ZIP64 EOCD record
+        zipU64(zip64EocdOffset), // offset of the ZIP64 EOCD record
+        zipU32(1), // total number of disks
+      ]);
+      await this.sink.write(zip64Locator);
+      this.offset += zip64Locator.length;
+    }
     const end = concatBytes([
       zipU32(0x06054b50),
       zipU16(0), // number of this disk
       zipU16(0), // disk where central directory starts
-      zipU16(this.entries.length), // entries on this disk
-      zipU16(this.entries.length), // total entries
-      zipU32(centralSize), // size of central directory
-      zipU32(centralStart), // offset of central directory
+      zipU16(needZip64Eocd ? 0xffff : this.entries.length), // entries on this disk
+      zipU16(needZip64Eocd ? 0xffff : this.entries.length), // total entries
+      zipU32(needZip64Eocd ? 0xffffffff : centralSize), // size of central directory
+      zipU32(needZip64Eocd ? 0xffffffff : centralStart), // offset of central directory
       zipU16(0), // comment length
     ]);
     await this.sink.write(end);

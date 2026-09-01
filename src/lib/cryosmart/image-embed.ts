@@ -6,6 +6,7 @@
  */
 
 import { cryoSmartFetch, type CryoSmartSession } from "./proxy-client";
+import { outputPreviewFallbackImages } from "./report-html";
 
 /**
  * Convert a CryoSmart image URL (full URL or path) to a base64 data URL via
@@ -42,6 +43,26 @@ export interface ImageEmbedOptions {
    *  about to arrive via the capture script's own uploads anyway — grinding
    *  the proxy only stalls the report/modal embed behind a wall of 502s. */
   skipDirectCryosmart?: boolean;
+  /** v3.24: external abort (the bundle builder's Stop button). Merged with
+   *  the internal 10s timeout so a cancelled build stops prefetching
+   *  immediately instead of grinding N/8 × 10s of zombie fetches into an
+   *  already-idle progress card. */
+  signal?: AbortSignal;
+}
+
+/** Merge the external abort signal with the per-request timeout. Prefers
+ *  native AbortSignal.any (Chrome 116+/FF 124+); falls back to a manual
+ *  controller bridge for older engines. */
+function anySignalWithTimeout(external: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  if (!external) return timeout;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([external, timeout]);
+  const ctrl = new AbortController();
+  const abortFromExternal = () => ctrl.abort();
+  if (external.aborted) ctrl.abort();
+  else external.addEventListener("abort", abortFromExternal, { once: true });
+  timeout.addEventListener("abort", () => ctrl.abort(), { once: true });
+  return ctrl.signal;
 }
 
 export async function imageToBase64(
@@ -67,7 +88,7 @@ export async function imageToBase64(
     if (/^\/api\/cryosmart\/(?:import\/session|history)\/[^/]+\/image\//i.test(pathOnly)) {
       const resp = await fetch(pathOnly, {
         credentials: "same-origin",
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: anySignalWithTimeout(opts?.signal, FETCH_TIMEOUT_MS),
       });
       if (!resp.ok) return null;
       const buf = await resp.arrayBuffer();
@@ -82,7 +103,7 @@ export async function imageToBase64(
     if (/^\/(?!api\/)/i.test(pathOnly)) {
       const resp = await fetch(pathOnly, {
         credentials: "same-origin",
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: anySignalWithTimeout(opts?.signal, FETCH_TIMEOUT_MS),
       });
       if (!resp.ok) return null;
       const buf = await resp.arrayBuffer();
@@ -130,7 +151,9 @@ export async function imageToBase64(
     // CryoSmart origin) → the proxied branch has nothing to proxy against.
     if (!session || !session.baseUrl) return null;
 
-    const resp = await cryoSmartFetch(session, relativePath);
+    const resp = await cryoSmartFetch(session, relativePath, {
+      signal: opts?.signal,
+    });
     if (!resp.ok) return null;
 
     const buf = await resp.arrayBuffer();
@@ -177,8 +200,12 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
  * Scope per node (matching reportMediaBlock / reportClassTable /
  * reportMapDownloads / reportImageBoxes):
  *   - node.images: log-image refs (log_image + image_log kinds) → first 24;
- *     other kinds are not rendered by the report (they feed the graph
- *     card / modal instead) → skipped.
+ *     other kinds are not rendered by the report when log images exist
+ *     (they feed the graph card / modal instead) → skipped.
+ *   - v3.28: node.images ui_tile + output_group kinds → the report's
+ *     OUTPUT-GROUP FALLBACK renders them (first 6, same selection rules
+ *     via outputPreviewFallbackImages) when the job has no log images —
+ *     they must embed too, or the downloaded report loses them.
  *   - representative_micrograph_images → first 3.
  *   - select_2d → the 3 tile images.
  *   - classes → every mrc_preview (the classes table renders all rows).
@@ -198,6 +225,9 @@ export interface PrefetchImagesOptions {
    *  grind 10s proxy timeouts while their bytes are already on the way via
    *  the session-image channel. */
   stagedImport?: boolean;
+  /** v3.24: external abort — the bundle builder's Stop button. Stops the
+   *  worker pool from pulling new URLs and aborts in-flight fetches. */
+  signal?: AbortSignal;
 }
 
 /** Structured progress: pass any subset of current/total/message. */
@@ -219,11 +249,16 @@ export async function prefetchImagesForReport(
   for (const node of summary.nodes || []) {
     // From node.images — log images only (log_image + image_log kinds,
     // mirroring reportMediaBlock), capped at the report's per-job display
-    // limit (non-log node.images are not rendered by the report).
+    // limit; when a job has NO log images the v3.28 output-group fallback
+    // renders its preview assets instead, so those are collected too
+    // (mirroring the rendered scope exactly via the shared helper).
     const logImages = (node.images || []).filter(
       (img) => img.kind === "log_image" || img.kind === "image_log"
     );
     for (const img of logImages.slice(0, REPORT_LOG_IMAGE_LIMIT)) {
+      add(img.url, img.src);
+    }
+    for (const img of outputPreviewFallbackImages(node)) {
       add(img.url, img.src);
     }
 
@@ -258,6 +293,9 @@ export async function prefetchImagesForReport(
       (img) => img.kind === "log_image" || img.kind === "image_log"
     );
     for (const img of logImages.slice(0, REPORT_LOG_IMAGE_LIMIT)) {
+      add(img.url, img.src);
+    }
+    for (const img of outputPreviewFallbackImages(sj)) {
       add(img.url, img.src);
     }
     if (sj.select_2d) {
@@ -313,11 +351,15 @@ export async function prefetchImagesForReport(
 
   async function worker() {
     while (index < urlList.length) {
+      // v3.24: a cancelled build stops pulling new URLs — the pool drains
+      // as soon as the in-flight fetches observe the merged abort signal.
+      if (opts?.signal?.aborted) return;
       const myIndex = index++;
       const url = urlList[myIndex];
       onProgress?.({ current: done, total: urlList.length, message: `Embedding image ${done + 1}/${urlList.length}…` });
       const dataUrl = await imageToBase64(session, url, {
         skipDirectCryosmart: opts?.stagedImport === true,
+        signal: opts?.signal,
       });
       if (dataUrl) {
         out[url] = dataUrl;

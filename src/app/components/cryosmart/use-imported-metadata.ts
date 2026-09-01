@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
+import { toast } from "sonner";
 import type { LoadedMetadata } from "@/app/components/cryosmart/data-source-card";
 import type { CryoSmartSession } from "@/lib/cryosmart/proxy-client";
 
@@ -52,6 +53,17 @@ interface SessionStatus {
   log_images_uploaded: number;
   log_jobs_with_images: number;
   note: string;
+  /** v3.29: the capture script's current sub-step kind ("prepare",
+   *  "calibrating", "scan", "rescue", "grace", "rest", "drain") —
+   *  reported via POST .../phase during the stretches where the aggregate
+   *  counters cannot move (loader calibration, per-job slow waits). */
+  script_phase?: string;
+  /** v3.29: human detail for script_phase ("scanning 13/72 · J13
+   *  (class_3d)"). */
+  phase_detail?: string;
+  /** v3.29: epoch-ms of the last phase POST — the strip renders a
+   *  liveness age ("3s ago") from it. */
+  phase_at?: number;
   /** v3.5: job whose CryoSmart page the script ran on (auto-trace anchor). */
   end_job_uid?: string | null;
   /** v3.5: log images are fetched only for the requested lineage jobs. */
@@ -71,6 +83,38 @@ export interface ImportProgress {
   images: number;
   /** Log image bytes uploaded so far (same-origin renderable). */
   uploaded: number;
+  /** v3.29: the script's current sub-step kind ("calibrating", "scan",
+   *  "rescue", "grace", "rest", "drain") — null until the script reports
+   *  its first phase. */
+  phase?: string | null;
+  /** v3.29: human detail ("scanning 13/72 · J13 (class_3d)"). */
+  phaseDetail?: string | null;
+  /** v3.29: epoch-ms of the last phase POST (liveness age). */
+  phaseAt?: number | null;
+}
+
+/**
+ * v3.25: live feedback for the /data APPLY phase. A big capture (590 jobs,
+ * ~7 MB of JSON) spends seconds in download → JSON.parse → merge →
+ * LineageGraph re-render — all previously invisible, which reads as "the
+ * popup page is dead until I refresh". While an apply is running the
+ * poller publishes this snapshot so DataSourceCard and the capture
+ * progress strip can show "Receiving 590 jobs (7.0 MB) · 3.2s…" plus a
+ * real "4.3 MB / 7.0 MB · 1.2 MB/s" download bar (the /data endpoint now
+ * streams its body with an exact Content-Length for exactly this).
+ */
+export interface ApplyProgress {
+  /** Jobs in the snapshot being applied — the session's total_jobs hint
+   *  while downloading, the ACTUAL job count once parsing begins. */
+  jobs: number | null;
+  /** Bytes received so far (== total once the download finished). */
+  received: number;
+  /** Total payload bytes from Content-Length (null when unknown). */
+  total: number | null;
+  /** download = body still streaming; parse = JSON.parse + graph render. */
+  phase: "download" | "parse";
+  /** Date.now() when this apply's fetch started (elapsed-timer anchor). */
+  startedAt: number;
 }
 
 export interface ImportState {
@@ -95,6 +139,16 @@ export interface ImportState {
    * exited after its /complete POST failed 3×. The strip surfaces this
    * with an amber badge and emphasizes the Stop button. */
   uploadStalled?: boolean;
+  /** v3.26: total job count when the "Fetch all jobs' log images" action is
+   * available (live lineage-scoped session whose log_request does not yet
+   * cover every captured job). Null otherwise. Clicking the strip button
+   * POSTs {all:true} to request-logs; the capture script picks the extras
+   * up via its re-trace grace window / byte-drain poll and scans them. */
+  fetchAllJobs?: number | null;
+  /** v3.26: a Fetch-all request was sent for THIS session — the strip
+   * button stays disabled ("Requested ✓") until the next poll tick sees
+   * the unioned request (and drops the button). */
+  fetchAllRequested?: boolean;
 }
 
 interface UseImportedOpts {
@@ -268,6 +322,60 @@ export function sessionImageBase(token: string): string {
   return `/api/cryosmart/import/session/${encodeURIComponent(token)}/image/`;
 }
 
+/**
+ * Read a fetch Response body as text while reporting the received byte
+ * count (drives the download-progress bar). Falls back to resp.text()
+ * when no streaming reader is available (ancient browsers / test mocks).
+ */
+async function readBodyWithProgress(
+  resp: Response,
+  onProgress: (received: number) => void
+): Promise<string> {
+  if (!resp.body || typeof resp.body.getReader !== "function") {
+    const t = await resp.text();
+    onProgress(t.length);
+    return t;
+  }
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.byteLength > 0) {
+      chunks.push(value);
+      received += value.byteLength;
+      onProgress(received);
+    }
+  }
+  const merged = new Uint8Array(received);
+  let off = 0;
+  for (const c of chunks) {
+    merged.set(c, off);
+    off += c.byteLength;
+  }
+  return new TextDecoder("utf-8").decode(merged);
+}
+
+/** Wait ~two animation frames so a state update PAINTS before the caller
+ * blocks the main thread (JSON.parse of a 7 MB body). Hidden tabs never
+ * fire rAF — the wall-clock fallback keeps backgrounded capture tabs
+ * moving. */
+function yieldToPaint(maxWaitMs = 150): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => requestAnimationFrame(finish));
+    }
+    setTimeout(finish, maxWaitMs);
+  });
+}
+
 /** Image-base prefix for a RESTORED capture-history entry's stored bytes. */
 export function historyImageBase(entryId: string): string {
   return `/api/cryosmart/history/${encodeURIComponent(entryId)}/image/`;
@@ -397,10 +505,164 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     endJobUid: null,
   });
 
+  /* v3.25: apply-phase progress — deliberately OUTSIDE ImportState so the
+   * poller's change-deduped applyState() never has to reason about it,
+   * and so a superseded apply can never resurrect stale progress. */
+  const [applying, setApplying] = useState<ApplyProgress | null>(null);
+  /** Monotonic apply sequence: progress callbacks from an older fetch are
+   *  dropped once a newer apply (or the final stop) has begun. */
+  const applySeqRef = useRef(0);
+  /** v3.26: a Fetch-all request was acknowledged for the CURRENT session
+   *  (reset whenever a new session's polling loop starts). Read by the poll
+   *  loop's applyState so the strip button flips to "Requested ✓"
+   *  immediately instead of waiting for the next status tick. */
+  const fetchAllDoneRef = useRef(false);
+
   const onLoadedRef = useRef(opts?.onLoaded);
   useEffect(() => {
     onLoadedRef.current = opts?.onLoaded;
   }, [opts?.onLoaded]);
+
+  /* ── v3.25: the ONE place a /data snapshot is fetched + applied ──────
+   * Streaming read with byte progress, an explicit parse phase, the
+   * first-apply toast, and a badge that stays up until the heavy graph
+   * re-render has painted. The poll loop's progressive passes, the final
+   * /complete apply AND the manual stop all route through here. */
+  const fetchSessionData = useCallback(
+    async (
+      token: string,
+      expectedJobs: number | null,
+      callOpts?: { firstApply?: boolean; isCancelled?: () => boolean }
+    ): Promise<PendingData | null> => {
+      const seq = ++applySeqRef.current;
+      const now0 =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      /** setApplying, but no-ops once a NEWER apply has started. */
+      const commit = (next: SetStateAction<ApplyProgress | null>) => {
+        if (applySeqRef.current !== seq) return;
+        setApplying(next);
+      };
+      commit({
+        jobs: expectedJobs,
+        received: 0,
+        total: null,
+        phase: "download",
+        startedAt: Date.now(),
+      });
+
+      let resp: Response;
+      try {
+        resp = await fetch(
+          `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
+          { credentials: "same-origin", cache: "no-store" }
+        );
+      } catch {
+        commit(null);
+        return null;
+      }
+      if (!resp.ok) {
+        commit(null);
+        return null;
+      }
+      const totalHeader = Number(resp.headers.get("Content-Length"));
+      const total =
+        Number.isFinite(totalHeader) && totalHeader > 0 ? totalHeader : null;
+
+      // Byte progress, throttled to ~4 Hz — a callback per network chunk
+      // would re-render the page 110+ times for a 7 MB body.
+      let lastEmit = 0;
+      let received = 0;
+      let text: string;
+      try {
+        text = await readBodyWithProgress(resp, (r) => {
+          received = r;
+          const t = Date.now();
+          if (t - lastEmit >= 250) {
+            lastEmit = t;
+            commit((prev) =>
+              prev ? { ...prev, received: r, total: total ?? prev.total } : prev
+            );
+          }
+        });
+      } catch {
+        commit(null);
+        return null;
+      }
+
+      // Download finished → parsing. Let the "parsing…" state paint
+      // BEFORE the JSON.parse block freezes the timer.
+      commit((prev) =>
+        prev
+          ? {
+              ...prev,
+              received: received || text.length,
+              total: total ?? Math.max(received, text.length),
+              phase: "parse",
+            }
+          : prev
+      );
+      await yieldToPaint();
+
+      let data: PendingData;
+      try {
+        data = JSON.parse(text) as PendingData;
+      } catch {
+        commit(null);
+        return null;
+      }
+      if (
+        !(data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0)
+      ) {
+        commit(null);
+        return null;
+      }
+      const jobsCount = data.data.jobs.length;
+      const bytesCount = total ?? Math.max(received, text.length);
+      commit((prev) =>
+        prev
+          ? { ...prev, jobs: jobsCount, received: bytesCount, total: bytesCount }
+          : prev
+      );
+
+      // The genuinely heavy step: mergeLogImagesIntoRaw + page setState +
+      // the LineageGraph re-render of hundreds of nodes.
+      if (callOpts?.isCancelled?.()) {
+        commit(null);
+        return null;
+      }
+      onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
+
+      // Keep the "Receiving…" badge up until the re-render has PAINTED —
+      // rAF fires after the next paint, the nested setTimeout(0) runs
+      // after React commits it. The 3 s wall-clock fallback covers
+      // hidden tabs (whose rAF never fires).
+      const clear = () => commit(null);
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => setTimeout(clear, 0));
+      } else {
+        setTimeout(clear, 0);
+      }
+      setTimeout(clear, 3000);
+
+      if (callOpts?.firstApply) {
+        const seconds = Math.max(
+          0.1,
+          ((typeof performance !== "undefined" ? performance.now() : Date.now()) -
+            now0) /
+            1000
+        );
+        const finish = () =>
+          toast.success(`Loaded ${jobsCount} jobs in ${seconds.toFixed(1)}s`);
+        if (typeof requestAnimationFrame === "function") {
+          requestAnimationFrame(finish);
+        } else {
+          setTimeout(finish, 0);
+        }
+      }
+      return data;
+    },
+    []
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -479,6 +741,8 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
       let progressLastActivity = Date.now();
       /** consecutive session-endpoint 404s (stale-URL early exit below). */
       let staged404Count = 0;
+      // v3.26: fresh session → fresh Fetch-all acknowledgement state.
+      fetchAllDoneRef.current = false;
 
       // ── Progressive data application ─────────────────────────────
       // The graph/report are built from `loaded`, which used to refresh
@@ -511,7 +775,10 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               p.done === n.done &&
               p.total === n.total &&
               p.images === n.images &&
-              p.uploaded === n.uploaded) ||
+              p.uploaded === n.uploaded &&
+              p.phase === n.phase &&
+              p.phaseDetail === n.phaseDetail &&
+              p.phaseAt === n.phaseAt) ||
             (!p && !n);
           if (
             prev.status === next.status &&
@@ -528,20 +795,18 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
         });
       };
 
-      /** Fetch the current cumulative session snapshot and apply it. */
-      const applyStagedData = async (): Promise<PendingData | null> => {
-        const dataResp = await fetch(
-          `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
-          { credentials: "same-origin", cache: "no-store" }
-        );
-        if (!dataResp.ok) return null;
-        const data = (await dataResp.json()) as PendingData;
-        if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
-          onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
-          return data;
-        }
-        return null;
-      };
+      /** Fetch the current cumulative session snapshot and apply it.
+       * v3.25: routes through fetchSessionData — streaming byte progress,
+       * parse-phase indicator, first-apply toast and the stop-race
+       * cancellation check all live there. */
+      const applyStagedData = (
+        expectedJobs: number | null = null,
+        firstApply = false
+      ): Promise<PendingData | null> =>
+        fetchSessionData(token, expectedJobs, {
+          firstApply,
+          isCancelled: () => cancelled,
+        });
 
       /** Fingerprint of "what data the session holds right now" — any
        * change means the streamed log images grew and `loaded` is stale. */
@@ -654,6 +919,10 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
           // `updated_at` while it waits for the user's trace, and every
           // log/image batch mutates the counters, so a live capture always
           // changes this fingerprint.
+          // v3.29: phase POSTS count as liveness here — a script deep in
+          // loader calibration (or a 20s slow-log wait) reports its
+          // sub-step but cannot move any counter, and must not trip the
+          // 10-min dead-tab timeout.
           const sig = [
             sessionStatus.status,
             sessionStatus.log_jobs_done,
@@ -663,6 +932,8 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             sessionStatus.note,
             sessionStatus.updated_at ?? 0,
             sessionStatus.log_request?.revision ?? 0,
+            sessionStatus.script_phase ?? "",
+            sessionStatus.phase_detail ?? "",
           ].join("|");
           // v3.16.1: progress-only fingerprint (NO updated_at) — heartbeat
           // bumps must not mask frozen COUNTERS. When the scan is finished
@@ -708,7 +979,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               // the strip — losing them now would look like the original
               // "captured 320 but nothing shows" bug).
               try {
-                await applyStagedData();
+                await applyStagedData(sessionStatus.total_jobs);
               } catch {
                 // nothing to rescue
               }
@@ -735,7 +1006,9 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             lastDataFetchAt = Date.now();
             try {
               if (cancelled) return;
-              await applyStagedData();
+              // firstApply → the "Loaded N jobs in X.Xs" toast fires once
+              // the initial snapshot has rendered.
+              await applyStagedData(sessionStatus.total_jobs, true);
             } catch {
               // non-fatal: retried by the progressive pass below
             }
@@ -751,7 +1024,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             lastDataFetchAt = Date.now();
             try {
               if (cancelled) return;
-              await applyStagedData();
+              await applyStagedData(sessionStatus.total_jobs);
             } catch {
               // transient — the next counter change or /complete re-applies
             }
@@ -763,30 +1036,77 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
             // word on what the capture collected.
             try {
               if (cancelled) return;
-              const data = await applyStagedData();
+              const data = await applyStagedData(sessionStatus.total_jobs);
               if (data) {
                 const jobsCount = data.data.jobs?.length ?? 0;
                 const nLogs = sessionStatus.log_images_count;
                 const withLogs = sessionStatus.log_jobs_with_images;
                 const uploaded = sessionStatus.log_images_uploaded;
                 const req = sessionStatus.log_request;
-                const lineageNote =
-                  sessionStatus.lineage_mode && req && req.jobs.length > 0
-                    ? ` (traced lineage — ${req.jobs.length} of ${jobsCount} jobs scanned)`
-                    : "";
+                // v3.26: the summary now EXPLAINS its own numbers — the
+                // user's recurring "why did only 41 of 72 jobs get images?"
+                // question (31 jobs with no readable logs, untraced jobs
+                // skipped by design, refs without preview bytes) is answered
+                // right where the final message lands, instead of requiring
+                // a console scroll through the capture script's notes.
+                const lineageScoped =
+                  !!sessionStatus.lineage_mode && !!req && req.jobs.length > 0;
+                // v3.27: the complete-report pass widens the request to every
+                // job — "traced" wording only while the request is a real
+                // subset (early stop / legacy capture).
+                const wholeProject = lineageScoped && jobsCount > 0 && req.jobs.length >= jobsCount;
+                let message: string;
+                if (nLogs > 0 && lineageScoped) {
+                  const scopeLabel = wholeProject ? "" : "traced ";
+                  const noLogCount = Math.max(0, req.jobs.length - withLogs);
+                  const untraced = Math.max(0, jobsCount - req.jobs.length);
+                  const noBytes = Math.max(0, nLogs - uploaded);
+                  const reasons: string[] = [];
+                  if (noLogCount > 0)
+                    reasons.push(
+                      `${noLogCount} of the ${scopeLabel}jobs have no readable log images (import/ctf jobs usually have none — the CryoSmart console lists them; the report shows their output-group previews instead)`
+                    );
+                  if (untraced > 0)
+                    reasons.push(
+                      `${untraced} jobs outside the traced lineage were skipped by design`
+                    );
+                  if (noBytes > 0) {
+                    // v3.30: when the script's LAST sub-step was the byte
+                    // drain, its detail line says WHY the bytes are missing
+                    // (dead image endpoint / breaker trip / throttle) —
+                    // surface it verbatim right where the user reads the
+                    // number, instead of a generic "missing or too large".
+                    const drainNote =
+                      sessionStatus.script_phase === "drain" &&
+                      typeof sessionStatus.phase_detail === "string" &&
+                      sessionStatus.phase_detail
+                        ? ` — ${sessionStatus.phase_detail}`
+                        : "";
+                    reasons.push(
+                      `${noBytes} image(s) have no preview bytes (missing or too large on the CryoSmart server)${drainNote}`
+                    );
+                  }
+                  message =
+                    `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} of the ${req.jobs.length} ${scopeLabel}jobs` +
+                    (reasons.length ? ` — ${reasons.join("; ")}` : "") +
+                    ` (${uploaded} with previews).`;
+                } else if (nLogs > 0) {
+                  message =
+                    `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} jobs` +
+                    (uploaded > 0 && uploaded < nLogs
+                      ? ` (${uploaded} with previews).`
+                      : ".");
+                } else {
+                  message =
+                    sessionStatus.log_jobs_done > 0
+                      ? `Captured ${jobsCount} jobs — no log images readable on this build (see the CryoSmart console diagnostics).`
+                      : sessionStatus.lineage_mode && !sessionStatus.log_request
+                        ? `Captured ${jobsCount} jobs — no Trace Lineage ran during the capture window, so no log images were fetched. Re-run the script and trace (or call __csCaptureAll() in the CryoSmart console).`
+                        : `Captured ${jobsCount} jobs (no log images available).`;
+                }
                 applyState({
                   status: "loaded",
-                  message:
-                    nLogs > 0
-                      ? `Captured ${jobsCount} jobs + ${nLogs} log images from ${withLogs} jobs${lineageNote}` +
-                          (uploaded > 0 && uploaded < nLogs
-                            ? ` (${uploaded} with previews).`
-                            : ".")
-                      : sessionStatus.log_jobs_done > 0
-                        ? `Captured ${jobsCount} jobs — no log images readable on this build (see the CryoSmart console diagnostics).`
-                        : sessionStatus.lineage_mode && !sessionStatus.log_request
-                          ? `Captured ${jobsCount} jobs — no Trace Lineage ran during the capture window, so no log images were fetched. Re-run the script and trace (or call __csCaptureAll() in the CryoSmart console).`
-                          : `Captured ${jobsCount} jobs (no log images available).`,
+                  message,
                   token,
                   startedAt,
                   progress: null,
@@ -813,7 +1133,7 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
               applyState({
                 status: "polling",
                 message:
-                  `Loaded ${sessionStatus.total_jobs} jobs — waiting for Trace Lineage (log images are fetched only for the traced lineage)` +
+                  `Loaded ${sessionStatus.total_jobs} jobs — waiting for Trace Lineage (its log images are fetched first; every remaining job follows)` +
                   (endJobUidSeen
                     ? `… auto-tracing from ${endJobUidSeen}.`
                     : ` — pick a Start Job below and click Trace Lineage.`),
@@ -822,6 +1142,10 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 progress: null,
                 endJobUid: endJobUidSeen,
                 uploadStalled: false,
+                fetchAllJobs: sessionStatus.lineage_mode
+                  ? sessionStatus.total_jobs
+                  : null,
+                fetchAllRequested: fetchAllDoneRef.current,
               });
             } else {
               const imgs = sessionStatus.log_images_count;
@@ -830,20 +1154,61 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                 sessionStatus.log_jobs_total > 0 &&
                 sessionStatus.log_jobs_done >= sessionStatus.log_jobs_total;
               const lineageNote =
-                sessionStatus.lineage_mode && req ? " for the traced lineage" : "";
+                sessionStatus.lineage_mode && req && req.jobs.length < sessionStatus.total_jobs
+                  ? " for the traced lineage"
+                  : "";
+              // v3.26: is every captured job already in the log request?
+              // (fetch-all clicked, or the trace genuinely covered the
+              // whole project — either way the button is pointless).
+              const allRequested =
+                !!req && sessionStatus.total_jobs > 0 && req.jobs.length >= sessionStatus.total_jobs;
+              const fetchAllJobs =
+                sessionStatus.lineage_mode && !allRequested
+                  ? sessionStatus.total_jobs
+                  : null;
+              // v3.29: the script's current sub-step ("calibrating the log
+              // loader on J45 — action 'getJobDetail' arg shape 2/6…",
+              // "scanning 13/72 · J13 (class_3d)", "rescue", "grace",
+              // "rest", "drain"). While NO job has streamed yet the
+              // generic "fetching log images 0/72…" line says nothing —
+              // the phase detail replaces it so the calibration stretch
+              // (30–120s on a real build) explains itself; afterwards the
+              // generic line resumes and the detail moves to the strip's
+              // activity row.
+              const phaseDetail =
+                typeof sessionStatus.phase_detail === "string" && sessionStatus.phase_detail
+                  ? sessionStatus.phase_detail
+                  : null;
               // Phase-aware message: the scan can finish minutes before the
               // script completes (re-trace grace window + byte upload
               // drain) — say what is actually happening instead of a
-              // stale "fetching… 24/24".
+              // stale "fetching… 24/24". v3.26: the "all ready" wording
+              // now names the grace window — this is the silent multi-minute
+              // stretch that previously read as "stuck".
+              // v3.27: the "all ready" case is now TRANSIENT — after the
+              // short grace window the complete-report pass widens the
+              // denominator to the whole project and the "fetching X/N"
+              // line resumes, so the note names the wrap-up, not a wait.
+              // v3.30: at ZERO bytes landed the message names the wait —
+              // the refs are safe, every fetch is time-boxed, and a slow
+              // or stalled CryoSmart image endpoint only delays previews.
+              // The bare "uploading image previews 0/712…" previously
+              // sat unchanged for minutes and read exactly like a hang.
               const message =
                 scanDone && imgs > 0 && upl < imgs
-                  ? `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews ${upl}/${imgs}${lineageNote}…`
+                  ? upl === 0
+                    ? `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews 0/${imgs}${lineageNote} — no preview bytes yet (the CryoSmart image endpoint is slow or stalled; refs are captured)…`
+                    : `Loaded ${sessionStatus.total_jobs} jobs — uploading image previews ${upl}/${imgs}${lineageNote}…`
                   : scanDone && imgs > 0
-                    ? `Loaded ${sessionStatus.total_jobs} jobs — all ${imgs} log images ready${lineageNote}, finalizing…`
-                    : `Loaded ${sessionStatus.total_jobs} jobs — fetching log images${lineageNote} ` +
-                      `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
-                      (imgs > 0 ? ` (${imgs} captured)` : "") +
-                      "…";
+                    ? `Loaded ${sessionStatus.total_jobs} jobs — all ${imgs} log images ready${lineageNote}; the script is wrapping up…`
+                    : sessionStatus.log_jobs_done === 0 && phaseDetail
+                      ? `Loaded ${sessionStatus.total_jobs} jobs — ${phaseDetail}${
+                          phaseDetail.endsWith("…") || phaseDetail.endsWith(".") ? "" : "…"
+                        }`
+                      : `Loaded ${sessionStatus.total_jobs} jobs — fetching log images${lineageNote} ` +
+                        `${sessionStatus.log_jobs_done}/${sessionStatus.log_jobs_total}` +
+                        (imgs > 0 ? ` (${imgs} captured)` : "") +
+                        "…";
               applyState({
                 status: "polling",
                 message,
@@ -854,9 +1219,14 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
                   total: Math.max(1, sessionStatus.log_jobs_total),
                   images: sessionStatus.log_images_count,
                   uploaded: sessionStatus.log_images_uploaded,
+                  phase: sessionStatus.script_phase || null,
+                  phaseDetail,
+                  phaseAt: sessionStatus.phase_at || null,
                 },
                 endJobUid: endJobUidSeen,
                 uploadStalled,
+                fetchAllJobs,
+                fetchAllRequested: fetchAllDoneRef.current,
               });
             }
           } else {
@@ -915,7 +1285,9 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     return () => {
       cancelled = true;
     };
-  }, [state.status, state.token, state.startedAt]);
+    // fetchSessionData is a stable useCallback([]) — listed for the
+    // exhaustive-deps linter, it never re-triggers this effect.
+  }, [state.status, state.token, state.startedAt, fetchSessionData]);
 
   /* ── v3.16.1: manual stop ("Stop waiting & keep captured data") ──────
    * The user's "stuck at 263/268 with no way to stop" case: a live capture
@@ -944,39 +1316,36 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
     // Best-effort final snapshot: fetch + apply the cumulative data (the
     // poll loop has been applying it live all along — this is a last
     // refresh so anything uploaded in the final seconds is not lost).
+    // v3.25: routed through fetchSessionData, so the stop's own /data read
+    // gets the applying indicator AND supersedes any in-flight poll apply
+    // (applySeq) — the newest snapshot can no longer be overwritten by a
+    // stale poll fetch finishing late.
     try {
-      const dataResp = await fetch(
-        `/api/cryosmart/import/session/${encodeURIComponent(token)}/data`,
-        { credentials: "same-origin", cache: "no-store" }
-      );
-      if (dataResp.ok) {
-        const data = (await dataResp.json()) as PendingData;
-        if (data.ok && Array.isArray(data.data.jobs) && data.data.jobs.length > 0) {
-          onLoadedRef.current?.(toLoaded(data, sessionImageBase(token)));
-          const jobsCount = data.data.jobs.length;
-          const uploaded = data.data.uploaded_image_ids?.length ?? 0;
-          const refs = Object.values(data.data.job_log_images || {}).reduce(
-            (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
-            0
-          );
-          const withLogs = Object.values(data.data.job_log_images || {}).filter(
-            (arr) => Array.isArray(arr) && arr.length > 0
-          ).length;
-          setState({
-            status: "loaded",
-            message:
-              refs > 0
-                ? `Stopped waiting — kept ${jobsCount} jobs + ${refs} log images from ${withLogs} jobs (${uploaded} with previews). The capture script may still be running in its tab; re-run Smart Capture to fetch the rest.`
-                : `Stopped waiting — kept ${jobsCount} jobs (no log images captured yet). Re-run Smart Capture to collect them.`,
-            token,
-            startedAt,
-            progress: null,
-            endJobUid,
-            uploadStalled: false,
-          });
-          clearPersistedImportToken();
-          return;
-        }
+      const data = await fetchSessionData(token, null);
+      if (data) {
+        const jobsCount = data.data.jobs?.length ?? 0;
+        const uploaded = data.data.uploaded_image_ids?.length ?? 0;
+        const refs = Object.values(data.data.job_log_images || {}).reduce(
+          (sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0),
+          0
+        );
+        const withLogs = Object.values(data.data.job_log_images || {}).filter(
+          (arr) => Array.isArray(arr) && arr.length > 0
+        ).length;
+        setState({
+          status: "loaded",
+          message:
+            refs > 0
+              ? `Stopped waiting — kept ${jobsCount} jobs + ${refs} log images from ${withLogs} jobs (${uploaded} with previews). The capture script may still be running in its tab; re-run Smart Capture to fetch the rest.`
+              : `Stopped waiting — kept ${jobsCount} jobs (no log images captured yet). Re-run Smart Capture to collect them.`,
+          token,
+          startedAt,
+          progress: null,
+          endJobUid,
+          uploadStalled: false,
+        });
+        clearPersistedImportToken();
+        return;
       }
     } catch {
       // fall through to the error report below
@@ -994,7 +1363,48 @@ export function useImportedMetadata(opts?: UseImportedOpts) {
       uploadStalled: false,
     });
     clearPersistedImportToken();
+  }, [fetchSessionData]);
+
+  /* ── v3.26: "Fetch all jobs' log images" ────────────────────────────
+   * The user's recurring "why did only 41 of 72 traced jobs (and none of
+   * the 520 untraced ones) get log images?" — the capture is lineage-
+   * scoped by design, and the only escape hatch was the console-only
+   * __csCaptureAll(). This publishes {all:true} to the session's log
+   * request: the running script sees the unioned list (trace-wait loop,
+   * re-trace grace window, or the v3.26 byte-drain poll) and scans every
+   * remaining job. Only meaningful while the script is still attached —
+   * after /complete the button disappears with the polling state. */
+  const requestAllLogs = useCallback(async (): Promise<void> => {
+    const token = stopRef.current.token;
+    if (!token || fetchAllDoneRef.current) return;
+    try {
+      const resp = await fetch(
+        `/api/cryosmart/import/session/${encodeURIComponent(token)}/request-logs`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ all: true }),
+        }
+      );
+      const data = (await resp.json()) as { ok?: boolean; log_request?: { jobs?: unknown[] }; error?: string };
+      if (data?.ok) {
+        fetchAllDoneRef.current = true;
+        const n = Array.isArray(data.log_request?.jobs) ? data.log_request.jobs.length : 0;
+        // Optimistic UI: flip the button to "Requested ✓" without waiting
+        // for the next 700ms poll tick to publish fetchAllRequested.
+        setState((prev) =>
+          prev.status === "polling" ? { ...prev, fetchAllRequested: true } : prev
+        );
+        toast.success(
+          `Requested log images for all ${n} job(s) — the capture script picks them up within seconds and the progress above extends. Large projects can take several minutes.`
+        );
+      } else {
+        toast.error(data?.error || "Could not request all jobs' log images.");
+      }
+    } catch {
+      toast.error("Could not reach the capture session — try again.");
+    }
   }, []);
 
-  return { ...state, stop: stopImport };
+  return { ...state, applying, stop: stopImport, requestAllLogs };
 }

@@ -43,7 +43,7 @@
  * when a session is supplied (for inline image embedding in detail mode).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -681,7 +681,7 @@ function routeEdgeLane(
 
 
 /* ── Component ────────────────────────────────────────────────────────── */
-export function LineageGraph({ summary, session, stagedImport }: Props) {
+function LineageGraphImpl({ summary, session, stagedImport }: Props) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
 
@@ -1259,11 +1259,17 @@ export function LineageGraph({ summary, session, stagedImport }: Props) {
       canvas.width = Math.max(1, Math.round(bounds.w * 2));
       canvas.height = Math.max(1, Math.round(bounds.h * 2));
       const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+      if (!ctx) {
+        // v3.24: leak fix — release the object URL on this early return.
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+        return;
+      }
       ctx.fillStyle = bgColor;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(url);
+      // v3.24: delayed revoke — the synchronous revoke raced the SVG loader
+      // in some engines; 30s matches the app-wide blob-URL policy.
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
       canvas.toBlob((blob) => {
         if (!blob) return;
         const dlUrl = URL.createObjectURL(blob);
@@ -1271,8 +1277,15 @@ export function LineageGraph({ summary, session, stagedImport }: Props) {
         a.href = dlUrl;
         a.download = `CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_graph.png`;
         a.click();
-        URL.revokeObjectURL(dlUrl);
+        // v3.24: same delayed-revoke rule as the report download — the
+        // synchronous revoke could cancel the download handshake.
+        setTimeout(() => URL.revokeObjectURL(dlUrl), 30000);
       }, "image/png");
+    };
+    // v3.24: leak fix — without onerror a failed SVG load left the object
+    // URL alive forever and the click silently did nothing.
+    img.onerror = () => {
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
     };
     img.src = url;
   }, [bounds.w, bounds.h, bgColor, summary.project_uid, summary.start_uid]);
@@ -2145,6 +2158,13 @@ export function LineageGraph({ summary, session, stagedImport }: Props) {
     </div>
   );
 }
+
+/** PERF (v3.25): memoized — the apply-phase progress state (and its ~5 Hz
+ *  elapsed timer) re-renders the page every 200 ms while a big snapshot
+ *  streams in. `summary`/`session`/`stagedImport` are referentially stable
+ *  across those ticks, so the memo skips re-running this 1500-line render
+ *  (hundreds of SVG nodes + edges) until the data itself changes. */
+export const LineageGraph = memo(LineageGraphImpl);
 
 /* ── Sub-components ───────────────────────────────────────────────────── */
 

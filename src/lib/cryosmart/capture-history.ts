@@ -522,18 +522,84 @@ export async function historyImageResponse(
   }
   const link = capture.remote_image_urls?.[fileid];
   if (!opts?.allowRemote || !link || !/^https?:\/\//i.test(link.url)) return null;
+  // SECURITY (v3.24 SSRF guard): `remote_image_urls` is attacker-editable
+  // import JSON — this endpoint used to forward the stored CryoSmart
+  // Authorization/Cookie headers to WHATEVER http(s) URL the document
+  // listed, turning a re-imported capture into a credential exfiltration
+  // primitive. Only URLs on the capture's OWN CryoSmart origin may carry
+  // the credentials now.
+  const allowedOrigin = String(capture.cryosmart_origin || "")
+    .trim()
+    .replace(/\/+$/, "")
+    .toLowerCase();
+  const originOfUrl = (u: string): string => {
+    try {
+      return new URL(u).origin.replace(/\/+$/, "").toLowerCase();
+    } catch {
+      return "";
+    }
+  };
+  if (!allowedOrigin || originOfUrl(link.url) !== allowedOrigin) return null;
+  const REMOTE_IMAGE_CAP = 8 * 1024 * 1024;
   try {
-    const headers: Record<string, string> = {};
-    if (capture.cryosmart_auth) headers.Authorization = capture.cryosmart_auth;
-    if (capture.cryosmart_cookie) headers.Cookie = capture.cryosmart_cookie;
-    const res = await fetch(link.url, {
-      headers,
-      redirect: "follow",
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.byteLength === 0 || buf.byteLength > 8 * 1024 * 1024) return null;
+    // Manual redirect following (max 3 hops, same-origin only): undici
+    // strips Authorization on cross-origin redirects but NOT the manually
+    // set Cookie header — following blindly could still bounce the session
+    // cookie to a third-party host. Re-validate every hop instead.
+    let url = link.url;
+    let res: Response | null = null;
+    for (let hop = 0; hop < 4; hop++) {
+      const headers: Record<string, string> = {};
+      if (capture.cryosmart_auth) headers.Authorization = capture.cryosmart_auth;
+      if (capture.cryosmart_cookie) headers.Cookie = capture.cryosmart_cookie;
+      res = await fetch(url, {
+        headers,
+        redirect: "manual",
+        signal: AbortSignal.timeout(10000),
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get("location");
+        try { await res.body?.cancel(); } catch { /* release best-effort */ }
+        if (!loc) return null;
+        let next: string;
+        try {
+          next = new URL(loc, url).toString();
+        } catch {
+          return null;
+        }
+        if (originOfUrl(next) !== allowedOrigin) return null; // no credential bounce
+        url = next;
+        continue;
+      }
+      break;
+    }
+    if (!res || !res.ok) return null;
+    // Pre-check the declared length (cheapest cap)…
+    const declared = Number(res.headers.get("content-length") || "0");
+    if (declared > REMOTE_IMAGE_CAP) {
+      try { await res.body?.cancel(); } catch { /* release best-effort */ }
+      return null;
+    }
+    // …then stream with a hard cap so a lying Content-Length can't buffer
+    // an unbounded body before the old post-hoc size check fired.
+    const reader = res.body?.getReader();
+    if (!reader) return null;
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let overflow = false;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > REMOTE_IMAGE_CAP) {
+        overflow = true;
+        break;
+      }
+      chunks.push(Buffer.from(value));
+    }
+    try { await reader.cancel(); } catch { /* already done/errored */ }
+    if (overflow || total === 0) return null;
+    const buf = Buffer.concat(chunks, total);
     // SECURITY: trust the BYTES, never the declared content type — only
     // raster signatures are accepted (same rule as the session store).
     const mime = sniffImageMimeBuf(buf);

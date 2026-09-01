@@ -88,6 +88,21 @@ export interface ImportSession {
   logJobsWithImages: number;
   /** Free-form stage note from the capture script (e.g. "calibrating loader"). */
   note: string;
+  /** v3.29: the capture script's CURRENT sub-step kind ("prepare",
+   *  "calibrating", "scan", "rescue", "grace", "rest", "drain") — the
+   *  progress strip renders phaseDetail + a liveness age so the long
+   *  pre-first-batch stretch (loader calibration) no longer reads as a
+   *  frozen "0/72 · 0%" capture. phaseAt doubles as a per-sub-step
+   *  heartbeat: every phase POST also bumps updatedAt, so a script that
+   *  is actively working (but whose counters legitimately cannot move
+   *  yet) keeps the session alive and the stall detector quiet. */
+  scriptPhase: string;
+  /** v3.29: human detail for scriptPhase (e.g. "scanning 13/72 · J13
+   *  (class_3d)" or "calibrating the log loader on J45 — action
+   *  'getJobDetail' arg shape 2/6…"). */
+  phaseDetail: string;
+  /** v3.29: Date.now() of the last phase POST. */
+  phaseAt: number;
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
@@ -162,6 +177,9 @@ export function createImportSession(
     logImagesCount: 0,
     logJobsWithImages: 0,
     note,
+    scriptPhase: "",
+    phaseDetail: "",
+    phaseAt: 0,
     createdAt: now,
     updatedAt: now,
     expiresAt: now + TTL_MS,
@@ -439,6 +457,25 @@ export function setSessionNote(session: ImportSession, note: string): void {
   session.updatedAt = Date.now();
 }
 
+/**
+ * v3.29: record the capture script's CURRENT sub-step ("calibrating the log
+ * loader on J45…", "scanning 13/72 · J13 (class_3d)"…). Fire-and-forget
+ * from the script — a lost POST just means a slightly stale detail line.
+ * Bumps `updatedAt` so phase POSTs double as heartbeats during stretches
+ * where no counter can move (calibration can run minutes before the first
+ * /logs batch lands).
+ */
+export function setSessionPhase(
+  session: ImportSession,
+  phase: string,
+  detail: string
+): void {
+  session.scriptPhase = phase;
+  session.phaseDetail = detail;
+  session.phaseAt = Date.now();
+  session.updatedAt = Date.now();
+}
+
 /** Public progress snapshot for the status endpoint. */
 export function sessionProgress(session: ImportSession) {
   return {
@@ -464,6 +501,9 @@ export function sessionProgress(session: ImportSession) {
         }
       : null,
     note: session.note,
+    script_phase: session.scriptPhase,
+    phase_detail: session.phaseDetail,
+    phase_at: session.phaseAt,
     updated_at: session.updatedAt,
     expires_in: Math.max(0, Math.round((session.expiresAt - Date.now()) / 1000)),
   };

@@ -167,8 +167,10 @@ export default function Home() {
       <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-8 sm:px-6 lg:px-8">
         <div className="space-y-6">
           {/* Data loading flows through useImportedMetadata's onLoaded hook
-              (staged capture / restore) — the card itself is display-only. */}
-          <DataSourceCard loaded={loaded} />
+              (staged capture / restore) — the card itself is display-only.
+              v3.25: `applying` drives the "Receiving N jobs (X MB) · Ys…"
+              badge + download bar while a /data snapshot is in flight. */}
+          <DataSourceCard loaded={loaded} applying={importState.applying} />
           <CaptureHistoryCard
             importToken={importState.token}
             onRestore={(restored, anchorUid) => {
@@ -200,10 +202,14 @@ export default function Home() {
                     message: importState.message,
                     progress: importState.progress,
                     uploadStalled: importState.uploadStalled,
+                    applying: importState.applying,
+                    fetchAllJobs: importState.fetchAllJobs,
+                    fetchAllRequested: importState.fetchAllRequested,
                   }
             }
             importStatus={importState.status}
             onStopImport={importState.status === "polling" ? importState.stop : undefined}
+            onRequestAllLogs={importState.status === "polling" ? importState.requestAllLogs : undefined}
             stagedImport={importState.token !== null}
           />
           <DownloadCard summary={summary} loaded={loaded} />

@@ -1,0 +1,301 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CryoSmart Capture</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      width: 360px;
+      min-height: 400px;
+      background: linear-gradient(135deg, #f0fdf4 0%, #ecfdf5 100%);
+      color: #1f2937;
+    }
+    
+    .header {
+      background: linear-gradient(135deg, #0d9488 0%, #059669 100%);
+      color: white;
+      padding: 16px;
+      text-align: center;
+    }
+    
+    .header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    
+    .header p {
+      font-size: 12px;
+      opacity: 0.9;
+    }
+    
+    .status-bar {
+      padding: 12px 16px;
+      background: white;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+    
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #d1d5db;
+    }
+    
+    .status-dot.connected {
+      background: #10b981;
+      box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+    }
+    
+    .status-dot.waiting {
+      background: #f59e0b;
+    }
+    
+    .status-dot.error {
+      background: #ef4444;
+    }
+    
+    .section {
+      padding: 16px;
+    }
+    
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #6b7280;
+      margin-bottom: 12px;
+    }
+    
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+    
+    .input-group {
+      margin-bottom: 12px;
+    }
+    
+    .input-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: #374151;
+      margin-bottom: 6px;
+    }
+    
+    .input-group input {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      font-size: 13px;
+      font-family: monospace;
+      transition: border-color 0.2s;
+    }
+    
+    .input-group input:focus {
+      outline: none;
+      border-color: #0d9488;
+      box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1);
+    }
+    
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    
+    .checkbox-group input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      accent-color: #0d9488;
+    }
+    
+    .checkbox-group label {
+      font-size: 13px;
+      color: #374151;
+    }
+    
+    .btn {
+      width: 100%;
+      padding: 12px 16px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    
+    .btn-primary {
+      background: linear-gradient(135deg, #0d9488 0%, #059669 100%);
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(13, 148, 136, 0.3);
+    }
+    
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+    
+    .btn-secondary {
+      background: #f3f4f6;
+      color: #374151;
+      margin-top: 8px;
+    }
+    
+    .btn-secondary:hover {
+      background: #e5e7eb;
+    }
+    
+    .project-list {
+      max-height: 150px;
+      overflow-y: auto;
+    }
+    
+    .project-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-bottom: 4px;
+    }
+    
+    .project-item:hover {
+      background: #f3f4f6;
+    }
+    
+    .project-item.selected {
+      background: #ecfdf5;
+      border: 1px solid #10b981;
+    }
+    
+    .project-item-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: #1f2937;
+      margin-bottom: 2px;
+    }
+    
+    .project-item-meta {
+      font-size: 11px;
+      color: #6b7280;
+    }
+    
+    .result {
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 12px;
+      font-size: 13px;
+    }
+    
+    .result.success {
+      background: #ecfdf5;
+      border: 1px solid #10b981;
+      color: #065f46;
+    }
+    
+    .result.error {
+      background: #fef2f2;
+      border: 1px solid #fca5a5;
+      color: #991b1b;
+    }
+    
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    .help-text {
+      font-size: 11px;
+      color: #9ca3af;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>CryoSmart Capture</h1>
+    <p>Auto-sync job metadata to lineage tracer</p>
+  </div>
+  
+  <div class="status-bar">
+    <div class="status" id="status">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Checking connection...</span>
+    </div>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">Configuration</div>
+    <div class="card">
+      <div class="input-group">
+        <label>Web App URL</label>
+        <input type="text" id="webAppUrl" placeholder="http://localhost:3006" />
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="autoCapture" />
+        <label for="autoCapture">Auto-capture on project load</label>
+      </div>
+    </div>
+  </div>
+  
+  <div class="section">
+    <div class="section-title">Projects</div>
+    <div class="card">
+      <div class="project-list" id="projectList">
+        <div style="padding: 12px; color: #6b7280; font-size: 13px;">Loading projects...</div>
+      </div>
+    </div>
+  </div>
+  
+  <div class="section">
+    <button class="btn btn-primary" id="captureBtn" disabled>
+      <span>Capture & Sync</span>
+    </button>
+    <button class="btn btn-secondary" id="openBtn" disabled>
+      Open in CryoSmart
+    </button>
+    <div id="result"></div>
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

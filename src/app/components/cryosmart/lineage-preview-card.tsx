@@ -25,7 +25,8 @@ import { copyToClipboard } from "@/lib/cryosmart/clipboard";
 import { LineageGraph } from "./lineage-graph";
 import { ShareLineageButton } from "./share-lineage-button";
 import { FscPlotViewer } from "./fsc-plot-viewer";
-import type { ImportProgress } from "./use-imported-metadata";
+import type { ImportProgress, ApplyProgress } from "./use-imported-metadata";
+import { formatBytes, useElapsedTick, applyElapsedSeconds, applySpeedBps } from "./apply-progress-format";
 
 export type ImportStatusKind = "idle" | "polling" | "loaded" | "error" | "expired" | "not-found";
 
@@ -44,6 +45,16 @@ interface Props {
     /** v3.16.1: counters frozen with the upload incomplete — the strip
      * shows an amber badge and emphasizes the Stop button. */
     uploadStalled?: boolean;
+    /** v3.25: a /data snapshot apply is running (download → parse →
+     *  render) — the strip adds a second row with byte progress so the
+     *  multi-second apply of a big capture is visible HERE, where the
+     *  popup page has auto-scrolled to. */
+    applying?: ApplyProgress | null;
+    /** v3.26: job count when the "Fetch all jobs' images" action is
+     *  available on a live lineage-scoped capture (null = hide). */
+    fetchAllJobs?: number | null;
+    /** v3.26: the request was sent — button shows the requested state. */
+    fetchAllRequested?: boolean;
   } | null;
   /** Capture lifecycle state — "polling" renders the live strip;
    *  "loaded"/"error"/"expired" render the final message (dismissable). */
@@ -57,9 +68,14 @@ interface Props {
    * keeps whatever data arrived so far (the user's "stuck at 263/268 with
    * no way to stop" case). Rendered as a Stop button on the polling strip. */
   onStopImport?: () => void;
+  /** v3.26: expands a lineage-scoped capture to EVERY job's log images —
+   * publishes {all:true} to the session's log request; the still-running
+   * capture script picks the extras up and scans them. Rendered as a
+   * "Fetch all N jobs" button on the polling strip. */
+  onRequestAllLogs?: () => void;
 }
 
-export function LineagePreviewCard({ summary, session, importInfo, importStatus, onStopImport, stagedImport }: Props) {
+export function LineagePreviewCard({ summary, session, importInfo, importStatus, onStopImport, onRequestAllLogs, stagedImport }: Props) {
   const [reportTab, setReportTab] = useState("stats");
 
   /* ── v3.17 report style (template / font / image mode / title) ──────
@@ -220,6 +236,10 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
             progress={progress}
             pct={importPct}
             stalled={importInfo?.uploadStalled}
+            applying={importInfo?.applying || null}
+            fetchAllJobs={importInfo?.fetchAllJobs ?? null}
+            fetchAllRequested={importInfo?.fetchAllRequested}
+            onRequestAllLogs={onRequestAllLogs}
             onStop={onStopImport}
             onDismiss={() => setDismissedKey(stripKey)}
           />
@@ -276,6 +296,10 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
           progress={progress}
           pct={importPct}
           stalled={importInfo?.uploadStalled}
+          applying={importInfo?.applying || null}
+          fetchAllJobs={importInfo?.fetchAllJobs ?? null}
+          fetchAllRequested={importInfo?.fetchAllRequested}
+          onRequestAllLogs={onRequestAllLogs}
           onStop={onStopImport}
           onDismiss={() => setDismissedKey(stripKey)}
         />
@@ -347,7 +371,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                   {REPORT_TEMPLATES.map((t) => {
                     const selected = reportStyle.template === t.id;
                     const isNew =
-                      t.id === "blueprint" || t.id === "editorial" || t.id === "focus";
+                      t.id === "blueprint" || t.id === "editorial" || t.id === "focus" || t.id === "industrial";
                     return (
                       <button
                         key={t.id}
@@ -531,7 +555,11 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
                     a.href = url;
                     a.download = `CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_report.html`;
                     a.click();
-                    URL.revokeObjectURL(url);
+                    // v3.24: revoke AFTER a delay (same policy as the bundle
+                    // path) — the synchronous revoke raced the browser's
+                    // download handshake in Safari-class engines and could
+                    // cancel the download of the just-clicked blob URL.
+                    setTimeout(() => URL.revokeObjectURL(url), 30000);
                     toast.success(`Downloaded CryoSmart_${summary.project_uid}_${summary.start_uid}_lineage_report.html`);
                   }}
                 >
@@ -607,6 +635,10 @@ function ImportProgressStrip({
   progress,
   pct,
   stalled,
+  applying,
+  fetchAllJobs,
+  fetchAllRequested,
+  onRequestAllLogs,
   onStop,
   onDismiss,
 }: {
@@ -617,10 +649,26 @@ function ImportProgressStrip({
   pct: number | null;
   /** v3.16.1: capture counters frozen with the upload incomplete. */
   stalled?: boolean;
+  /** v3.25: /data snapshot apply in flight — second row with byte progress. */
+  applying?: ApplyProgress | null;
+  /** v3.26: job count when the "Fetch all jobs' images" action is available. */
+  fetchAllJobs?: number | null;
+  /** v3.26: request already sent — button shows the requested state. */
+  fetchAllRequested?: boolean;
+  /** v3.26: expand the log-image request to every captured job. */
+  onRequestAllLogs?: () => void;
   /** v3.16.1: manual stop — stop waiting and keep the data captured so far. */
   onStop?: () => void;
   onDismiss: () => void;
 }) {
+  /* v3.29: live activity clock — ticks only while a script phase detail is
+   * on screen, driving the "Ns ago" liveness age next to it. Must run
+   * before the early return below (hook order). */
+  const phaseActive =
+    status === "polling" &&
+    !!progress?.phaseDetail &&
+    !!(progress?.phaseAt && progress.phaseAt > 0);
+  const activityNow = useElapsedTick(phaseActive);
   if (!visible || !message) return null;
   const done = status === "loaded";
   const failed = status === "error" || status === "expired";
@@ -672,6 +720,28 @@ function ImportProgressStrip({
             no progress
           </span>
         )}
+        {status === "polling" && fetchAllJobs != null && fetchAllJobs > 0 && onRequestAllLogs && (
+          <button
+            type="button"
+            onClick={onRequestAllLogs}
+            disabled={fetchAllRequested}
+            title="The traced lineage's log images are fetched first — this widens the request to every captured job immediately, merging them into the first pass (the script now scans the remaining jobs by default anyway; this button just skips the wait)"
+            aria-label="Fetch log images for all captured jobs"
+            className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-emerald-300 bg-white/80 px-2.5 text-[11.5px] font-medium text-emerald-700 transition-colors hover:bg-white disabled:cursor-default disabled:opacity-75 dark:border-emerald-700 dark:bg-slate-900/70 dark:text-emerald-300 dark:hover:bg-slate-800 dark:disabled:opacity-80"
+          >
+            {fetchAllRequested ? (
+              <CheckCircle2 className="h-3 w-3" />
+            ) : (
+              <Layers className="h-3 w-3" />
+            )}
+            <span className="hidden sm:inline">
+              {fetchAllRequested ? "Requested" : `Fetch all ${fetchAllJobs} jobs`}
+            </span>
+            <span className="sm:hidden">
+              {fetchAllRequested ? "Done" : "Fetch all"}
+            </span>
+          </button>
+        )}
         {status === "polling" && onStop && (
           <button
             type="button"
@@ -700,6 +770,22 @@ function ImportProgressStrip({
           </button>
         )}
       </div>
+      {status === "polling" && progress?.phaseDetail && (
+        /* v3.29: script sub-step activity row — the counters (0/72 · 0%)
+           stay frozen through loader calibration, slow per-job waits and
+           the byte drain; this line names WHAT is running right now plus
+           a ticking liveness age so the capture never reads as dead. */
+        <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-[10.5px] font-medium text-teal-700/90 dark:text-teal-300/85">
+          <span className="relative flex h-1.5 w-1.5 shrink-0" aria-hidden="true">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-teal-400 opacity-75" />
+            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-teal-500" />
+          </span>
+          <span className="min-w-0 flex-1 truncate">{progress.phaseDetail}</span>
+          {phaseActive && progress.phaseAt ? (
+            <ActivityAge phaseAt={progress.phaseAt} now={activityNow || Date.now()} />
+          ) : null}
+        </div>
+      )}
       {progress && pct !== null && (
         <div className="mt-2.5">
           <div className="h-2 w-full overflow-hidden rounded-full bg-white/90 ring-1 ring-inset ring-teal-100 dark:bg-slate-800 dark:ring-teal-900/50">
@@ -716,6 +802,78 @@ function ImportProgressStrip({
               {progress.images} {progress.images === 1 ? "image" : "images"} captured
               {progress.uploaded > 0 ? ` · ${progress.uploaded} ready` : ""}
             </span>
+          </div>
+        </div>
+      )}
+      {applying && <StripApplyingRow applying={applying} />}
+    </div>
+  );
+}
+
+/** v3.29: liveness age for the strip's script-phase activity row — "3s ago"
+ *  while the script's phase POSTs are fresh, degrading to an amber "quiet
+ *  for 2m" once the sub-step itself has gone silent (a hint that the
+ *  capture tab may have died, complementing the stall detector). */
+function ActivityAge({ phaseAt, now }: { phaseAt: number; now: number }) {
+  const ageSec = Math.max(0, (now - phaseAt) / 1000);
+  if (ageSec < 90) {
+    return (
+      <span className="shrink-0 font-mono text-[10px] text-teal-600/70 dark:text-teal-400/60">
+        · {Math.max(1, Math.round(ageSec))}s ago
+      </span>
+    );
+  }
+  const mins = Math.round(ageSec / 60);
+  return (
+    <span className="shrink-0 font-mono text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+      · quiet for {mins}m
+    </span>
+  );
+}
+
+/** v3.25: the strip's apply-phase row — mirrors the DataSourceCard badge
+ *  for users who landed on #preview (the capture popup auto-scrolls here,
+ *  so the data card may be off-screen). Shows byte progress while the
+ *  snapshot downloads and an elapsed timer through parse + render. */
+function StripApplyingRow({ applying }: { applying: ApplyProgress }) {
+  const now = useElapsedTick(true);
+  const base = now || applying.startedAt;
+  const secs = applyElapsedSeconds(applying, base);
+  const speed = applySpeedBps(applying, base);
+  const pct =
+    applying.phase === "download" && applying.total && applying.total > 0
+      ? Math.min(100, Math.round((applying.received / applying.total) * 100))
+      : null;
+  const jobsLabel = applying.jobs != null ? `${applying.jobs} jobs` : "snapshot";
+  return (
+    <div className="mt-2 rounded-lg bg-white/70 px-2.5 py-2 ring-1 ring-inset ring-teal-100 dark:bg-slate-900/50 dark:ring-teal-900/50">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-teal-800 dark:text-teal-200">
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+        <span className="font-medium">
+          {applying.phase === "download"
+            ? `Receiving ${jobsLabel} (${formatBytes(applying.total ?? applying.received)}) · ${secs.toFixed(1)}s…`
+            : `Applying ${jobsLabel} to the graph · ${secs.toFixed(1)}s…`}
+        </span>
+        {applying.phase === "download" && pct != null && (
+          <span className="ml-auto rounded bg-teal-100/80 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-teal-700 dark:bg-teal-900/60 dark:text-teal-300">
+            {pct}%
+          </span>
+        )}
+      </div>
+      {applying.phase === "download" && (
+        <div className="mt-1.5">
+          <div className="h-1 w-full overflow-hidden rounded-full bg-teal-100/80 dark:bg-slate-800">
+            <div
+              className="h-full rounded-full bg-teal-500 transition-[width] duration-300 ease-out"
+              style={{ width: pct != null ? `${pct}%` : "100%" }}
+            />
+          </div>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-x-3 font-mono text-[10px] text-teal-800/70 dark:text-teal-300/60">
+            <span>
+              {formatBytes(applying.received)}
+              {applying.total ? ` / ${formatBytes(applying.total)}` : ""}
+            </span>
+            {speed > 0 && <span>{formatBytes(speed)}/s</span>}
           </div>
         </div>
       )}

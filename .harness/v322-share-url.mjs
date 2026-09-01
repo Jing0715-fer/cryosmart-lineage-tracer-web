@@ -45,7 +45,12 @@ const tiny = () => {
 
 const T = tiny();
 const clone = JSON.parse(JSON.stringify(summary));
-for (const node of clone.nodes) {
+// v3.23: shrink EVERY container that carries inline data-URL images —
+// nodes + start_job + import_or_leaf_jobs (the v3.23 fixture's realistic
+// 240×180 micrograph-like images made the missed fields blow the 48KB
+// hash cap; the old 96×72 gradients slipped under it by accident).
+const shrinkNode = (node) => {
+  if (!node) return;
   for (const im of node.representative_micrograph_images || []) {
     im.src = T; im.url = T; im.original_url = T;
   }
@@ -60,7 +65,10 @@ for (const node of clone.nodes) {
       if (node.select_2d[k]) node.select_2d[k] = T;
     }
   }
-}
+};
+for (const node of clone.nodes) shrinkNode(node);
+shrinkNode(clone.start_job);
+for (const node of clone.import_or_leaf_jobs || []) shrinkNode(node);
 for (const job of clone.class_split_jobs || []) {
   for (const cls of job.classes || []) {
     if (cls.mrc_preview_src) cls.mrc_preview_src = T;

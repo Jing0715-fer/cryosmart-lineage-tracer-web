@@ -1508,6 +1508,60 @@ export interface ReportHtmlOptions {
       .join("")}</div>`;
   }
 
+  /** v3.28: max output-group fallback images rendered per job card (and
+   *  prefetched for embedding) — mirrors how the other media blocks cap
+   *  themselves (3 micrographs, 24 log images, 3 select-2D tiles). */
+  export const OUTPUT_PREVIEW_FALLBACK_LIMIT = 6;
+
+  /** v3.28: log-image fallback assets for a job card. When a job has NO
+   *  log images (its logs were never scanned, or it genuinely has none —
+   *  import/ctf-style), the card used to render completely IMAGELESS even
+   *  though CryoSmart itself shows previews for the job (the ui_tile /
+   *  output_group bytes ride the SAME capture pipeline since v3.12 and
+   *  land in node.images). Returns the preview assets that should
+   *  substitute — [] when the job has log images or its images are
+   *  already rendered by another block (import micrographs / Select 2D
+   *  tiles / classes table / map grid), so the fallback never duplicates
+   *  an existing image. Shared with image-embed.ts so the prefetch scope
+   *  mirrors the rendered scope exactly. */
+  export function outputPreviewFallbackImages(node: LineageNode): ImageAsset[] {
+    const images = node.images || [];
+    const logImages = images.filter(
+      (item) => item.kind === "log_image" || item.kind === "image_log"
+    );
+    if (logImages.length > 0) return [];
+    // Import jobs: the micrograph block renders their ui tiles.
+    if (
+      node.job_type === "import_micrographs" &&
+      (node.representative_micrograph_images || []).some((item) => item && item.src)
+    ) {
+      return [];
+    }
+    // Class jobs: the classes table renders per-class mrc previews — the
+    // card is not imageless when any row carries one.
+    if ((node.classes || []).some((cls) => cls.mrc_preview_url)) return [];
+    // Map jobs (no classes): the map grid renders output-group previews.
+    if (
+      !(node.classes || []).length &&
+      normalMapAssets(node).some((item) => item.preview_url)
+    ) {
+      return [];
+    }
+    // select_2D jobs: the Select 2D block renders the three template tiles.
+    const select2dNames = node.select_2d
+      ? ["templates_selected", "templates_excluded", "particles_selected"]
+      : [];
+    return images
+      .filter(
+        (item) =>
+          (item.kind === "ui_tile" || item.kind === "output_group") &&
+          item.url &&
+          item.src &&
+          !select2dNames.includes(item.name)
+      )
+      .slice(0, OUTPUT_PREVIEW_FALLBACK_LIMIT);
+  }
+
   /** Micrograph preview + Select 2D media block. */
   export function reportMediaBlock(node: LineageNode, opts?: ReportHtmlOptions): string {
     const chunks: string[] = [];
@@ -1576,6 +1630,33 @@ export interface ReportHtmlOptions {
               : `Log images (${logImages.length})`;
           chunks.push(`<div class="media-block imgs-block"><h3>${escHtml(heading)}</h3>${html}</div>`);
         }
+      }
+    }
+
+    // v3.28: OUTPUT-GROUP FALLBACK — "log images missing → show the output
+    // group image instead". A job card with no log images used to render
+    // IMAGELESS even when CryoSmart has previews for the job (their bytes
+    // ride the same capture pipeline), reading as "this job has no
+    // images" — wrong: only its LOG images were missing. The fallback
+    // renders the job's ui_tile / output_group previews (deduped against
+    // the other media blocks by outputPreviewFallbackImages), with a
+    // heading that names the substitution. Carries imgs-block so failed
+    // images auto-hide it and the (N) count stays truthful.
+    if (logImages.length === 0) {
+      const fallback = outputPreviewFallbackImages(node);
+      const html = reportImageBoxes(
+        node.uid,
+        fallback,
+        OUTPUT_PREVIEW_FALLBACK_LIMIT,
+        opts,
+        "compact"
+      );
+      if (html) {
+        chunks.push(
+          `<div class="media-block imgs-block"><h3>Output group 预览 (${escHtml(
+            String(fallback.length)
+          )}) — 未捕获到 log 图像，以输出预览代替</h3>${html}</div>`
+        );
       }
     }
 
@@ -2238,6 +2319,13 @@ export interface ReportHtmlOptions {
       ".classes{border:0}",
       "th{background:transparent;border-top:1.5px solid var(--line-2)}",
       "tr:hover td{background:var(--row-hover)}",
+      // v3.23 VLM pass: stronger job-title hierarchy + breathing room in
+      // the dense data tables ("字体层级不够明显 / 表格线条过密").
+      ".job-head h2{font-size:1.16em;letter-spacing:.01em}",
+      ".source-table th,.source-table td,table th,table td{padding:8px 13px}",
+      // r3: looser leading + more air between open hairline sections
+      "body{line-height:1.72}",
+      ".source-block,.media-block,.map-block{margin-top:22px;padding-top:14px}",
       "@page{margin:14mm}",
     ].join("\n"),
   };
@@ -2380,8 +2468,8 @@ export interface ReportHtmlOptions {
     panel3: "#eef0e9",
     text: "#23262b",
     text2: "#2f343b",
-    text3: "#545d66",
-    muted: "#6d757e",
+    text3: "#4b545c",
+    muted: "#5f6771",
     muted2: "#9aa2a9",
     line: "#d4d8d0",
     line2: "#c2c8bf",
@@ -2442,6 +2530,10 @@ export interface ReportHtmlOptions {
       // 顶栏铁锈红刻度带（紧贴黑块下方，与铁锈红分节编号呼应）
       "header::after{content:\"\";position:absolute;left:0;right:0;bottom:-3px;height:3px;background:#b3541e}",
       "table th{text-transform:uppercase;font-family:var(--font-mono)}",
+      // v3.23 r3 VLM pass ("模块边界模糊 / 留白节奏不统一"): the boxed
+      // sections get the skin's signature hard offset shadow so panel
+      // edges read clearly on the white panels, + one step more padding.
+      ".source-block,.media-block,.map-block{box-shadow:4px 4px 0 -1px rgba(35,38,43,.09);padding:16px 18px}",
       "@page{margin:12mm}",
     ].join("\n"),
   };
@@ -2454,12 +2546,14 @@ export interface ReportHtmlOptions {
     id: "editorial",
     layout: "split",
     fontBody: 'Georgia,"Times New Roman","Songti SC","Noto Serif CJK SC",serif',
-    baseFontPx: 15,
+    // v3.23 r3 VLM pass: 15 → 16px ("部分文本字号偏小，长距离阅读易疲劳")
+    baseFontPx: 16,
     centerHeader: false,
     stickyHeader: true,
     boxedSections: true,
     flowTop: "96px",
-    bg: "#f4efe6",
+    // v3.23 VLM pass: bg softened one step ("偏暖黄易疲劳")
+    bg: "#f6f2ea",
     bg2: "#ece5d6",
     panel: "#fffdf8",
     panel2: "#f8f3e8",
@@ -2469,8 +2563,9 @@ export interface ReportHtmlOptions {
     text3: "#6b6353",
     muted: "#8d8471",
     muted2: "#b8af9a",
-    line: "#e5ddcb",
-    line2: "#d3c8ae",
+    // v3.23 r3 VLM pass ("卡片边框颜色较浅层次弱"): lines one step darker
+    line: "#ded3bc",
+    line2: "#c9bda2",
     link: "#9a3b26",
     linkHover: "#7c2e1d",
     linkUnderline: "hover",
@@ -2539,7 +2634,7 @@ export interface ReportHtmlOptions {
     baseFontPx: 16,
     centerHeader: false,
     stickyHeader: true,
-    boxedSections: false,
+    boxedSections: true,
     flowTop: "78px",
     bg: "#f7f3e9",
     bg2: "#efe9db",
@@ -2599,6 +2694,100 @@ export interface ReportHtmlOptions {
     comfortable: 1.14,
   };
 
+  /** Industrial — 工业控制台（v3.24）：枪灰钢板 + 安全橙警示条。与 slate
+   *  （冷蓝暗色 + 青绿荧光）和 blueprint（浅色工程纸面 + 点阵）都不同：
+   *  中性暖炭灰底 + 拉丝金属纹理、机柜面板式深色题头带 45° 警示条纹、
+   *  job 卡顶部铆钉铭牌（nameplate strip）、LED 状态灯分节标记、方角
+   *  钢板倒角（inset 高光 + 硬投影）。所有结构器件都是暗色机柜语言。 */
+  const INDUSTRIAL_SPEC: ReportTemplateSpec = {
+    id: "industrial",
+    layout: "split",
+    fontBody:
+      'system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",Roboto,"Helvetica Neue",Arial,sans-serif',
+    baseFontPx: 13.5,
+    centerHeader: false,
+    stickyHeader: true,
+    boxedSections: true,
+    flowTop: "84px",
+    // gunmetal: neutral warm charcoal, three plate levels
+    bg: "#151618",
+    bg2: "#101113",
+    panel: "#1e2124",
+    panel2: "#24272b",
+    panel3: "#2b2f34",
+    text: "#e8e6e1",
+    text2: "#cfccc5",
+    text3: "#a5a29a",
+    muted: "#7d7a73",
+    muted2: "#57544e",
+    line: "#33373c",
+    line2: "#454b52",
+    link: "#ff8a3d",
+    linkHover: "#ffb26b",
+    linkUnderline: "hover",
+    // safety-orange machine button: raised chrome + hard press edge
+    btnBg: "#ff7a1a",
+    btnText: "#1a120a",
+    btnBorder: "#ff7a1a",
+    btnHoverBg: "#ffa04d",
+    micro: "#8ec46a",
+    microBg: "rgba(142,196,106,.09)",
+    microBorder: "rgba(142,196,106,.34)",
+    particle: "#e6b93f",
+    particleBg: "rgba(230,185,63,.09)",
+    particleBorder: "rgba(230,185,63,.34)",
+    volume: "#4fc0a5",
+    volumeBg: "rgba(79,192,165,.09)",
+    volumeBorder: "rgba(79,192,165,.34)",
+    smallBg: "rgba(255,255,255,.045)",
+    smallBorder: "#3a3f45",
+    radius: "0px",
+    radiusSm: "0px",
+    radiusLg: "0px",
+    // steel bevel: top inner highlight + drop shadow (machined plate)
+    shadowSm: "inset 0 1px 0 rgba(255,255,255,.05),0 1px 3px rgba(0,0,0,.5)",
+    shadow: "inset 0 1px 0 rgba(255,255,255,.05),0 6px 18px -6px rgba(0,0,0,.65)",
+    rowHover: "#26292d",
+    thBg: "#2b2f34",
+    extra: [
+      // 拉丝金属页面纹理（极淡 45° 细纹，只落在页面层）
+      "body{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.016) 0 1px,transparent 1px 6px)}",
+      // 机柜面板题头：深钢板 + 底缘 45° 安全橙警示条纹（hazard tape）
+      "header{background:#22252a;border-bottom:0}",
+      "header::after{content:\"\";position:absolute;left:0;right:0;bottom:-5px;height:5px;background:repeating-linear-gradient(-45deg,#ff7a1a 0 11px,#191b1e 11px 22px)}",
+      "header .top{padding:16px 28px}",
+      ".title h1{color:#f0eee9;letter-spacing:.03em;font-family:var(--font-mono);text-transform:uppercase}",
+      ".title h1::before{content:\"\";display:inline-block;width:9px;height:9px;border-radius:50%;background:#8ec46a;box-shadow:0 0 9px rgba(142,196,106,.85);margin-right:12px;vertical-align:.04em}",
+      ".title p{color:#9b978e}",
+      ".title p b{color:#c9c5bb}",
+      ".title .note{color:#b3a58f}",
+      // 面板头：抬升钢板条 + 橙色 LED 指示块
+      ".pane-head,.chain-head{border-bottom:1px solid #3a3f45;background:linear-gradient(180deg,#2a2d31,#232629)}",
+      ".pane-head h2::before,.chain-head h2::before{content:\"\";display:inline-block;width:8px;height:8px;background:#ff7a1a;box-shadow:0 0 7px rgba(255,122,26,.6);margin-right:9px}",
+      ".pane{box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 4px 14px rgba(0,0,0,.5)}",
+      // 分节标签：等宽刻字 + 圆形 LED 灯（与 blueprint 的方块标记区分）
+      "h3{font-family:var(--font-mono)}",
+      ".source-block h3::before,.media-block h3::before,.map-block h3::before{content:\"\";display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff7a1a;box-shadow:0 0 6px rgba(255,122,26,.55);margin-right:8px;vertical-align:.08em}",
+      // job 卡顶部铆钉铭牌（nameplate strip）：负外边距吃满卡宽，
+      // 深色抬升钢板 + 左右两颗铆钉
+      ".job-card{border-left-width:1px;border-left-style:solid}",
+      ".job-head{position:relative;background:linear-gradient(180deg,#282b30,#22252a);border:1px solid #363b41;border-left:0;border-right:0;margin:-16px -18px 12px;padding:11px 18px 10px}",
+      ".job-head::before,.job-head::after{content:\"\";position:absolute;top:8px;width:6px;height:6px;border-radius:50%;background:#565c64;box-shadow:inset 0 1px 1px rgba(255,255,255,.28),0 0 3px rgba(0,0,0,.7)}",
+      ".job-head::before{left:8px}",
+      ".job-head::after{right:8px}",
+      // 安全橙机器按钮：凸起铬面 + 硬压边
+      ".download-all{box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 2px 0 #b35612}",
+      ".download-all:active{transform:translateY(1px);box-shadow:inset 0 1px 0 rgba(255,255,255,.35),0 1px 0 #b35612}",
+      // 表格：机加工网格（等宽大写表头 + 顶缘高光）
+      "table th,.source-table th{text-transform:uppercase;font-family:var(--font-mono)}",
+      ".source-table th{box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}",
+      // 图片井：更深的车间暗窗，衬托电镜图
+      ".imgbox img,.pf-mic-imgs img,.map-cell-img{background:#0d0e10}",
+      ".map-cell:hover{border-color:var(--volume-border)}",
+      "@page{margin:12mm}",
+    ].join("\n"),
+  };
+
   /** Generate the full v3.17 stylesheet for one skin. Covers every class the
    *  body markup emits (outline / picture-flow / job cards / tables / image
    *  grids / map cells / gone-markers / responsive + print).
@@ -2606,11 +2795,158 @@ export interface ReportHtmlOptions {
    *  larger media frames, 3-level visual layering (page → pane → inset
    *  boxes), sticky slim headers for minimal/slate, unified scrollbar +
    *  focus styling, and per-template flourish blocks in spec.extra. */
+  /** v3.23: per-skin lightbox tints. The lightbox STRUCTURE (stage / bar /
+   *  nav buttons / spinner) is shared; the backdrop tone, chrome colors and
+   *  caption typography follow each template's archetype so the enlarged
+   *  view still reads as part of the same design system. Every skin uses a
+   *  dark scrim (micrographs are dark — light backdrops kill contrast),
+   *  but with the palette's own temperature and accent. */
+  interface LightboxTint {
+    back: string;
+    text: string;
+    muted: string;
+    well: string;
+    btnBg: string;
+    btnLine: string;
+    /** v3.23 r3: button glyph color — defaults to `text`, but LIGHT button
+     *  chrome (paper's white buttons) needs a dark glyph or the ✕/‹/› are
+     *  nearly invisible (the VLM "导航按钮难以辨识" finding). */
+    btnText?: string;
+    /** extra per-skin lightbox css (caption typography, frame chrome) */
+    extra?: string;
+  }
+  const LIGHTBOX_TINTS: Record<string, LightboxTint> = {
+    // paper: mounted-print aesthetic — white mat + hairline frame, serif italic caption
+    paper: {
+      back: "rgba(22,19,16,.97)",
+      text: "#f6f0e6",
+      muted: "#b6a695",
+      well: "#fcfaf6",
+      // r4: dark translucent chrome (the WHITE buttons oscillated — r2
+      // "invisible glyph", r3 "too strong vs dark backdrop"; dark chrome
+      // matches every other skin while the white MAT frame keeps the
+      // mounted-print signature).
+      btnBg: "rgba(38,33,28,.92)",
+      btnLine: "#a99a82",
+      extra:
+        ".lb-frame{padding:10px;background:#fcfaf6;border:1px solid #d8d0c1;box-shadow:0 34px 90px -22px rgba(0,0,0,.78)}\n" +
+        ".lb-frame .lb-img{background:transparent}\n" +
+        ".lb-cap{font-style:italic}\n",
+    },
+    // minimal: neutral graphite chrome, quiet
+    minimal: {
+      back: "rgba(8,9,10,.96)",
+      text: "#f4f5f6",
+      muted: "#8b9096",
+      // r6: wells one step lighter than pure graphite — dark micrographs
+      // need a distinguishable mat (the "图片区域为纯黑" VLM readings).
+      well: "#1a1d21",
+      btnBg: "rgba(24,26,28,.96)",
+      btnLine: "#5a6066",
+    },
+    // slate: deep cool scrim, teal accent via --lb-accent
+    slate: {
+      back: "rgba(4,7,10,.97)",
+      text: "#dfe7ee",
+      muted: "#7e8a99",
+      well: "#141b24",
+      btnBg: "rgba(16,22,29,.97)",
+      btnLine: "#3d4e5e",
+    },
+    // blueprint: graphite scrim, mono uppercase caption, squared chrome (radius 0)
+    blueprint: {
+      back: "rgba(9,11,13,.96)",
+      text: "#e8e4da",
+      muted: "#9a8f7c",
+      well: "#181b1f",
+      btnBg: "rgba(18,21,25,.97)",
+      btnLine: "#7d868e",
+      extra:
+        ".lb-cap{font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em}\n" +
+        ".lb-btn{border-radius:0}\n" +
+        ".lb-btn:hover{box-shadow:0 0 0 1px var(--lb-accent) inset}\n",
+    },
+    // editorial: warm ink scrim, cream serif italic caption
+    editorial: {
+      back: "rgba(16,13,10,.97)",
+      text: "#f3ead8",
+      muted: "#a4906f",
+      well: "#262017",
+      btnBg: "rgba(30,25,18,.97)",
+      btnLine: "#6a5c44",
+      extra: ".lb-cap{font-style:italic}\n",
+    },
+    // focus: warm reading-room scrim, serif caption
+    focus: {
+      back: "rgba(15,12,8,.97)",
+      text: "#efe7d8",
+      muted: "#a89a82",
+      well: "#241e15",
+      btnBg: "rgba(28,23,16,.97)",
+      btnLine: "#6e6250",
+      extra: ".lb-cap{font-style:italic}\n",
+    },
+    // industrial: neutral graphite scrim, mono uppercase caption, squared
+    // chrome with a safety-orange top rail on the frame (hazard language)
+    industrial: {
+      back: "rgba(8,8,9,.97)",
+      text: "#ece9e2",
+      muted: "#948f85",
+      well: "#232323",
+      btnBg: "rgba(30,32,34,.97)",
+      btnLine: "#5b6067",
+      extra:
+        ".lb-frame{border-top:3px solid var(--lb-accent)}\n" +
+        ".lb-cap{font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.06em}\n" +
+        ".lb-btn{border-radius:0}\n" +
+        ".lb-btn:hover{box-shadow:0 0 0 1px var(--lb-accent) inset}\n",
+    },
+  };
+  const LIGHTBOX_TINT_DEFAULT: LightboxTint = LIGHTBOX_TINTS.minimal;
+
+  /** v3.23: shared lightbox stylesheet (structure identical across skins;
+   *  colors from --lb-* tokens, accent from the skin's link color). Emitted
+   *  by buildTemplateCss AND appended to the classic override so ALL
+   *  templates support click-to-enlarge. */
+  function buildLightboxCss(): string {
+    return (
+      ".lb-root{position:fixed;inset:0;z-index:900;display:none;flex-direction:column;background:var(--lb-back);color:var(--lb-text);-webkit-backdrop-filter:blur(12px) saturate(1.05);backdrop-filter:blur(12px) saturate(1.05)}\n" +
+      ".lb-root.lb-on{display:flex;animation:lb-fade .18s ease}\n" +
+      "@keyframes lb-fade{from{opacity:0}to{opacity:1}}\n" +
+      ".lb-stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:46px 64px 8px;overflow:hidden}\n" +
+      // r4: the frame has a DEFINITE size and the img fills it with
+      // object-fit:contain — small images upscale to use the screen (the
+      // r3 "图片尺寸偏小，未充分利用屏幕空间" finding: a 96×72 source was
+      // rendered at 96×72 because max-w/max-h never UPSCALE). Contain keeps
+      // the aspect; the well color letterboxes around it.
+      ".lb-frame{position:relative;display:flex;align-items:center;justify-content:center;width:min(92vw,1500px);height:calc(100vh - 148px);animation:lb-pop .2s ease;box-shadow:0 32px 90px -24px rgba(0,0,0,.6);border:1px solid var(--lb-btn-line)}\n" +
+      "@keyframes lb-pop{from{opacity:0;transform:scale(.965)}to{opacity:1;transform:scale(1)}}\n" +
+      ".lb-img{width:100%;height:100%;object-fit:contain;background:var(--lb-well);cursor:zoom-in;touch-action:none;-webkit-user-select:none;user-select:none;transform-origin:center}\n" +
+      ".lb-img.lb-zoomed{cursor:zoom-out}\n" +
+      ".lb-img.lb-dragging{cursor:grabbing}\n" +
+      ".lb-load{position:absolute;left:50%;top:50%;width:26px;height:26px;margin:-13px 0 0 -13px;border:2px solid var(--lb-btn-line);border-top-color:var(--lb-accent);border-radius:50%;animation:lb-spin .8s linear infinite;display:none;pointer-events:none}\n" +
+      ".lb-load.lb-busy{display:block}\n" +
+      "@keyframes lb-spin{to{transform:rotate(360deg)}}\n" +
+      ".lb-bar{display:flex;align-items:center;gap:8px;padding:8px 20px 14px}\n" +
+      ".lb-cap{flex:1;min-width:0;font-family:var(--font-ui);font-size:.8em;color:var(--lb-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}\n" +
+      ".lb-cnt{flex-shrink:0;font-family:var(--font-mono);font-size:.72em;color:var(--lb-muted);letter-spacing:.08em}\n" +
+      ".lb-hint{flex-shrink:0;font-size:.66em;color:var(--lb-muted);letter-spacing:.04em;opacity:.85}\n" +
+      ".lb-btn{position:fixed;top:50%;transform:translateY(-50%);width:46px;height:46px;display:flex;align-items:center;justify-content:center;font-size:23px;font-weight:700;line-height:1;border-radius:var(--radius);border:1.5px solid var(--lb-btn-line);background:var(--lb-btn-bg);color:var(--lb-btn-text,var(--lb-text));cursor:pointer;padding:0;transition:border-color .15s ease,color .15s ease,box-shadow .15s ease}\n" +
+      ".lb-btn:hover{border-color:var(--lb-accent);color:var(--lb-accent);box-shadow:0 0 0 1px var(--lb-accent)}\n" +
+      ".lb-prev{left:16px}\n" +
+      ".lb-next{right:16px}\n" +
+      ".lb-close{top:16px;right:16px;transform:none;width:44px;height:44px;font-size:19px;font-weight:700;box-shadow:0 6px 22px -6px rgba(0,0,0,.45)}\n" +
+      ".lb-root :focus-visible{outline:2px solid var(--lb-accent);outline-offset:2px}\n" +
+      "@media(max-width:640px){.lb-stage{padding:52px 10px 6px}.lb-prev{left:6px}.lb-next{right:6px}.lb-hint{display:none}}\n"
+    );
+  }
+
   function buildTemplateCss(
     spec: ReportTemplateSpec,
     fontPx: number,
     widthMode: ReportWidthMode = "full"
   ): string {
+    const tint = LIGHTBOX_TINTS[spec.id] ?? LIGHTBOX_TINT_DEFAULT;
     const linkDeco =
       spec.linkUnderline === "always"
         ? "text-decoration:underline"
@@ -2667,11 +3003,14 @@ export interface ReportHtmlOptions {
         `.workspace{${widthCap}margin:0 auto;display:grid;grid-template-columns:minmax(360px,min(24vw,540px)) minmax(0,1fr);gap:24px;padding:24px clamp(20px,2.5vw,44px) 64px;width:100%;align-items:start}\n` +
         `.flow-pane{position:sticky;top:${spec.flowTop};max-height:${flowMax};overflow:auto}\n`;
     return (
-      `:root{--bg:${spec.bg};--bg-2:${spec.bg2};--panel:${spec.panel};--panel-2:${spec.panel2};--panel-3:${spec.panel3};--text:${spec.text};--text-2:${spec.text2};--text-3:${spec.text3};--muted:${spec.muted};--muted-2:${spec.muted2};--line:${spec.line};--line-2:${spec.line2};--micro:${spec.micro};--micro-bg:${spec.microBg};--micro-border:${spec.microBorder};--particle:${spec.particle};--particle-bg:${spec.particleBg};--particle-border:${spec.particleBorder};--volume:${spec.volume};--volume-bg:${spec.volumeBg};--volume-border:${spec.volumeBorder};--small-bg:${spec.smallBg};--small-border:${spec.smallBorder};--radius:${spec.radius};--radius-sm:${spec.radiusSm};--radius-lg:${spec.radiusLg};--font-ui:${spec.fontBody};--font-mono:${REPORT_FONT_MONO};--shadow-sm:${spec.shadowSm};--shadow:${spec.shadow};--link:${spec.link};--link-hover:${spec.linkHover};--th-bg:${spec.thBg};--row-hover:${spec.rowHover};--btn-bg:${spec.btnBg};--btn-text:${spec.btnText};--btn-border:${spec.btnBorder};--btn-hover-bg:${spec.btnHoverBg}}\n` +
+      `:root{--bg:${spec.bg};--bg-2:${spec.bg2};--panel:${spec.panel};--panel-2:${spec.panel2};--panel-3:${spec.panel3};--text:${spec.text};--text-2:${spec.text2};--text-3:${spec.text3};--muted:${spec.muted};--muted-2:${spec.muted2};--line:${spec.line};--line-2:${spec.line2};--micro:${spec.micro};--micro-bg:${spec.microBg};--micro-border:${spec.microBorder};--particle:${spec.particle};--particle-bg:${spec.particleBg};--particle-border:${spec.particleBorder};--volume:${spec.volume};--volume-bg:${spec.volumeBg};--volume-border:${spec.volumeBorder};--small-bg:${spec.smallBg};--small-border:${spec.smallBorder};--radius:${spec.radius};--radius-sm:${spec.radiusSm};--radius-lg:${spec.radiusLg};--font-ui:${spec.fontBody};--font-mono:${REPORT_FONT_MONO};--shadow-sm:${spec.shadowSm};--shadow:${spec.shadow};--link:${spec.link};--link-hover:${spec.linkHover};--th-bg:${spec.thBg};--row-hover:${spec.rowHover};--btn-bg:${spec.btnBg};--btn-text:${spec.btnText};--btn-border:${spec.btnBorder};--btn-hover-bg:${spec.btnHoverBg};--lb-back:${tint.back};--lb-text:${tint.text};--lb-muted:${tint.muted};--lb-well:${tint.well};--lb-btn-bg:${tint.btnBg};--lb-btn-line:${tint.btnLine};--lb-btn-text:${tint.btnText ?? tint.text};--lb-accent:${spec.link}}\n` +
       "*{box-sizing:border-box;margin:0;padding:0;scrollbar-width:thin;scrollbar-color:var(--line-2) transparent}\n" +
       "html{scroll-behavior:smooth;background:var(--bg)}\n" +
       `body{background:var(--bg);color:var(--text);font:${fontPx}px/1.62 var(--font-ui);-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;min-height:100vh}\n` +
       "img{max-width:100%}\n" +
+      // v3.23: every report image is click-to-enlarge (lightbox) — show the
+      // zoom-in affordance on hover so users discover it.
+      "main img{cursor:zoom-in}\n" +
       `a{color:var(--link);${linkDeco}}\n` +
       `a:hover{color:var(--link-hover);${linkHoverDeco}}\n` +
       ":focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:2px}\n" +
@@ -2691,8 +3030,16 @@ export interface ReportHtmlOptions {
       // v3.22: layout archetype comes from workspaceCss — split (two-pane
       // grid + sticky rail) or reading (single-column document + horizontal
       // chapter rail).
-      workspaceCss +
+      // v3.27 FIX: the base .pane{overflow:hidden} (rounded-corner clip)
+      // must be emitted BEFORE workspaceCss so the layout branch's
+      // .flow-pane{…overflow:auto|visible} wins the cascade — the previous
+      // order let .pane{overflow:hidden} (same specificity, later) override
+      // it, silently clipping the Lineage Outline at max-height with NO
+      // scrollbar in every v3.17+ skin. Classic's V2 CSS was ordered
+      // correctly (.flow-pane AFTER .pane), which is why only the skins
+      // were broken ("有的模板 Lineage Outline 缺少滚动条").
       ".pane{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);overflow:hidden}\n" +
+      workspaceCss +
       ".flow-pane::-webkit-scrollbar{width:6px}\n" +
       ".flow-pane::-webkit-scrollbar-track{background:transparent}\n" +
       ".flow-pane::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:3px}\n" +
@@ -2721,11 +3068,19 @@ export interface ReportHtmlOptions {
       // v3.21: compact vertical mini-node tile — uid / type / metric stack,
       // ref pills wrap below (the old side-by-side pill column needed a
       // ~200px card; the 2-per-row grid yields ~145-200px per tile).
-      ".mini-node{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:8px 10px 8px 12px;color:var(--text);cursor:default;position:relative;overflow:hidden;transition:border-color .15s ease}\n" +
+      ".mini-node{display:flex;flex-direction:column;border:1px solid var(--line-2);border-radius:var(--radius);background:var(--panel);padding:8px 10px 8px 12px;color:var(--text);cursor:default;position:relative;overflow:hidden;transition:border-color .15s ease}\n" +
       ".mini-node::before{content:\"\";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--kc,var(--muted-2))}\n" +
-      ".mini-node.micrograph{--kc:var(--micro);border-color:var(--micro-border);background:var(--micro-bg)}\n" +
-      ".mini-node.particle{--kc:var(--particle);border-color:var(--particle-border);background:var(--particle-bg)}\n" +
-      ".mini-node.volume{--kc:var(--volume);border-color:var(--volume-border);background:var(--volume-bg)}\n" +
+      // v3.23 VLM pass: the left-rail mini-nodes read as "too many colored
+      // cards" (paper/blueprint/slate/classic reviews) — the kind tiles now
+      // stay NEUTRAL (panel bg + normal border); the kind shows through the
+      // 3px left stripe AND the mono uid picking up the kind color. Calmer
+      // rail, same instant color-coding.
+      ".mini-node.micrograph{--kc:var(--micro)}\n" +
+      ".mini-node.particle{--kc:var(--particle)}\n" +
+      ".mini-node.volume{--kc:var(--volume)}\n" +
+      ".mini-node.micrograph b{color:var(--micro)}\n" +
+      ".mini-node.particle b{color:var(--particle)}\n" +
+      ".mini-node.volume b{color:var(--volume)}\n" +
       ".mini-node:hover{border-color:var(--line-2)}\n" +
       ".mini-node b{font-size:.82em;font-weight:700;color:var(--text);font-family:var(--font-mono);line-height:1.3}\n" +
       ".mini-node span{font-size:.68em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-2);margin-top:1px}\n" +
@@ -2863,7 +3218,11 @@ export interface ReportHtmlOptions {
       ".img-gone{display:none!important}\n" +
       ".imgs-block.block-gone{display:none!important}\n" +
       "@media(max-width:1180px){.workspace{grid-template-columns:1fr;width:100%}.flow-pane{position:relative;top:auto;max-height:none}.job-card{grid-template-columns:minmax(0,1fr)}.metrics{margin-left:0}}\n" +
-      "@media print{header{position:static}.workspace{grid-template-columns:1fr;padding:0}.flow-pane{position:relative;top:auto;max-height:none;overflow:visible}.download-all,.download-links{display:none}a{color:inherit}}\n" +
+      "@media print{header{position:static}.workspace{grid-template-columns:1fr;padding:0}.flow-pane{position:relative;top:auto;max-height:none;overflow:visible}.download-all,.download-links,.lb-root,.lb-btn{display:none!important}a{color:inherit}}\n" +
+      // v3.23 lightbox (click-to-enlarge) — shared structure + skin tint.
+      // Comes AFTER the print rule; the print block above already hides it.
+      buildLightboxCss() +
+      (tint.extra ?? "") +
       (spec.extra ? `${spec.extra}\n` : "")
     );
   }
@@ -2882,14 +3241,15 @@ export interface ReportHtmlOptions {
     blueprint: BLUEPRINT_SPEC,
     editorial: EDITORIAL_SPEC,
     focus: FOCUS_SPEC,
+    industrial: INDUSTRIAL_SPEC,
   };
 
   /** Resolve the stylesheet for any template id (classic = legacy CSS).
    *  v3.20: the token skins take a widthMode (default "full" — the
    *  workspace spans the whole viewport; "wide"/"boxed" cap it at
    *  1680/1280px for users who prefer a reading measure).
-   *  v3.22: dispatch through REPORT_TEMPLATE_SPECS — six token skins
-   *  (paper/minimal/slate/blueprint/editorial/focus). */
+   *  v3.22: dispatch through REPORT_TEMPLATE_SPECS — seven token skins
+   *  (paper/minimal/slate/blueprint/editorial/focus/industrial). */
   export function buildReportCss(
     template: ReportTemplateId = "paper",
     fontScale: ReportFontScale = "standard",
@@ -2922,7 +3282,23 @@ export interface ReportHtmlOptions {
         ".mini-node p{grid-column:auto;grid-row:auto;display:flex;flex-wrap:wrap;justify-content:flex-start;align-content:flex-start;min-width:0;margin:4px 0 0}\n" +
         ".job-card{grid-template-columns:minmax(0,1fr) clamp(180px,22%,280px)}\n" +
         ".job-out .quiet{display:inline-block;margin-top:2px;padding:3px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px;font-weight:600;font-style:normal}\n";
-      const override = `${mult !== 1 ? `body{font-size:${Math.round(14 * mult * 10) / 10}px}\n` : ""}.title .note{font-style:italic}\n${widthOverride}${layoutOverride}`;
+      // v3.23: classic gets the lightbox too — tokens resolve against the
+      // classic :root (--brand teal accent), structure identical to the
+      // token skins. main-img cursor + print-hide included.
+      const lightboxOverride =
+        ":root{--lb-back:rgba(6,9,14,.96);--lb-text:#eef2f6;--lb-muted:#9aa5bd;--lb-well:#161d27;--lb-btn-bg:rgba(18,24,34,.97);--lb-btn-line:#55667a;--lb-accent:var(--brand)}\n" +
+        "main img{cursor:zoom-in}\n" +
+        buildLightboxCss() +
+        "@media print{.lb-root,.lb-btn{display:none!important}}\n" +
+        // v3.23 VLM pass: classic left rail gets the same calm mini-nodes
+        // (neutral tile + colored stripe + colored uid) and slightly more
+        // line-height for the dense data lists.
+        ".mini-node.micrograph,.mini-node.particle,.mini-node.volume{background:var(--panel);border-color:var(--line)}\n" +
+        ".mini-node.micrograph b{color:var(--micro)}\n" +
+        ".mini-node.particle b{color:var(--particle)}\n" +
+        ".mini-node.volume b{color:var(--volume)}\n" +
+        "body{line-height:1.65}\n";
+      const override = `${mult !== 1 ? `body{font-size:${Math.round(14 * mult * 10) / 10}px}\n` : ""}.title .note{font-style:italic}\n${widthOverride}${layoutOverride}${lightboxOverride}`;
       return REPORT_HTML_V2_CSS + override;
     }
     const spec =
@@ -2967,7 +3343,14 @@ export interface ReportHtmlOptions {
    * — which broke BOTH the iframe auto-resize AND every 一键下载 button).
    * Keep it balanced; prefer appending statements rather than editing tails.
    */
-  const REPORT_HTML_V2_SCRIPT = `document.addEventListener("click",(event)=>{const button=event.target.closest(".download-all");if(button){event.preventDefault();const urls=(button.dataset.urls||"").split("|").filter(Boolean);const names=(button.dataset.names||"").split("|").filter(Boolean);urls.forEach((url,index)=>{if(!url||url.startsWith("#"))return;const name=names[index]||url.split("/").pop()||"download";setTimeout(()=>{fetch(url).then(r=>{if(!r.ok){window.open(url,"_blank");return}return r.blob()}).then(blob=>{if(blob){const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000)}}).catch(()=>window.open(url,"_blank"))},index*200);});}});document.addEventListener("click",function(e){var t=e.target;if(!t||!t.closest)return;var a=t.closest('a[href^="#"]');if(!a)return;var href=a.getAttribute("href");if(!href||href==="#")return;var el=document.getElementById(href.slice(1));if(el){e.preventDefault();try{el.scrollIntoView({behavior:"smooth",block:"start"});}catch(err){el.scrollIntoView();}}});`;
+  const REPORT_HTML_V2_SCRIPT = `function __csTinyZip(files){var enc=new TextEncoder();var CRC=new Uint32Array(256);for(var n=0;n<256;n++){var c=n;for(var k=0;k<8;k++){c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);}CRC[n]=c>>>0;}function crc32(b){var c=0xFFFFFFFF;for(var i=0;i<b.length;i++){c=CRC[(c^b[i])&0xFF]^(c>>>8);}return (c^0xFFFFFFFF)>>>0;}function u16(n){return [n&0xFF,(n>>>8)&0xFF];}function u32(n){return [n&0xFF,(n>>>8)&0xFF,(n>>>16)&0xFF,(n>>>24)&0xFF];}function dosTime(d){return [((d.getHours()&0x1F)<<3)|((d.getMinutes()&0x3C)>>>2),((d.getMinutes()&0x03)<<5)|(d.getSeconds()&0x3F),(((d.getMonth()+1)&0x07)<<5)|(d.getDate()&0x1F),(((d.getFullYear()-1980)&0x7F)<<1)|0];}var local=[],central=[],offset=0,now=new Date();for(var i=0;i<files.length;i++){var f=files[i];var name=enc.encode(f.name);var data=(typeof f.data==="string")?enc.encode(f.data):f.data;var crc=crc32(data);var dos=dosTime(now);local.push.apply(local,[0x50,0x4B,0x03,0x04,20,0,0,0,dos[0],dos[1],dos[2],dos[3]]);local.push.apply(local,u32(crc));local.push.apply(local,u32(data.length));local.push.apply(local,u32(data.length));local.push.apply(local,u16(name.length));local.push.apply(local,[0,0]);for(var j=0;j<name.length;j++)local.push(name[j]);for(var j=0;j<data.length;j++)local[data[j]!==undefined?data[j]:0]=data[j];for(var j=0;j<data.length;j++)local.push(data[j]);var hdr=30+name.length;var off=offset;offset+=hdr+data.length;central.push.apply(central,[0x50,0x4B,0x01,0x02,20,20,0,0,0,0,dos[0],dos[1],dos[2],dos[3]]);central.push.apply(central,u32(crc));central.push.apply(central,u32(data.length));central.push.apply(central,u32(data.length));central.push.apply(central,u16(name.length));central.push.apply(central,[0,0,0,0,0,0,0,0,0,0,0,0]);central.push.apply(central,u32(off));for(var j=0;j<name.length;j++)central.push(name[j]);}var cdSize=central.length;var cdOffset=offset;local.push.apply(local,[0x50,0x4B,0x05,0x06,0,0,0,0]);local.push.apply(local,u16(files.length));local.push.apply(local,u16(files.length));local.push.apply(local,u32(cdSize));local.push.apply(local,u32(cdOffset));local.push.apply(local,u16(0));return new Blob([new Uint8Array(local)],{type:"application/zip"});}document.addEventListener("click",function(event){var button=event.target.closest(".download-all");if(!button)return;event.preventDefault();var urls=(button.dataset.urls||"").split("|").filter(Boolean);var names=(button.dataset.names||"").split("|").filter(Boolean);if(urls.length===0)return;function nameOf(u,i){return names[i]||u.split("/").pop()||"download";}function triggerSingle(url,name){return fetch(url).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},5000);}).catch(function(){window.open(url,"_blank");});}if(urls.length<=3){urls.forEach(function(url,index){if(!url||url.startsWith("#"))return;setTimeout(function(){triggerSingle(url,nameOf(url,index));},index*200);});return;}var zipLabel=button.dataset.zipname||"images.zip";button.disabled=true;var origText=button.textContent;button.textContent="\u5305\u88c5\u4e2d\u2026";Promise.all(urls.map(function(url,i){if(!url||url.startsWith("#"))return Promise.resolve(null);return fetch(url).then(function(r){if(!r.ok)return null;return r.blob().then(function(blob){return {name:nameOf(url,i),data:blob};});}).catch(function(){return null;});})).then(function(parts){var files=parts.filter(Boolean);if(files.length===0){window.alert("\u4e0b\u8f7d\u5931\u8d25\uff1a\u6240\u6709\u8d44\u6e90\u90fd\u8bbf\u95ee\u4e0d\u5230\u3002");return;}if(files.length===1){triggerSingle(urls[0],nameOf(urls[0],0));return;}var zipBlob=__csTinyZip(files);var a=document.createElement("a");a.href=URL.createObjectURL(zipBlob);a.download=zipLabel;a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},30000);}).catch(function(err){window.alert("\u6253\u5305\u5931\u8d25\uff1a"+(err&&err.message||err));}).then(function(){button.disabled=false;button.textContent=origText;});});document.addEventListener("click",function(e){var t=e.target;if(!t||!t.closest)return;var a=t.closest('a[href^="#"]');if(!a)return;var href=a.getAttribute("href");if(!href||href==="#")return;var el=document.getElementById(href.slice(1));if(el){e.preventDefault();try{el.scrollIntoView({behavior:"smooth",block:"start"});}catch(err){el.scrollIntoView();}}});`;
+  // v3.23: the lightbox IIFE below is APPENDED as a third statement. It is
+  // deliberately written with ZERO backslashes (no regex literals) — inside
+  // this TS template literal an escape like \\s would silently degrade to
+  // "s" at runtime and corrupt the script (see the markFailed comment for
+  // the historical precedent). Keep it balanced; keep concat, no backticks.
+  const REPORT_LIGHTBOX_SCRIPT = `(function(){"use strict";var root=null,im=null,cap=null,cnt=null,prevB=null,nextB=null,closeB=null,loadB=null;var list=[],idx=-1,scale=1,tx=0,ty=0,px=0,py=0,swx=0,swy=0,down=false,dragging=false,movedPx=0,lastFocus=null,cur=null;function collect(){var out=[],els=document.querySelectorAll("main img");for(var i=0;i<els.length;i++){var el=els[i];if(el.closest(".lb-root"))continue;if(el.closest(".img-gone,.block-gone"))continue;out.push(el);}return out;}function resolveSrc(el){var a=el.closest("a"),full=null;if(a){var h=a.getAttribute("href");if(h&&h.charAt(0)!=="#")full=h;}var disp=el.currentSrc||el.getAttribute("src")||"";return {full:full,disp:disp};}function captionOf(el){var t="",fig=el.closest("figure");if(fig){var fc=fig.querySelector("figcaption");if(fc){t=(fc.textContent||"").trim();while(t.length>1&&t.slice(-2)==="\\u6253\\u5f00")t=t.slice(0,-2).trim();}}if(!t){var mc=el.closest(".map-cell");if(mc){var mn=mc.querySelector(".map-cell-name");if(mn)t=mn.getAttribute("title")||mn.textContent||"";}}if(!t)t=el.getAttribute("alt")||"";var card=el.closest(".job-card");var uid="";if(card){var h2=card.querySelector(".job-head h2");if(h2)uid=(h2.textContent||"").trim();}return {t:t,uid:uid};}function ensure(){if(root)return;root=document.createElement("div");root.className="lb-root";root.setAttribute("role","dialog");root.setAttribute("aria-modal","true");root.setAttribute("aria-label","\\u56fe\\u7247\\u67e5\\u770b\\u5668\\uff08\\u70b9\\u51fb\\u56fe\\u7247\\u7f29\\u653e\\uff0cESC \\u5173\\u95ed\\uff09");root.innerHTML='<div class="lb-stage"><div class="lb-frame"><img class="lb-img" alt=""><div class="lb-load"></div></div></div><div class="lb-bar"><span class="lb-cap"></span><span class="lb-cnt"></span><span class="lb-hint">\\u70b9\\u51fb\\u7f29\\u653e \\u00b7 ESC \\u5173\\u95ed</span></div><button type="button" class="lb-btn lb-prev" aria-label="\\u4e0a\\u4e00\\u5f20">\\u2039</button><button type="button" class="lb-btn lb-next" aria-label="\\u4e0b\\u4e00\\u5f20">\\u203a</button><button type="button" class="lb-btn lb-close" aria-label="\\u5173\\u95ed\\uff08ESC\\uff09">\\u2715</button>';document.body.appendChild(root);im=root.querySelector(".lb-img");cap=root.querySelector(".lb-cap");cnt=root.querySelector(".lb-cnt");loadB=root.querySelector(".lb-load");prevB=root.querySelector(".lb-prev");nextB=root.querySelector(".lb-next");closeB=root.querySelector(".lb-close");im.addEventListener("load",function(){loadB.classList.remove("lb-busy");});im.addEventListener("error",function(){if(!root.classList.contains("lb-on"))return;if(cur&&cur.full&&im.getAttribute("src")!==cur.disp&&cur.disp){loadB.classList.add("lb-busy");cur.full=null;im.src=cur.disp;return;}loadB.classList.remove("lb-busy");im.removeAttribute("src");cap.textContent="\\u56fe\\u7247\\u52a0\\u8f7d\\u5931\\u8d25";});root.addEventListener("click",function(e){var b=e.target&&e.target.closest?e.target.closest(".lb-btn"):null;if(b){e.preventDefault();e.stopPropagation();if(b===closeB)close();else if(b===prevB)show(idx-1);else show(idx+1);return;}if(e.target===im){if(movedPx<8){e.preventDefault();e.stopPropagation();toggleZoom(e.clientX,e.clientY);}return;}if(e.target===root||(e.target.classList&&(e.target.classList.contains("lb-stage")||e.target.classList.contains("lb-frame")))){e.preventDefault();e.stopPropagation();close();}});im.addEventListener("pointerdown",function(e){down=true;dragging=scale>1;movedPx=0;px=e.clientX;py=e.clientY;swx=e.clientX;swy=e.clientY;if(dragging){im.classList.add("lb-dragging");try{im.setPointerCapture(e.pointerId);}catch(err){}}});im.addEventListener("pointermove",function(e){if(!down)return;var dx=e.clientX-px,dy=e.clientY-py;movedPx+=Math.abs(dx)+Math.abs(dy);px=e.clientX;py=e.clientY;if(dragging){tx+=dx;ty+=dy;apply();}});var endDrag=function(e){if(!down)return;down=false;dragging=false;im.classList.remove("lb-dragging");if(scale<=1&&movedPx>60&&list.length>1){var dx=e.clientX-swx,dy=e.clientY-swy;if(Math.abs(dx)>Math.abs(dy)&&Math.abs(dx)>60)show(dx<0?idx+1:idx-1);}};im.addEventListener("pointerup",endDrag);im.addEventListener("pointercancel",function(){down=false;dragging=false;im.classList.remove("lb-dragging");});im.addEventListener("wheel",function(e){e.preventDefault();zoomTo(scale*(e.deltaY<0?1.18:1/1.18),e.clientX,e.clientY);},{passive:false});document.addEventListener("keydown",function(e){if(!root.classList.contains("lb-on"))return;if(e.key==="Escape"){e.preventDefault();close();}else if(e.key==="ArrowLeft"){e.preventDefault();show(idx-1);}else if(e.key==="ArrowRight"){e.preventDefault();show(idx+1);}else if(e.key==="+"||e.key==="="){e.preventDefault();zoomTo(scale*1.3,window.innerWidth/2,window.innerHeight/2);}else if(e.key==="-"){e.preventDefault();zoomTo(scale/1.3,window.innerWidth/2,window.innerHeight/2);}});}function open(el){ensure();list=collect();if(!list.length)return;var i=list.indexOf(el);if(i<0){list.push(el);i=list.length-1;}lastFocus=document.activeElement;root.classList.add("lb-on");document.documentElement.style.overflow="hidden";try{closeB.focus();}catch(err){}show(i);}function show(i){if(!list.length)return;idx=(i+list.length)%list.length;cur=resolveSrc(list[idx]);scale=1;tx=0;ty=0;movedPx=0;down=false;dragging=false;apply();var meta=captionOf(list[idx]);cap.textContent=(meta.uid?meta.uid+" \\u00b7 ":"")+meta.t;var nav=list.length>1;prevB.style.display=nav?"":"none";nextB.style.display=nav?"":"none";loadB.classList.add("lb-busy");var src=cur.full||cur.disp;if(src)im.src=src;else{loadB.classList.remove("lb-busy");cap.textContent="\\u56fe\\u7247\\u4e0d\\u53ef\\u7528";}}function close(){if(!root)return;root.classList.remove("lb-on");document.documentElement.style.overflow="";im.removeAttribute("src");if(lastFocus&&lastFocus.focus){try{lastFocus.focus();}catch(err){}}}function apply(){im.style.transform=scale===1?"":"translate("+tx+"px,"+ty+"px) scale("+scale+")";im.classList.toggle("lb-zoomed",scale>1);cnt.textContent=(idx+1)+" / "+list.length+(scale>1?" \u00b7 "+Math.round(scale*100)+"%":"");}function zoomTo(k,vx,vy){k=Math.min(8,Math.max(1,k));if(k===scale)return;var r=im.getBoundingClientRect();var ccx=r.left+r.width/2,ccy=r.top+r.height/2;var dx=vx-ccx,dy=vy-ccy;tx=(tx+dx)-(k/scale)*dx;ty=(ty+dy)-(k/scale)*dy;scale=k;if(scale===1){tx=0;ty=0;}apply();}function toggleZoom(vx,vy){if(scale>1){scale=1;tx=0;ty=0;apply();}else zoomTo(2.5,vx,vy);}document.addEventListener("click",function(e){var t=e.target;if(!t||!t.tagName)return;if(t.tagName!=="IMG")return;if(t.classList.contains("lb-img"))return;if(!t.closest||!t.closest("main"))return;e.preventDefault();e.stopPropagation();open(t);});})();`;
+  const REPORT_HTML_V2_SCRIPT_FULL = REPORT_HTML_V2_SCRIPT + REPORT_LIGHTBOX_SCRIPT;
   // v3.17: the height-reporting IIFE that used to live at the tail of this
   // script was REMOVED — the web UI no longer embeds the report in an
   // auto-resizing iframe (download / new-tab only), so nobody listens to
@@ -3017,11 +3400,13 @@ export interface ReportHtmlOptions {
     }</div></div></header><main class="workspace"><section class="pane flow-pane"><div class="pane-head"><h2>Lineage Outline</h2><div class="legend"><span class="micrograph">micrographs</span><span class="particle">particles</span><span class="volume">map</span></div></div><div class="outline">${reportOutline(
       summary,
       state,
-    )}</div>${reportPictureFlow(summary, state, opts)}</section><section class="pane chain-pane"><div class="chain-head"><h2>Main Data Chain</h2><span class="hint">小节点会折叠到可见主节点；左侧标签只指向左侧已有节点。</span></div><div class="cards">${cards}</div></section></main><script>${REPORT_HTML_V2_SCRIPT}</script></body></html>`;
+    )}</div>${reportPictureFlow(summary, state, opts)}</section><section class="pane chain-pane"><div class="chain-head"><h2>Main Data Chain</h2><span class="hint">小节点会折叠到可见主节点；左侧标签只指向左侧已有节点。</span></div><div class="cards">${cards}</div></section></main><script>${REPORT_HTML_V2_SCRIPT_FULL}</script></body></html>`;
   }
 
   /** @internal Exported only for testing of the inline script string. */
   export const _REPORT_HTML_V2_CSS = REPORT_HTML_V2_CSS;
-  /** @internal Exported only for testing of the inline script string. */
-  export const _REPORT_HTML_V2_SCRIPT = REPORT_HTML_V2_SCRIPT;
+  /** @internal Exported only for testing of the inline script string
+   *  (v3.23: the FULL script = base handlers + lightbox IIFE, so a
+   *  new-Function() parse test covers the lightbox too). */
+  export const _REPORT_HTML_V2_SCRIPT = REPORT_HTML_V2_SCRIPT_FULL;
 

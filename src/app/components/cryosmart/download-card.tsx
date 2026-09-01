@@ -141,6 +141,9 @@ export function DownloadCard({ summary, loaded }: Props) {
    *  build; handleCancel aborts it and bumps the epoch so late progress
    *  events / the eventual rejection from the dying build are ignored. */
   const abortRef = useRef<AbortController | null>(null);
+  /** v3.24: promise of the currently-running build (never rejects) — used
+   *  to serialize a rebuild behind a just-cancelled build's teardown. */
+  const buildInFlightRef = useRef<Promise<void> | null>(null);
   /** Output mode of the RUNNING build (v3.18): "opfs" = streamed to
    *  browser disk storage, "memory" = in-memory fallback with the 1 GB
    * budget. Surfaced in the progress box so the user can SEE that a
@@ -187,14 +190,12 @@ export function DownloadCard({ summary, loaded }: Props) {
     setSelections((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const handleBuild = useCallback(async () => {
-    if (!summary) {
-      toast.error("Trace lineage first.");
-      return;
-    }
-    const epoch = ++buildEpochRef.current;
-    const abort = new AbortController();
-    abortRef.current = abort;
+  /** v3.24: the build body, extracted so handleBuild can register its
+   *  promise in buildInFlightRef BEFORE the first await (a rebuild must
+   *  see it) and serialize behind a dying build's teardown. Never throws
+   *  — every path lands in its own catch. */
+  const runBuild = useCallback(async (epoch: number, abort: AbortController) => {
+    if (!summary) return; // narrowing guard — the null check lives in handleBuild
     setBuilding(true);
     setResult(null);
     setProgress({ phase: "init", current: 0, total: 1, message: "Starting…" });
@@ -258,6 +259,40 @@ export function DownloadCard({ summary, loaded }: Props) {
       if (abortRef.current === abort) abortRef.current = null;
     }
   }, [summary, selections, loaded]);
+
+  const handleBuild = useCallback(async () => {
+    if (!summary) {
+      toast.error("Trace lineage first.");
+      return;
+    }
+    // v3.24: serialize builds — a just-cancelled build unwinds
+    // ASYNCHRONOUSLY (buildBundle's catch awaits writer.abort(), which
+    // awaits the OPFS writable's abort) while handleCancel already flipped
+    // building=false. A Build click in that window used to call
+    // createWritable() on the still-locked OPFS file → InvalidStateError
+    // → createBundleSink's catch silently degraded to the 1 GB memory
+    // sink. Wait (bounded, 3s) for the dying build to release its locks
+    // before opening a new sink — worst case we time out and take the
+    // memory fallback, exactly the old behaviour.
+    setBuilding(true);
+    const prev = buildInFlightRef.current;
+    if (prev) {
+      try {
+        await Promise.race([prev, new Promise((r) => setTimeout(r, 3000))]);
+      } catch {
+        // the dying build's own error — already surfaced by its epoch
+      }
+    }
+    const epoch = ++buildEpochRef.current;
+    const abort = new AbortController();
+    abortRef.current = abort;
+    const run = runBuild(epoch, abort);
+    buildInFlightRef.current = run.then(
+      () => undefined,
+      () => undefined
+    );
+    await run;
+  }, [summary, selections, loaded, runBuild]);
 
   const handleCancel = useCallback(() => {
     const abort = abortRef.current;

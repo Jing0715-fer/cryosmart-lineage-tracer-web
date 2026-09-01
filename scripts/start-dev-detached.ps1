@@ -12,7 +12,14 @@
 #   powershell -NoProfile -File .zscripts\start-dev-detached.ps1
 #   tail dev-watchdog.log   # to watch what the watchdog is doing
 
+# Accept -Port so multiple web apps can coexist on the same machine.
+# NOTE: `param` MUST be the first statement in PowerShell 5.1.
+param(
+  [int]$Port = 3000
+)
+
 $ErrorActionPreference = 'Stop'
+
 $root = (Split-Path -Parent $PSCommandPath) | Split-Path -Parent
 $wd   = Join-Path $root 'scripts\dev-watchdog.ps1'
 $wdLog = Join-Path $root 'dev-watchdog.log'
@@ -48,12 +55,12 @@ Start-Sleep -Seconds 2
 #    redirection), the watchdog's writes fail with an IOException and
 #    the script exits — exactly the failure we saw on first run.
 $proc = Start-Process -FilePath 'powershell' `
-                      -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File', $wd `
+                      -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File', $wd, '-Port', "$Port" `
                       -WorkingDirectory $root `
                       -RedirectStandardOutput "$wdLog.stdout" `
                       -RedirectStandardError "$wdLog.stderr" `
                       -WindowStyle Hidden `
                       -PassThru
-Write-Host "watchdog launched as PID $($proc.Id)"
+Write-Host "watchdog launched as PID $($proc.Id) on port $Port"
 Write-Host "watchdog log:    $wdLog  (use Get-Content -Wait to follow)"
 Write-Host "watchdog stdio:  $wdLog.stdout / $wdLog.stderr"
