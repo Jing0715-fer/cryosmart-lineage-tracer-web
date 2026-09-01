@@ -22,6 +22,16 @@
 #   (or use .zscripts\start-dev-detached.ps1 to launch it without keeping
 #    the parent shell open)
 
+# Accept -Port so multiple web apps can coexist on the same machine (the
+# default 3000 may be claimed by another project).
+# NOTE: `param` MUST be the first statement in PowerShell 5.1 — the
+# previous version put it after $ErrorActionPreference, which pwsh
+# tolerates but Windows PowerShell 5.1 rejects with "param is not a
+# recognized cmdlet". Keep this block at the very top.
+param(
+  [int]$Port = 3000
+)
+
 $ErrorActionPreference = 'Stop'
 
 # Resolve repo root from this script's location so it works regardless of
@@ -30,7 +40,6 @@ $root    = (Split-Path -Parent $PSCommandPath) | Split-Path -Parent
 $log     = Join-Path $root 'dev.log'
 $logErr  = Join-Path $root 'dev.err.log'
 $wdLog   = Join-Path $root 'dev-watchdog.log'
-$port    = 3000
 $checkEverySec    = 30
 $startupGraceSec  = 20   # how long to wait after starting before re-checking
 
