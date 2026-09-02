@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.34 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.35 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -305,6 +305,25 @@ export function SmartCapturePanel() {
 // /images responses now also carry WHY each rejected item bounced
 // (badUrl / oversize / nonRaster / storeFull), and the script's
 // "accepted 0 of N" warning prints the actual reasons instead of a guess.
+// v3.35: RPC-LAYER ARGUMENT REPAIR (restores image capture, keeps the
+// popups dead). v3.34's signature parsing could never work: pinia store
+// actions are WRAPPERS — String(store.getLogsByJob) is pinia's own
+// "function () { const args = Array.from(arguments); … }", the original
+// action's parameters live in a closure and are unreadable — so
+// synthCallArgs saw "no parameters" and called every loader with ZERO
+// arguments, which is exactly how a run ends at "N/N jobs scanned · 0
+// images" with only 404 probes in the console. v3.35 restores the
+// v3.2–v3.33 guessed-shape sweep (the mechanism that captured 903/320/
+// 128 images on the real builds) and arms a repair layer at the socket
+// boundary: while one of OUR calls is in flight, the outgoing RPC
+// payload's uid fields are COMPLETED from the held values (job/project/
+// experiment uid), a 2-param action called with 1 arg has its forwarded
+// (job_uid, undefined) pair repaired into (project_uid, job_uid), and a
+// payload that cannot be completed is swallowed — the half-empty RPC
+// never reaches the server, so "get_job_streamlog() missing 2 required
+// positional arguments" ServerError dialogs stay gone. The SPA's own
+// calls are never touched (repair runs only inside the short window
+// around our calls, and only edits incomplete/misplaced uid fields).
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -971,25 +990,27 @@ export function SmartCapturePanel() {
     return found;
   }
 
-  // v3.34: SIGNATURE-AWARE LOADER CALLS ────────────────────────────
+  // v3.35: RPC-LAYER ARGUMENT REPAIR ──────────────────────────────
   // The calibration step below CALLS pinia store actions inside the
-  // user's SPA. Until v3.33 it called each candidate with a fixed list
-  // of guessed shapes ([uid, {job_uid}, {uid}, [uid], row, {uid,
-  // project_uid}]). On the real build one candidate is get_job_streamlog
-  // — a WebSocket RPC whose server function requires BOTH project_uid
-  // AND job_uid. No guessed shape carried both, so the RPC left with
-  // neither and the server raised
-  //   TypeError: get_job_streamlog() missing 2 required positional
-  //   arguments: 'project_uid' and 'job_uid'
-  // which the CryoSmart UI surfaced as ServerError dialogs (several per
-  // capture). v3.34 never calls blind: the action's declared parameter
-  // list is parsed from its source, and for MINIFIED builds (param names
-  // mangled to e/t/…) the {project_uid: e, job_uid: t} object keys the
-  // source constructs are matched back to the parameter positions. We
-  // only call when every required argument can be supplied with a value
-  // we actually hold (job uid / project uid / experiment uid); anything
-  // else is SKIPPED with a console note — a skipped loader costs nothing,
-  // a blind call costs a server-side traceback dialog in the user's face.
+  // user's SPA, with guessed argument shapes (v3.2–v3.33, restored). The
+  // pre-v3.34 problem was never the guessing itself — it was that a
+  // 2-parameter action called with 1 argument forwarded (job_uid,
+  // undefined) to the server, whose "get_job_streamlog() missing 2
+  // required positional arguments" TypeError popped ServerError dialogs
+  // in the CryoSmart UI. v3.34 tried to stop that by parsing each
+  // action's declared signature — but pinia actions are WRAPPERS:
+  // String(store.getLogsByJob) is pinia's own "function () { const args
+  // = Array.from(arguments); … }", the original parameters live in a
+  // closure and are UNREADABLE. synthCallArgs therefore saw "no
+  // parameters" and called every loader with ZERO arguments — the whole
+  // capture then ends at "N/N jobs scanned · 0 images" (the user's 593-
+  // job run: only 404 probes in the console, HTTP fallback disabled).
+  // The argument truth is visible one layer DOWN: when our guessed-shape
+  // call leaves the socketManager, the outgoing RPC shows exactly which
+  // fields the action wanted. v3.35 completes those fields at the socket
+  // boundary (fill undefined uid fields, undo job-uid-in-project-slot
+  // swaps, repair positional under-supply) — so guessed shapes load logs
+  // again WITHOUT ever sending a half-empty payload to the server.
   function rowFor(uid) {
     for (var i = 0; i < jobs.length; i++) {
       if (jobs[i] && jobs[i].uid === uid) return jobs[i];
@@ -997,114 +1018,255 @@ export function SmartCapturePanel() {
     return null;
   }
 
-  // → { destructured: bool, params: [{ name, optional }] } | null
-  function parseFnParams(fn) {
-    try {
-      var src = String(fn);
-      var m = src.match(/^\\s*(?:async\\s+)?function\\s*[\\w$]*\\s*\\(([^)]*)\\)/) ||
-              src.match(/^\\s*(?:async\\s+)?[\\w$]+\\s*\\(([^)]*)\\)\\s*\\{/) ||
-              src.match(/^\\s*(?:async\\s+)?\\(?([^)=]*)\\)?\\s*=>/) ||
-              src.match(/^\\s*(?:async\\s+)?\\(([^)]*)\\)\\s*(?:=>|\\{)/);
-      if (!m) return null;
-      var head = m[1] || '';
-      var dm = head.match(/^\\s*\\{([^}]*)\\}/);
-      if (dm) {
-        var dparams = [];
-        var dparts = dm[1].split(',');
-        for (var d = 0; d < dparts.length; d++) {
-          var dp = dparts[d].trim();
-          if (!dp) continue;
-          var dnm = dp.replace(/\\.\\.\\./g, '').split(':')[0].split('=')[0].trim();
-          if (dnm) dparams.push({ name: dnm, optional: /=/.test(dp) });
-        }
-        return { destructured: true, params: dparams };
-      }
-      var out = [];
-      var plist = head.split(',');
-      for (var i2 = 0; i2 < plist.length; i2++) {
-        var pp = plist[i2].trim();
-        if (!pp) continue;
-        var opt = /\\.\\.\\./.test(pp) || /=/.test(pp);
-        var nm = pp.replace(/\\.\\.\\./g, '').split('=')[0].split(':')[0].trim();
-        if (nm) out.push({ name: nm, optional: opt });
-      }
-      return { destructured: false, params: out };
-    } catch (e) { return null; }
-  }
-
-  // Map a declared parameter NAME to a value we hold. Returns undefined
-  // for identifiers we cannot supply (the caller must then skip the
-  // action if the parameter is required), null for a known identifier
-  // whose value is missing on this job.
-  function knownArgFor(name, uid, row) {
-    var k = String(name).toLowerCase();
-    if (k === 'job_uid' || k === 'jobuid' || k === 'job_id' || k === 'jobid' ||
-        k === 'job' || k === 'uid' || k === 'id') return uid;
-    if (k === 'project_uid' || k === 'projectuid' || k === 'project_id' ||
-        k === 'projectid' || k === 'project' || k === 'pid') return projectId;
-    if (k === 'experiment_uid' || k === 'experiment' || k === 'exp_uid' ||
-        k === 'experimentuid' || k === 'experiment_id' || k === 'workspace_uid') {
-      return (row && (row.experiment_uid || row.workspace_uid)) || null;
-    }
-    return undefined;
-  }
-
-  // Minified sources keep the PAYLOAD object keys (string literals
-  // survive mangling): {project_uid: e, job_uid: t}. Match each key back
-  // to the parameter that fills it, so positional arguments can be
-  // synthesized even when the parameter NAMES are gone.
-  var PAYLOAD_KEY_RE = /\\b(job_uid|jobUid|job_id|jobId|project_uid|projectUid|project_id|projectId|experiment_uid|experimentUid|workspace_uid)\\s*:\\s*([A-Za-z_$][\\w$]*)/g;
-  function payloadKeyParamMap(fn, params) {
-    var map = {};
-    try {
-      var src = String(fn);
-      var mm;
-      PAYLOAD_KEY_RE.lastIndex = 0;
-      while ((mm = PAYLOAD_KEY_RE.exec(src))) {
-        var key = mm[1].toLowerCase();
-        for (var i = 0; i < params.length; i++) {
-          if (params[i].name === mm[2]) { map[key] = mm[2]; break; }
-        }
-      }
-    } catch (e) {}
-    return map;
-  }
-
-  // → { args: [...] } when the call is safe, or { skip: '<reason>' }.
-  function synthCallArgs(fn, uid) {
+  // v3.2–v3.33 argument shapes, in historical win order (the raw job uid
+  // first — the shape that loaded logs on every real build so far; the
+  // repair layer above makes every shape popup-safe to try).
+  function shapesFor(uid) {
     var row = rowFor(uid);
-    var parsed = parseFnParams(fn);
-    if (!parsed) return { skip: 'its signature cannot be read (heavily minified)' };
-    var params = parsed.params;
-    if (!params.length) return { args: [] };
-    if (parsed.destructured) {
-      var obj = {};
-      for (var d = 0; d < params.length; d++) {
-        var v0 = knownArgFor(params[d].name, uid, row);
-        if (v0 === undefined || v0 === null) {
-          if (params[d].optional) continue;
-          return { skip: 'it requires "' + params[d].name + '", which this script cannot supply' };
+    var sh = [uid, { job_uid: uid }, { uid: uid }, [uid]];
+    if (row) sh.push(row);
+    sh.push({ uid: uid, project_uid: projectId });
+    return sh;
+  }
+
+  // ── v3.35 repair state ───────────────────────────────────────────
+  var blindCallActive = false;   // true only inside the short window around one of OUR loader calls
+  var blindCallCtx = { jobUid: null, projectUid: null, expUid: null };
+  var rpcNotes = [];             // what the repair layer did (printed in diagnostics)
+  var repairTimer = null;
+  function noteRpc(msg) {
+    if (rpcNotes.length < 40) rpcNotes.push(msg);
+  }
+
+  function isJobKey(nk) {
+    return nk === 'job_uid' || nk === 'jobuid' || nk === 'job_id' || nk === 'jobid' ||
+           nk === 'job' || nk === 'uid' || nk === 'id';
+  }
+  function isProjKey(nk) {
+    return nk === 'project_uid' || nk === 'projectuid' || nk === 'project_id' ||
+           nk === 'projectid' || nk === 'project' || nk === 'pid';
+  }
+  function isExpKey(nk) {
+    return nk === 'experiment_uid' || nk === 'experimentuid' ||
+           nk === 'workspace_uid' || nk === 'workspaceuid';
+  }
+
+  // Complete/fix the uid-family fields of ONE payload object, in place.
+  // Only fills EMPTY slots and undoes uid VALUE confusions — a payload
+  // the SPA itself built correctly is never modified.
+  function repairUidFields(obj, depth) {
+    if (!obj || typeof obj !== 'object' || depth > 3) return false;
+    var changed = false;
+    for (var k in obj) {
+      var nk = String(k).toLowerCase();
+      if (!isJobKey(nk) && !isProjKey(nk) && !isExpKey(nk)) continue;
+      var v = obj[k];
+      if (v === undefined || v === null || v === '') {
+        var fill = isProjKey(nk) ? blindCallCtx.projectUid : (isExpKey(nk) ? blindCallCtx.expUid : blindCallCtx.jobUid);
+        if (fill) { obj[k] = fill; changed = true; noteRpc('filled ' + k); }
+      } else if (isProjKey(nk) && blindCallCtx.projectUid && v === blindCallCtx.jobUid && blindCallCtx.projectUid !== v) {
+        // our guessed shape fed the project slot the JOB uid
+        obj[k] = blindCallCtx.projectUid; changed = true; noteRpc('moved the job uid out of ' + k);
+      } else if (isJobKey(nk) && blindCallCtx.jobUid && v === blindCallCtx.projectUid && blindCallCtx.jobUid !== v) {
+        obj[k] = blindCallCtx.jobUid; changed = true; noteRpc('moved the project uid out of ' + k);
+      } else if (isExpKey(nk) && blindCallCtx.expUid && v === blindCallCtx.jobUid && blindCallCtx.expUid !== v) {
+        obj[k] = blindCallCtx.expUid; changed = true; noteRpc('moved the job uid out of ' + k);
+      }
+    }
+    for (var k2 in obj) {
+      var vv = obj[k2];
+      if (vv && typeof vv === 'object' && !Array.isArray(vv)) {
+        if (repairUidFields(vv, depth + 1)) changed = true;
+      }
+    }
+    return changed;
+  }
+
+  // v3.35 ws-frame completion: JSON.stringify DROPS undefined keys, so a
+  // stringified confusion frame shows project_uid = <the JOB uid> with NO
+  // job key at all. Complete the pair — but ONLY on that exact pattern
+  // (a project slot holding the job uid while the job slot is absent);
+  // a frame the SPA itself built with its real project uid is never
+  // touched, so no unexpected-kwarg errors can be introduced.
+  function completeJobSlotOnConfusion(node) {
+    var changed = false;
+    function walk(o, depth) {
+      if (!o || typeof o !== 'object' || depth > 2) return;
+      var hasJob = false, projKey = null, projVal;
+      for (var k in o) {
+        var nk = String(k).toLowerCase();
+        if (isJobKey(nk)) hasJob = true;
+        if (isProjKey(nk) && projKey === null) { projKey = k; projVal = o[k]; }
+      }
+      if (!hasJob && projKey !== null && projVal === blindCallCtx.jobUid &&
+          blindCallCtx.projectUid && blindCallCtx.projectUid !== blindCallCtx.jobUid) {
+        o[projKey] = blindCallCtx.projectUid;
+        o.job_uid = blindCallCtx.jobUid;
+        changed = true;
+        noteRpc('completed job_uid in a wire frame');
+      }
+      for (var k2 in o) {
+        var vv = o[k2];
+        if (vv && typeof vv === 'object' && !Array.isArray(vv)) walk(vv, depth + 1);
+      }
+    }
+    walk(node, 0);
+    return changed;
+  }
+
+  // Repair the ARGUMENT LIST of a socket-manager method our blind call
+  // just invoked: (1) payload objects get repairUidFields; (2) positional
+  // under-supply — a 2-param action called with 1 arg forwards
+  // (job_uid, undefined) — is repaired into the (project_uid, job_uid)
+  // pair the get_job_streamlog RPC family declares (the order the user's
+  // own server error proved). This is what kills the ServerError popups
+  // WITHOUT killing the loader calls.
+  function repairArgs(args) {
+    var sawJob = false, sawProj = false;
+    for (var i = 0; i < args.length; i++) {
+      var a = args[i];
+      if (a && typeof a === 'object' && !Array.isArray(a)) {
+        repairUidFields(a, 0);
+        for (var k in a) {
+          var nk = String(k).toLowerCase();
+          if (isProjKey(nk)) sawProj = true;
+          else if (isJobKey(nk) || isExpKey(nk)) sawJob = true;
         }
-        obj[params[d].name] = v0;
       }
-      return { args: [obj] };
     }
-    var keyMap = payloadKeyParamMap(fn, params);
-    var args = [];
-    for (var i = 0; i < params.length; i++) {
-      var pn = params[i].name;
-      var mapped = null;
-      for (var kk in keyMap) {
-        if (keyMap[kk] === pn) { mapped = kk; break; }
-      }
-      var v = mapped !== null ? knownArgFor(mapped, uid, row) : knownArgFor(pn, uid, row);
-      if (v === undefined || v === null) {
-        if (params[i].optional) { args.push(undefined); continue; }
-        return { skip: 'it requires "' + pn + '", which this script cannot supply' };
-      }
-      args.push(v);
+    var idxStr = [], idxUndef = [];
+    for (var j = 0; j < args.length; j++) {
+      if (typeof args[j] === 'string' && args[j] === blindCallCtx.jobUid) idxStr.push(j);
+      else if (args[j] === undefined) idxUndef.push(j);
     }
-    return { args: args };
+    if (idxStr.length === 1 && idxUndef.length >= 1 &&
+        blindCallCtx.projectUid && blindCallCtx.projectUid !== blindCallCtx.jobUid) {
+      var sj = idxStr[0], su = idxUndef[0];
+      if (su > sj) {
+        args[sj] = blindCallCtx.projectUid;
+        args[su] = blindCallCtx.jobUid;
+        noteRpc('repaired a (project_uid, job_uid) positional pair');
+      } else {
+        args[su] = blindCallCtx.projectUid;
+        noteRpc('filled a leading project_uid positional');
+      }
+    } else if (idxUndef.length && !sawJob) {
+      var fill2 = blindCallCtx.jobUid || blindCallCtx.projectUid || blindCallCtx.expUid;
+      if (fill2) { args[idxUndef[0]] = fill2; noteRpc('filled an undefined positional argument'); }
+    }
+  }
+
+  // True when an argument object STILL carries an empty uid-family field
+  // after repair — the payload cannot be completed, so it must NOT be sent
+  // (sending it is exactly what raised the pre-v3.34 ServerError dialogs).
+  function payloadIncomplete(args) {
+    function objIncomplete(o) {
+      for (var k in o) {
+        var nk = String(k).toLowerCase();
+        if (!isJobKey(nk) && !isProjKey(nk) && !isExpKey(nk)) continue;
+        if (o[k] === undefined || o[k] === null || o[k] === '') return true;
+      }
+      return false;
+    }
+    for (var i = 0; i < args.length; i++) {
+      var a = args[i];
+      if (a && typeof a === 'object' && !Array.isArray(a)) {
+        if (objIncomplete(a)) return true;
+        for (var k2 in a) {
+          var vv = a[k2];
+          if (vv && typeof vv === 'object' && !Array.isArray(vv) && objIncomplete(vv)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // v3.35: wrap the socket manager's methods (+ ws.send). Outside our
+  // call windows this is a pure pass-through — the SPA never notices.
+  var rpcPatched = false;
+  function ensureRpcPatch() {
+    if (rpcPatched) return;
+    rpcPatched = true;
+    try {
+      var sm = socketStore && socketStore.socketManager;
+      if (!sm) {
+        console.log('[CryoSmart] No socket manager found — the RPC repair layer is off (the shape sweep still runs).');
+        return;
+      }
+      var seen = {};
+      var obj = sm;
+      for (var depth = 0; depth < 4 && obj; depth++) {
+        var names = [];
+        try { names = Object.getOwnPropertyNames(obj); } catch (e) { break; }
+        for (var i = 0; i < names.length; i++) {
+          var nm = names[i];
+          if (seen[nm] || nm === 'ws' || nm === 'constructor' || nm === '__proto__') continue;
+          seen[nm] = 1;
+          var d = null;
+          try { d = Object.getOwnPropertyDescriptor(obj, nm); } catch (e) {}
+          if (!d || typeof d.value !== 'function' || !d.writable) continue;
+          (function(orig) {
+            try {
+              sm[nm] = function() {
+                var args = Array.prototype.slice.call(arguments);
+                if (blindCallActive && args.length) {
+                  try {
+                    repairArgs(args);
+                    // the guarantee: a payload that still carries an empty
+                    // uid field after repair is SWALLOWED — the half-empty
+                    // RPC never reaches the server, so its TypeError can
+                    // never pop a ServerError dialog in the CryoSmart UI.
+                    if (payloadIncomplete(args)) {
+                      noteRpc('swallowed an RPC that could not be completed');
+                      return;
+                    }
+                  } catch (e) {}
+                }
+                return orig.apply(this, args);
+              };
+            } catch (e) {}
+          })(d.value);
+        }
+        try { obj = Object.getPrototypeOf(obj); } catch (e) { break; }
+      }
+      var wsx = null;
+      try { wsx = sm.ws; } catch (e) {}
+      if (wsx && typeof wsx.send === 'function') {
+        var rawSend = wsx.send;
+        wsx.send = function(data) {
+          if (blindCallActive && typeof data === 'string' && data.length && data.charAt(0) === '{') {
+            try {
+              var parsed = JSON.parse(data);
+              if (parsed && typeof parsed === 'object') {
+                completeJobSlotOnConfusion(parsed);
+                repairUidFields(parsed, 0);
+                data = JSON.stringify(parsed);
+              }
+            } catch (e) {}
+          }
+          return rawSend.call(wsx, data);
+        };
+      }
+      console.log('[CryoSmart] RPC repair layer armed: our loader calls leave with COMPLETED arguments — ' +
+        'the half-empty payloads that used to raise "get_job_streamlog() missing 2 required positional arguments" ' +
+        'never reach the server (no ServerError dialogs), and every guessed shape is safe to try.');
+    } catch (e) {
+      console.warn('[CryoSmart] Could not arm the RPC repair layer (the shape sweep still runs):', e && e.message);
+    }
+  }
+
+  // Arm the repair context around one of OUR loader calls. The flag
+  // drops itself after 1.2s — async action bodies fire their RPC a
+  // microtask or two after the sync call returns, so the window must
+  // still be open then; SPA traffic outside the window is never touched.
+  function armRepair(uid) {
+    var row = rowFor(uid);
+    blindCallCtx.jobUid = uid;
+    blindCallCtx.projectUid = projectId || null;
+    blindCallCtx.expUid = (row && (row.experiment_uid || row.workspace_uid)) || null;
+    blindCallActive = true;
+    if (repairTimer) clearTimeout(repairTimer);
+    repairTimer = setTimeout(function() { blindCallActive = false; repairTimer = null; }, 1200);
   }
 
   function waitForLogs(uid, ms) {
@@ -2247,7 +2409,7 @@ export function SmartCapturePanel() {
 
   // Loader calibration result + already-streamed bookkeeping, shared
   // across scan passes (initial request + the re-trace grace window below).
-  var winning = null;   // {action, mode:'state'|'return'|'diff'} or {http:true}
+  var winning = null;   // {action, shapeIdx, mode:'state'|'return'|'diff'} or {http:true}
   var scanned = {};
 
   async function scanLogs(budgetMs) {
@@ -2335,7 +2497,11 @@ export function SmartCapturePanel() {
     // fails, paste the console output back to the maintainer for an exact fix.
     for (var d2 = 0; d2 < actions.length && d2 < 2; d2++) {
       try {
-        console.log('[CryoSmart] Loader "' + actions[d2].name + '" source (diagnostics):\\n' + String(actions[d2].fn).slice(0, 900));
+        // v3.35: pinia actions are WRAPPERS — String(fn) shows pinia's own
+        // "function () { const args = Array.from(arguments); … }", NOT the
+        // action body. That is EXPECTED (and is exactly why v3.34's
+        // signature synthesis could never work); printed for completeness.
+        console.log('[CryoSmart] Loader "' + actions[d2].name + '" source (diagnostics, pinia wrapper — expected):\\n' + String(actions[d2].fn).slice(0, 900));
       } catch (e) {}
     }
 
@@ -2351,51 +2517,47 @@ export function SmartCapturePanel() {
       console.log('[CryoSmart] Calibrating on job(s): ' + calibPool.slice(0, calibTries).join(', ') + ' (image-rich types first)');
     }
 
-    var synthSkipped = {};
+    // v3.35: arm the RPC repair layer BEFORE the first guessed-shape call
+    // — pinia actions are wrappers (signatures unreadable), the argument
+    // truth only shows at the RPC boundary, and under-supplied payloads
+    // are completed there instead of erroring on the server.
+    ensureRpcPatch();
+
     outer:
     for (var ci = 0; ci < calibTries && !winning; ci++) {
       var calibUid = calibPool[ci];
+      var shapes = shapesFor(calibUid);
       for (var a = 0; a < actions.length; a++) {
-        // v3.34: call each candidate ONLY with the arguments its own
-        // signature declares (synthCallArgs above). The old blind shape
-        // sweep ([uid, {job_uid}, {uid}, [uid], row, {uid, project_uid}])
-        // hit actions like get_job_streamlog — a WS RPC whose server
-        // function requires BOTH project_uid AND job_uid — with NEITHER,
-        // and the CryoSmart server UI popped ServerError dialogs:
-        //   TypeError: get_job_streamlog() missing 2 required positional
-        //   arguments: 'project_uid' and 'job_uid'
-        var plan = synthCallArgs(actions[a].fn, calibUid);
-        if (plan.skip) {
-          if (!synthSkipped[actions[a].name]) {
-            synthSkipped[actions[a].name] = 1;
-            console.log('[CryoSmart] Loader "' + actions[a].name + '" left uncalled — ' + plan.skip +
-              '. (A guessed-argument call has crashed the CryoSmart server UI with ServerError dialogs before;' +
-              ' the stream harvest, the deep scan and the HTTP fallback still cover the logs.)');
-          }
-          continue;
-        }
-        // v3.29: per-action progress — the calibration sweep can take a
-        // minute+ on builds with many candidate actions; without this
-        // the strip sat at "0/72 · 0%" the whole time.
-        phase('calibrating', 'calibrating on ' + calibUid + ' — action "' + actions[a].name + '"' +
-          (plan.args.length ? ' — calling with its declared arguments…' : ' (no arguments)…'));
-        var base = snapshotLogs(stores);
-        var ret = null;
-        try {
-          ret = actions[a].fn.apply(actions[a].store, plan.args);
-        } catch (e) {}
+        for (var s = 0; s < shapes.length; s++) {
+          // v3.29: per-combo progress — a full action×shape sweep can take
+          // a minute+ on builds with many candidate actions; without this
+          // the strip sat at "0/72 · 0%" the whole time.
+          // v3.35: armRepair wraps THIS call — its outgoing RPC payload is
+          // completed/fixed at the socket boundary (see ensureRpcPatch),
+          // so a guessed shape can no longer under-supply the server RPC
+          // (the pre-v3.34 ServerError popups). v3.34 overcorrected by
+          // "synthesizing" arguments from pinia WRAPPER sources — which
+          // read as zero-parameter functions — so every loader got called
+          // with NO arguments and whole captures ended at 0 images.
+          phase('calibrating', 'calibrating on ' + calibUid + ' — action "' + actions[a].name + '" arg shape ' + (s + 1) + '/' + shapes.length + '…');
+          armRepair(calibUid);
+          var base = snapshotLogs(stores);
+          var ret = null;
+          try {
+            ret = actions[a].fn.call(actions[a].store, shapes[s]);
+          } catch (e) {}
           // (a) the call RESOLVES to the logs directly (return value)
           if (ret && typeof ret.then === 'function') {
             var resolved = coerceLogs(await withTimeout(ret.catch(function() {}), 1500));
             if (looksLikeLogs(resolved)) {
-              winning = { action: actions[a], mode: 'return' };
+              winning = { action: actions[a], shapeIdx: s, mode: 'return' };
               batch.push({ uid: calibUid, images: extractLogImages(resolved, calibUid) });
               scanned[calibUid] = true;
               queueJobAssets(calibUid);
               break outer;
             }
           } else if (looksLikeLogs(coerceLogs(ret))) {
-            winning = { action: actions[a], mode: 'return' };
+            winning = { action: actions[a], shapeIdx: s, mode: 'return' };
             batch.push({ uid: calibUid, images: extractLogImages(coerceLogs(ret), calibUid) });
             scanned[calibUid] = true;
             queueJobAssets(calibUid);
@@ -2412,11 +2574,11 @@ export function SmartCapturePanel() {
               // ATTRIBUTABLE to the calibration job (evidence rules in
               // pickByUid). The loader may populate state without any
               // array naming this job — keep polling, then fall through
-              // to the next action; the per-job scan re-tries via
+              // to the next action/shape; the per-job scan re-tries via
               // deepLogsFor + HTTP anyway.
               var pick = pickByUid(fresh, calibUid);
               if (pick) {
-                winning = { action: actions[a], mode: 'diff' };
+                winning = { action: actions[a], shapeIdx: s, mode: 'diff' };
                 batch.push({ uid: calibUid, images: extractLogImages(pick.arr, calibUid) });
                 scanned[calibUid] = true;
                 queueJobAssets(calibUid);
@@ -2426,7 +2588,7 @@ export function SmartCapturePanel() {
             }
             var logs = readLogState(calibUid);
             if (logs) {
-              winning = { action: actions[a], mode: 'state' };
+              winning = { action: actions[a], shapeIdx: s, mode: 'state' };
               batch.push({ uid: calibUid, images: extractLogImages(logs, calibUid) });
               scanned[calibUid] = true;
               queueJobAssets(calibUid);
@@ -2434,6 +2596,7 @@ export function SmartCapturePanel() {
             }
             await new Promise(function(r) { setTimeout(r, 140); });
           }
+        }
       }
     }
 
@@ -2463,12 +2626,14 @@ export function SmartCapturePanel() {
       console.log('[CryoSmart] ── Diagnostics (paste this whole block back to the maintainer) ──');
       try { console.log('pinia stores:\\n' + storeSummary(stores)); } catch (e) {}
       console.log('socket messages during scan (' + socketMsgs.length + '): ' + socketMsgs.slice(-60).join(', '));
+      if (rpcNotes.length) console.log('rpc repairs during scan (' + rpcNotes.length + '): ' + rpcNotes.slice(-12).join('; '));
     }
     await flushLogs(true);
     if (winning) {
       console.log('[CryoSmart] Log loading works via ' +
         (winning.http ? 'HTTP endpoint' : 'store action "' + winning.action.name + '" (' + winning.mode + ')') +
-        ' — scanning ' + pending.length + ' job(s)...');
+        ' — scanning ' + pending.length + ' job(s)...' +
+        (rpcNotes.length ? ' (RPC repair layer completed ' + rpcNotes.length + ' outgoing payload field(s) — no half-empty RPC ever reached the server.)' : ''));
     } else if (pending.length - lazy.length > 0) {
       console.log('[CryoSmart] ' + (pending.length - lazy.length) + ' job(s) already have logs cached in memory (previous run or opened views)' +
         ' — harvesting them without extra API calls.');
@@ -2536,13 +2701,14 @@ export function SmartCapturePanel() {
         if (winning.http) {
           logs2 = await httpLogProbe(uid2);
         } else {
-          // v3.34: rebuild the action's signature-exact arguments for THIS
-          // job (the calibration no longer stores a shape index — every
-          // call is synthesized from the declared parameter list).
-          var plan2 = synthCallArgs(winning.action.fn, uid2);
+          // v3.33/v3.35: replay the winning action with the shape that won
+          // calibration; armRepair wraps the call so its outgoing RPC
+          // payload is completed at the socket boundary for THIS job.
+          var arg = shapesFor(uid2)[winning.shapeIdx];
+          armRepair(uid2);
           var base2 = snapshotLogs(stores);
           try {
-            var rr = plan2.skip ? null : winning.action.fn.apply(winning.action.store, plan2.args);
+            var rr = winning.action.fn.call(winning.action.store, arg);
             if (rr && typeof rr.then === 'function') {
               var rv = coerceLogs(await withTimeout(rr.catch(function() {}), 1500));
               if (!rv) {
@@ -2632,8 +2798,10 @@ export function SmartCapturePanel() {
         var rescueBatchN = 0;
         for (var n1 = 0; n1 < noLog.length; n1++) {
           try {
-            var nplan = synthCallArgs(winning.action.fn, noLog[n1]);
-            var nret = nplan.skip ? null : winning.action.fn.apply(winning.action.store, nplan.args);
+            // v3.35: armRepair per call — the rescue re-fires the winning
+            // loader for late deliverers with a completed RPC payload.
+            armRepair(noLog[n1]);
+            var nret = winning.action.fn.call(winning.action.store, shapesFor(noLog[n1])[winning.shapeIdx]);
             if (nret && typeof nret.then === 'function') nret.catch(function() {});
           } catch (e) {}
           rescueBatchN++;

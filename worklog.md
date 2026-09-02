@@ -1802,3 +1802,31 @@ Stage Summary:
 - ServerError popups: eliminated — no loader action is ever called without its declared arguments; get_job_streamlog is now invoked correctly (project_uid + job_uid) and usually wins calibration.
 - "accepted 0 of N" is now honest end-to-end (server reject reasons → POST response → script console warning).
 - CRITICAL for the user: re-copy the capture script from the panel — the clipboard still holds the pre-v3.33 build that produced the CORS/502, accepted-0 and popup symptoms.
+
+---
+Task ID: 8 (v3.35)
+Agent: main (Z.ai Code)
+Task: User report: v3.34 run on the 593-job build — "[CryoSmart] Calibrating on job(s): J606, J602, J586" → every HTTP log probe 404 → "No HTTP log endpoint on this CryoSmart build" → "593/593 jobs scanned · 0 images captured"; user asked to check the git history for how log images were fetched in the past. Root-cause and fix (+ push to GitHub).
+
+Work Log:
+- Read the console trace: calibration found NO winning loader, fell to the HTTP fallback, probes 404'd, HTTP fallback disabled → nothing ever loaded logs → 0 images.
+- Git-history analysis (v3.2–v3.33): the winning mechanism was the BLIND SHAPE SWEEP — calling pinia store actions with 6 guessed shapes ([uid, {job_uid}, {uid}, [uid], row, {uid, project_uid}]); the pinia wrapper forwards arguments to the original action; getLogsByJob(uid) fired WS insert_events and the deep-scan harvested logsByJob state (this is how 903/320/128 images were captured in past runs).
+- THE ROOT CAUSE of v3.34's 0-image regression (proven with a node test against real pinia 2.1.7 in /tmp): pinia store actions are WRAPPERS — String(store.getLogsByJob) is pinia's own "function () { const args = Array.from(arguments); … }"; the original action's parameter list lives in a closure and is UNREADABLE from the store. v3.34's parseFnParams therefore parsed the wrapper, saw "no parameters", and synthCallArgs called every loader with ZERO arguments — no logs could ever load. Its 18/18 harness passed only because it tested raw functions, never a wrapped one.
+- v3.35 design: restore the v3.2–v3.33 shape sweep AND kill the pre-v3.34 ServerError popups at the RPC boundary instead of by refusing to call:
+  * ensureRpcPatch() wraps every function property of socketStore.socketManager (own + 3 prototype levels, in place) plus sm.ws.send; outside our call windows the wrappers are pure pass-throughs.
+  * armRepair(uid) arms a 1.2s window around EACH of our calls (async action bodies fire their RPC a microtask or two after the sync call returns) and sets the repair context (jobUid / projectUid / expUid from the job row).
+  * repairUidFields: fills undefined/null/'' uid-family fields (job_uid/job_id/job/uid/id, project_*/pid, experiment_*/workspace_*) from the armed context; undoes value confusions (job uid sitting in the project slot etc.); recursive to depth 3; now returns whether it changed anything.
+  * repairArgs: (1) repairs payload objects, (2) positional under-supply — a 2-param action called with 1 arg forwards (job_uid, undefined); when the job-uid string sits in an earlier slot and a later one is undefined, rebuilds the (project_uid, job_uid) pair (the exact order the user's server error proved for get_job_streamlog); otherwise fills the first undefined positional with a held uid.
+  * payloadIncomplete + swallow: after repair, any argument object still carrying an EMPTY uid field → the RPC is swallowed (never reaches the server) — the "missing 2 required positional arguments" TypeError can never fire. Verified end-to-end in the harness with a null-project context.
+  * completeJobSlotOnConfusion (ws.send level): JSON.stringify drops undefined keys, so a stringified confusion frame shows project_uid=<job uid> with NO job key; ONLY that exact pattern gets both keys completed (an SPA-built correct frame never matches, so no unexpected-kwarg errors).
+- All three loader call sites (calibration, per-job retry, paced rescue) go through shapesFor(uid)[winning.shapeIdx] + armRepair(uid) (v3.33 structure restored); removed the v3.34 synth block (parseFnParams/knownArgFor/payloadKeyParamMap/synthCallArgs); winning = {action, shapeIdx, mode} again.
+- Console honesty: ensureRpcPatch prints its arming line; the win line appends the repair count; the no-winner diagnostics print "rpc repairs during scan"; the loader-source diagnostic now says the pinia wrapper is EXPECTED (and why v3.34 could never work).
+- Version markers: script header v3.35 + full header explanation; kept the v3.34 image-reject-reasons server/script code (harmless, orthogonal).
+
+Stage Summary:
+- 0-images regression ELIMINATED: loaders receive guessed shapes again (the historically proven mechanism), now with RPC-boundary argument completion so half-empty payloads never reach the server.
+- ServerError popups stay dead — not by refusing to call (v3.34's dead end) but by repairing the outgoing RPC (fills, swaps, positional-pair rebuild, swallow-when-uncompletable).
+- SPA's own traffic is never touched: repairs run only inside the 1.2s armed window around our calls and only edit incomplete/misplaced uid fields.
+- Harness .harness/v335-rpc-repair.js 26/26 — end-to-end against a REAL require('pinia') store (the v3.34 blind spot): wrapper-forwarded getLogsByJob(uid) reaches the wire (v3.34 sent zero args), the under-supplied streamlog payload is repaired to {project_uid: P222, job_uid: J606}, uncompletable payloads are swallowed, unarmed SPA calls pass byte-identical, ws confusion frames are completed, all three replay sites use winning.shapeIdx. Stale v334-synth.js deleted (its subject functions are gone).
+- Verification: node --check clean; bun run lint clean; dev.log clean; agent-browser E2E — page renders with zero errors, Copy Capture Script yields the v3.35 script (144,077 bytes; contains ensureRpcPatch/armRepair/shapesFor/repairArgs, no synthCallArgs), history Restore loads the 593-job capture, footer sits exactly at document bottom with no overlap (bodyScrollH=4373=footerBottom), desktop+mobile screenshots saved (.harness/v335-panel.png / v335-mobile.png).
+- Artifacts: smart-capture-panel.tsx (v3.35), .harness/v335-rpc-repair.js, README.md (v3.35 entry), worklog.md (this entry). Pushed to GitHub as v3.35.
