@@ -1741,3 +1741,21 @@ Work Log:
 
 Stage Summary:
 - The 404 console spam on this user's build drops from thousands of lines to exactly 8 (one staggered calibration burst), the HTTP fallback self-disables for the rest of the capture, the WS rescue no longer spikes the server, and the CryoSmart freeze + "Capture stalled" chain is defused. Script is v3.31; re-copy from the Smart Capture panel.
+
+---
+Task ID: 41
+Agent: main (Z.ai Code)
+Task: User's capture log showed (a) repeated "[CryoSmart] Image store accepted 0 of 6 image(s) in a batch (size cap or invalid data URL)" and the strip stuck at "uploading image previews 0/254" after 24/24 jobs scanned; (b) the one-time J42 8-path 404 burst (v3.31 working as designed); (c) asked to push the fixes to GitHub.
+
+Work Log:
+- Root-caused the 0/N previews bug: THREE cooperating mismatches.
+  1. Client sniff fallback chain (magic bytes → Content-Type → extension hint refMimeHint) built data URLs for bodies the app server ALWAYS re-sniffs and rejects (server = raster-only png/jpeg/gif/bmp/webp/tiff/ico). HTML/JSON error bodies dressed as data:image/png → POST → "accepted 0 of N" × every batch, imgUploaded stuck at 0.
+  2. AVIF missing from BOTH sniffers (some builds serve AVIF previews) — same reject-all symptom.
+  3. Server dedupe: re-POSTed fileids (after a lost response + retry) counted stored:0 → phantom "0 of N accepted" + N false failures.
+- v3.32 fix (script): client sniffer now mirrors the server accept table EXACTLY (raster-only, +AVIF, -SVG); refMimeHint + Content-Type fallbacks removed from the upload decision — bytes the server will reject are never POSTed. One-time diagnostic for non-image bodies: URL, HTTP status, Content-Type, size, first 16 bytes hex + 120-char text preview, and a plain-language guess (expired-login HTML / JSON error envelope / SVG). Image ENDPOINT DISCOVERY with winner/dead memory: default /api/log_image/<id>; on failure ONE probe pass tries (a) DOM template — src of an actually-rendered <img> containing a pending fileid, query params (auth tokens) preserved, then (b) statics /api/image/<id>, /api/log_image?fileid=<id>, /api/file/<id>, /api/files/<id>; the first route delivering raster bytes wins and is used exclusively. Final zero-image warning rewritten to point at the diagnostic.
+- Server fix (import-session-store.ts): AVIF sniff branch added; deduped fileids now count as stored (idempotent re-POST).
+- Validation: node --check passes; behavioral harness (mocked fetch/Blob/DOM) — 6 scenarios pass: default-route PNG (1 req), AVIF accepted, HTML-login default + /api/image alternate discovered (winner-only 1 req/image afterwards), all-404 (5 probe reqs once, then 0 forever), SVG → null + one diagnostic, DOM-template route with ?token=xyz preserved and reused for other fileids. Lint clean; tsc clean for edited files (pre-existing unrelated errors in examples/skills/tools only); agent-browser page + Copy button error-free.
+- Git: local and origin/main had diverged (local = superset with v3.31 + earlier unpushed work; remote had named v3.27-v3.30 commits with identical file content). Merged origin/main (all conflicts resolved with local versions — verified script still valid, no conflict markers), committed fix(v3.31+v3.32) + merge, pushed 9031597..6503096 to main.
+
+Stage Summary:
+- "Image store accepted 0 of N" + stuck 0/254 previews fixed by client/server sniffer alignment (+AVIF), honest non-image diagnostics, image-route discovery (DOM template with token params + static alternates), and idempotent server dedupe counting. Everything pushed to github.com/Jing0715-fer/cryosmart-lineage-tracer-web main (6503096).
