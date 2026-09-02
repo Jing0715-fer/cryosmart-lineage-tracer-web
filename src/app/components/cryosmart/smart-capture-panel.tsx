@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.36 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.37 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -336,6 +336,30 @@ export function SmartCapturePanel() {
 // all-404 verdict is remembered in localStorage for 14 days, so runs
 // after the first fire ZERO 404 console lines (this build has no REST
 // log API — the real loader is the WS RPC path).
+// v3.37: REPLAY SELF-HEALING + HONEST PACING. Two field failures on the
+// 593-job build: (1) calibration delivered the CALIBRATION job's logs
+// (J606: 22 refs) but the per-job replay of the winning action×shape
+// delivered NOTHING for the 177 jobs scanned after it — "log image
+// fetch incomplete" — because a calibration win can be a FALSE
+// POSITIVE (the shape only worked for that job, or the delivery was
+// the SPA's own traffic caught by the growth-tail rule) and the replay
+// never questioned it: one shape, one call, 521 empty batches. (2) an
+// empty replay job still burned its full 1.5s + flat 20s slow-log wait
+// + 8s diff window — 521 × up to 28s ≈ hours of a strip that ticks ONE
+// job every 20-30s and reads as "stuck" (it was never deadlocked; it
+// was slow). Fixes: the replay tracks a WIN-MISS STREAK; after 3
+// straight empty jobs it rotates ALTERNATE argument shapes (2 per job,
+// round-robin across jobs so every shape gets coverage within a few
+// jobs) through the same winning action, and a shape that delivers is
+// PROMOTED to the winner on the spot (streak resets, promotion logs
+// once). The 20s slow-log second chance is TYPE-GATED (hetero/abinit/
+// class3d keep 20s, everyone else 6s). The per-job phase line carries a
+// live ETA ("scanning 108/521 · J63 (hetero_refine) · ~41 min left ·
+// 2.4s/job") and the 20-job progress lines carry a loader-health
+// counter — a dead loader is now VISIBLE ("loader delivering: 0/20"),
+// and a WebSocket liveness guard prints once if the SPA's socket is
+// CLOSED (with it, every replay fails silently — that line is the only
+// honest hint).
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -363,7 +387,7 @@ export function SmartCapturePanel() {
   // oscillator engages only while the tab is hidden — audible tabs are
   // exempt from intensive throttling AND tab freezing. Falls back to
   // plain setTimeout when Worker or blob URLs are unavailable.
-  console.log('[CryoSmart] Smart Capture v3.36 — worker-pacer timers (background tabs keep full speed), silent audio keep-alive, REST-probe verdict memory.');
+  console.log('[CryoSmart] Smart Capture v3.37 — replay self-healing (winner rotation + promotion), type-gated slow waits, live ETA, WS liveness guard.');
   var pacerWorker = null, pacerSeq = 0, pacerWaiters = {};
   try {
     var PACER_SRC = 'var t={};onmessage=function(e){var d=e.data;' +
@@ -2803,6 +2827,20 @@ export function SmartCapturePanel() {
     // pathological-server guard while never firing on a healthy scan.
     var t0 = Date.now(), BUDGET_MS = budgetMs || Math.max(300000, pending.length * 150000);
     var noLog = [];   // v3.11: jobs whose logs never became readable
+    // v3.37: replay self-healing state. winMissStreak counts consecutive
+    // jobs the winning action×shape delivered nothing for; once it reaches
+    // 3, the rotation kicks in (alternate shapes, 2 per job, round-robin
+    // across jobs). rotCursor walks the shape list; jobDurations feeds the
+    // per-job ETA; loaderHit/loaderTried feed the 20-job health line.
+    var winMissStreak = 0, rotCursor = 0, loaderHit = 0, loaderTried = 0;
+    var jobDurations = [];
+    var wsDeadNoted = false, wsAliveNoted = false;
+    function wsAlive() {
+      try {
+        var smw = socketStore && socketStore.socketManager && socketStore.socketManager.ws;
+        return !smw || smw.readyState === 1;   // no socket to check = don't guess dead
+      } catch (e) { return true; }
+    }
     for (var j = 0; j < pending.length; j++) {
       var uid2 = pending[j];
       if (scanned[uid2]) continue;
@@ -2821,9 +2859,35 @@ export function SmartCapturePanel() {
       // 20s, 8s diff windows, 15s HTTP probes) would otherwise freeze the
       // strip's counters on one number; naming the CURRENT job + type
       // keeps the activity line moving and tells the user exactly where
-      // the scan is.
+      // the scan is. v3.37: the line also carries a live ETA + per-job
+      // pace, so a long rest pass reads as SLOW, not stuck.
+      var jobStart = Date.now();
+      var etaBit = '';
+      if (j >= 5 && jobDurations.length) {
+        var avgMs = 0;
+        for (var jd = 0; jd < jobDurations.length; jd++) avgMs += jobDurations[jd];
+        avgMs = avgMs / jobDurations.length;
+        etaBit = ' · ~' + Math.max(1, Math.round(avgMs * (pending.length - j) / 60000)) + ' min left · ' +
+          (avgMs / 1000).toFixed(1) + 's/job';
+      }
       phase('scan', 'scanning ' + (j + 1) + '/' + pending.length + ' · ' + uid2 +
-        (typeByUid[uid2] ? ' (' + typeByUid[uid2] + ')' : ''));
+        (typeByUid[uid2] ? ' (' + typeByUid[uid2] + ')' : '') + etaBit);
+      // v3.37: WebSocket liveness guard. A closed socket makes every
+      // replay fail SILENTLY (the call goes out, nothing ever comes back)
+      // — without this line the only symptom is 500 empty batches.
+      if (!wsAlive()) {
+        if (!wsDeadNoted) {
+          wsDeadNoted = true; wsAliveNoted = false;
+          var wsRs = '?';
+          try { wsRs = socketStore.socketManager.ws.readyState; } catch (e) {}
+          console.warn('[CryoSmart] ⚠ The SPA\\'s WebSocket is CLOSED (readyState ' + wsRs + ') — every log-loader call is failing silently.' +
+            '\\n   The CryoSmart tab likely dropped its connection (server restart / idle timeout / the tab was frozen).' +
+            '\\n   Fix: reload the CryoSmart tab, then re-run this script — already-scanned jobs are re-harvested from cache (v3.9+).');
+        }
+      } else if (wsDeadNoted && !wsAliveNoted) {
+        wsAliveNoted = true;
+        console.log('[CryoSmart] WebSocket is open again — loader deliveries can flow.');
+      }
       // v3.28: per-job fault isolation — one throwing job (weird store
       // state, malformed log payload, an unguarded helper) used to kill the
       // WHOLE scan loop: the exception escaped to the phase-level catch and
@@ -2843,52 +2907,105 @@ export function SmartCapturePanel() {
           logs2 = await httpLogProbe(uid2);
         } else {
           // v3.33/v3.35: replay the winning action with the shape that won
-          // calibration; armRepair wraps the call so its outgoing RPC
+          // calibration; armRepair wraps each call so its outgoing RPC
           // payload is completed at the socket boundary for THIS job.
-          var arg = shapesFor(uid2)[winning.shapeIdx];
-          armRepair(uid2);
+          // v3.37: the replay now SELF-HEALS. A calibration win can be a
+          // false positive (the shape only delivered for THAT job, or the
+          // "delivery" was the SPA's own traffic caught by the growth-tail
+          // rule) — the old replayed it blindly for every job and streamed
+          // 500+ empty batches. Now a win-miss streak switches on shape
+          // ROTATION (2 alternates per job, round-robin across jobs so all
+          // shapes get coverage), and a shape that delivers is PROMOTED.
+          var bigLog = HUGE_LOG_RE.test(typeByUid[uid2] || '');
+          var shapes2 = shapesFor(uid2);
+          var slowWaitMs = bigLog ? 20000 : 6000;   // v3.37: type-gated (flat 20s × 521 empty jobs was hours)
           var base2 = snapshotLogs(stores);
-          try {
-            var rr = winning.action.fn.call(winning.action.store, arg);
-            if (rr && typeof rr.then === 'function') {
-              var rv = coerceLogs(await withTimeout(rr.catch(function() {}), 1500));
-              if (!rv) {
-                // v3.13: the 1.5s race timed out — huge-log jobs (hetero /
-                // abinit carry hundreds of entries) regularly exceed it.
-                // Keep waiting on the SAME promise for up to 20s before
-                // giving up; this was the systematic "hetero_refine /
-                // ab-init have no log images" failure: the loader worked,
-                // it was just slow.
-                // v3.29: name the wait — a 20s stall on one job is the
-                // scan's longest single silence, and without this line the
-                // strip looks frozen exactly there.
-                phase('scan', 'scanning ' + (j + 1) + '/' + pending.length + ' · ' + uid2 +
-                  ' — logs are slow to arrive, waiting up to 20s…');
-                rv = coerceLogs(await withTimeout(rr.catch(function() {}), 20000));
-              }
-              if (looksLikeLogs(rv)) logs2 = rv;
-            } else if (looksLikeLogs(coerceLogs(rr))) {
-              logs2 = coerceLogs(rr);
+          var plan = [winning.shapeIdx];
+          if (winMissStreak >= 3) {
+            var addedShapes = 0;
+            while (addedShapes < 2 && plan.length < shapes2.length) {
+              var cand = rotCursor % shapes2.length;
+              rotCursor++;
+              if (cand === winning.shapeIdx || plan.indexOf(cand) !== -1) continue;
+              plan.push(cand);
+              addedShapes++;
             }
-          } catch (e) {}
-          if (!logs2) {
-            // v3.13: huge-log job types get an 8s state-diff window (the
-            // 1.3s default expired mid-delivery for big payloads).
-            var bigLog = HUGE_LOG_RE.test(typeByUid[uid2] || '');
-            var deadline2 = Date.now() + (bigLog ? 8000 : 1300);
-            while (Date.now() < deadline2) {
-              var fresh2 = diffLogs(stores, base2);
-              if (fresh2.length) {
-                // v3.10: attribution needs evidence — an unattributable
-                // grown array (another job's late delivery) must not be
-                // smeared onto this job. Keep polling until the deadline,
-                // then fall through to the HTTP probe.
-                var pick2 = pickByUid(fresh2, uid2);
-                if (pick2) { logs2 = pick2.arr; break; }
+          }
+          var promotedIdx = -1;
+          for (var pi2 = 0; pi2 < plan.length && !logs2; pi2++) {
+            var arg = shapes2[plan[pi2]];
+            armRepair(uid2);
+            try {
+              var rr = winning.action.fn.call(winning.action.store, arg);
+              if (rr && typeof rr.then === 'function') {
+                var rv = coerceLogs(await withTimeout(rr.catch(function() {}), 1500));
+                if (!rv && pi2 === 0) {
+                  // v3.13: the 1.5s race timed out — huge-log jobs (hetero /
+                  // abinit carry hundreds of entries) regularly exceed it.
+                  // Keep waiting on the SAME promise before giving up; this
+                  // was the systematic "hetero_refine / ab-init have no log
+                  // images" failure: the loader worked, it was just slow.
+                  // v3.37: TYPE-GATED — huge types keep 20s, everything
+                  // else 6s (a flat 20s on every empty job is how a
+                  // 521-job rest pass took hours and read as "stuck").
+                  // v3.29: name the wait — a long stall on one job is the
+                  // scan's longest single silence, and without this line
+                  // the strip looks frozen exactly there.
+                  phase('scan', 'scanning ' + (j + 1) + '/' + pending.length + ' · ' + uid2 +
+                    ' — logs are slow to arrive, waiting up to ' + Math.round(slowWaitMs / 1000) + 's…');
+                  rv = coerceLogs(await withTimeout(rr.catch(function() {}), slowWaitMs));
+                }
+                if (looksLikeLogs(rv)) { logs2 = rv; promotedIdx = plan[pi2]; }
+              } else if (looksLikeLogs(coerceLogs(rr))) {
+                logs2 = coerceLogs(rr);
+                promotedIdx = plan[pi2];
               }
-              var st2 = readLogState(uid2);
-              if (st2) { logs2 = st2; break; }
-              await sleepMs(140);   // v3.36: rides the worker pacer
+            } catch (e) {}
+            if (!logs2) {
+              // v3.13: huge-log job types get an 8s state-diff window (the
+              // 1.3s default expired mid-delivery for big payloads).
+              // v3.37: rotated alternates probe with SHORT windows — they
+              // are candidates, not the established loader.
+              var dw = bigLog ? (pi2 === 0 ? 8000 : 4000) : (pi2 === 0 ? 1300 : 1000);
+              var deadline2 = Date.now() + dw;
+              while (Date.now() < deadline2) {
+                var fresh2 = diffLogs(stores, base2);
+                if (fresh2.length) {
+                  // v3.10: attribution needs evidence — an unattributable
+                  // grown array (another job's late delivery) must not be
+                  // smeared onto this job. Keep polling until the deadline,
+                  // then fall through to the HTTP probe.
+                  var pick2 = pickByUid(fresh2, uid2);
+                  if (pick2) { logs2 = pick2.arr; promotedIdx = plan[pi2]; break; }
+                }
+                var st2 = readLogState(uid2);
+                if (st2) { logs2 = st2; promotedIdx = plan[pi2]; break; }
+                await sleepMs(140);   // v3.36: rides the worker pacer
+              }
+            }
+          }
+          loaderTried++;
+          if (logs2) {
+            loaderHit++;
+            winMissStreak = 0;
+            if (promotedIdx !== winning.shapeIdx && promotedIdx >= 0) {
+              // v3.37: PROMOTION — a rotated shape delivered where the
+              // calibrated shape had stopped: make it the winner for the
+              // rescue pass + later jobs, and say so once per run.
+              console.log('[CryoSmart] Loader argument shape ' + (promotedIdx + 1) + ' delivered for ' + uid2 +
+                ' where the calibrated shape had stopped — promoting it to the winning shape for the remaining jobs.');
+              winning.shapeIdx = promotedIdx;
+            }
+          } else {
+            winMissStreak++;
+            if (winMissStreak === 12) {
+              console.warn('[CryoSmart] ⚠ The winning log loader ("' + winning.action.name + '", shape ' +
+                (winning.shapeIdx + 1) + ', mode ' + winning.mode + ') has now delivered NOTHING for 12 straight jobs ' +
+                (wsAlive() ? 'while the SPA\\'s WebSocket is OPEN' : 'and the SPA\\'s WebSocket is CLOSED') +
+                '.' +
+                '\\n   Rotated shapes were tried too (2 per job). If these jobs DO have log images, the loader needs a' +
+                '\\n   different action or argument shape this script has not guessed — paste this console block' +
+                '\\n   (plus the "Log loader candidates:" line from the top) back to the maintainer for an exact fix.');
             }
           }
           if (!logs2) logs2 = await httpLogProbe(uid2);   // per-job HTTP fallback
@@ -2911,7 +3028,11 @@ export function SmartCapturePanel() {
       if (!logs2 || !logs2.length) noLog.push(uid2);
       batch.push({ uid: uid2, images: imgs2 });
       await flushLogs(false);
-      if ((j + 1) % 20 === 0) console.log('[CryoSmart] Log scan progress: ' + (j + 1) + '/' + pending.length + ' job(s)...');
+      jobDurations.push(Date.now() - jobStart);
+      if (jobDurations.length > 30) jobDurations.shift();
+      if ((j + 1) % 20 === 0) console.log('[CryoSmart] Log scan progress: ' + (j + 1) + '/' + pending.length + ' job(s)...' +
+        (loaderTried ? ' · loader delivering: ' + loaderHit + '/' + loaderTried +
+          (loaderHit === 0 && winMissStreak >= 12 ? ' (the winning loader has NOT delivered in ' + winMissStreak + ' jobs — if the WS is open, paste this console back for a fix)' : '') : ''));
     }
 
     // v3.11: SLOW-LOG RESCUE. Huge-payload jobs (hetero_refine /

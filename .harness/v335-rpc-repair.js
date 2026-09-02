@@ -163,7 +163,9 @@ setTimeout(async () => {
   ok(/ensureRpcPatch\(\);\s*\n\s*outer:/.test(src), 'ensureRpcPatch runs before the calibration sweep');
   ok(/winning\.action\.fn\.call\(winning\.action\.store, shapesFor\(noLog\[n1\]\)\[winning\.shapeIdx\]\)/.test(src),
     'paced rescue replays the winning shape');
-  ok(/var arg = shapesFor\(uid2\)\[winning\.shapeIdx\];/.test(src), 'per-job retry replays the winning shape');
+  ok(/var shapes2 = shapesFor\(uid2\);/.test(src) && /var plan = \[winning\.shapeIdx\];/.test(src) &&
+     /var arg = shapes2\[plan\[pi2\]\];/.test(src) && /loaderTried\+\+;/.test(src),
+    'per-job retry replays the winning shape (v3.37 rotation plan: plan[0] is the winner, rotation + promotion on top)');
   ok(/armRepair\(calibUid\);/.test(src) && /armRepair\(uid2\);/.test(src) && /armRepair\(noLog\[n1\]\);/.test(src),
     'every loader call site is wrapped by armRepair');
 
