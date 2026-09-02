@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.33 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.34 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -287,6 +287,24 @@ export function SmartCapturePanel() {
 // only an unreachable app exits early. The trace-wait also settles 2s
 // on first sight of a log request so an auto-trace built from a
 // PARTIAL batch upload cannot pin the scan to a stale lineage list.
+// v3.34: SIGNATURE-AWARE LOADER CALLS + HONEST IMAGE-REJECT REASONS.
+// The loader calibration no longer calls pinia actions with guessed
+// argument shapes — on the real build one candidate is the
+// get_job_streamlog WS RPC, whose server function requires BOTH
+// project_uid and job_uid; no guessed shape carried both, the server
+// raised "TypeError: get_job_streamlog() missing 2 required positional
+// arguments: 'project_uid' and 'job_uid'", and the CryoSmart UI popped
+// ServerError dialogs mid-capture (several per run). Actions are now
+// called ONLY with the exact arguments their own signature declares
+// (param names parsed from source; minified builds are handled via the
+// payload object keys the source constructs), and actions whose required
+// arguments cannot be supplied are SKIPPED — a skipped loader costs
+// nothing, a blind call costs a server traceback in the user's face.
+// Called correctly, get_job_streamlog typically BECOMES the working log
+// loader (logs then stream in over the WS the SPA already uses).
+// /images responses now also carry WHY each rejected item bounced
+// (badUrl / oversize / nonRaster / storeFull), and the script's
+// "accepted 0 of N" warning prints the actual reasons instead of a guess.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -951,6 +969,142 @@ export function SmartCapturePanel() {
       return ra - rb;
     });
     return found;
+  }
+
+  // v3.34: SIGNATURE-AWARE LOADER CALLS ────────────────────────────
+  // The calibration step below CALLS pinia store actions inside the
+  // user's SPA. Until v3.33 it called each candidate with a fixed list
+  // of guessed shapes ([uid, {job_uid}, {uid}, [uid], row, {uid,
+  // project_uid}]). On the real build one candidate is get_job_streamlog
+  // — a WebSocket RPC whose server function requires BOTH project_uid
+  // AND job_uid. No guessed shape carried both, so the RPC left with
+  // neither and the server raised
+  //   TypeError: get_job_streamlog() missing 2 required positional
+  //   arguments: 'project_uid' and 'job_uid'
+  // which the CryoSmart UI surfaced as ServerError dialogs (several per
+  // capture). v3.34 never calls blind: the action's declared parameter
+  // list is parsed from its source, and for MINIFIED builds (param names
+  // mangled to e/t/…) the {project_uid: e, job_uid: t} object keys the
+  // source constructs are matched back to the parameter positions. We
+  // only call when every required argument can be supplied with a value
+  // we actually hold (job uid / project uid / experiment uid); anything
+  // else is SKIPPED with a console note — a skipped loader costs nothing,
+  // a blind call costs a server-side traceback dialog in the user's face.
+  function rowFor(uid) {
+    for (var i = 0; i < jobs.length; i++) {
+      if (jobs[i] && jobs[i].uid === uid) return jobs[i];
+    }
+    return null;
+  }
+
+  // → { destructured: bool, params: [{ name, optional }] } | null
+  function parseFnParams(fn) {
+    try {
+      var src = String(fn);
+      var m = src.match(/^\\s*(?:async\\s+)?function\\s*[\\w$]*\\s*\\(([^)]*)\\)/) ||
+              src.match(/^\\s*(?:async\\s+)?[\\w$]+\\s*\\(([^)]*)\\)\\s*\\{/) ||
+              src.match(/^\\s*(?:async\\s+)?\\(?([^)=]*)\\)?\\s*=>/) ||
+              src.match(/^\\s*(?:async\\s+)?\\(([^)]*)\\)\\s*(?:=>|\\{)/);
+      if (!m) return null;
+      var head = m[1] || '';
+      var dm = head.match(/^\\s*\\{([^}]*)\\}/);
+      if (dm) {
+        var dparams = [];
+        var dparts = dm[1].split(',');
+        for (var d = 0; d < dparts.length; d++) {
+          var dp = dparts[d].trim();
+          if (!dp) continue;
+          var dnm = dp.replace(/\\.\\.\\./g, '').split(':')[0].split('=')[0].trim();
+          if (dnm) dparams.push({ name: dnm, optional: /=/.test(dp) });
+        }
+        return { destructured: true, params: dparams };
+      }
+      var out = [];
+      var plist = head.split(',');
+      for (var i2 = 0; i2 < plist.length; i2++) {
+        var pp = plist[i2].trim();
+        if (!pp) continue;
+        var opt = /\\.\\.\\./.test(pp) || /=/.test(pp);
+        var nm = pp.replace(/\\.\\.\\./g, '').split('=')[0].split(':')[0].trim();
+        if (nm) out.push({ name: nm, optional: opt });
+      }
+      return { destructured: false, params: out };
+    } catch (e) { return null; }
+  }
+
+  // Map a declared parameter NAME to a value we hold. Returns undefined
+  // for identifiers we cannot supply (the caller must then skip the
+  // action if the parameter is required), null for a known identifier
+  // whose value is missing on this job.
+  function knownArgFor(name, uid, row) {
+    var k = String(name).toLowerCase();
+    if (k === 'job_uid' || k === 'jobuid' || k === 'job_id' || k === 'jobid' ||
+        k === 'job' || k === 'uid' || k === 'id') return uid;
+    if (k === 'project_uid' || k === 'projectuid' || k === 'project_id' ||
+        k === 'projectid' || k === 'project' || k === 'pid') return projectId;
+    if (k === 'experiment_uid' || k === 'experiment' || k === 'exp_uid' ||
+        k === 'experimentuid' || k === 'experiment_id' || k === 'workspace_uid') {
+      return (row && (row.experiment_uid || row.workspace_uid)) || null;
+    }
+    return undefined;
+  }
+
+  // Minified sources keep the PAYLOAD object keys (string literals
+  // survive mangling): {project_uid: e, job_uid: t}. Match each key back
+  // to the parameter that fills it, so positional arguments can be
+  // synthesized even when the parameter NAMES are gone.
+  var PAYLOAD_KEY_RE = /\\b(job_uid|jobUid|job_id|jobId|project_uid|projectUid|project_id|projectId|experiment_uid|experimentUid|workspace_uid)\\s*:\\s*([A-Za-z_$][\\w$]*)/g;
+  function payloadKeyParamMap(fn, params) {
+    var map = {};
+    try {
+      var src = String(fn);
+      var mm;
+      PAYLOAD_KEY_RE.lastIndex = 0;
+      while ((mm = PAYLOAD_KEY_RE.exec(src))) {
+        var key = mm[1].toLowerCase();
+        for (var i = 0; i < params.length; i++) {
+          if (params[i].name === mm[2]) { map[key] = mm[2]; break; }
+        }
+      }
+    } catch (e) {}
+    return map;
+  }
+
+  // → { args: [...] } when the call is safe, or { skip: '<reason>' }.
+  function synthCallArgs(fn, uid) {
+    var row = rowFor(uid);
+    var parsed = parseFnParams(fn);
+    if (!parsed) return { skip: 'its signature cannot be read (heavily minified)' };
+    var params = parsed.params;
+    if (!params.length) return { args: [] };
+    if (parsed.destructured) {
+      var obj = {};
+      for (var d = 0; d < params.length; d++) {
+        var v0 = knownArgFor(params[d].name, uid, row);
+        if (v0 === undefined || v0 === null) {
+          if (params[d].optional) continue;
+          return { skip: 'it requires "' + params[d].name + '", which this script cannot supply' };
+        }
+        obj[params[d].name] = v0;
+      }
+      return { args: [obj] };
+    }
+    var keyMap = payloadKeyParamMap(fn, params);
+    var args = [];
+    for (var i = 0; i < params.length; i++) {
+      var pn = params[i].name;
+      var mapped = null;
+      for (var kk in keyMap) {
+        if (keyMap[kk] === pn) { mapped = kk; break; }
+      }
+      var v = mapped !== null ? knownArgFor(mapped, uid, row) : knownArgFor(pn, uid, row);
+      if (v === undefined || v === null) {
+        if (params[i].optional) { args.push(undefined); continue; }
+        return { skip: 'it requires "' + pn + '", which this script cannot supply' };
+      }
+      args.push(v);
+    }
+    return { args: args };
   }
 
   function waitForLogs(uid, ms) {
@@ -1680,8 +1834,18 @@ export function SmartCapturePanel() {
             imgUploaded += storedCount;
             if (storedCount < items.length) {
               imgFailed += items.length - storedCount;
+              // v3.34: the server now reports WHY each item bounced —
+              // print the real reasons instead of the old guess.
+              var rj = r.rejects;
+              var bits = [];
+              if (rj) {
+                if (rj.badUrl) bits.push(rj.badUrl + ' malformed data URL(s)');
+                if (rj.oversize) bits.push(rj.oversize + ' over the ~4MB per-image cap');
+                if (rj.nonRaster) bits.push(rj.nonRaster + ' not raster image bytes (SVG/HTML/text bodies are rejected)');
+                if (rj.storeFull) bits.push('the session image store is full (~216MB)');
+              }
               console.warn('[CryoSmart] Image store accepted ' + storedCount + ' of ' + items.length +
-                ' image(s) in a batch (size cap or invalid data URL).');
+                ' image(s) in a batch' + (bits.length ? ' — ' + bits.join(', ') + '.' : ' (size cap or invalid data URL).'));
             }
           } else {
             throw new Error('server rejected the batch');
@@ -2083,7 +2247,7 @@ export function SmartCapturePanel() {
 
   // Loader calibration result + already-streamed bookkeeping, shared
   // across scan passes (initial request + the re-trace grace window below).
-  var winning = null;   // {action, shapeIdx, mode:'state'|'return'|'diff'} or {http:true}
+  var winning = null;   // {action, mode:'state'|'return'|'diff'} or {http:true}
   var scanned = {};
 
   async function scanLogs(budgetMs) {
@@ -2127,14 +2291,6 @@ export function SmartCapturePanel() {
       var deep = deepArrays ? deepLogsForIn(deepArrays, uid) : deepLogsFor(uid);
       if (deep && deep.length) return deep;
       return null;
-    }
-    function shapesFor(uid) {
-      var row = null;
-      for (var i = 0; i < jobs.length; i++) if (jobs[i].uid === uid) { row = jobs[i]; break; }
-      var sh = [uid, { job_uid: uid }, { uid: uid }, [uid]];
-      if (row) sh.push(row);
-      sh.push({ uid: uid, project_uid: projectId });
-      return sh;
     }
     // v3.29: ONE deep walk for the whole lazy-job classification (was one
     // PER pending job — 72 full store walks ≈ seconds of dead tree-
@@ -2195,33 +2351,51 @@ export function SmartCapturePanel() {
       console.log('[CryoSmart] Calibrating on job(s): ' + calibPool.slice(0, calibTries).join(', ') + ' (image-rich types first)');
     }
 
+    var synthSkipped = {};
     outer:
     for (var ci = 0; ci < calibTries && !winning; ci++) {
       var calibUid = calibPool[ci];
-      var shapes = shapesFor(calibUid);
       for (var a = 0; a < actions.length; a++) {
-        for (var s = 0; s < shapes.length; s++) {
-          // v3.29: per-combo progress — a full action×shape sweep can take
-          // a minute+ on builds with many candidate actions; without this
-          // the strip sat at "0/72 · 0%" the whole time.
-          phase('calibrating', 'calibrating on ' + calibUid + ' — action "' + actions[a].name + '" arg shape ' + (s + 1) + '/' + shapes.length + '…');
-          var base = snapshotLogs(stores);
-          var ret = null;
-          try {
-            ret = actions[a].fn.call(actions[a].store, shapes[s]);
-          } catch (e) {}
+        // v3.34: call each candidate ONLY with the arguments its own
+        // signature declares (synthCallArgs above). The old blind shape
+        // sweep ([uid, {job_uid}, {uid}, [uid], row, {uid, project_uid}])
+        // hit actions like get_job_streamlog — a WS RPC whose server
+        // function requires BOTH project_uid AND job_uid — with NEITHER,
+        // and the CryoSmart server UI popped ServerError dialogs:
+        //   TypeError: get_job_streamlog() missing 2 required positional
+        //   arguments: 'project_uid' and 'job_uid'
+        var plan = synthCallArgs(actions[a].fn, calibUid);
+        if (plan.skip) {
+          if (!synthSkipped[actions[a].name]) {
+            synthSkipped[actions[a].name] = 1;
+            console.log('[CryoSmart] Loader "' + actions[a].name + '" left uncalled — ' + plan.skip +
+              '. (A guessed-argument call has crashed the CryoSmart server UI with ServerError dialogs before;' +
+              ' the stream harvest, the deep scan and the HTTP fallback still cover the logs.)');
+          }
+          continue;
+        }
+        // v3.29: per-action progress — the calibration sweep can take a
+        // minute+ on builds with many candidate actions; without this
+        // the strip sat at "0/72 · 0%" the whole time.
+        phase('calibrating', 'calibrating on ' + calibUid + ' — action "' + actions[a].name + '"' +
+          (plan.args.length ? ' — calling with its declared arguments…' : ' (no arguments)…'));
+        var base = snapshotLogs(stores);
+        var ret = null;
+        try {
+          ret = actions[a].fn.apply(actions[a].store, plan.args);
+        } catch (e) {}
           // (a) the call RESOLVES to the logs directly (return value)
           if (ret && typeof ret.then === 'function') {
             var resolved = coerceLogs(await withTimeout(ret.catch(function() {}), 1500));
             if (looksLikeLogs(resolved)) {
-              winning = { action: actions[a], shapeIdx: s, mode: 'return' };
+              winning = { action: actions[a], mode: 'return' };
               batch.push({ uid: calibUid, images: extractLogImages(resolved, calibUid) });
               scanned[calibUid] = true;
               queueJobAssets(calibUid);
               break outer;
             }
           } else if (looksLikeLogs(coerceLogs(ret))) {
-            winning = { action: actions[a], shapeIdx: s, mode: 'return' };
+            winning = { action: actions[a], mode: 'return' };
             batch.push({ uid: calibUid, images: extractLogImages(coerceLogs(ret), calibUid) });
             scanned[calibUid] = true;
             queueJobAssets(calibUid);
@@ -2238,11 +2412,11 @@ export function SmartCapturePanel() {
               // ATTRIBUTABLE to the calibration job (evidence rules in
               // pickByUid). The loader may populate state without any
               // array naming this job — keep polling, then fall through
-              // to the next action/shape; the per-job scan re-tries via
+              // to the next action; the per-job scan re-tries via
               // deepLogsFor + HTTP anyway.
               var pick = pickByUid(fresh, calibUid);
               if (pick) {
-                winning = { action: actions[a], shapeIdx: s, mode: 'diff' };
+                winning = { action: actions[a], mode: 'diff' };
                 batch.push({ uid: calibUid, images: extractLogImages(pick.arr, calibUid) });
                 scanned[calibUid] = true;
                 queueJobAssets(calibUid);
@@ -2252,7 +2426,7 @@ export function SmartCapturePanel() {
             }
             var logs = readLogState(calibUid);
             if (logs) {
-              winning = { action: actions[a], shapeIdx: s, mode: 'state' };
+              winning = { action: actions[a], mode: 'state' };
               batch.push({ uid: calibUid, images: extractLogImages(logs, calibUid) });
               scanned[calibUid] = true;
               queueJobAssets(calibUid);
@@ -2260,7 +2434,6 @@ export function SmartCapturePanel() {
             }
             await new Promise(function(r) { setTimeout(r, 140); });
           }
-        }
       }
     }
 
@@ -2363,10 +2536,13 @@ export function SmartCapturePanel() {
         if (winning.http) {
           logs2 = await httpLogProbe(uid2);
         } else {
-          var arg = shapesFor(uid2)[winning.shapeIdx];
+          // v3.34: rebuild the action's signature-exact arguments for THIS
+          // job (the calibration no longer stores a shape index — every
+          // call is synthesized from the declared parameter list).
+          var plan2 = synthCallArgs(winning.action.fn, uid2);
           var base2 = snapshotLogs(stores);
           try {
-            var rr = winning.action.fn.call(winning.action.store, arg);
+            var rr = plan2.skip ? null : winning.action.fn.apply(winning.action.store, plan2.args);
             if (rr && typeof rr.then === 'function') {
               var rv = coerceLogs(await withTimeout(rr.catch(function() {}), 1500));
               if (!rv) {
@@ -2456,7 +2632,8 @@ export function SmartCapturePanel() {
         var rescueBatchN = 0;
         for (var n1 = 0; n1 < noLog.length; n1++) {
           try {
-            var nret = winning.action.fn.call(winning.action.store, shapesFor(noLog[n1])[winning.shapeIdx]);
+            var nplan = synthCallArgs(winning.action.fn, noLog[n1]);
+            var nret = nplan.skip ? null : winning.action.fn.apply(winning.action.store, nplan.args);
             if (nret && typeof nret.then === 'function') nret.catch(function() {});
           } catch (e) {}
           rescueBatchN++;

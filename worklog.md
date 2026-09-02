@@ -1783,3 +1783,22 @@ Stage Summary:
 - A failed staged upload no longer kills the Trace wait — the rescue keeps the session open and the script stays alive for the user's Trace Lineage click (the direct cause of this round's "no log image fetch").
 - Backward compatible: old script copies get the old replace/auto-complete semantics; new script requires re-copying from the panel (clipboard holds the old version).
 - Committed and pushed to origin/main.
+
+---
+Task ID: 41
+Agent: main (Z.ai Code)
+Task: Fix the CryoSmart server-side ServerError popups ("get_job_streamlog() missing 2 required positional arguments: 'project_uid' and 'job_uid'") triggered by the Smart Capture script, and make "/images accepted 0 of N" explain itself.
+
+Work Log:
+- Root cause: scanLogs' loader calibration called pinia store actions (findLogActions) with a fixed list of guessed shapes ([uid, {job_uid}, {uid}, [uid], row, {uid, project_uid}]). The real build's get_job_streamlog action wraps a WS RPC whose server function requires BOTH project_uid AND job_uid — no guessed shape carried both, so the RPC left with NEITHER: the server raised the TypeError above and its UI popped ServerError dialogs (several per run; the "get message: get_job_streamlog0.b8qwzul1k2" frames in the user's console are the error-channel echoes).
+- v3.34 script (smart-capture-panel.tsx): SIGNATURE-AWARE loader calls — parseFnParams (parses declared params incl. method-shorthand/arrow/destructured forms), knownArgFor (maps job/project/experiment uid identifier families to held values), payloadKeyParamMap (minified builds: {project_uid: e, job_uid: t} payload keys matched back to parameter positions), synthCallArgs (→ {args} only when every required param is satisfiable, {skip} otherwise). Calibration + per-job retry + paced rescue all call via fn.apply(store, synthCallArgs(...)); unsatisfiable actions are SKIPPED with a console note. shapesFor/shapeIdx deleted. Called correctly, get_job_streamlog typically BECOMES the working loader — which also removes the residual 8×404 REST-probe sweep (the HTTP fallback no longer runs).
+- postBatch now prints r.rejects (badUrl/oversize/nonRaster/storeFull) instead of the old "(size cap or invalid data URL)" guess.
+- App side: import-session-store.ts addImagesToSession counts per-batch rejects into session.lastImageRejects (interface field added); /images route response now carries `rejects`.
+- Confirmed the other symptoms in the user's log came from their STALE clipboard script: v3.33 already caps staged job batches (60 jobs/~250KB, ×3 retry — kills the preview-gateway 502+CORS seen on the 593-job one-shot), and v3.32's client-side raster sniffing already refuses to upload non-image bodies (with the nonRasterDiag explanation).
+- Template-literal escape trap re-hit during the edit (script regexes need DOUBLED backslashes in the TSX source) — fixed and guarded by node --check.
+- Verification: node /tmp/extract-script.js + node --check → SYNTAX OK; NEW .harness/v334-synth.js behavior harness 18/18 (unminified + minified + destructured get_job_streamlog → [projectId, uid]; passthrough fn(e) → skipped; zero-param/optional-with-default/rest forms; shapesFor+shapeIdx gone; exactly 3 fn.apply call sites; postBatch reads r.rejects; v3.34 marker). bun run lint clean. dev.log clean. E2E curl on the live dev server: POST /images with SVG + valid PNG + non-data-URL triplet → stored:1, rejects {badUrl:1, nonRaster:1, storeFull:false}. agent-browser: page renders, zero console/page errors, served script contains "Smart Capture v3.34" + synthCallArgs, Copy Capture Script button present; screenshot .harness/v334-panel.png.
+
+Stage Summary:
+- ServerError popups: eliminated — no loader action is ever called without its declared arguments; get_job_streamlog is now invoked correctly (project_uid + job_uid) and usually wins calibration.
+- "accepted 0 of N" is now honest end-to-end (server reject reasons → POST response → script console warning).
+- CRITICAL for the user: re-copy the capture script from the panel — the clipboard still holds the pre-v3.33 build that produced the CORS/502, accepted-0 and popup symptoms.

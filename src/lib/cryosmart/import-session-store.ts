@@ -72,6 +72,10 @@ export interface ImportSession {
   imageStore: Map<string, { mime: string; b64: string; name?: string }>;
   /** Approximate total size of `imageStore` (base64 chars ≈ bytes). */
   imageStoreBytes: number;
+  /** v3.34: why the most recent /images batch rejected items — surfaced
+   * in the POST response so the capture script's "accepted 0 of N"
+   * warning can print the real reasons instead of a guess. */
+  lastImageRejects?: { badUrl: number; oversize: number; nonRaster: number; storeFull: boolean };
   /** Log-image refs whose bytes were uploaded successfully. */
   logImagesUploaded: number;
   /** Jobs scanned for logs so far (progress numerator — DISTINCT jobs:
@@ -376,6 +380,10 @@ export function addImagesToSession(
   items: Array<{ fileid?: unknown; data?: unknown; name?: unknown }>
 ): number {
   let stored = 0;
+  // v3.34: per-batch reject reasons — the route returns these so the
+  // capture script can finally say WHY "accepted 0 of N" happened
+  // (bad data URL vs per-image cap vs store-full vs non-raster bytes).
+  const rejects = { badUrl: 0, oversize: 0, nonRaster: 0, storeFull: false };
   for (const item of items || []) {
     if (!item || typeof item !== "object") continue;
     const fileid = typeof item.fileid === "string" ? item.fileid : "";
@@ -390,10 +398,17 @@ export function addImagesToSession(
     // declared mime is not an image, trust the actual BYTES instead and
     // only store when they sniff as a real image format.
     const m = data.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/i);
-    if (!m) continue;
-    if (m[2].length > MAX_SINGLE_IMAGE_CHARS) continue;
+    if (!m) {
+      rejects.badUrl++;
+      continue;
+    }
+    if (m[2].length > MAX_SINGLE_IMAGE_CHARS) {
+      rejects.oversize++;
+      continue;
+    }
     if (session.imageStoreBytes + m[2].length > MAX_IMAGE_STORE_CHARS) {
       // Store is full — stop accepting new bytes (refs remain usable).
+      rejects.storeFull = true;
       break;
     }
     // SECURITY: ALWAYS trust the actual BYTES over the declared mime. The
@@ -403,7 +418,10 @@ export function addImagesToSession(
     // re-served same-origin (stored XSS via history import would make it
     // persistent). Previously any image/* declared mime bypassed sniffing.
     const sniffed = sniffImageMimeB64(m[2]);
-    if (!sniffed) continue; // not raster image bytes (text/xml/svg/pdf body) — reject
+    if (!sniffed) {
+      rejects.nonRaster++; // not raster image bytes (text/xml/svg/pdf body) — reject
+      continue;
+    }
     const mime = sniffed;
     session.imageStore.set(fileid, {
       mime,
@@ -413,6 +431,7 @@ export function addImagesToSession(
     session.imageStoreBytes += m[2].length;
     stored += 1;
   }
+  session.lastImageRejects = rejects;
   if (stored > 0) {
     session.logImagesUploaded = logImagesUploadedCount(session);
     session.updatedAt = Date.now();

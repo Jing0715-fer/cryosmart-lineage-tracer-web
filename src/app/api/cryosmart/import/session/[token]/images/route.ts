@@ -64,7 +64,14 @@ export async function POST(
   const stored = addImagesToSession(session, items);
 
   return NextResponse.json(
-    { ...sessionProgress(session), stored },
+    {
+      ...sessionProgress(session),
+      stored,
+      // v3.34: why rejected items bounced — the capture script prints
+      // these in its "accepted N of M" warning instead of guessing.
+      rejects:
+        session.lastImageRejects ?? { badUrl: 0, oversize: 0, nonRaster: 0, storeFull: false },
+    },
     { headers: IMPORT_SESSION_CORS }
   );
 }
