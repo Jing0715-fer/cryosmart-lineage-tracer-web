@@ -352,7 +352,13 @@ export interface ReportHtmlOptions {
    *  blob: context failed to resolve them, so every "UI title" image broke
    *  and silently self-hid (v3.19 regression: the old inline iframe
    *  resolved relative paths against the app origin; the new-tab blob
-   *  report does not). Non-app URLs are returned unchanged. */
+   *  report does not). Non-app URLs are returned unchanged.
+   *  v3.39: also absolutizes the PROXY-FALLBACK URL
+   *  (`/api/proxy-image/<fileid>?...`) — it used to be emitted as a bare
+   *  relative path, so the onerror chain's `this.src =
+   *  this.dataset.proxySrc` resolved it against the blob:'s opaque path
+   *  (broken) — refs-only images lost their only working fallback exactly
+   *  in the contexts (blob:/file:) where they need it. */
   function absolutizeSessionUrl(
     url: string,
     webAppOrigin?: string
@@ -360,7 +366,8 @@ export interface ReportHtmlOptions {
     if (
       webAppOrigin &&
       url.startsWith("/") &&
-      /^\/api\/cryosmart\/(?:import\/session|history)\/[^/?#]+\/image\//.test(url)
+      (/^\/api\/cryosmart\/(?:import\/session|history)\/[^/?#]+\/image\//.test(url) ||
+        /^\/api\/proxy-image\/[^/?#]+/.test(url))
     ) {
       return `${String(webAppOrigin).replace(/\/$/, "")}${url}`;
     }
@@ -1452,7 +1459,16 @@ export interface ReportHtmlOptions {
     // the "Open" button serves this same HTML from a blob: URL where
     // relative resolution fails outright.
     const renderSrc = absolutizeSessionUrl(remoteSrc, opts?.webAppOrigin);
-    const proxyUrl = buildProxyFallbackUrl(remoteSrc, opts?.session);
+    // v3.39: the proxy fallback must be ABSOLUTE too — a relative
+    // `/api/proxy-image/...` never resolves from the blob:/file: contexts
+    // this report lives in (the onerror handler assigns it verbatim to
+    // this.src), so the fallback was dead code exactly where it was
+    // needed. Absolutized, an app server that CAN reach CryoSmart (the
+    // user's LAN deployment) renders refs-only images even unembedded.
+    const proxyUrl = absolutizeSessionUrl(
+      buildProxyFallbackUrl(remoteSrc, opts?.session) || "",
+      opts?.webAppOrigin
+    );
     // SECURITY: the proxy fallback URL is carried in a data-* attribute and
     // read back via `this.dataset.proxySrc` — NEVER interpolated into the
     // JS string literal. `proxyUrl` embeds the raw fileid captured from the

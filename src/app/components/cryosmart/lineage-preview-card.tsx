@@ -132,6 +132,18 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
   const [embeddingProgress, setEmbeddingProgress] = useState<string>("");
   const [embedFailed, setEmbedFailed] = useState(false);
 
+  // v3.39: the ONLY window in which the prefetch's skip-direct-URLs behavior
+  // is valid (the capture script is still streaming image bytes into the
+  // session store). The bare `stagedImport` prop (token !== null) stays TRUE
+  // after the capture finishes — passing it onward made the post-capture
+  // embed skip every direct `http://<cryosmart>` URL forever, so a refs-only
+  // (or partially uploaded) capture embedded NOTHING in the live view while
+  // a refresh+restore embedded the same URLs through the app-server proxy
+  // (the user's "report images only appear after restore" bug). Computed at
+  // component level so BOTH the embed effect and the graph modal's
+  // pre-embed (LineageGraph's skipDirectCryosmart) share the same window.
+  const captureStreaming = stagedImport === true && importStatus === "polling";
+
   useEffect(() => {
     // v3.20: `session` is NO LONGER required — restored-from-history
     // captures (no live session) still prefetch their app-served history
@@ -161,7 +173,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
     // capture to settle (status leaves "polling"), then embed ONCE against
     // the final summary. Restored-history / non-staged captures have no
     // stream to wait for and embed immediately.
-    if (stagedImport && importStatus === "polling") {
+    if (captureStreaming) {
       setEmbeddedImages(null);
       setEmbedFailed(false);
       setEmbeddingProgress("Report images embed automatically once the capture finishes…");
@@ -183,7 +195,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
         lastProgressMessage = p.message ?? "";
         setEmbeddingProgress(p.message ?? "Embedding images…");
       }
-    }, { stagedImport })
+    }, { stagedImport: captureStreaming })
       .then((map) => {
         if (cancelled) return;
         const count = Object.keys(map).length;
@@ -199,7 +211,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
     return () => {
       cancelled = true;
     };
-  }, [summary, session, stagedImport, reportStyle.imageMode, importStatus]);
+  }, [summary, session, stagedImport, reportStyle.imageMode, importStatus, captureStreaming]);
 
   const reportHtml = useMemo(() => {
     if (!summary) return "";
@@ -372,7 +384,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
           </TabsContent>
 
           <TabsContent value="graph" className="mt-3">
-            <LineageGraph summary={summary} session={session ?? null} stagedImport={stagedImport} />
+            <LineageGraph summary={summary} session={session ?? null} stagedImport={captureStreaming} />
           </TabsContent>
 
           <TabsContent value="fsc" className="mt-3">

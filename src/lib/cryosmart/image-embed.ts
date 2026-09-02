@@ -292,12 +292,17 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 const REPORT_LOG_IMAGE_LIMIT = 24;
 
 export interface PrefetchImagesOptions {
-  /** A staged Smart-Capture session is ACTIVE for this summary — the capture
-   *  script is (or was) streaming image BYTES into the session store, so
-   *  direct `http://<cryosmart>/api/log_image/...` URLs are skipped from the
-   *  prefetch entirely (see ImageEmbedOptions.skipDirectCryosmart): they
-   *  grind 10s proxy timeouts while their bytes are already on the way via
-   *  the session-image channel. */
+  /** A staged Smart-Capture session is ACTIVELY STREAMING for this summary —
+   *  the capture script is still uploading image BYTES into the session
+   *  store, so direct `http://<cryosmart>/api/log_image/...` URLs are
+   *  skipped from the prefetch entirely (see
+   *  ImageEmbedOptions.skipDirectCryosmart): they grind 10s proxy timeouts
+   *  while their bytes are already on the way via the session-image channel.
+   *  v3.39: pass this ONLY while the capture is live (importStatus ===
+   *  "polling"). Once the capture finishes the premise is void — no more
+   *  bytes will arrive — and the caller must pass false/undefined so
+   *  refs-only images still get embedded through the app-server proxy
+   *  (the live-vs-restore asymmetry bug). */
   stagedImport?: boolean;
   /** v3.24: external abort — the bundle builder's Stop button. Stops the
    *  worker pool from pulling new URLs and aborts in-flight fetches. */
@@ -386,25 +391,29 @@ export async function prefetchImagesForReport(
     return out;
   }
 
-  // Staged-capture short-circuit: skip direct CryoSmart http(s) URLs when a
-  // staged capture is active (explicit flag — covers the refs-only phase
-  // BEFORE the first bytes land, when no session-image URLs exist yet for
-  // the heuristic below to detect) or when ANY URL is a session-image URL
-  // (bytes uploaded by the capture script). In that mode the direct
+  // Staged-capture short-circuit: skip direct CryoSmart http(s) URLs ONLY
+  // while a staged capture is actively STREAMING (the caller passes
+  // stagedImport=true solely for that window). In that mode the direct
   // `http://<cryosmart>/api/log_image/...` URLs are near-worthless to
-  // prefetch: they route through the app server's proxy (10s abort each)
-  // which usually cannot reach the user's intranet at all, so a capture with
-  // a handful of not-yet-uploaded previews used to spend MINUTES grinding
-  // 502s while the already-uploaded session images waited behind them. An
-  // asset with BOTH variants embeds via its session URL (same picture), and
-  // an asset with ONLY a direct URL renders via the report's own src +
-  // proxy-fallback chain (hidden cleanly when unreachable) and upgrades to
-  // a session URL when its bytes land and the summary refreshes.
-  const isSessionImageUrl = (u: string) =>
-    /\/api\/cryosmart\/(?:import\/session|history)\/[^/?#]+\/image\//.test(u);
+  // prefetch: their bytes are about to arrive through the capture script's
+  // own session-image uploads, and each direct fetch routes through the app
+  // server's proxy (10s abort) which on many deployments cannot reach the
+  // user's intranet at all.
+  // v3.39 FIX: the flag is no longer passed once the capture finishes
+  // (status leaves "polling") — at that point no more bytes will EVER
+  // arrive, so skipping direct URLs left refs-only images permanently
+  // unembedded in the LIVE view while a fresh-page RESTORE embedded the
+  // exact same URLs through the proxy (the user's "report images only
+  // appear after refresh + restore" bug). Post-capture, direct URLs are
+  // fetched like any other (bounded by the 10s abort + the
+  // unreachable-proxy breaker below), which embeds them on instances whose
+  // server CAN reach CryoSmart and skips them honestly (remote links) where
+  // it cannot. The old `urlList.some(isSessionImageUrl)` heuristic is gone
+  // with it — it dropped the direct variants of mixed captures in RESTORED
+  // data too, long after any bytes could still arrive.
   const isDirectCryosmartUrl = (u: string) =>
     /^https?:\/\//i.test(u) && u.includes("/api/log_image/");
-  if (opts?.stagedImport || urlList.some(isSessionImageUrl)) {
+  if (opts?.stagedImport === true) {
     const before = urlList.length;
     const kept = Array.from(new Set(urlList.filter((u) => !isDirectCryosmartUrl(u))));
     const skipped = before - kept.length;
