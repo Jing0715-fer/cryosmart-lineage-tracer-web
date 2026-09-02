@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.31 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.32 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -258,6 +258,22 @@ export function SmartCapturePanel() {
 // this removes thousands of pointless GETs and their console 404 spam —
 // sustained 8-request bursts that could freeze a small intranet backend
 // and stall the whole capture behind the app's 10-minute stall detector.
+// v3.32: IMAGE-BYTE HONESTY + ENDPOINT DISCOVERY — the client sniffer
+// now mirrors the app server's accept table EXACTLY (raster only, +AVIF,
+// -SVG), so bytes the server would reject are never POSTed (the old
+// extension/Content-Type fallbacks dressed HTML/JSON/SVG bodies in a
+// plausible data:image/png URL — every batch then bounced as "Image
+// store accepted 0 of N" and the capture sat at "uploading image
+// previews 0/254" forever). A non-image body now triggers a ONE-TIME
+// diagnostic (status, Content-Type, first bytes as hex + text, and a
+// plain-language guess: expired-login HTML / JSON error / SVG). When
+// the default /api/log_image/<id> route fails, ONE probe pass learns
+// the build's REAL image URL: the DOM scan copies the src of an
+// actually-rendered <img> containing one of our fileids (query params —
+// auth tokens included — preserved), then static alternates
+// (/api/image/<id>, /api/log_image?fileid=<id>, /api/file/<id>,
+// /api/files/<id>); the first route delivering raster bytes wins and is
+// used exclusively afterwards.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -1367,6 +1383,18 @@ export function SmartCapturePanel() {
   // through FileReader yields data:application/octet-stream, which the app
   // server (v3.11 and older) rejected. A capture could stream 128 image
   // refs and store ZERO bytes, so the graph and report showed no images.
+  // v3.32: this sniffer now mirrors the APP SERVER's accept table EXACTLY
+  // (import-session-store sniffImageMimeB64: png/jpeg/gif/bmp/webp/tiff/
+  // ico/avif — raster only). SVG was removed: the server rejects SVG bytes
+  // (stored-XSS guard — a re-served image/svg+xml can carry <script>), and
+  // AVIF was added (some builds serve AVIF previews; the missing branch
+  // made every upload of them bounce as "Image store accepted 0 of N").
+  // Uploading bytes this table does not recognize is a WASTED POST — the
+  // old fallback chain (bytes → server Content-Type → extension hint)
+  // dressed non-image bodies (HTML/JSON error pages, SVG plots) in a
+  // plausible data:image/png URL and uploaded them anyway; the server
+  // re-sniffed, rejected, and the capture sat at "0/N previews" while
+  // the console filled with "accepted 0 of 6" warnings.
   function sniffImageMime(b) {
     if (!b || b.length < 4) return null;
     if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'image/png';
@@ -1378,41 +1406,9 @@ export function SmartCapturePanel() {
     if ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2A) ||
         (b[0] === 0x4D && b[1] === 0x4D && b[2] === 0x00)) return 'image/tiff';
     if (b[0] === 0x00 && b[1] === 0x00 && b[2] === 0x01) return 'image/x-icon';
-    // SVG is text: skip whitespace/BOM, then look for an xml/svg open tag.
-    for (var si = 0; si < Math.min(32, b.length); si++) {
-      var sc = b[si];
-      if (sc === 0x3C) {
-        var sHead = '';
-        for (var sk = si; sk < Math.min(si + 12, b.length); sk++) sHead += String.fromCharCode(b[sk]);
-        var sLo = sHead.toLowerCase();
-        if (sLo.indexOf('<svg') === 0 || sLo.indexOf('<?xml') === 0) return 'image/svg+xml';
-        break;
-      }
-      if (sc !== 0x20 && sc !== 0x09 && sc !== 0x0A && sc !== 0x0D && sc !== 0xEF && sc !== 0xBB && sc !== 0xBF) break;
-    }
-    return null;
-  }
-
-  // v3.12: the ref itself usually knows the type (filetype / filename
-  // extension) — the last-resort hint when neither bytes nor server tell us.
-  function refMimeHint(ref) {
-    if (!ref) return null;
-    var ft = typeof ref.filetype === 'string' ? ref.filetype.toLowerCase() : '';
-    if (ft.indexOf('image/') === 0) return ft;
-    var ftShort = ft === 'jpg' ? 'jpeg' : (ft === 'tif' ? 'tiff' : (ft === 'svg' ? 'svg+xml' : ft));
-    if (ftShort === 'png' || ftShort === 'jpeg' || ftShort === 'gif' || ftShort === 'bmp' ||
-        ftShort === 'webp' || ftShort === 'tiff' || ftShort === 'ico' || ftShort === 'avif' || ftShort === 'svg+xml') {
-      return 'image/' + ftShort;
-    }
-    var nm = String(ref.filename || ref.name || '').toLowerCase();
-    var dot = nm.lastIndexOf('.');
-    if (dot >= 0 && dot < nm.length - 1) {
-      var ext = nm.slice(dot + 1);
-      var extM = ext === 'jpg' ? 'jpeg' : (ext === 'tif' ? 'tiff' : (ext === 'svg' ? 'svg+xml' : ext));
-      if (extM === 'png' || extM === 'jpeg' || extM === 'gif' || extM === 'bmp' ||
-          extM === 'webp' || extM === 'tiff' || extM === 'ico' || extM === 'avif' || extM === 'svg+xml') {
-        return 'image/' + extM;
-      }
+    if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+      var brand = String.fromCharCode(b[8], b[9], b[10], b[11]);
+      if (brand === 'avif' || brand === 'avis') return 'image/avif';
     }
     return null;
   }
@@ -1455,54 +1451,194 @@ export function SmartCapturePanel() {
     });
   }
 
+  // v3.32: image ENDPOINT DISCOVERY (winner/dead memory — same pattern as
+  // the v3.31 log-probe). The hard-coded '/api/log_image/<id>' route is
+  // right on most builds, but some serve image bytes from a different
+  // route, or require a token query param only the SPA appends. When the
+  // default route disappoints (404, or a 200 body that does not sniff as
+  // a raster image), ONE probe pass tries, in order:
+  //   1. DOM template — if the SPA is RENDERING an image whose src
+  //      contains one of the pending fileids, copy that src verbatim as a
+  //      template (query params — auth tokens included — preserved) and
+  //      swap the fileid. This learns the EXACT URL the build really uses.
+  //   2. Static alternates: /api/image/<id>, /api/log_image?fileid=<id>,
+  //      /api/file/<id>, /api/files/<id>.
+  // The first builder whose response sniffs as raster WINS and is used
+  // exclusively afterwards (1 request per image). 404/405/501 marks a
+  // non-winning builder dead. The full probe runs at most once per
+  // capture; after that, no-winner builds fail fast and the v3.30 breaker
+  // skips the tail of the queue.
+  var imgUrlWin = null;          // winning builder (function fileid → URL)
+  var imgUrlDead = {};           // key → 1 (route absent on this build)
+  var imgUrlProbed = false;      // the one-time alternate probe ran
+  var imgNonRasterNoted = false; // the one-time non-image-body diagnostic ran
+
+  function imgDomTemplate(pendingIds) {
+    // Scan rendered <img> tags for one whose src embeds a pending fileid.
+    // blob:/data: srcs are unreadable templates — skipped.
+    try {
+      var imgs = document.querySelectorAll('img[src]');
+      for (var i = 0; i < imgs.length && i < 400; i++) {
+        var src = imgs[i].getAttribute('src') || '';
+        if (!src || src.indexOf('blob:') === 0 || src.indexOf('data:') === 0) continue;
+        for (var p = 0; p < pendingIds.length; p++) {
+          var fid = pendingIds[p];
+          var at = src.indexOf(fid);
+          if (at >= 0) return src.slice(0, at) + '\\u0000FID\\u0000' + src.slice(at + fid.length);
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
   function fetchImageData(ref) {
     if (!ref || !ref.fileid) return Promise.resolve(null);
+    var id = String(ref.fileid);
     var tries = 0;
-    function run() {
-      // v3.25: 45s → 30s per attempt — with retries the worst case per
-      // image is ~93s; a hung fetch must not eat the whole drain budget.
-      // v3.30: the deadline now covers the WHOLE attempt — headers, the
-      // BODY read (r.blob()/arrayBuffer()) and the base64 pass. v3.25's
-      // fetchT cleared its abort timer the moment HEADERS arrived, so a
-      // server that stalled mid-body left the body read pending FOREVER:
-      // every worker hung, zero bytes landed, zero failures were counted,
-      // and the strip froze on "uploading image previews 0/712" until the
-      // app's 10-minute stall detector declared the capture dead. The
-      // controller stays armed until the data URL is built — a stalled
-      // body now aborts at the deadline and feeds the normal retry path.
+
+    // One bounded GET → { status, ct, blob, url } (blob null unless 200).
+    function oneGet(url) {
       var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
       var tid = ctrl ? setTimeout(function() { try { ctrl.abort(); } catch (e2) {} }, 30000) : null;
       function clearT() { if (tid) { clearTimeout(tid); tid = null; } }
       var o = { credentials: 'include' };
       if (ctrl) o.signal = ctrl.signal;
-      var p = fetch('/api/log_image/' + encodeURIComponent(ref.fileid), o)
+      // v3.30: the deadline covers the WHOLE attempt — headers, the BODY
+      // read (r.blob()) and the base64 pass. A server that stalls mid-body
+      // aborts at the deadline and feeds the normal retry path (the v3.25
+      // timer that stopped at headers left stalled body reads pending
+      // forever and froze "uploading image previews 0/712").
+      return fetch(url, o)
         .then(function(r) {
-          if (r.ok) return r.blob();   // bounded: the armed abort signal rejects a stalled body read
-          if (r.status === 408 || r.status === 429 || r.status >= 500) {
-            throw new Error('HTTP ' + r.status);
-          }
-          return null;   // 404/403 — permanent, do not retry
-        })
-        .then(function(b) {
-          if (!b || b.size === 0 || b.size > IMG_MAX_BYTES) return null;
-          if (!b.arrayBuffer) return null;
-          return b.arrayBuffer().then(function(buf) {
-            var bytes = new Uint8Array(buf);
-            // Type priority: magic bytes > server Content-Type (when image/*)
-            // > the ref's own filetype/extension evidence.
-            var mime = sniffImageMime(bytes) ||
-              (b.type && b.type.indexOf('image/') === 0 ? b.type : null) ||
-              refMimeHint(ref);
-            if (!mime) return null;
-            return blobToDataUrl(b, mime, bytes);
+          var ct = '';
+          try { ct = (r.headers && r.headers.get) ? (r.headers.get('content-type') || '') : ''; } catch (e3) {}
+          if (!r.ok) return { status: r.status, ct: ct, blob: null, url: url };
+          return r.blob().then(function(b) {
+            return { status: r.status, ct: ct || b.type || '', blob: b, url: url };
           });
+        })
+        .then(
+          function(v) { clearT(); return v; },
+          function(e) { clearT(); throw e; }
+        );
+    }
+
+    function bytesOf(v) {
+      var b = v.blob;
+      if (!b || b.size === 0 || b.size > IMG_MAX_BYTES || !b.arrayBuffer) return Promise.resolve(null);
+      return b.arrayBuffer().then(function(buf) { return new Uint8Array(buf); });
+    }
+
+    // v3.32: ONE-TIME diagnostic for a 200 body that is not raster image
+    // bytes — the user SEES what the endpoint actually returned (login
+    // HTML, JSON error envelope, SVG text, empty…) instead of 40 silent
+    // "accepted 0 of N" upload warnings after the fact.
+    function nonRasterDiag(v, bytes) {
+      if (imgNonRasterNoted) return;
+      imgNonRasterNoted = true;
+      var hex = '';
+      for (var i = 0; bytes && i < Math.min(16, bytes.length); i++) {
+        hex += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16) + ' ';
+      }
+      var text = '';
+      if (bytes) {
+        for (var t = 0; t < Math.min(120, bytes.length); t++) {
+          var c = bytes[t];
+          text += (c >= 32 && c < 127) ? String.fromCharCode(c) : ((c === 10 || c === 13) ? ' ' : '\\u00b7');
+        }
+      }
+      var guess = '';
+      if (/html/i.test(v.ct || '') || /^\\s*<(?:!doctype|html)/i.test(text)) {
+        guess = '\\n  \\u2192 this is an HTML page, not image bytes — the CryoSmart session probably EXPIRED (re-login, then re-run this script).';
+      } else if (/json/i.test(v.ct || '') || /^[\\[{]/.test(text)) {
+        guess = '\\n  \\u2192 this is a JSON error envelope, not image bytes (wrong route for this build, or an auth/API error — read the text above).';
+      } else if (hex.indexOf('3c 73 76 67') >= 0 || text.indexOf('<svg') >= 0) {
+        guess = '\\n  \\u2192 this is an SVG (text) — the web app cannot store SVG previews (script-content guard), so these bytes are skipped.';
+      }
+      console.warn('[CryoSmart] Image endpoint returned a NON-IMAGE body:' +
+        '\\n  URL: ' + v.url + ' \\u2192 HTTP ' + v.status + ' \\u00b7 Content-Type: ' + (v.ct || '(none)') +
+        ' \\u00b7 ' + (v.blob ? v.blob.size : 0) + ' bytes' +
+        '\\n  first bytes (hex): ' + (hex.trim() || '(empty)') +
+        '\\n  as text: ' + (text ? '"' + text + '"' : '(binary)') + guess +
+        '\\n  Uploading such bodies is skipped (the web app would reject them anyway).');
+    }
+
+    // Try one builder; on 404 mark it dead and move on; on a non-raster
+    // 200 run the diagnostic and move on; on raster set the winner.
+    function tryBuilder(b) {
+      return oneGet(b.mk(id)).then(function(v) {
+        if (v.status === 404 || v.status === 405 || v.status === 501) {
+          if (b.key !== 'win') imgUrlDead[b.key] = 1;
+          return null;
+        }
+        if (v.status !== 200) throw new Error('HTTP ' + v.status);   // retryable
+        return bytesOf(v).then(function(bytes) {
+          var mime = bytes ? sniffImageMime(bytes) : null;
+          if (!mime) {
+            nonRasterDiag(v, bytes);
+            return null;   // v3.32: never upload bytes the app server will reject
+          }
+          if (b.key !== 'win') {
+            imgUrlWin = b.mk;
+            if (b.key !== 'log_image_path') {
+              console.log('[CryoSmart] Image bytes found on the "' + b.key + '" route' +
+                (b.key === 'dom_tpl' ? ' (copied from a rendered <img> tag — query params preserved)' : '') +
+                ' — using it for the remaining image fetches.');
+            }
+          }
+          return blobToDataUrl(v.blob, mime, bytes);
         });
-      return p.then(
-        function(v) { clearT(); return v; },
-        function(e) { clearT(); throw e; }
-      ).catch(function(e) {
-        // NOTE: attached INSIDE run() so every recursive retry re-arms its
-        // own catch (a catch outside run() would only cover attempt #1).
+      });
+    }
+
+    function probeAlternates() {
+      imgUrlProbed = true;
+      var domTpl = imgDomTemplate([id].concat(imgQueue.slice(0, 40).map(function(r2) { return r2 && r2.fileid ? String(r2.fileid) : ''; }).filter(Boolean)));
+      var cands = [];
+      if (domTpl) {
+        cands.push({
+          key: 'dom_tpl',
+          mk: function(fid) { return domTpl.split('\\u0000FID\\u0000').join(encodeURIComponent(fid)); }
+        });
+      }
+      var statics = [
+        ['image_path',  function(fid) { return '/api/image/' + encodeURIComponent(fid); }],
+        ['log_image_q', function(fid) { return '/api/log_image?fileid=' + encodeURIComponent(fid); }],
+        ['file_path',   function(fid) { return '/api/file/' + encodeURIComponent(fid); }],
+        ['files_path',  function(fid) { return '/api/files/' + encodeURIComponent(fid); }]
+      ];
+      for (var s = 0; s < statics.length; s++) {
+        if (!imgUrlDead[statics[s][0]]) cands.push({ key: statics[s][0], mk: statics[s][1] });
+      }
+      var p = Promise.resolve(null);
+      // Sequential — each candidate only runs while nothing has won.
+      cands.forEach(function(c) {
+        p = p.then(function(hit) {
+          if (hit || imgUrlWin) return hit;
+          return tryBuilder(c);
+        });
+      });
+      return p;
+    }
+
+    function attempt() {
+      if (imgUrlWin) {
+        return tryBuilder({ key: 'win', mk: imgUrlWin });
+      }
+      var first = !imgUrlDead['log_image_path']
+        ? Promise.resolve(tryBuilder({ key: 'log_image_path', mk: function(fid) { return '/api/log_image/' + encodeURIComponent(fid); } }))
+        : Promise.resolve(null);
+      return first.then(function(hit) {
+        if (hit) return hit;
+        if (imgUrlProbed) return null;   // alternates already tried once — fail fast
+        return probeAlternates();
+      });
+    }
+
+    function run() {
+      return attempt().catch(function(e) {
+        // RETRYABLE (network / 408 / 429 / 5xx) — backoff and re-attempt.
+        // 404s and non-image bodies resolved null above (permanent-ish).
         tries++;
         if (tries < IMG_FETCH_TRIES) {
           return sleepMs(800 * tries).then(run);
@@ -2438,11 +2574,14 @@ export function SmartCapturePanel() {
       '\\n   (or run it from the FINAL job\\'s page so it auto-traces).');
   } else if (imgUploaded === 0 && (logRefsStreamed || 0) > 0) {
     console.warn('[CryoSmart] ⚠ ' + logRefsStreamed + ' log-image refs were captured but ZERO image bytes uploaded —' +
-      '\\n   previews will be missing. The CryoSmart /api/log_image/ endpoint rejected every fetch' +
-      (imgBreakerTripped
-        ? '\\n   (the dead-endpoint breaker tripped — the endpoint stopped answering mid-capture).'
-        : '\\n   (expired session or removed files).') +
-      '\\n   Re-login to CryoSmart and re-run the script.' +
+      '\\n   previews will be missing. See the "Image endpoint returned a NON-IMAGE body" warning above:' +
+      '\\n   it shows what the image route actually answered (login HTML / JSON error / non-raster bytes).' +
+      (imgUrlWin
+        ? '\\n   (bytes WERE found on the "' + imgUrlWin('DIAG') + '" route — but most fetches still failed: expired session or removed files.)'
+        : (imgBreakerTripped
+          ? '\\n   (the dead-endpoint breaker tripped — the endpoint stopped answering mid-capture).'
+          : '\\n   (no working image route was found — the build serves image bytes somewhere this script could not learn).') ) +
+      '\\n   Re-login to CryoSmart and re-run the script (open one job detail view first — the DOM-scan route discovery copies the EXACT image URL the build uses).' +
       '\\n   Also keep this tab VISIBLE while a capture runs — backgrounded tabs are throttled by the browser.');
   } else if ((logRefsStreamed || 0) === 0 && knownRequested) {
     console.warn('[CryoSmart] ⚠ ZERO log images were found for the ' + knownRequested.length + ' traced job(s).' +

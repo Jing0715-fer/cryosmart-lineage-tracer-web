@@ -300,6 +300,17 @@ function sniffImageMimeB64(b64: string): string | null {
       if ((head[0] === 0x49 && head[1] === 0x49 && head[2] === 0x2a) ||
           (head[0] === 0x4d && head[1] === 0x4d && head[2] === 0x00)) return "image/tiff";
       if (head[0] === 0x00 && head[1] === 0x00 && head[2] === 0x01) return "image/x-icon";
+      // v3.32: AVIF (ftyp box with avif/avis brand) — some CryoSmart builds
+      // serve AVIF previews; the missing branch made the store reject every
+      // one of them ("Image store accepted 0 of N" + a capture stuck at
+      // "uploading image previews 0/N" with refs but zero bytes).
+      if (
+        head.length >= 12 &&
+        head[4] === 0x66 && head[5] === 0x74 && head[6] === 0x79 && head[7] === 0x70
+      ) {
+        const brand = String.fromCharCode(head[8], head[9], head[10], head[11]);
+        if (brand === "avif" || brand === "avis") return "image/avif";
+      }
     }
   } catch {
     // fall through — undecodable prefix is simply not a known image
@@ -327,7 +338,11 @@ function logImagesUploadedCount(session: ImportSession): number {
 /**
  * Merge one batch of uploaded image bytes (data URLs from the capture
  * script). Items: `{ fileid, data: "data:image/png;base64,...", name? }`.
- * Duplicates (same fileid) are skipped. Returns the number stored.
+ * v3.32: an item whose fileid is ALREADY stored counts as stored — the
+ * script re-POSTs a batch when its first POST's RESPONSE is lost (network
+ * blip), and the bytes landed fine; the old `continue` returned 0 for a
+ * batch that is fully present, which the script logged as "Image store
+ * accepted 0 of N" and counted as N failures.
  */
 export function addImagesToSession(
   session: ImportSession,
@@ -339,7 +354,10 @@ export function addImagesToSession(
     const fileid = typeof item.fileid === "string" ? item.fileid : "";
     const data = typeof item.data === "string" ? item.data : "";
     if (!fileid || !data) continue;
-    if (session.imageStore.has(fileid)) continue;
+    if (session.imageStore.has(fileid)) {
+      stored++;   // v3.32: idempotent re-POST — bytes already in the store
+      continue;
+    }
     // Accept well-formed base64 data URLs of ANY declared mime — the
     // declaring side may be a typeless server (octet-stream). When the
     // declared mime is not an image, trust the actual BYTES instead and
