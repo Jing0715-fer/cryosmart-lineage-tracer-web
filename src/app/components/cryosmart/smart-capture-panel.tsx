@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.35 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.36 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -324,6 +324,18 @@ export function SmartCapturePanel() {
 // positional arguments" ServerError dialogs stay gone. The SPA's own
 // calls are never touched (repair runs only inside the short window
 // around our calls, and only edits incomplete/misplaced uid fields).
+// v3.36: BACKGROUND-TAB PROOFING + QUIETER PROBES. Every wait in this
+// script (poll sleeps, probe stagger, retry backoffs, timeout aborts,
+// the 1.2s RPC-repair disarm) now rides a WEB-WORKER timer: Chrome
+// clamps main-thread setTimeout wake-ups to ~1/minute in tabs hidden
+// >5 minutes (the "capture stalls unless I switch back to the CryoSmart
+// tab" effect), while worker timers keep full speed. A near-silent
+// oscillator engages only while the tab is hidden — audible tabs are
+// exempt from intensive throttling AND tab freezing (the tab shows a
+// speaker icon while it runs in the background). The REST log probe's
+// all-404 verdict is remembered in localStorage for 14 days, so runs
+// after the first fire ZERO 404 console lines (this build has no REST
+// log API — the real loader is the WS RPC path).
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -340,6 +352,104 @@ export function SmartCapturePanel() {
   if (!socketStore || !socketStore.projectsInMap) {
     alert('CryoSmart data not loaded. Please wait for the page to fully load.'); return;
   }
+
+  // ── v3.36: WORKER-PACED TIMERS + AUDIO KEEP-ALIVE ────────────────────
+  // Chrome clamps main-thread setTimeout/setInterval wake-ups in tabs
+  // left hidden >5 minutes to ~1/minute ("intensive throttling") and may
+  // freeze them outright — that was the "capture stalls unless I switch
+  // back to the CryoSmart tab" effect. Every wait in this script now
+  // rides a WEB-WORKER timer (workers run on their own thread; their
+  // timers keep full speed in background tabs), and a near-silent
+  // oscillator engages only while the tab is hidden — audible tabs are
+  // exempt from intensive throttling AND tab freezing. Falls back to
+  // plain setTimeout when Worker or blob URLs are unavailable.
+  console.log('[CryoSmart] Smart Capture v3.36 — worker-pacer timers (background tabs keep full speed), silent audio keep-alive, REST-probe verdict memory.');
+  var pacerWorker = null, pacerSeq = 0, pacerWaiters = {};
+  try {
+    var PACER_SRC = 'var t={};onmessage=function(e){var d=e.data;' +
+      'if(d.op==="delay"){t[d.id]=setTimeout(function(){delete t[d.id];postMessage({op:"fire",id:d.id});},d.ms);}' +
+      'else if(d.op==="cancel"){if(t[d.id]){clearTimeout(t[d.id]);delete t[d.id];}}};';
+    pacerWorker = new Worker(URL.createObjectURL(new Blob([PACER_SRC], { type: 'text/javascript' })));
+    pacerWorker.onmessage = function(ev) {
+      var d = ev.data;
+      if (d && d.op === 'fire' && pacerWaiters[d.id]) {
+        var w = pacerWaiters[d.id];
+        delete pacerWaiters[d.id];
+        try { w(); } catch (e) {}
+      }
+    };
+    pacerWorker.onerror = function() {
+      // A dead worker must not strand waiters: flush them onto the
+      // main-thread timer and mark the pacer unavailable.
+      var olds = pacerWaiters; pacerWaiters = {};
+      pacerWorker = null;
+      for (var k in olds) { try { setTimeout(olds[k], 0); } catch (e) {} }
+    };
+  } catch (e) { pacerWorker = null; }
+  function pacerDelay(ms) {
+    return new Promise(function(r) {
+      if (!pacerWorker) { setTimeout(r, ms); return; }
+      var id = ++pacerSeq;
+      pacerWaiters[id] = r;
+      try { pacerWorker.postMessage({ op: 'delay', id: id, ms: ms }); }
+      catch (e) { delete pacerWaiters[id]; setTimeout(r, ms); }
+    });
+  }
+  function pacerTimeout(fn, ms) {
+    // Cancelable worker timer. Timeout-aborts must fire ON TIME in a
+    // background tab too — a clamped abort timer is how "hung" requests
+    // used to stay hung while the tab was hidden.
+    if (!pacerWorker) { var t = setTimeout(fn, ms); return { cancel: function() { clearTimeout(t); } }; }
+    var id = ++pacerSeq;
+    var done = false;
+    var h = { cancel: function() {
+      if (done) return;
+      done = true;
+      delete pacerWaiters[id];
+      try { pacerWorker.postMessage({ op: 'cancel', id: id }); } catch (e) {}
+    } };
+    pacerWaiters[id] = function() {
+      if (done) return;
+      done = true;
+      delete pacerWaiters[id];
+      try { fn(); } catch (e) {}
+    };
+    try { pacerWorker.postMessage({ op: 'delay', id: id, ms: ms }); }
+    catch (e) { delete pacerWaiters[id]; if (!done) { done = true; var t2 = setTimeout(fn, ms); } }
+    return h;
+  }
+  // Near-silent audio keep-alive, engaged ONLY while the tab is hidden.
+  var kaState = null, kaNoted = false;
+  function kaStart() {
+    if (kaState) return;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      var ctx = new AC();
+      var osc = ctx.createOscillator();
+      var g = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 189;    // low hum — inaudible at this gain
+      g.gain.value = 0.0004;        // ~-68 dBFS: non-zero frames (count as
+                                    // audio to Chrome), silent to any ear
+      osc.connect(g); g.connect(ctx.destination);
+      if (ctx.state === 'suspended') ctx.resume().catch(function() {});
+      osc.start();
+      kaState = { ctx: ctx, osc: osc };
+      if (!kaNoted) {
+        kaNoted = true;
+        console.log('[CryoSmart] Audio keep-alive on (this tab went to the background) — the tab shows a small speaker icon; that is what stops Chrome from throttling/freezing it.');
+      }
+    } catch (e) { kaState = null; }
+  }
+  function kaStop() {
+    if (!kaState) return;
+    try { kaState.osc.stop(); kaState.ctx.close(); } catch (e) {}
+    kaState = null;
+  }
+  function __csVis() { if (document.hidden) kaStart(); else kaStop(); }
+  try { document.addEventListener('visibilitychange', __csVis); } catch (e) {}
+  var kaFailsafe = pacerTimeout(kaStop, 40 * 60 * 1000);   // never hum past 40 min
 
   // ── Session info for map/image downloads ───────────────────────────
   var cryosmartOrigin = window.location.origin;
@@ -533,12 +643,15 @@ export function SmartCapturePanel() {
   // AbortController is available in every browser this script supports.
   function fetchT(url, opts, ms) {
     var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    var tid = ctrl ? setTimeout(function() { ctrl.abort(); }, ms || 30000) : null;
+    // v3.36: the abort rides the worker pacer — a backgrounded tab cannot
+    // have its timeout-aborts clamped to ~1/min (a clamped abort was how
+    // "hung" requests stayed hung in the background).
+    var tid = ctrl ? pacerTimeout(function() { ctrl.abort(); }, ms || 30000) : null;
     var o = opts || {};
     if (ctrl) o.signal = ctrl.signal;
     return fetch(url, o).then(
-      function(r) { if (tid) clearTimeout(tid); return r; },
-      function(e) { if (tid) clearTimeout(tid); throw e; }
+      function(r) { if (tid) tid.cancel(); return r; },
+      function(e) { if (tid) tid.cancel(); throw e; }
     );
   }
 
@@ -1033,7 +1146,7 @@ export function SmartCapturePanel() {
   var blindCallActive = false;   // true only inside the short window around one of OUR loader calls
   var blindCallCtx = { jobUid: null, projectUid: null, expUid: null };
   var rpcNotes = [];             // what the repair layer did (printed in diagnostics)
-  var repairTimer = null;
+  var repairGen = 0;   // v3.36: generation counter replaces the timer handle (worker-paced disarm)
   function noteRpc(msg) {
     if (rpcNotes.length < 40) rpcNotes.push(msg);
   }
@@ -1265,8 +1378,14 @@ export function SmartCapturePanel() {
     blindCallCtx.projectUid = projectId || null;
     blindCallCtx.expUid = (row && (row.experiment_uid || row.workspace_uid)) || null;
     blindCallActive = true;
-    if (repairTimer) clearTimeout(repairTimer);
-    repairTimer = setTimeout(function() { blindCallActive = false; repairTimer = null; }, 1200);
+    // v3.36: generation-counted, worker-paced disarm. A backgrounded tab
+    // could have the 1.2s window stretched to a minute+, leaving the
+    // repair layer armed over unrelated SPA traffic; the worker timer
+    // fires on time and only the LATEST arm's generation may disarm.
+    var gen = ++repairGen;
+    var disarm = function() { if (gen === repairGen) blindCallActive = false; };
+    try { pacerDelay(1200).then(disarm); }
+    catch (e) { setTimeout(disarm, 1200); }
   }
 
   function waitForLogs(uid, ms) {
@@ -1276,7 +1395,7 @@ export function SmartCapturePanel() {
         var logs = readLogState(uid);
         if (logs) return resolve(logs);
         if (Date.now() - t0 >= ms) return resolve(null);
-        setTimeout(check, 120);
+        pacerDelay(120).then(check);   // v3.36: worker-paced poll — background tabs keep the 120ms tick
       })();
     });
   }
@@ -1284,7 +1403,7 @@ export function SmartCapturePanel() {
   function withTimeout(p, ms) {
     return Promise.race([
       p,
-      new Promise(function(resolve) { setTimeout(function() { resolve(undefined); }, ms); })
+      pacerDelay(ms)   // v3.36: worker-paced (resolves undefined, as before)
     ]);
   }
 
@@ -1528,6 +1647,7 @@ export function SmartCapturePanel() {
   var logProbeConsecNull = 0;
   var logBreakerTripped = false;
   var logAllDeadNoted = false;
+  var logSkipNoted = false;   // v3.36: one-time note for the remembered REST verdict
   var LOG_BREAKER_N = 6;
 
   function httpLogCandidates(uid) {
@@ -1550,7 +1670,7 @@ export function SmartCapturePanel() {
       list.forEach(function(c, i) {
         // v3.31: stagger the burst 120ms apart — 8 simultaneous GETs on a
         // small local backend read as a spike (one freeze contributor).
-        setTimeout(function() {
+        pacerDelay(i * 120).then(function() {
           if (won) return;
           fetchT(c.url, { credentials: 'include' }, 15000)
             .then(function(r) {
@@ -1577,13 +1697,28 @@ export function SmartCapturePanel() {
               remaining--;
               if (remaining === 0 && !won) resolve(null);
             });
-        }, i * 120);
+        });
       });
     });
   }
 
   function httpLogProbe(uid) {
     if (logBreakerTripped) return Promise.resolve(null);
+    // v3.36: REMEMBERED VERDICT. If every REST candidate 404'd on an
+    // earlier run on this origin, the burst is skipped entirely — zero
+    // 404 console lines from run two onward. Auto-expires after 14 days
+    // (a CryoSmart update could gain a REST log API); delete the key
+    // 'cryosmartNoRestLogs' in the console to re-probe immediately.
+    try {
+      var rem = localStorage.getItem('cryosmartNoRestLogs');
+      if (rem && (Date.now() - Number(rem)) < 14 * 86400000) {
+        if (!logSkipNoted) {
+          logSkipNoted = true;
+          console.log('[CryoSmart] REST log probe skipped — every candidate 404\\'d on an earlier run on this server (remembered for 14 days; localStorage key "cryosmartNoRestLogs").');
+        }
+        return Promise.resolve(null);
+      }
+    } catch (e) {}
     var all = httpLogCandidates(uid);
     var winKey = null;
     for (var wk = 0; wk < all.length; wk++) {
@@ -1597,8 +1732,10 @@ export function SmartCapturePanel() {
     if (!live.length) {
       if (!logAllDeadNoted) {
         logAllDeadNoted = true;
+        try { localStorage.setItem('cryosmartNoRestLogs', String(Date.now())); } catch (e) {}
         console.warn('[CryoSmart] No HTTP log endpoint on this CryoSmart build — every probe path returned 404.' +
           '\\nThe HTTP fallback is now DISABLED for the rest of this capture (zero further probe requests).' +
+          '\\nVerdict remembered on this origin: future runs skip the probe burst entirely (localStorage key "cryosmartNoRestLogs", auto-expires in 14 days).' +
           '\\nThe WebSocket log loader still runs, and logs cached by opened job views are still harvested.');
       }
       return Promise.resolve(null);
@@ -1828,8 +1965,9 @@ export function SmartCapturePanel() {
     // One bounded GET → { status, ct, blob, url } (blob null unless 200).
     function oneGet(url) {
       var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-      var tid = ctrl ? setTimeout(function() { try { ctrl.abort(); } catch (e2) {} }, 30000) : null;
-      function clearT() { if (tid) { clearTimeout(tid); tid = null; } }
+      // v3.36: abort rides the worker pacer (fires on time in background tabs).
+      var tid = ctrl ? pacerTimeout(function() { try { ctrl.abort(); } catch (e2) {} }, 30000) : null;
+      function clearT() { if (tid) { tid.cancel(); tid = null; } }
       var o = { credentials: 'include' };
       if (ctrl) o.signal = ctrl.signal;
       // v3.30: the deadline covers the WHOLE attempt — headers, the BODY
@@ -2140,7 +2278,7 @@ export function SmartCapturePanel() {
         lastCheckAt = now;
         if (!throttleNoted && tickGap > 8000) {
           throttleNoted = true;
-          phase('drain', 'this CryoSmart tab is being throttled by the browser (it was left in the background) — capture steps run up to 60x slower; keep the tab visible for full speed');
+          phase('drain', 'timer wake-ups are being delayed by the browser (worker pacer fell back to main-thread timers — or this tab is frozen) — keep the tab visible for full speed');
         }
         if (watchRequest && now - lastReqPoll >= 3000) {
           lastReqPoll = now;
@@ -2184,7 +2322,7 @@ export function SmartCapturePanel() {
               : 'uploading image preview bytes — ' + imgUploaded + ' ok · ' + inFlight + ' still in flight') +
             ' · quiet for ' + Math.round((now - drainStart) / 1000) + 's');
         }
-        setTimeout(check, 250);
+        pacerDelay(250).then(check);   // v3.36: worker-paced — background tabs keep the 250ms tick
       })();
     });
   }
@@ -2341,7 +2479,10 @@ export function SmartCapturePanel() {
       .then(function(r) { return r.ok ? r.json() : null; })
       .catch(function() { return null; });
   }
-  function sleepMs(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
+  // v3.36: every sleep rides the WORKER pacer — main-thread setTimeout
+  // is clamped to ~1/minute in tabs hidden >5 minutes (the background
+  // stall the user reported). Worker timers keep full speed.
+  function sleepMs(ms) { return pacerDelay(ms); }
 
   if (LINEAGE_MODE) {
     var WAIT_MS = 20 * 60 * 1000;   // v3.7: 20 min — a slow first trace should not forfeit the log fetch
@@ -2594,7 +2735,7 @@ export function SmartCapturePanel() {
               queueJobAssets(calibUid);
               break outer;
             }
-            await new Promise(function(r) { setTimeout(r, 140); });
+            await sleepMs(140);   // v3.36: rides the worker pacer
           }
         }
       }
@@ -2747,7 +2888,7 @@ export function SmartCapturePanel() {
               }
               var st2 = readLogState(uid2);
               if (st2) { logs2 = st2; break; }
-              await new Promise(function(r) { setTimeout(r, 140); });
+              await sleepMs(140);   // v3.36: rides the worker pacer
             }
           }
           if (!logs2) logs2 = await httpLogProbe(uid2);   // per-job HTTP fallback
@@ -2827,7 +2968,7 @@ export function SmartCapturePanel() {
         await sleepMs(2000);
         if (!rescueThrottle && Date.now() - sleepStart > 8000) {
           rescueThrottle = true;
-          phase('rescue', 'this CryoSmart tab is being throttled by the browser (background tab) — the late-log re-check runs up to 60x slower; keep the tab visible for full speed');
+          phase('rescue', 'sleeps are over-running (worker pacer fell back to main-thread timers — or the tab is frozen) — keep the tab visible for full speed');
         }
         var rnow = Date.now();
         if (rnow - rescueBeat >= 25000) {
@@ -3017,7 +3158,7 @@ export function SmartCapturePanel() {
           ? '\\n   (the dead-endpoint breaker tripped — the endpoint stopped answering mid-capture).'
           : '\\n   (no working image route was found — the build serves image bytes somewhere this script could not learn).') ) +
       '\\n   Re-login to CryoSmart and re-run the script (open one job detail view first — the DOM-scan route discovery copies the EXACT image URL the build uses).' +
-      '\\n   Also keep this tab VISIBLE while a capture runs — backgrounded tabs are throttled by the browser.');
+      '\\n   v3.36: backgrounded tabs keep full speed now — worker-timer pacing + a silent audio keep-alive (the tab shows a speaker icon while hidden; that is intended).');
   } else if ((logRefsStreamed || 0) === 0 && knownRequested) {
     console.warn('[CryoSmart] ⚠ ZERO log images were found for the ' + knownRequested.length + ' traced job(s).' +
       '\\n   Those jobs may genuinely have no image logs — or this build keeps them where the' +
@@ -3045,6 +3186,12 @@ export function SmartCapturePanel() {
     " · multi-round/multi-iteration/numbered-series jobs keep only their FINAL round's images" +
     ' · non-image result files (pdf/xml/txt/…) are never captured' +
     '. Live page:', appUrl);
+
+  // v3.36: release the pacer worker + audio keep-alive (the speaker icon
+  // disappears; the capture is over).
+  try { kaStop(); if (kaFailsafe) kaFailsafe.cancel(); } catch (e) {}
+  try { if (typeof __csVis === 'function') document.removeEventListener('visibilitychange', __csVis); } catch (e) {}
+  try { if (pacerWorker) { pacerWorker.terminate(); pacerWorker = null; } } catch (e) {}
 })();
 `.trim();
 
