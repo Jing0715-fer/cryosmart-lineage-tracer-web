@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.30 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.31 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -248,7 +248,16 @@ export function SmartCapturePanel() {
 // capture shows its liveness in the tab bar; and the {all:true} log-request
 // widening is retried ×3 with its RESULT checked (a silently failed widen
 // used to leave the strip's denominator stuck at the traced lineage while
-// 500+ jobs streamed off the books).
+// 500+ jobs streamed off the books). v3.31: LOG-PROBE ENDPOINT MEMORY —
+// the 8 candidate REST log routes are probed ONCE, not once per job: a
+// 404/405/501 marks that route dead for the whole capture (definitive
+// "route absent"), the route that delivers is remembered and asked ALONE
+// on later jobs, all-dead or 6-straight-empty trips a breaker that stops
+// the HTTP fallback entirely, and the first burst is staggered 120ms per
+// path. On builds with no REST log API (all 8 paths 404 for every job)
+// this removes thousands of pointless GETs and their console 404 spam —
+// sustained 8-request bursts that could freeze a small intranet backend
+// and stall the whole capture behind the app's 10-minute stall detector.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -1152,42 +1161,126 @@ export function SmartCapturePanel() {
     return lines.join('\\n');
   }
 
-  function httpLogProbe(uid) {
-    var paths = [
-      '/api/job/get_job_logs?job_uid=' + encodeURIComponent(uid),
-      '/api/job/get_logs?job_uid=' + encodeURIComponent(uid),
-      '/api/job/get_job_log?job_uid=' + encodeURIComponent(uid),
-      '/api/job/logs?job_uid=' + encodeURIComponent(uid),
-      '/api/logs?job_uid=' + encodeURIComponent(uid),
-      '/api/log/get_logs?job_uid=' + encodeURIComponent(uid),
-      '/api/job/' + encodeURIComponent(uid) + '/logs',
-      '/api/logs?job=' + encodeURIComponent(uid)
+  // v3.31: endpoint NEGATIVE MEMORY + winner memory + circuit breaker.
+  // The probe used to fire all 8 paths for EVERY job that fell to it. On
+  // builds where the REST log routes do not exist (every path 404s — the
+  // user console fills with VM:313 GET ... 404 lines), a 500-job
+  // complete-report pass meant ~4000 pointless GETs, and the sustained
+  // 8-request bursts (plus the image byte workers) helped freeze small
+  // intranet backends — a frozen CryoSmart then hung the WS loader, the
+  // scan crawled at ~43s/job, and the app trip its 10-min stall detector.
+  // Now each path template is keyed and remembered:
+  //   - 404 / 405 / 501 → the route definitively does not exist on this
+  //     build: marked DEAD, never asked again this capture (transient 5xx
+  //     and network errors keep it alive).
+  //   - a path that DELIVERS logs is remembered as the WINNER and is
+  //     asked FIRST and ALONE on later jobs (1 request per job instead
+  //     of 8 on HTTP-winning builds).
+  //   - once every path is dead, httpLogProbe resolves null with ZERO
+  //     requests; after LOG_BREAKER_N consecutive live-path probes that
+  //     find nothing, the HTTP fallback is disabled for the capture.
+  var LOG_PATH_STATE = {};   // key → 'dead' | 'win'
+  var logProbeConsecNull = 0;
+  var logBreakerTripped = false;
+  var logAllDeadNoted = false;
+  var LOG_BREAKER_N = 6;
+
+  function httpLogCandidates(uid) {
+    var enc = encodeURIComponent(uid);
+    return [
+      { key: 'job_get_job_logs', url: '/api/job/get_job_logs?job_uid=' + enc },
+      { key: 'job_get_logs',     url: '/api/job/get_logs?job_uid=' + enc },
+      { key: 'job_get_job_log',  url: '/api/job/get_job_log?job_uid=' + enc },
+      { key: 'job_logs',         url: '/api/job/logs?job_uid=' + enc },
+      { key: 'logs_job_uid',     url: '/api/logs?job_uid=' + enc },
+      { key: 'log_get_logs',     url: '/api/log/get_logs?job_uid=' + enc },
+      { key: 'job_uid_logs',     url: '/api/job/' + enc + '/logs' },
+      { key: 'logs_job_param',   url: '/api/logs?job=' + enc }
     ];
-    // v3.29: fire ALL paths CONCURRENTLY (first valid hit wins) instead of
-    // chaining them one-by-one. The chain's worst case was 8 × 15s = 120s
-    // PER JOB on a slow/hanging server — with ~500 no-log jobs falling to
-    // the probe in the complete-report pass, that was hours of pure
-    // waiting. Concurrent: the wall-clock worst case is one 15s timeout,
-    // and on healthy servers the round trips overlap (8 sequential RTTs
-    // → ~1). The 8 GETs are read-only and trivial for the server; losing
-    // requests once a hit resolves is harmless.
+  }
+
+  function probePaths(list) {
     return new Promise(function(resolve) {
-      var remaining = paths.length, won = false;
-      paths.forEach(function(p) {
-        fetchT(p, { credentials: 'include' }, 15000)
-          .then(function(r) { return r.ok ? r.json() : null; })
-          .then(function(d) {
-            if (d) {
-              var arr = d.data || d.logs || (Array.isArray(d) ? d : null);
-              if (looksLikeLogs(arr) && !won) { won = true; resolve(arr); }
-            }
-          })
-          .catch(function() {})
-          .then(function() {
-            remaining--;
-            if (remaining === 0 && !won) resolve(null);
-          });
+      var remaining = list.length, won = false;
+      list.forEach(function(c, i) {
+        // v3.31: stagger the burst 120ms apart — 8 simultaneous GETs on a
+        // small local backend read as a spike (one freeze contributor).
+        setTimeout(function() {
+          if (won) return;
+          fetchT(c.url, { credentials: 'include' }, 15000)
+            .then(function(r) {
+              if (!r.ok) {
+                if (r.status === 404 || r.status === 405 || r.status === 501) {
+                  LOG_PATH_STATE[c.key] = 'dead';
+                }
+                return null;
+              }
+              return r.json().catch(function() { return null; });
+            })
+            .then(function(d) {
+              if (d) {
+                var arr = d.data || d.logs || (Array.isArray(d) ? d : null);
+                if (looksLikeLogs(arr) && !won) {
+                  won = true;
+                  LOG_PATH_STATE[c.key] = 'win';
+                  resolve(arr);
+                }
+              }
+            })
+            .catch(function() {})
+            .then(function() {
+              remaining--;
+              if (remaining === 0 && !won) resolve(null);
+            });
+        }, i * 120);
       });
+    });
+  }
+
+  function httpLogProbe(uid) {
+    if (logBreakerTripped) return Promise.resolve(null);
+    var all = httpLogCandidates(uid);
+    var winKey = null;
+    for (var wk = 0; wk < all.length; wk++) {
+      if (LOG_PATH_STATE[all[wk].key] === 'win') { winKey = all[wk].key; break; }
+    }
+    var live = [];
+    for (var li = 0; li < all.length; li++) {
+      if (LOG_PATH_STATE[all[li].key] === 'dead') continue;
+      live.push(all[li]);
+    }
+    if (!live.length) {
+      if (!logAllDeadNoted) {
+        logAllDeadNoted = true;
+        console.warn('[CryoSmart] No HTTP log endpoint on this CryoSmart build — every probe path returned 404.' +
+          '\\nThe HTTP fallback is now DISABLED for the rest of this capture (zero further probe requests).' +
+          '\\nThe WebSocket log loader still runs, and logs cached by opened job views are still harvested.');
+      }
+      return Promise.resolve(null);
+    }
+    var attempt;
+    if (winKey && live.length > 1) {
+      // Fast path: ask the endpoint that already delivered once, ALONE.
+      var winCand = null;
+      for (var wc = 0; wc < all.length; wc++) if (all[wc].key === winKey) { winCand = all[wc]; break; }
+      attempt = probePaths([winCand]).then(function(arr) {
+        if (arr) return arr;
+        var rest = live.filter(function(c) { return c.key !== winKey; });
+        return rest.length ? probePaths(rest) : null;
+      });
+    } else {
+      attempt = probePaths(live);
+    }
+    return attempt.then(function(arr) {
+      if (arr) { logProbeConsecNull = 0; return arr; }
+      logProbeConsecNull++;
+      if (!logBreakerTripped && logProbeConsecNull >= LOG_BREAKER_N) {
+        logBreakerTripped = true;
+        console.warn('[CryoSmart] HTTP log probe breaker tripped — ' + LOG_BREAKER_N +
+          ' consecutive probes found nothing. The HTTP fallback is disabled for this capture;' +
+          ' the WebSocket loader path continues.');
+      }
+      return null;
     });
   }
 
@@ -1947,14 +2040,18 @@ export function SmartCapturePanel() {
 
     if (!winning) {
       // HTTP fallback against every calibration candidate.
+      // v3.31: dead paths are remembered inside httpLogProbe — the first
+      // probe marks absent routes dead, later candidates cost ZERO requests.
       for (var pi = 0; pi < calibTries && !winning; pi++) {
-        phase('calibrating', 'probing HTTP log endpoints for ' + calibPool[pi] + ' (all 8 paths in parallel)…');
+        phase('calibrating', 'probing HTTP log endpoints for ' + calibPool[pi] + '…');
         var probe = await httpLogProbe(calibPool[pi]);
         if (probe) {
           winning = { http: true };
           batch.push({ uid: calibPool[pi], images: extractLogImages(probe, calibPool[pi]) });
           scanned[calibPool[pi]] = true;
           queueJobAssets(calibPool[pi]);
+        } else if (logBreakerTripped || logAllDeadNoted) {
+          break;   // no live route left to calibrate against
         }
       }
     }
@@ -2120,15 +2217,30 @@ export function SmartCapturePanel() {
       // legitimately cannot move — name it so it reads as deliberate.
       phase('rescue', noLog.length + ' job(s) delivered no readable logs yet — re-checking for late deliveries (up to 90s)…');
       console.log('[CryoSmart] ' + noLog.length + ' job(s) had no readable logs yet (large payloads can be slow) — re-checking for up to 90s…');
+      var rescueEnd = Date.now() + 90000;
       if (winning && !winning.http) {
+        // v3.31: PACED re-trigger. This used to fire EVERY no-log job's
+        // loader call in one tight synchronous loop — with 300+ no-log
+        // jobs that is 300+ WebSocket job-detail requests hitting the
+        // CryoSmart backend at the same instant, which froze small
+        // intranet servers (the frozen server then hung the scan and the
+        // app's stall detector fired "capture stalled"). Batches of 25
+        // with a 400ms pause keep the same coverage inside the 90s window
+        // while never spiking the server.
+        var rescueBatchN = 0;
         for (var n1 = 0; n1 < noLog.length; n1++) {
           try {
             var nret = winning.action.fn.call(winning.action.store, shapesFor(noLog[n1])[winning.shapeIdx]);
             if (nret && typeof nret.then === 'function') nret.catch(function() {});
           } catch (e) {}
+          rescueBatchN++;
+          if (rescueBatchN >= 25 && n1 < noLog.length - 1) {
+            rescueBatchN = 0;
+            await sleepMs(400);
+            if (Date.now() >= rescueEnd) break;   // window closed — stop firing
+          }
         }
       }
-      var rescueEnd = Date.now() + 90000;
       // v3.30: heartbeat through the rescue window. Its 2s sleeps make it
       // the scan's longest legitimately-silent stretch — and when this tab
       // is BACKGROUNDed, the browser clamps those sleeps to ~1/min, so a

@@ -1723,3 +1723,21 @@ Work Log:
 
 Stage Summary:
 - Smart Capture console script is now syntactically valid end-to-end; the VM48:2124:11 syntax error is fixed by a one-character escape correction in src/app/components/cryosmart/smart-capture-panel.tsx line 2275.
+
+---
+Task ID: 40
+Agent: main (Z.ai Code)
+Task: User reported (a) massive 404 spam from the capture script probing 8 REST log endpoints per job (VM62:313 GET /api/job/get_job_log?job_uid=J507 404 etc.), (b) CryoSmart itself sometimes freezing during capture, and (c) after the freeze the log-fetch progress stalls and the app shows "Capture stalled — the capture script stopped responding".
+
+Work Log:
+- Diagnosed the 404 flood: httpLogProbe() fired 8 concurrent GETs for EVERY job that fell back to it (loader calibration probes, per-job WS-failure fallback at two call sites, complete-report pass). On builds with no REST log API that is 8 × N jobs pointless requests + console 404 lines.
+- Identified two freeze drivers toward small intranet backends: (1) the sustained 8-request probe bursts, (2) the slow-log rescue re-trigger loop firing ALL no-log jobs' WebSocket loader calls in one tight synchronous loop (300+ simultaneous WS job-detail requests).
+- v3.31 fix 1 — endpoint NEGATIVE MEMORY: httpLogCandidates() gives each path a stable key; LOG_PATH_STATE maps key → 'dead' | 'win'. 404/405/501 marks a route dead for the whole capture (definitive route-absent); transient 5xx and network errors keep it alive. When every path is dead, httpLogProbe resolves null with ZERO requests and prints one explanatory warning.
+- v3.31 fix 2 — WINNER memory: the route that delivered logs is remembered and asked FIRST and ALONE on later jobs (1 request per job on HTTP-winning builds); only if it returns nothing do the remaining live paths fire.
+- v3.31 fix 3 — circuit breaker: 6 consecutive live-path probes with no result trip logBreakerTripped → HTTP fallback disabled for the capture (WS loader path unaffected). Calibration loop breaks early once all-dead/breaker.
+- v3.31 fix 4 — staggered bursts: first-time probe paths fire 120ms apart instead of simultaneously.
+- v3.31 fix 5 — PACED slow-log rescue: loader re-trigger now fires in batches of 25 with 400ms pauses (same 90s coverage, no WS spike); rescueEnd declared before use.
+- Validation: node --check on the extracted script passes. Behavioral harness (mocked fetchT/looksLikeLogs, extracted real functions): all-404 server → probe 1 fires 8 requests (staggered 120ms) then 0 forever + warning; winning-endpoint server → probe 1 finds winner, probe 2+ fires exactly 1 request; 5xx server → paths stay alive, breaker trips after 6 probes, later probes instant-null. bun run lint clean; dev.log recompiled; agent-browser: page loads, zero console/page errors, Copy Capture Script button works.
+
+Stage Summary:
+- The 404 console spam on this user's build drops from thousands of lines to exactly 8 (one staggered calibration burst), the HTTP fallback self-disables for the rest of the capture, the WS rescue no longer spikes the server, and the CryoSmart freeze + "Capture stalled" chain is defused. Script is v3.31; re-copy from the Smart Capture panel.
