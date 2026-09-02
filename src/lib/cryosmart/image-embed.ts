@@ -35,6 +35,80 @@ import { outputPreviewFallbackImages } from "./report-html";
  */
 const FETCH_TIMEOUT_MS = 10_000;
 
+/* v3.38: EMBED RESUME CACHE. The preview card's prefetch effect re-runs
+ * every time the live summary refreshes (which during an active capture
+ * is every ~1.5s as log-image counters move) — each re-run CANCELLED the
+ * in-flight prefetch and restarted it from scratch, so the embed progress
+ * read "Embedding image 1/N…" forever and never crossed a handful of
+ * images (the user's "嵌入 report 过程中卡住，进度一直是 0"). Only
+ * SUCCESSES are cached: a URL that 404s while its bytes are still
+ * uploading must be retried by a later pass (session-image bytes are
+ * immutable once stored, so a cached success can never go stale). The
+ * cap keeps a pathological restore from pinning unbounded memory
+ * (data URLs are big; 4000 × ~50 KB ≈ 200 MB worst case, never reached
+ * in practice — real reports reference ≤ 2–3k distinct URLs). */
+const EMBED_CACHE = new Map<string, string>();
+const EMBED_CACHE_CAP = 4000;
+
+function cacheEmbed(url: string, dataUrl: string): void {
+  if (EMBED_CACHE.has(url)) return;
+  if (EMBED_CACHE.size >= EMBED_CACHE_CAP) {
+    // Map preserves insertion order — evict the oldest entries (LRU-ish;
+    // re-insertions below refresh recency).
+    const it = EMBED_CACHE.keys();
+    for (let i = 0; i < 64 && EMBED_CACHE.size >= EMBED_CACHE_CAP; i++) {
+      const k = it.next().value as string | undefined;
+      if (k === undefined) break;
+      EMBED_CACHE.delete(k);
+    }
+  }
+  EMBED_CACHE.set(url, dataUrl);
+}
+
+/* v3.38: UNREACHABLE-PROXY BREAKER. A restored capture (or a capture whose
+ * byte uploads failed — refs only) carries DIRECT
+ * `http://<intranet>/api/log_image/...` URLs; embedding them routes through
+ * THIS app server's CryoSmart proxy, which often cannot reach the user's
+ * intranet at all (the preview gateway especially). Every such fetch then
+ * burns its full 10s abort timeout, so a 200-image embed grinds for
+ * MINUTES at "Embedding image 1/N…" — the "嵌入 report 过程中卡住，进度
+ * 一直是 0" experience. PROXY_FAIL_N consecutive proxied failures mark the
+ * origin unreachable for PROXY_DEAD_TTL_MS (module-level, so
+ * summary-refresh restarts skip the dead origin instantly instead of
+ * re-grinding); skipped images fall back to remote links in the report —
+ * the capture script's byte uploads remain the self-contained channel. */
+const PROXY_DEAD = new Map<string, number>(); // proxy-origin → markedAt ms
+const PROXY_DEAD_TTL_MS = 5 * 60_000;
+const PROXY_FAIL_N = 6;
+
+const SESSION_IMAGE_RE = /\/api\/cryosmart\/(?:import\/session|history)\/[^/?#]+\/image\//;
+
+/** The proxy-origin a URL would route through, or null when the fetch is
+ *  same-origin / data (those never grind on an unreachable proxy). */
+function proxyDeadKey(url: string, baseUrl?: string | null): string | null {
+  if (!url) return null;
+  if (/^data:/i.test(url)) return null;
+  if (SESSION_IMAGE_RE.test(url)) return null;
+  if (/^https?:\/\//i.test(url)) {
+    try { return new URL(url).origin; } catch { return null; }
+  }
+  // Relative CryoSmart API path ("api/log_image/…" or "/api/…") → proxied
+  // against the session's base URL.
+  if (/^\/?api\//i.test(url)) return baseUrl || "(relative-no-session)";
+  // Other same-origin paths (/demo/…) never proxy.
+  return null;
+}
+
+function isProxyDead(key: string): boolean {
+  const at = PROXY_DEAD.get(key);
+  if (at == null) return false;
+  if (Date.now() - at >= PROXY_DEAD_TTL_MS) {
+    PROXY_DEAD.delete(key);
+    return false;
+  }
+  return true;
+}
+
 export interface ImageEmbedOptions {
   /** Skip fetching DIRECT CryoSmart URLs (`http://<intranet>/api/log_image/…`)
    *  entirely — return null without a request. Used while a STAGED capture is
@@ -344,10 +418,13 @@ export async function prefetchImagesForReport(
   // Fetch with limited concurrency (8 at a time). Session-image URLs are
   // same-origin in-memory serves — fast; remote/proxied URLs are bounded by
   // the 10s abort timeout inside imageToBase64 so nothing hangs the pool.
+  // v3.38: proxied failures feed the unreachable-proxy breaker above.
   const CONCURRENCY = 8;
   let done = 0;
   let embedded = 0;
   let index = 0;
+  let proxiedFails = 0;
+  let skippedUnreachable = 0;
 
   async function worker() {
     while (index < urlList.length) {
@@ -356,6 +433,24 @@ export async function prefetchImagesForReport(
       if (opts?.signal?.aborted) return;
       const myIndex = index++;
       const url = urlList[myIndex];
+      // v3.38: cache hit → instant. Restarted prefetches (live summary
+      // refresh) resume from the previously embedded images instead of
+      // restarting at 0 — progress becomes monotonic across restarts.
+      const hit = EMBED_CACHE.get(url);
+      if (hit) {
+        out[url] = hit;
+        embedded++;
+        done++;
+        continue;
+      }
+      // v3.38: unreachable-proxy skip — a dead origin (this page session)
+      // is never re-ground; those images render as remote links.
+      const deadKey = proxyDeadKey(url, session?.baseUrl);
+      if (deadKey && isProxyDead(deadKey)) {
+        skippedUnreachable++;
+        done++;
+        continue;
+      }
       onProgress?.({ current: done, total: urlList.length, message: `Embedding image ${done + 1}/${urlList.length}…` });
       const dataUrl = await imageToBase64(session, url, {
         skipDirectCryosmart: opts?.stagedImport === true,
@@ -364,6 +459,18 @@ export async function prefetchImagesForReport(
       if (dataUrl) {
         out[url] = dataUrl;
         embedded++;
+        cacheEmbed(url, dataUrl);
+        if (deadKey) proxiedFails = 0;   // reachable after all — reset
+      } else if (deadKey) {
+        proxiedFails++;
+        if (proxiedFails >= PROXY_FAIL_N && !isProxyDead(deadKey)) {
+          PROXY_DEAD.set(deadKey, Date.now());
+          onProgress?.({
+            current: done,
+            total: urlList.length,
+            message: `App server cannot reach ${deadKey} — skipping its remaining image(s) (they render as remote links; the capture script's byte uploads are the self-contained channel)…`,
+          });
+        }
       }
       done++;
     }
@@ -380,8 +487,13 @@ export async function prefetchImagesForReport(
     total: urlList.length,
     message:
       embedded > 0
-        ? `${embedded}/${urlList.length} images embedded`
-        : "Image embedding failed — falling back to remote URLs",
+        ? `${embedded}/${urlList.length} images embedded` +
+          (skippedUnreachable > 0
+            ? ` · ${skippedUnreachable} skipped (app server cannot reach the CryoSmart intranet origin — those render as remote links; the capture script's byte uploads are the self-contained channel)`
+            : "")
+        : skippedUnreachable > 0
+          ? `No images embedded — ${skippedUnreachable} skipped (app server cannot reach the CryoSmart intranet origin; they render as remote links in the report)`
+          : "Image embedding failed — falling back to remote URLs",
   });
   return out;
 }

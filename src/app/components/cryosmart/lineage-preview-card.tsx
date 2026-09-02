@@ -149,20 +149,46 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
       setEmbedFailed(false);
       return;
     }
+    // v3.38: DEFER while the staged capture is still STREAMING. The live
+    // summary refreshes every ~1.5s during a capture (log counters move →
+    // /data re-applied → new summary identity), and every refresh used to
+    // CANCEL the in-flight prefetch and restart it from zero — with more
+    // images than a 1.5s window can embed, the progress line read
+    // "Embedding image 1/N…" for the whole capture ("嵌入 report 过程中
+    // 卡住，进度一直是 0"). Meanwhile the LIVE preview doesn't need the
+    // embed at all (session-image URLs render same-document); embedding
+    // only matters for the downloaded blob:/file: report. So: wait for the
+    // capture to settle (status leaves "polling"), then embed ONCE against
+    // the final summary. Restored-history / non-staged captures have no
+    // stream to wait for and embed immediately.
+    if (stagedImport && importStatus === "polling") {
+      setEmbeddedImages(null);
+      setEmbedFailed(false);
+      setEmbeddingProgress("Report images embed automatically once the capture finishes…");
+      return;
+    }
     let cancelled = false;
     // Synchronous reset before kicking off the async prefetch — same as
     // above, a dep-change transition.
     setEmbeddedImages(null);
     setEmbedFailed(false);
     setEmbeddingProgress("Prefetching images for report preview…");
+    // v3.38: remember the prefetch's LAST status line — when the map comes
+    // back empty it explains WHY (unreachable-proxy breaker: "N skipped —
+    // app server cannot reach <origin>…") instead of the old generic
+    // "No images could be embedded".
+    let lastProgressMessage = "";
     prefetchImagesForReport(session ?? null, summary, (p) => {
-      if (!cancelled) setEmbeddingProgress(p.message ?? "Embedding images…");
+      if (!cancelled) {
+        lastProgressMessage = p.message ?? "";
+        setEmbeddingProgress(p.message ?? "Embedding images…");
+      }
     }, { stagedImport })
       .then((map) => {
         if (cancelled) return;
         const count = Object.keys(map).length;
         setEmbeddedImages(map);
-        setEmbeddingProgress(count ? `${count} images embedded` : "No images could be embedded");
+        setEmbeddingProgress(count ? `${count} images embedded` : (lastProgressMessage || "No images could be embedded"));
       })
       .catch(() => {
         if (!cancelled) {
@@ -173,7 +199,7 @@ export function LineagePreviewCard({ summary, session, importInfo, importStatus,
     return () => {
       cancelled = true;
     };
-  }, [summary, session, stagedImport, reportStyle.imageMode]);
+  }, [summary, session, stagedImport, reportStyle.imageMode, importStatus]);
 
   const reportHtml = useMemo(() => {
     if (!summary) return "";

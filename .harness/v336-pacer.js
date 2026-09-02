@@ -22,7 +22,7 @@ function ok(cond, label) {
 }
 
 // ── 0. script-wide markers ──
-ok(/Smart Capture v3\.37/.test(src), 'v3.37 banner present');
+ok(/Smart Capture v3\.38/.test(src), 'v3.37 banner present');
 ok(src.indexOf('function pacerDelay') !== -1 && src.indexOf('function pacerTimeout') !== -1,
   'pacer functions present');
 ok(src.indexOf('cryosmartNoRestLogs') !== -1, 'REST-verdict localStorage key present');
@@ -145,33 +145,44 @@ const pacerFactory = new Function(
   const fakeConsole = { log: (...a) => spy.push(['log', a.join(' ')]), warn: (...a) => spy.push(['warn', a.join(' ')]) };
 
   const noLogs = function() { return false; };
-  // 3a: fresh origin — 8 probes fire, all 404; the NEXT call (all paths
-  // now dead — exactly like the calibration loop's 2nd/3rd candidate in
-  // production) writes the verdict + prints the explained warning.
+  // 3a (v3.38): DEFAULT-OFF — no opt-in key, no verdict: httpLogProbe must
+  // fire ZERO requests, resolve null, and explain the default-off in one
+  // console line (the 8×404 burst is gone from every fresh run).
   const recA = []; const lsA = mkLs({}); const hA = logFactory(lsA, fakeFetchT(recA), noLogs, fastPacer, fakeConsole);
   const rA = await hA.httpLogProbe('J602');
-  ok(rA === null, 'fresh run: all-404 probe resolves null');
-  ok(recA.length === 8, 'fresh run fires exactly 8 candidate GETs — ' + recA.length);
-  const rA2 = await hA.httpLogProbe('J602');
-  ok(rA2 === null && recA.length === 8, 'second call in the same run fires ZERO further requests');
-  ok(!!lsA._store['cryosmartNoRestLogs'], 'verdict written to localStorage');
-  ok(spy.some(s => s[0] === 'warn' && s[1].indexOf('Verdict remembered') !== -1),
-    'warning explains the remembered verdict');
+  ok(rA === null, 'default-off: probe resolves null without any request');
+  ok(recA.length === 0, 'default-off fires ZERO candidate GETs — ' + recA.length);
+  ok(spy.some(s => s[0] === 'log' && s[1].indexOf('not probed by default') !== -1),
+    'default-off is explained in one console line');
+  ok(!lsA._store['cryosmartNoRestLogs'], 'default-off writes no verdict (nothing was probed)');
 
-  // 3b: second run on the same origin — ZERO requests
-  const recB = []; const lsB = mkLs({ cryosmartNoRestLogs: String(Date.now()) });
+  // 3a-opt: OPTED-IN fresh origin (localStorage cryosmartProbeRestLogs='1')
+  // — 8 probes fire, all 404; the NEXT call (all paths now dead) writes the
+  // verdict + prints the explained warning (pre-v3.38 behavior, opt-in).
+  const recA2 = []; const lsA2 = mkLs({ cryosmartProbeRestLogs: '1' }); const hA2 = logFactory(lsA2, fakeFetchT(recA2), noLogs, fastPacer, fakeConsole);
+  const rA2 = await hA2.httpLogProbe('J602');
+  ok(rA2 === null, 'opted-in fresh run: all-404 probe resolves null');
+  ok(recA2.length === 8, 'opted-in fresh run fires exactly 8 candidate GETs — ' + recA2.length);
+  const rA3 = await hA2.httpLogProbe('J602');
+  ok(rA3 === null && recA2.length === 8, 'opted-in second call in the same run fires ZERO further requests');
+  ok(!!lsA2._store['cryosmartNoRestLogs'], 'opted-in: verdict written to localStorage');
+  ok(spy.some(s => s[0] === 'warn' && s[1].indexOf('Verdict remembered') !== -1),
+    'opted-in: warning explains the remembered verdict');
+
+  // 3b: opted-in + remembered verdict — ZERO requests
+  const recB = []; const lsB = mkLs({ cryosmartProbeRestLogs: '1', cryosmartNoRestLogs: String(Date.now()) });
   spy.length = 0;
   const hB = logFactory(lsB, fakeFetchT(recB), noLogs, fastPacer, fakeConsole);
   const rB = await hB.httpLogProbe('J606');
-  ok(rB === null && recB.length === 0, 'remembered verdict: ZERO probe requests on the next run');
+  ok(rB === null && recB.length === 0, 'opted-in remembered verdict: ZERO probe requests on the next run');
   ok(spy.some(s => s[0] === 'log' && s[1].indexOf('REST log probe skipped') !== -1),
-    'skip is explained in one console line');
+    'opted-in skip is explained in one console line');
 
-  // 3c: stale verdict (>14 days) — probes fire again
-  const recC = []; const lsC = mkLs({ cryosmartNoRestLogs: String(Date.now() - 15 * 86400000) });
+  // 3c: opted-in + stale verdict (>14 days) — probes fire again
+  const recC = []; const lsC = mkLs({ cryosmartProbeRestLogs: '1', cryosmartNoRestLogs: String(Date.now() - 15 * 86400000) });
   const hC = logFactory(lsC, fakeFetchT(recC), noLogs, fastPacer, fakeConsole);
   const rC = await hC.httpLogProbe('J586');
-  ok(recC.length === 8, 'verdict auto-expires after 14 days — probes fire again — ' + recC.length);
+  ok(recC.length === 8, 'opted-in verdict auto-expires after 14 days — probes fire again — ' + recC.length);
 
   console.log('\n' + (checks - fails) + '/' + checks + ' checks passed');
   process.exit(fails ? 1 : 0);

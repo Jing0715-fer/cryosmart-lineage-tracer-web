@@ -149,15 +149,19 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.37 — LAST-ITERATION, LAST-ROUND, LAST-OF-
-// NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
-// project immediately (fast); log images are fetched for the traced
-// lineage FIRST (the script waits for the web app's Trace Lineage action
-// to publish the lineage job list to the session, then scans just those
-// jobs — the graph + report become useful within seconds), and v3.27 then
-// scans EVERY REMAINING job in a complete-report pass (the report renders
-// a card for every job, so unfetched logs used to read as "this job has
-// no images" — wrong: its logs were simply never fetched). Multi-round jobs keep ONLY their latest round's log
+// CryoSmart Smart Capture v3.38 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// NUMBERED-SERIES, PER-JOB log images, LINEAGE-ONLY by default. Job
+// metadata uploads for the WHOLE project immediately (fast); log images
+// are fetched for the traced lineage ONLY (the script waits for the web
+// app's Trace Lineage action to publish the lineage job list to the
+// session, then scans just those jobs — ~72 on the user's project, the
+// graph + report become useful within seconds). v3.38 removed the v3.27
+// complete-report pass that auto-widened to {all:true} and scanned every
+// UNTRACED job afterwards (hours on a 593-job project; __csCaptureAll()
+// or the strip's "Fetch all N jobs" button still fetch them on demand),
+// and turned the 8-path REST log probe OFF by default (it 404'd on every
+// build tested — pure console noise; __csRestProbe("<uid>") or
+// localStorage cryosmartProbeRestLogs=1 opts back in). Multi-round jobs keep ONLY their latest round's log
 // entries (re-runs re-emit the same titles and the older rounds' files are
 // gone from the server) AND only their FINAL iteration's images (titles/
 // file names carry iteration numbers — "Iteration 000" is the FIRST,
@@ -167,7 +171,7 @@ export function SmartCapturePanel() {
 // number. Run the script from the END JOB's page and the
 // app auto-traces — zero manual setup. Console escape hatches while it
 // waits: __csCaptureAll() (fetch every job's logs) and __csCaptureFinish()
-// (stop now). Still uploads log-image BYTES same-origin (6 workers, 420s
+// (stop now). Still uploads log-image BYTES same-origin (6 workers, 300s
 // drain) and keeps the deep-scan log calibration that finds logs in ANY
 // store state shape (v3.2). v3.7: 20-minute wait window + 3-minute
 // re-trace grace, honest image-byte counters, loud zero-image diagnostics.
@@ -387,7 +391,7 @@ export function SmartCapturePanel() {
   // oscillator engages only while the tab is hidden — audible tabs are
   // exempt from intensive throttling AND tab freezing. Falls back to
   // plain setTimeout when Worker or blob URLs are unavailable.
-  console.log('[CryoSmart] Smart Capture v3.37 — replay self-healing (winner rotation + promotion), type-gated slow waits, live ETA, WS liveness guard.');
+  console.log('[CryoSmart] Smart Capture v3.38 — LINEAGE-ONLY scan (traced jobs only; the untraced ~520 need __csCaptureAll()/"Fetch all"), REST log probes OFF by default (8 fewer 404s), replay self-healing + WS liveness guard, worker-pacer timers.');
   var pacerWorker = null, pacerSeq = 0, pacerWaiters = {};
   try {
     var PACER_SRC = 'var t={};onmessage=function(e){var d=e.data;' +
@@ -1667,12 +1671,21 @@ export function SmartCapturePanel() {
   //   - once every path is dead, httpLogProbe resolves null with ZERO
   //     requests; after LOG_BREAKER_N consecutive live-path probes that
   //     find nothing, the HTTP fallback is disabled for the capture.
+  // v3.38: REST probing is now OFF BY DEFAULT. Every build this script has
+  // run against in the field serves logs over the WebSocket RPC loader —
+  // the 8 REST candidates 404'd every time, so the "fallback" was pure
+  // console noise (8 red GET lines per run). Opt in per origin with
+  // localStorage.setItem('cryosmartProbeRestLogs','1') + re-run, or probe
+  // once on demand with __csRestProbe('<jobUid>') — the probe code below
+  // (dead-route memory, winner memory, breaker) still serves both paths.
   var LOG_PATH_STATE = {};   // key → 'dead' | 'win'
   var logProbeConsecNull = 0;
   var logBreakerTripped = false;
   var logAllDeadNoted = false;
   var logSkipNoted = false;   // v3.36: one-time note for the remembered REST verdict
   var LOG_BREAKER_N = 6;
+  var REST_LOG_PROBES = false;   // v3.38: default OFF — see block comment above
+  try { REST_LOG_PROBES = localStorage.getItem('cryosmartProbeRestLogs') === '1'; } catch (e) {}
 
   function httpLogCandidates(uid) {
     var enc = encodeURIComponent(uid);
@@ -1728,6 +1741,18 @@ export function SmartCapturePanel() {
 
   function httpLogProbe(uid) {
     if (logBreakerTripped) return Promise.resolve(null);
+    // v3.38: REST probing is opt-in (see REST_LOG_PROBES above). The
+    // default-off return also marks the fallback loop dead so calibration
+    // skips the whole HTTP-fallback stage without a single request.
+    if (!REST_LOG_PROBES) {
+      if (!logSkipNoted) {
+        logSkipNoted = true;
+        console.log('[CryoSmart] REST log endpoints are not probed by default (they 404 on every build tested so far — the WebSocket loader is the real channel).' +
+          '\\nTo probe them anyway: localStorage.setItem("cryosmartProbeRestLogs","1") and re-run, or call __csRestProbe("<jobUid>") for a one-off.');
+      }
+      logAllDeadNoted = true;
+      return Promise.resolve(null);
+    }
     // v3.36: REMEMBERED VERDICT. If every REST candidate 404'd on an
     // earlier run on this origin, the burst is skipped entirely — zero
     // 404 console lines from run two onward. Auto-expires after 14 days
@@ -2497,6 +2522,22 @@ export function SmartCapturePanel() {
     FINISH_NOW = true;
     console.log('[CryoSmart] __csCaptureFinish — completing without further log fetching.');
   };
+  // v3.38: one-off REST log probe for future builds. Bypasses the
+  // default-off gate AND the remembered all-404 verdict — it is an
+  // explicit user action. A delivered route re-enables the REST fallback
+  // for the rest of the run (winning.http mode).
+  window.__csRestProbe = function(uid) {
+    var target = (typeof uid === 'string' && uid) ? uid : (ALL_UIDS[0] || '');
+    if (!target) { console.warn('[CryoSmart] __csRestProbe — no job uid known yet; pass one, e.g. __csRestProbe("J602")'); return; }
+    try { localStorage.removeItem('cryosmartNoRestLogs'); } catch (e) {}
+    REST_LOG_PROBES = true;
+    logAllDeadNoted = false;
+    console.log('[CryoSmart] __csRestProbe — probing the 8 REST log candidates for ' + target + ' (explicit request; result prints below).');
+    httpLogProbe(target).then(function(arr) {
+      if (arr) console.log('[CryoSmart] __csRestProbe — a REST route DELIVERED logs for ' + target + ' (' + (arr.length || 0) + ' entr(y/ies)) — the REST fallback stays enabled for the rest of this run.');
+      else console.log('[CryoSmart] __csRestProbe — no REST route delivered logs for ' + target + ' (consistent with the WebSocket loader being the only log channel on this build).');
+    });
+  };
 
   function fetchStatus(hb) {
     return fetchT(APP + '/api/cryosmart/import/session/' + token + (hb ? '?hb=1' : ''), { cache: 'no-store' }, 10000)
@@ -2513,7 +2554,7 @@ export function SmartCapturePanel() {
     var waitStart = Date.now();
     var misses = 0;
     var settleTried = false;   // v3.33: one-time 2s settle on first sight of a log request
-    console.log('[CryoSmart] Waiting for Trace Lineage — the traced lineage images are fetched first; every remaining job follows.');
+    console.log('[CryoSmart] Waiting for Trace Lineage — the traced-lineage log images are fetched; jobs OUTSIDE the lineage are skipped by design (run __csCaptureAll() to fetch them too).');
     console.log('[CryoSmart]   escape hatches: __csCaptureAll() = every job in the FIRST pass · __csCaptureFinish() = stop now');
     while (!knownRequested && !FINISH_NOW) {
       if (Date.now() - waitStart > WAIT_MS) {
@@ -2852,7 +2893,7 @@ export function SmartCapturePanel() {
       }
       if (Date.now() - t0 > BUDGET_MS) {
         console.log('[CryoSmart] Log scan safety ceiling reached (this only fires on a pathological server) — stopping after ' + j + '/' + pending.length +
-          ' job(s). The complete-report pass below (or a re-run) picks the rest up — nothing is lost.');
+          ' job(s). A re-run (or __csCaptureAll()) picks the rest up — already-scanned jobs are re-harvested from cache.');
         break;
       }
       // v3.29: per-job sub-step — a slow job (loader second chance up to
@@ -3141,15 +3182,17 @@ export function SmartCapturePanel() {
   if (LINEAGE_MODE && knownRequested && !FINISH_NOW) {
     if ((logRefsStreamed || 0) > 0) {
       console.log('[CryoSmart] All lineage log images streamed — they are already visible in the web app tab (the graph and report refresh live as bytes arrive).' +
-        ' Waiting up to 15s for a possible re-trace, then scanning the remaining jobs for complete reports…');
+        ' Waiting up to 15s for a possible re-trace, then completing the capture.');
     }
-    // v3.29: 60s → 15s — coverage never depended on this window (the
-    // complete-report pass below scans every remaining job regardless;
-    // a late re-trace / Fetch-all click is ALSO adopted during the byte
-    // drain's request polling), so the window only buys ORDER. 15s is
-    // plenty for a deliberate re-trace and removes 45s of dead wait
-    // from EVERY capture.
-    phase('grace', 'lineage scan complete — brief re-trace window (15s), then the remaining jobs for the complete report…');
+    // v3.29: 60s → 15s — coverage never depended on this window; the
+    // window only buys ORDER for a deliberate re-trace (a late re-trace /
+    // Fetch-all click is ALSO adopted during the byte drain's request
+    // polling). 15s is plenty and removes 45s of dead wait from EVERY
+    // capture. v3.38: the remaining UNTRACED jobs are no longer scanned
+    // after this window (lineage-only by design — the old complete-report
+    // pass spent hours on the ~520 untraced jobs; __csCaptureAll() fetches
+    // them on demand instead).
+    phase('grace', 'lineage scan complete — brief re-trace window (15s), then completing the capture…');
     var graceEnd = Date.now() + 15000;
     var served = knownRequested.slice();
     while (Date.now() < graceEnd && !FINISH_NOW) {
@@ -3180,56 +3223,24 @@ export function SmartCapturePanel() {
     }
   }
 
-  // ── STEP 3.7 (v3.27): complete-report pass — scan the REMAINING jobs ─
-  // The report renders a card for every job, so images missing on
-  // unscanned jobs read as "this job has no images" — when really its
-  // logs were never fetched (the user's 520 untraced jobs). After the
-  // traced lineage's images have streamed (fast first report), widen the
-  // session's log request to EVERY captured job — the same {all:true}
-  // endpoint the app's "Fetch all N jobs" button uses, so the progress
-  // denominator covers the whole project and the final summary explains
-  // itself — then scan whatever is left. __csCaptureFinish() above keeps
-  // the old fast lineage-only behavior; a job-count-scaled ceiling
-  // (v3.28: min 20 min, 150s per remaining job) guards against pathological
-  // servers without ever firing on a healthy scan — the v3.27 flat 20-min
-  // cap was the same class of bug as the traced pass's flat 5-min one
-  // (a 551-job rest pass at 2.2s+ per job could again be cut mid-list).
+  // ── STEP 3.7 (v3.27→v3.38): complete-report pass — now OPT-IN ───────
+  // v3.27 used to widen the session's log request to EVERY captured job
+  // ({all:true}) and scan all ~520 untraced jobs here — that is the
+  // "又进行了全部 job 的 log image 获取" pass, and on the 593-job build it
+  // added HOURS (plus its own 20-minute budget class) for images the user
+  // did not ask for. v3.38 makes the capture LINEAGE-ONLY BY DEFAULT: the
+  // traced lineage (~72 jobs here) is scanned, and the untraced remainder
+  // is skipped with one console line. Two opt-ins still reach it:
+  //   - __csCaptureAll() in this console (fetch-all, same session),
+  //   - the web app strip's "Fetch all N jobs" button ({all:true} — the
+  //     drain loop adopts the widened request and scans late arrivals).
   if (!FINISH_NOW) {
     var rest3 = ALL_UIDS.filter(function(u) { return !scanned[u]; });
     if (rest3.length) {
-      // v3.30: the widening POST gets the same 3-try policy as every other
-      // session POST, and its RESULT is checked — post() resolves the
-      // parsed JSON even for a 4xx, so the old single try could "succeed"
-      // (no throw) while the store never widened. A failed widening left
-      // the strip's denominator at 72 while the rest pass streamed 500+
-      // jobs off the books: the message read "uploading 0/712 for the
-      // traced lineage" over a capture that was actively scanning.
-      var widened = false;
-      for (var wr = 0; wr < 3 && !widened; wr++) {
-        try {
-          var pr = await post('/request-logs', { all: true });
-          if (pr && pr.ok) widened = true;
-        } catch (e) {}
-        if (!widened && wr < 2) {
-          phase('rest', 're-trying to widen the log request to every job (' + (wr + 2) + '/3)…');
-          await sleepMs(1000 + wr * 2000);
-        }
-      }
-      if (!widened) {
-        console.warn('[CryoSmart] Could not widen the log request — scanning the remaining jobs anyway' +
-          ' (the progress totals may lag; the web app\\'s "Fetch all" button can still widen it).');
-        phase('rest', 'could not widen the log request — scanning the remaining jobs anyway (the progress totals may lag behind)');
-      }
-      console.log('[CryoSmart] Complete-report pass — fetching log images for the remaining ' + rest3.length + ' of ' + ALL_UIDS.length + ' job(s)' +
-        ' (the report includes every job; large projects take several more minutes).');
-      // v3.29: the rest pass is the LONGEST stretch of a big capture —
-      // name it before the per-job phases take over (the strip's own
-      // denominator widens via the {all:true} request at the same time).
-      phase('rest', 'complete-report pass — scanning the remaining ' + rest3.length + ' of ' + ALL_UIDS.length + ' job(s)…');
-      pending = rest3;
-      try { await scanLogs(Math.max(1200000, rest3.length * 150000)); } catch (e) {
-        console.warn('[CryoSmart] Complete-report pass failed (non-fatal):', e && e.message);
-      }
+      console.log('[CryoSmart] Lineage-only mode — ' + rest3.length + ' of ' + ALL_UIDS.length + ' job(s) outside the traced lineage were NOT scanned' +
+        ' (saves the multi-hour all-job pass).' +
+        '\\n   Want their log images too? Run __csCaptureAll() in this console, or click "Fetch all N jobs" on the progress strip —' +
+        '\\n   the capture adopts the widened list and scans them in THIS session before completing.');
     }
   }
 
@@ -3241,10 +3252,14 @@ export function SmartCapturePanel() {
   // v3.13: 240s → 420s — with lineage scans now allowed 5 minutes (slow
   // hetero/abinit loaders), the byte drain must not expire first: bytes
   // queued by late jobs need their window too.
-  // v3.27: 420s → 600s — the complete-report pass adds a whole project's
-  // worth of refs to the byte queue; the drain still resolves the moment
-  // the queue goes idle, the ceiling just covers the larger tail.
-  await drainImageUploads(600000);
+  // v3.27: 420s → 600s — the (then-default) complete-report pass added a
+  // whole project's worth of refs to the byte queue.
+  // v3.38: 600s → 300s — the capture is lineage-only by default now, so the
+  // byte queue carries one lineage's worth of images (a late
+  // __csCaptureAll()/Fetch-all adoption still polls the request and keeps
+  // the drain alive while it scans). The drain resolves the moment the
+  // queue goes idle; the ceiling only covers the tail.
+  await drainImageUploads(300000);
 
   // ── STEP 4: mark the session complete ──────────────────────────────
   // The web UI stops polling and shows the final summary. v3.8 retries:
@@ -3298,9 +3313,9 @@ export function SmartCapturePanel() {
   var scannedCount = Object.keys(scanned).length;
   console.log('[CryoSmart] Capture complete' +
     (LINEAGE_MODE && ALL_UIDS.length > 0
-      ? ' — ' + scannedCount + ' of ' + ALL_UIDS.length + ' job(s) scanned for log images' +
+      ? ' — ' + scannedCount + ' of ' + ALL_UIDS.length + ' job(s) scanned for log images (lineage-only by design)' +
         (scannedCount < ALL_UIDS.length
-          ? ' (the rest were cut by the time budget or __csCaptureFinish — re-run the script to complete them)'
+          ? ' — the rest are UNTRACED jobs, skipped on purpose: run __csCaptureAll() here or "Fetch all N jobs" on the strip to fetch them too (re-runs re-harvest already-scanned jobs from cache)'
           : '')
       : '') +
     ' · ' + (logRefsStreamed || 0) + ' log image(s) · ' + imgUploaded + ' with bytes' +
@@ -3421,9 +3436,11 @@ export function SmartCapturePanel() {
               A new tab opens <strong>immediately</strong> and shows live
               progress. The lineage graph renders as soon as job metadata
               lands, auto-traces from your page job, and log images stream in
-              <strong> for the traced lineage first, then for every remaining
-              job</strong> — so the report carries every image that exists
-              (large projects take a few extra minutes). The strip names the
+              <strong> for the traced lineage only</strong> (≈72 jobs on a
+              large project — the untraced jobs are skipped by design to
+              keep the capture minutes instead of hours; the
+              <strong> Fetch-all button</strong> or <code className="rounded bg-slate-100 px-1 font-mono text-[10px]">__csCaptureAll()</code>
+              can fetch the rest on demand). The strip names the
               <strong> exact current sub-step</strong> (loader calibration,
               the job being scanned, bytes uploading — with a liveness age)
               so a long step never reads as frozen. Multi-round jobs
