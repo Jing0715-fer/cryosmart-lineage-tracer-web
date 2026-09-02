@@ -5,6 +5,7 @@ import {
   addJobsToSession,
   addLogBatchToSession,
   completeImportSession,
+  setSessionNote,
 } from "@/lib/cryosmart/import-session-store";
 
 /**
@@ -96,9 +97,16 @@ export async function POST(req: NextRequest) {
   // polling the staged session picks everything up live — previously the
   // fallback was broken end-to-end: the app ground its full timeout on an
   // empty session while the CryoSmart console claimed "Legacy import done".
+  // v3.33: `continue_staged: true` — the script now SURVIVES the rescue
+  // (it still waits for Trace Lineage + streams log images afterwards),
+  // so the rescue must NOT complete the session: a complete status makes
+  // the script's trace-wait polls break out immediately and the session
+  // would finalize with zero images. Old scripts (no flag) still
+  // auto-complete — they exit right after this call.
   if (typeof obj.token === "string" && obj.token) {
     const session = getImportSession(obj.token);
     if (session) {
+      const continueStaged = obj.continue_staged === true;
       addJobsToSession(session, jobs, {
         project_uid: inferredPid,
         experiment_uid: experimentUid,
@@ -116,12 +124,22 @@ export async function POST(req: NextRequest) {
           .map(([uid, v]) => ({ uid, images: v as Array<Record<string, unknown>> }));
         if (items.length > 0) addLogBatchToSession(session, items);
       }
-      completeImportSession(session);
+      if (continueStaged) {
+        // Keep the session open — the script heartbeats via its status
+        // polls and drives /complete when its scan finishes.
+        setSessionNote(
+          session,
+          "legacy rescue applied — waiting for Trace Lineage"
+        );
+      } else {
+        completeImportSession(session);
+      }
       return NextResponse.json(
         {
           ok: true,
           token: obj.token,
           mode: "staged-rescue",
+          continuing: continueStaged,
           count: jobs.length,
           project_uid: inferredPid || null,
           has_session: Boolean(cryosmartOrigin ?? session.data.cryosmart_origin),

@@ -208,11 +208,38 @@ export function getImportSession(token: string): ImportSession | null {
 export function addJobsToSession(
   session: ImportSession,
   jobs: unknown[],
-  extra: ImportSessionData
+  extra: ImportSessionData,
+  opts?: { append?: boolean }
 ): ImportSession {
-  session.data = { ...session.data, ...extra, jobs };
-  session.data.discovered_job_count = jobs.length;
-  session.logJobsTotal = jobs.length;
+  // v3.33: the capture script uploads big projects (500+ jobs) as CAPPED
+  // BATCHES — each POST is small enough to survive the browser→preview
+  // gateway hop (a single multi-MB POST died with a bare 502 there and
+  // took the whole capture down with it). `append` merges the batch into
+  // the session's jobs (deduped by uid so a RETRIED batch is idempotent);
+  // single-shot callers (one-batch uploads, the legacy rescue) keep the
+  // replace semantics.
+  let merged: unknown[];
+  if (opts?.append && Array.isArray(session.data.jobs) && session.data.jobs.length > 0) {
+    const seen = new Set(
+      (session.data.jobs as Array<{ uid?: unknown }>)
+        .map((j) => (j && typeof j.uid === "string" ? j.uid : null))
+        .filter((u): u is string => !!u)
+    );
+    merged = session.data.jobs.slice();
+    for (const j of jobs) {
+      const uid = (j && typeof j === "object" ? (j as { uid?: unknown }).uid : null);
+      if (typeof uid === "string") {
+        if (seen.has(uid)) continue;
+        seen.add(uid);
+      }
+      merged.push(j);
+    }
+  } else {
+    merged = jobs;
+  }
+  session.data = { ...session.data, ...extra, jobs: merged };
+  session.data.discovered_job_count = merged.length;
+  session.logJobsTotal = merged.length;
   session.status = "collecting_logs";
   session.note = "jobs uploaded";
   session.updatedAt = Date.now();

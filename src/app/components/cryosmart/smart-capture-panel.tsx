@@ -149,7 +149,7 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.32 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.33 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images. Job metadata uploads for the WHOLE
 // project immediately (fast); log images are fetched for the traced
 // lineage FIRST (the script waits for the web app's Trace Lineage action
@@ -274,6 +274,19 @@ export function SmartCapturePanel() {
 // (/api/image/<id>, /api/log_image?fileid=<id>, /api/file/<id>,
 // /api/files/<id>); the first route delivering raster bytes wins and is
 // used exclusively afterwards.
+// v3.33: BATCHED JOB UPLOAD + SURVIVABLE RESCUE — the whole jobs array
+// used to leave as ONE POST; on a 593-job capture that single multi-MB
+// body died at the preview gateway with a bare 502 (the app log showed
+// only the preflight OPTIONS), and the legacy fallback then RETURNED —
+// killing the script before its Trace wait, so a Trace Lineage clicked
+// minutes later started nothing (“no Trace Lineage ran during the
+// capture window”). Jobs now upload as capped batches (60 jobs / ~250KB
+// of JSON, each retried ×3, live batch progress in the app strip,
+// uid-deduped server-side merge), and a rescue keeps the session OPEN
+// (continue_staged) while the script falls through to the Trace wait —
+// only an unreachable app exits early. The trace-wait also settles 2s
+// on first sight of a log request so an auto-trace built from a
+// PARTIAL batch upload cannot pin the scan to a stale lineage list.
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -1874,29 +1887,80 @@ export function SmartCapturePanel() {
     }
   }
 
+  // v3.33: BATCHED jobs upload. A 593-job capture used to leave as ONE
+  // multi-megabyte POST; on the browser→preview-gateway hop that single
+  // body can die with a bare 502 (the gateway drops it before the app
+  // ever sees a request — the app log shows only the preflight OPTIONS,
+  // and r.json() then throws on the HTML error page), sinking the whole
+  // capture into the legacy fallback. Batches cap at 60 jobs / ~250KB of
+  // JSON and every POST is retried ×3, so a flaky hop costs one small
+  // retry instead of the capture; the app tab sees total_jobs grow batch
+  // by batch (live upload progress) instead of an all-or-nothing POST.
   var up = null;
   try {
-    up = await post('/jobs', {
-      project_uid: projectId,
-      experiment_uid: project.experiments && project.experiments[0] ? project.experiments[0].uid : undefined,
-      jobs: jobs
-    });
+    var upBatches = [];
+    var upCur = [];
+    var upCurBytes = 0;
+    for (var upI = 0; upI < jobs.length; upI++) {
+      var upJobLen = (JSON.stringify(jobs[upI]) || 'null').length;
+      if (upCur.length && (upCurBytes + upJobLen > 250000 || upCur.length >= 60)) {
+        upBatches.push(upCur);
+        upCur = [];
+        upCurBytes = 0;
+      }
+      upCur.push(jobs[upI]);
+      upCurBytes += upJobLen;
+    }
+    if (upCur.length || !upBatches.length) upBatches.push(upCur);
+    var upLandedCount = 0;
+    var upFailed = 0;
+    for (var upB = 0; upB < upBatches.length; upB++) {
+      if (upBatches.length > 1) {
+        phase('upload', 'uploading job metadata — batch ' + (upB + 1) + ' of ' + upBatches.length +
+          ' · ' + upLandedCount + ' of ' + jobs.length + ' job(s) landed');
+      }
+      var upOk = false;
+      for (var upTry = 0; upTry < 3 && !upOk; upTry++) {
+        if (upTry) await sleepMs(1200 * upTry);
+        try {
+          var upRes = await post('/jobs', {
+            project_uid: projectId,
+            experiment_uid: project.experiments && project.experiments[0] ? project.experiments[0].uid : undefined,
+            jobs: upBatches[upB],
+            batch_index: upB,
+            batch_total: upBatches.length
+          });
+          if (upRes && upRes.ok) { upOk = true; upLandedCount += upBatches[upB].length; }
+        } catch (e) {}
+      }
+      if (!upOk) upFailed++;
+    }
+    if (!upFailed) up = { ok: true, count: upLandedCount };
+    else console.warn('[CryoSmart] ' + upFailed + ' of ' + upBatches.length +
+      ' job-metadata batch(es) failed after 3 tries each — trying the legacy one-shot rescue.');
   } catch (e) {}
 
   if (!up || !up.ok) {
     // Fallback: legacy one-shot import so the user still gets the data.
-    // v3.14: the body now carries the STAGED token — the app applies the
+    // v3.14: the body carries the STAGED token — the app applies the
     // payload to the very session its progress tab is already polling
-    // (see the staged-session rescue branch in /api/cryosmart/import), so
-    // the fallback actually rescues the live tab instead of leaving it to
-    // grind its timeout while this console says "Legacy import done".
-    console.warn('[CryoSmart] Staged upload failed — falling back to legacy one-shot import.');
+    // (see the staged-session rescue branch in /api/cryosmart/import).
+    // v3.33: continue_staged keeps that session OPEN and the script NO
+    // LONGER exits here — the rescue used to complete the session AND
+    // return, so a Trace Lineage clicked afterwards found no listener
+    // and the log-image fetch never started ("no Trace Lineage ran
+    // during the capture window"). The script now falls through to the
+    // Trace wait below; only a rescue that cannot even reach the app
+    // exits (nothing more could be done from this tab anyway).
+    console.warn('[CryoSmart] Staged upload failed — trying the legacy one-shot rescue.');
+    var upRescued = false;
     try {
       var r1 = await fetchT(APP + '/api/cryosmart/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token: token,
+          continue_staged: true,
           project_uid: projectId,
           experiment_uid: project.experiments && project.experiments[0] ? project.experiments[0].uid : undefined,
           jobs: jobs,
@@ -1909,14 +1973,19 @@ export function SmartCapturePanel() {
         })
       });
       var res1 = await r1.json();
-      if (res1.ok) console.log('[CryoSmart] Legacy import done:', res1.count, 'jobs', res1.mode === 'staged-rescue' ? '(applied to the live capture session)' : '');
-      else alert('Upload failed: ' + (res1.error || 'unknown'));
+      if (res1 && res1.ok) {
+        upRescued = true;
+        console.log('[CryoSmart] Legacy rescue applied', res1.count, 'jobs to the live session — continuing to the Trace wait.');
+      } else {
+        alert('Upload failed: ' + ((res1 && res1.error) || 'unknown'));
+      }
     } catch (e) {
       alert('Upload failed: ' + (e && e.message));
     }
-    return;
+    if (!upRescued) return;
+  } else {
+    console.log('[CryoSmart] Uploaded ' + up.count + ' jobs — the graph should be rendering in the new tab now.');
   }
-  console.log('[CryoSmart] Uploaded ' + up.count + ' jobs — the graph should be rendering in the new tab now.');
 
   // ── STEP 3 (v3.5): wait for Trace Lineage, then scan ONLY those jobs ─
   // The expensive part of a capture is log-image fetching (real projects
@@ -1952,6 +2021,7 @@ export function SmartCapturePanel() {
     var WAIT_MS = 20 * 60 * 1000;   // v3.7: 20 min — a slow first trace should not forfeit the log fetch
     var waitStart = Date.now();
     var misses = 0;
+    var settleTried = false;   // v3.33: one-time 2s settle on first sight of a log request
     console.log('[CryoSmart] Waiting for Trace Lineage — the traced lineage images are fetched first; every remaining job follows.');
     console.log('[CryoSmart]   escape hatches: __csCaptureAll() = every job in the FIRST pass · __csCaptureFinish() = stop now');
     while (!knownRequested && !FINISH_NOW) {
@@ -1968,13 +2038,33 @@ export function SmartCapturePanel() {
         if (st.status === 'complete') break;
         if (st.log_request && st.log_request.jobs && st.log_request.jobs.length) {
           knownRequested = st.log_request.jobs.slice();
+          if (!settleTried) {
+            settleTried = true;
+            // v3.33: the app AUTO-TRACE may have been built from a PARTIAL
+            // batch upload — the tab applied the first landed batch and
+            // auto-traced while later batches were still in flight, so
+            // this request list can be a subset of the real lineage.
+            // Re-poll once after 2s: if the app re-traced on the fuller
+            // data the revision bumped — take the newer (unioned) list
+            // before committing the scan to the stale one.
+            await sleepMs(2000);
+            var stSettle = await fetchStatus(true);
+            if (stSettle && stSettle.log_request && stSettle.log_request.jobs &&
+                stSettle.log_request.jobs.length &&
+                (stSettle.log_request.revision || 0) > (st.log_request.revision || 0)) {
+              knownRequested = stSettle.log_request.jobs.slice();
+            }
+          }
         }
       }
       // v3.29: 3s → 1.2s — the auto-trace lands seconds after the jobs
       // upload; a 3s poll added dead time to the very first visible
       // phase ("waiting for Trace Lineage" strip). The status GET is a
       // tiny local request; polling it faster is free.
-      await sleepMs(1200);
+      // v3.33: skipped when the request (and its settle) already
+      // resolved — the loop would otherwise burn one last dead 1.2s
+      // before re-checking its condition.
+      if (!knownRequested && !FINISH_NOW) await sleepMs(1200);
     }
     if (knownRequested) {
       if (CAPTURE_ALL_LATE) {

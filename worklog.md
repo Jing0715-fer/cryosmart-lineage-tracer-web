@@ -1759,3 +1759,27 @@ Work Log:
 
 Stage Summary:
 - "Image store accepted 0 of N" + stuck 0/254 previews fixed by client/server sniffer alignment (+AVIF), honest non-image diagnostics, image-route discovery (DOM template with token params + static alternates), and idempotent server dedupe counting. Everything pushed to github.com/Jing0715-fer/cryosmart-lineage-tracer-web main (6503096).
+
+---
+Task ID: 42
+Agent: main (Z.ai Code)
+Task: Fix v3.33 — 502 on the staged /jobs upload (593-job capture) and the "clicked Trace but log-image fetch never started" regression; push to GitHub.
+
+Work Log:
+- Diagnosed from dev.log: the s4 capture's POST /api/cryosmart/import/session/<t>/jobs NEVER reached Next.js (only its OPTIONS preflight is logged) — a bare 502 from the external preview gateway dropped the single multi-MB body (593 jobs). r.json() then threw on the HTML error page, the script fell back to the legacy one-shot import.
+- Root cause #2 (the user's "点Trace后没有开始获取log image"): the legacy fallback branch did `return;` — the script exited BEFORE the 20-minute Trace Lineage wait loop, and the rescue branch auto-completed the session, so the app tab printed "no Trace Lineage ran during the capture window" the moment the user clicked Trace.
+- Script (smart-capture-panel.tsx, v3.32 → v3.33):
+  - STEP 2 jobs upload is now BATCHED: ~60 jobs / ~250KB JSON per POST, `batch_index`/`batch_total` in the body, `phase('upload', …)` live progress, per-batch retry ×3 with 1.2s/2.4s backoff.
+  - Legacy fallback sends `continue_staged: true` and NO LONGER returns on a successful rescue — it falls through to the Trace wait (only an unreachable app exits early, keeping the alert).
+  - Trace-wait loop: one-time 2s settle re-poll on first sight of a log request (an auto-trace built from a PARTIAL batch upload would otherwise pin the scan to a stale lineage list; a revision bump adopts the unioned list). Trailing 1.2s poll sleep is now skipped once the request resolved.
+  - Header/changelog bumped to v3.33.
+- App (import-session-store.ts): `addJobsToSession` gained `{ append?: boolean }` — uid-deduped merge (retried batches are idempotent); replace semantics preserved for single-shot/legacy callers; discovered_job_count/logJobsTotal track the MERGED length.
+- App (session/[token]/jobs route): `batch_total > 1` → append mode; response carries the merged sessionProgress snapshot (total_jobs grows live).
+- App (import route, staged rescue): `continue_staged: true` keeps the session OPEN (note "legacy rescue applied — waiting for Trace Lineage", script drives /complete later); old scripts without the flag still auto-complete (back-compat).
+- Validation: extract → node --check OK; 26 upload behavior tests (batching caps, byte-cap split, retry, rescue continue, unreachable exit) + 11 settle tests all PASS; `bun run lint` clean; agent-browser end-to-end on the LIVE server: 2-batch upload with a duplicate uid merged to 3 jobs, continue_staged rescue left status=collecting_logs, old-script compat replace+auto-complete, /complete, /?imported=<token> tab rendered "Captured 3 jobs"; served chunk contains v3.33/upBatches/continue_staged; mobile+desktop layout and sticky footer verified; no console/page errors.
+
+Stage Summary:
+- The capture script no longer depends on one giant POST surviving the gateway: 593 jobs now travel as ~10 small retried batches with live progress.
+- A failed staged upload no longer kills the Trace wait — the rescue keeps the session open and the script stays alive for the user's Trace Lineage click (the direct cause of this round's "no log image fetch").
+- Backward compatible: old script copies get the old replace/auto-complete semantics; new script requires re-copying from the panel (clipboard holds the old version).
+- Committed and pushed to origin/main.

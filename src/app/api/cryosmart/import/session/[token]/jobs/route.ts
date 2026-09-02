@@ -13,8 +13,15 @@ import {
  * As soon as this lands the web UI can render the lineage graph; the
  * capture script continues streaming log images in the background.
  *
+ * v3.33: big projects arrive as multiple CAPPED batches
+ * ({ batch_index, batch_total } in the body). batch_total > 1 makes the
+ * batch APPEND (uid-deduped); each response carries the merged
+ * sessionProgress snapshot so the script (and the polling tab) see
+ * total_jobs grow live.
+ *
  * Request body:
- *   { project_uid?, experiment_uid?, source_url?, jobs: [...captured jobs] }
+ *   { project_uid?, experiment_uid?, source_url?, batch_index?,
+ *     batch_total?, jobs: [...captured jobs] }
  */
 export async function POST(
   req: NextRequest,
@@ -51,11 +58,27 @@ export async function POST(
   const str = (v: unknown): string | undefined =>
     typeof v === "string" && v.length > 0 ? v : undefined;
 
-  addJobsToSession(session, jobs, {
-    project_uid: str(obj.project_uid) ?? session.data.project_uid,
-    experiment_uid: str(obj.experiment_uid) ?? session.data.experiment_uid,
-    source_url: str(obj.source_url) ?? session.data.source_url,
-  });
+  // v3.33: batched uploads. The capture script caps each POST (~60 jobs /
+  // ~250KB of JSON) so big projects survive the browser→preview-gateway
+  // hop; a body declaring batch_total > 1 APPENDS (deduped by uid in the
+  // store — a retried batch is idempotent) instead of replacing. Bodies
+  // without batch fields keep the old single-shot replace semantics, so
+  // older script copies behave exactly as before.
+  const batchTotal =
+    typeof obj.batch_total === "number" && Number.isFinite(obj.batch_total)
+      ? obj.batch_total
+      : 0;
+
+  addJobsToSession(
+    session,
+    jobs,
+    {
+      project_uid: str(obj.project_uid) ?? session.data.project_uid,
+      experiment_uid: str(obj.experiment_uid) ?? session.data.experiment_uid,
+      source_url: str(obj.source_url) ?? session.data.source_url,
+    },
+    { append: batchTotal > 1 }
+  );
 
   return NextResponse.json(
     {
