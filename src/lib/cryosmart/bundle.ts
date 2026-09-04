@@ -669,16 +669,32 @@ async function assembleBundle(
   // Final results (optional) — only available in live mode
   if (options.includeFinalResults) {
     throwIfCancelled();
-    // Gate the whole phase on the SAME reachability probe as maps and
-    // direct-URL images: these are 11 best-effort PROXIED fetches at the
-    // 10s default timeout — on an unreachable intranet origin they used
-    // to grind ~110s of aborts for nothing, exactly the stall the v3.13
-    // probe was introduced to prevent.
+    // v3.40: the CAPTURED FSC-curve XML (script probe / history restore)
+    // is written FIRST and UNCONDITIONALLY — it is pure data, needs no
+    // session, no reachability, no fetch. A URL-only payload (ref /
+    // constructed) still rides the proxied best-effort targets below.
+    const fsc = summary.start_job?.fsc_xml || null;
+    let fscEmbedded = false;
+    if (fsc && fsc.xml && fsc.xml.trim()) {
+      await addFile(`Final_Result/FSC/fsc.xml`, fsc.xml);
+      fscEmbedded = true;
+    }
+    // Gate the NETWORK part of the phase on the SAME reachability probe
+    // as maps and direct-URL images: these are 11 best-effort PROXIED
+    // fetches at the 10s default timeout — on an unreachable intranet
+    // origin they used to grind ~110s of aborts for nothing, exactly the
+    // stall the v3.13 probe was introduced to prevent.
     if (!options.session) {
-      warnings.push("Final results scan skipped: requires session from Smart Capture mode.");
+      warnings.push(
+        fscEmbedded
+          ? "Final results scan skipped: requires session from Smart Capture mode (the captured FSC XML was still written)."
+          : "Final results scan skipped: requires session from Smart Capture mode."
+      );
     } else if (!(await ensureReachability())) {
       warnings.push(
-        `Final results scan skipped: CryoSmart (${options.session.baseUrl}) is unreachable from this app.`
+        fscEmbedded
+          ? `Final results scan skipped: CryoSmart (${options.session.baseUrl}) is unreachable from this app (the captured FSC XML was still written).`
+          : `Final results scan skipped: CryoSmart (${options.session.baseUrl}) is unreachable from this app.`
       );
     } else {
       onProgress?.({ phase: "final", current: 0, total: 1, message: "Scanning final results…" });
@@ -716,6 +732,19 @@ async function assembleBundle(
         finalTargets.push({
           url: `api/log_image/${g.kind}_${g.iteration}_${g.suffix}.${g.ext}`,
           path: `Final_Result/${g.kind}/${g.suffix}.${g.ext}`,
+        });
+      }
+      // v3.40: FSC-curve XML, URL-only form (ref / constructed) — joins
+      // the proxied best-effort targets. Absolute CryoSmart URL → strip
+      // the origin for the proxy path.
+      if (!fscEmbedded && fsc && fsc.url && /^https?:\/\//i.test(fsc.url)) {
+        let rel = fsc.url;
+        if (fsc.url.startsWith(summary.base_url || "\u0000")) {
+          rel = fsc.url.slice((summary.base_url || "").length).replace(/^\/+/, "");
+        }
+        finalTargets.push({
+          url: rel,
+          path: `Final_Result/FSC/fsc.xml`,
         });
       }
       // v3.24: sort targets by archive path UP FRONT so the ordered
@@ -767,7 +796,8 @@ async function assembleBundle(
         warnings.push(`${finalBudgetSkipped} final-result file(s) skipped: in-memory ZIP budget exceeded (no manual link available for these)`);
       }
       const summaryText = `Final result scan for ${projectId}/${startUid}.\n` +
-        `Fetched ${finalFetched} files.\n` +
+        `Fetched ${finalFetched + (fscEmbedded ? 1 : 0)} files.\n` +
+        (fscEmbedded ? `FSC curve XML (Final_Result/FSC/fsc.xml) embedded from the captured data.\n` : "") +
         `Generated at ${new Date().toISOString()}.\n`;
       await addFile(`Final_Result/final_result_summary.txt`, summaryText);
     }

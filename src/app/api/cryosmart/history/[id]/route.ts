@@ -70,6 +70,9 @@ export async function GET(
       cryosmart_auth: capture.cryosmart_auth || undefined,
       cryosmart_cookie: capture.cryosmart_cookie || undefined,
       job_log_images: capture.job_log_images || {},
+      // v3.40: FSC-curve XML per job — restored captures keep the
+      // report's one-click set (5 maps + 1 XML) intact.
+      job_fsc_xml: capture.job_fsc_xml || {},
       uploaded_image_ids: (capture.image_files || []).map((f) => f.fileid),
       remote_image_ids: remoteImageIds,
     },

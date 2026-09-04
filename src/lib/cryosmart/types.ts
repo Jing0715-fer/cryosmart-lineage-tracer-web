@@ -176,6 +176,11 @@ export interface JobMetadata {
   /** Images force-loaded from the SPA's lazy `jobLogs` state by the capture
    *  script ({ fileid, name } refs; see LogImageRef). */
   log_images?: LogImageRef[];
+  /** v3.40: the job's FSC-curve XML, probed on the CryoSmart page by the
+   *  Smart Capture script. `xml` holds the fetched text (embedded into the
+   *  report as a data: URL); `fileid` is a bare log-image ref when only the
+   *  reference could be captured. */
+  fsc_xml?: { fileid?: string; name?: string; xml?: string; text?: string } | null;
   overview_assets?: OverviewAssets;
   /** Image logs from CryoSmart jobLogs (type: image) - internal result images */
   image_logs?: ImageLogEntry[];
@@ -355,8 +360,26 @@ export interface LineageNode {
   maps: MapAsset[];
   classes: ClassSplit[];
   select_2d: Select2DSummary | null;
+  /** v3.40: the job's FSC-curve XML download (goes into the report's
+   *  one-click set — 5 maps + 1 XML — and the ZIP's Final_Result).
+   *  Null when the job produces no volume map. */
+  fsc_xml?: NodeFscXml | null;
   /** Only present on `import_micrographs` jobs. */
   representative_micrograph_images?: ImageAsset[];
+}
+
+/** v3.40: the FSC-curve XML asset carried on a `LineageNode` (built by
+ *  `fscXmlAsset()` in lineage.ts — canonical shape lives next to the
+ *  builder to keep the two in sync). */
+export interface NodeFscXml {
+  /** Download filename (BJ.<P>.<J>.volume.fsc.xml). */
+  name: string;
+  /** Download URL — data: (embedded text) or a CryoSmart URL. */
+  url: string;
+  /** Raw XML text when embedded — lets the ZIP write it without a fetch. */
+  xml?: string;
+  /** Where it came from. */
+  source: "captured" | "log_ref" | "constructed";
 }
 
 /** A class-split job entry in `LineageSummary.class_split_jobs`. */

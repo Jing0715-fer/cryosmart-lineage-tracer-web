@@ -149,8 +149,9 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.38 — LAST-ITERATION, LAST-ROUND, LAST-OF-
-// NUMBERED-SERIES, PER-JOB log images, LINEAGE-ONLY by default. Job
+// CryoSmart Smart Capture v3.40 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// NUMBERED-SERIES, PER-JOB log images, LINEAGE-ONLY by default, FSC-XML
+// CAPTURE. Job
 // metadata uploads for the WHOLE project immediately (fast); log images
 // are fetched for the traced lineage ONLY (the script waits for the web
 // app's Trace Lineage action to publish the lineage job list to the
@@ -364,6 +365,18 @@ export function SmartCapturePanel() {
 // and a WebSocket liveness guard prints once if the SPA's socket is
 // CLOSED (with it, every replay fails silently — that line is the only
 // honest hint).
+// v3.40: FSC-CURVE XML + THE 5-MAP SET. Each scanned job now also
+// resolves its FSC-curve XML (once per job per run): an XML file ref
+// in the job's log entries first, then — only for jobs with a 'volume'
+// output group carrying a plain 'map' blob (the refine shape) — a
+// same-origin probe of download_result_file/<pid>/<uid>.volume.fsc.xml.
+// The captured text streams with the /logs batches as 'fsc_xml'; the
+// app embeds it in the report's 一键下载 button (5 maps — map, sharp,
+// half A/B, mask_refine — + 1 XML, offline-safe data: URL) and writes
+// Final_Result/FSC/fsc.xml into the ZIP. The one-click button also
+// gained its own zip name (BJ.<P>.<J>.maps.zip) and a fixed
+// single-file fallback (the file that actually downloaded, not
+// blindly urls[0]).
 (async function() {
   var APP = '${webAppUrl}';
 
@@ -391,7 +404,7 @@ export function SmartCapturePanel() {
   // oscillator engages only while the tab is hidden — audible tabs are
   // exempt from intensive throttling AND tab freezing. Falls back to
   // plain setTimeout when Worker or blob URLs are unavailable.
-  console.log('[CryoSmart] Smart Capture v3.38 — LINEAGE-ONLY scan (traced jobs only; the untraced ~520 need __csCaptureAll()/"Fetch all"), REST log probes OFF by default (8 fewer 404s), replay self-healing + WS liveness guard, worker-pacer timers.');
+  console.log('[CryoSmart] Smart Capture v3.40 — LINEAGE-ONLY scan + FSC-curve XML capture (report 一键下载 = 5 maps + 1 fsc.xml), REST log probes OFF by default, replay self-healing + WS liveness guard, worker-pacer timers.');
   var pacerWorker = null, pacerSeq = 0, pacerWaiters = {};
   try {
     var PACER_SRC = 'var t={};onmessage=function(e){var d=e.data;' +
@@ -780,6 +793,119 @@ export function SmartCapturePanel() {
     var ext = fileExtOf(fn);
     if (!ext) return false;                                        // no evidence → keep
     return !IMG_EXT_RE.test(ext);
+  }
+
+  // ── v3.40: FSC-curve XML capture ──────────────────────────────────
+  // A refinement job's FSC curve exists as an XML data file. Two sources,
+  // both best-effort and CHEAP (a few KB per job, at most ONE request per
+  // job per run):
+  //   a) an XML file ref inside the job's log entries (imgfiles / files),
+  //      fetched via /api/log_image/<fileid>,
+  //   b) the volume-group result URL
+  //      download_result_file/<pid>/<uid>.volume.fsc.xml — probed
+  //      same-origin ONLY for jobs whose output groups contain the refine
+  //      shape (a 'volume' group with a 'map' blob).
+  // The TEXT streams with the /logs batches as 'fsc_xml'; the report's
+  // 一键下载 button then embeds it (5 maps + 1 XML, offline-safe data:
+  // URL) and the ZIP gains Final_Result/FSC/fsc.xml.
+
+  // True when a log file entry looks like the FSC curve XML.
+  function isFscXmlFile(file, evidence) {
+    if (!file) return false;
+    var isObj = typeof file === 'object';
+    var ft = isObj ? (file.filetype || file.file_type || file.type) : null;
+    var fn = isObj ? (file.filename || file.name || '') : String(file);
+    var looksXml = (typeof ft === 'string' && /xml/i.test(ft)) ||
+      (/\\.xml$/i.test(String(fn || '').trim()) && fileExtOf(fn) === 'xml');
+    if (!looksXml) return false;
+    return /fsc/i.test(String(fn || '')) || /fsc/i.test(String(evidence || ''));
+  }
+
+  // Find the FSC-XML ref in a job's log entries → {fileid, name} | null.
+  function fscXmlRefFromLogs(logs) {
+    if (!Array.isArray(logs)) return null;
+    for (var i = 0; i < logs.length; i++) {
+      var lg = logs[i];
+      if (!lg) continue;
+      var files = lg.imgfiles || lg.files || null;
+      if (!files || !files.length) continue;
+      var evidence = String(lg.text || '') + ' ' + String((lg.flags || []) || []);
+      for (var f = 0; f < files.length; f++) {
+        var file = files[f];
+        if (!isFscXmlFile(file, evidence)) continue;
+        var fid = typeof file === 'string' ? file : (file && (file.fileid || file.file_id || file.id));
+        if (!fid) continue;
+        var nm = (file && (file.filename || file.name)) || 'fsc.xml';
+        return { fileid: String(fid), name: String(nm) };
+      }
+    }
+    return null;
+  }
+
+  // True when the captured job metadata carries the refine shape: a group
+  // NAMED "volume" (class jobs use volume_class_N) containing a map blob.
+  function jobProducesVolumeMap(uid) {
+    for (var i = 0; i < jobs.length; i++) {
+      if (String(jobs[i].uid) !== String(uid)) continue;
+      var groups = jobs[i].output_result_groups || [];
+      for (var g = 0; g < groups.length; g++) {
+        var grp = groups[g];
+        if (!grp || !/^volume$/i.test(String(grp.name || ''))) continue;
+        var contains = grp.contains || [];
+        for (var c = 0; c < contains.length; c++) {
+          var it = contains[c];
+          if (it && /volume\\.blob/i.test(String(it.type || '')) && /^map$/i.test(String(it.name || ''))) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+    return false;
+  }
+
+  // Fetch a small XML text (≤2 MB) same-origin; resolves null on failure.
+  var FSC_MAX_TEXT = 2 * 1024 * 1024;
+  function fetchXmlText(url) {
+    return fetchT(url, { credentials: 'same-origin' }, 15000).then(function(r) {
+      if (!r.ok) return null;
+      return r.text().then(function(t) {
+        t = String(t || '');
+        if (!t || t.length > FSC_MAX_TEXT) return null;
+        // Markup sanity: must OPEN with a tag and carry no binary control
+        // chars — the log_image endpoint happily serves PNG bodies for any
+        // fileid, and random binary can contain a stray '<'.
+        if (!/^\\s*</.test(t)) return null;
+        if (/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]/.test(t)) return null;
+        return t;
+      });
+    }).catch(function() { return null; });
+  }
+
+  // Resolve one job's FSC XML (once per job per run) → /logs 'fsc_xml'
+  // payload or null. Log-ref source first; then the constructed result URL
+  // for map-producing jobs.
+  var fscTried = {};
+  function resolveFscXml(uid, logs) {
+    if (Object.prototype.hasOwnProperty.call(fscTried, uid)) {
+      return Promise.resolve(fscTried[uid] || null);
+    }
+    var done = function(v) { fscTried[uid] = v || null; return v; };
+    var ref = fscXmlRefFromLogs(logs);
+    if (ref) {
+      return fetchXmlText('api/log_image/' + encodeURIComponent(ref.fileid)).then(function(xml) {
+        if (xml) return done({ name: ref.name, xml: xml });
+        return done({ fileid: ref.fileid, name: ref.name });
+      });
+    }
+    if (!jobProducesVolumeMap(uid)) return Promise.resolve(done(null));
+    return fetchXmlText(
+      'api/log_image/download_result_file/' + encodeURIComponent(projectId) + '/' +
+      encodeURIComponent(String(uid)) + '.volume.fsc.xml'
+    ).then(function(xml) {
+      if (xml) return done({ name: String(uid) + '.volume.fsc.xml', xml: xml });
+      return done(null);
+    });
   }
 
   // Iteration / round number buried in a title or file name:
@@ -3067,7 +3193,16 @@ export function SmartCapturePanel() {
       scanned[uid2] = true;
       queueJobAssets(uid2);
       if (!logs2 || !logs2.length) noLog.push(uid2);
-      batch.push({ uid: uid2, images: imgs2 });
+      // v3.40: resolve the job's FSC-curve XML (once per job per run — a
+      // log-entry ref first, then the volume.fsc.xml result URL probe for
+      // map-producing jobs; failures resolve null and never re-fire).
+      var fscXml2 = null;
+      try { fscXml2 = await resolveFscXml(uid2, logs2); } catch (e) {}
+      if (fscXml2) {
+        console.log('[CryoSmart] FSC curve XML captured for ' + uid2 +
+          (fscXml2.xml ? ' (' + fscXml2.xml.length + ' bytes, embedded)' : ' (ref only)') + '.');
+      }
+      batch.push({ uid: uid2, images: imgs2, fsc_xml: fscXml2 || undefined });
       await flushLogs(false);
       jobDurations.push(Date.now() - jobStart);
       if (jobDurations.length > 30) jobDurations.shift();
@@ -3319,8 +3454,9 @@ export function SmartCapturePanel() {
           : '')
       : '') +
     ' · ' + (logRefsStreamed || 0) + ' log image(s) · ' + imgUploaded + ' with bytes' +
+    ' · FSC XML: ' + (Object.keys(fscTried).filter(function(u) { return fscTried[u]; }).length) + ' job(s)' +
     " · multi-round/multi-iteration/numbered-series jobs keep only their FINAL round's images" +
-    ' · non-image result files (pdf/xml/txt/…) are never captured' +
+    ' · non-image result files (pdf/xml/txt/…) are never captured as IMAGES — the FSC curve XML is the deliberate exception (captured as text for the report\\'s 一键下载 set)' +
     '. Live page:', appUrl);
 
   // v3.36: release the pacer worker + audio keep-alive (the speaker icon
@@ -3447,7 +3583,9 @@ export function SmartCapturePanel() {
               fetch only their
               <strong>final round / final iteration / last numbered plot</strong> ("Per particle
               scale factors 007" keeps only 007) and non-image result files
-              (pdf/xml/txt) are never fetched.
+              (pdf/xml/txt) are never fetched — <strong>except the FSC-curve
+              XML</strong>, which is captured as text for the report's one-click
+              set (<strong>5 maps + 1 fsc.xml</strong> per refine job).
             </p>
             <p className="mt-0.5 text-[11px] text-teal-600">
               Maps, tile images and job log images are captured with session credentials (auth + cookie) forwarded for downloads.

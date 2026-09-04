@@ -61,7 +61,7 @@ ok(/grace', 'lineage scan complete — brief re-trace window \(15s\), then compl
   'grace window wording: completes the capture (no all-job scan follows)');
 ok(/\(lineage-only by design\)'/.test(src),
   'final summary carries "lineage-only by design" + the opt-in hint');
-ok(/Smart Capture v3\.38/.test(src), 'v3.38 banner present');
+ok(/Smart Capture v3\.40/.test(src), 'v3.40 banner present');
 
 console.log('\n' + (checks - fails) + '/' + checks + ' checks passed');
 process.exit(fails ? 1 : 0);

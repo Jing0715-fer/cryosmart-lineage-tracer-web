@@ -62,6 +62,10 @@ export async function GET(
       cryosmart_cookie: d.cryosmart_cookie || undefined,
       // Log images streamed so far (may still grow until status=complete)
       job_log_images: session.jobLogImages,
+      // v3.40: FSC-curve XML per job (text or ref) — merged onto the jobs
+      // as `fsc_xml` and consumed by the report's one-click download set
+      // (5 maps + 1 XML) and the ZIP's Final_Result/FSC.
+      job_fsc_xml: session.jobFscXml,
       // Fileids whose BYTES were uploaded — the UI points these at the
       // same-origin /image/<fileid> endpoint instead of the (usually
       // mixed-content-blocked) direct CryoSmart URL.

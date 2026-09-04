@@ -22,7 +22,7 @@ function ok(cond, label) {
 }
 
 // ── 0. script-wide markers ──
-ok(/Smart Capture v3\.38/.test(src), 'v3.37 banner present');
+ok(/Smart Capture v3\.40/.test(src), 'v3.40 banner present');
 ok(src.indexOf('function pacerDelay') !== -1 && src.indexOf('function pacerTimeout') !== -1,
   'pacer functions present');
 ok(src.indexOf('cryosmartNoRestLogs') !== -1, 'REST-verdict localStorage key present');
