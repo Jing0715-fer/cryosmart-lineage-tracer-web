@@ -270,15 +270,22 @@ function isAbortReason(err: unknown): boolean {
 
 /** Fetch bytes (for maps, MRC, PNG, PDF). Returns Uint8Array.
  *
+ * `session` may be null (flow-figure/history-restore callers degrade
+ * gracefully); a null session throws the named Error immediately so every
+ * caller's try/catch maps it to its own fallback path.
+ *
  * Throws Error("…download stalled — no data for <N>s…") on a silent body,
  * a normal Error on HTTP failures (message keeps the `CryoSmart <status>`
  * prefix the bundle builder pattern-matches for unreachable detection),
  * and an AbortError when the caller cancels via init.signal. */
 export async function cryoSmartBytes(
-  session: CryoSmartSession,
+  session: CryoSmartSession | null,
   cryosmartPath: string,
   init?: CryoSmartFetchInit
 ): Promise<Uint8Array> {
+  if (!session) {
+    throw new Error("CryoSmart session unavailable — no credentials to fetch this resource");
+  }
   const timeoutMs = init?.timeoutMs;
   const stallMs = init?.stallMs ?? DEFAULT_STALL_MS;
   const ctrl = new AbortController();

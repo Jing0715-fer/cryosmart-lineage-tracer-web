@@ -1439,11 +1439,17 @@ export function mapPreviewImageName(group: unknown): string {
  *  (the refine job's primary output mask — included even when it lives in
  *  a `mask` group as `mask.mask_refine`), while `precision` (the
  *  per-particle precision map, an analysis artifact) is EXCLUDED. The
- *  remaining masks (`mask_fsc`, `mask_fsc_auto`, …) stay excluded. */
+ *  remaining masks (`mask_fsc`, `mask_fsc_auto`, …) stay excluded.
+ *  v3.42 (user report): CryoSmart exposes `mask_refine` in BOTH the
+ *  `volume` group and a separate `mask` group — the filter used to admit
+ *  the file twice ("map: 6 个", a duplicated download cell + a duplicated
+ *  one-click entry). Deduplicate by `result_name`, preferring the
+ *  volume-group twin (the user's canonical `<uid>.volume.mask_refine`
+ *  naming), so the deliverable set stays exactly 5. */
 export function normalMapAssets(node: {
   maps?: MapAsset[];
 }): MapAsset[] {
-  return (node.maps || []).filter((item) => {
+  const filtered = (node.maps || []).filter((item) => {
     const group = String(item.group || "");
     const result = String(item.result_name || "");
     const volumeGroup = item.group_type
@@ -1455,6 +1461,20 @@ export function normalMapAssets(node: {
     const isPrecision = /precision/i.test(result);
     return (volumeGroup || isMaskRefine) && !isMask && !isPrecision;
   });
+  const seen = new Map<string, MapAsset>();
+  for (const item of filtered) {
+    const key = String(item.result_name || item.group || "").toLowerCase();
+    const prev = seen.get(key);
+    // First entry wins EXCEPT when a later twin sits in a volume group and
+    // the first one doesn't (`volume.mask_refine` beats `mask.mask_refine`).
+    const prevVolume =
+      prev && (prev.group_type ? prev.group_type === "volume" : !/mask/i.test(String(prev.group || "")));
+    const currVolume = item.group_type
+      ? item.group_type === "volume"
+      : !/mask/i.test(String(item.group || ""));
+    if (!prev || (!prevVolume && currVolume)) seen.set(key, item);
+  }
+  return Array.from(seen.values());
 }
 
 /* ------------------------------------------------------------------ */

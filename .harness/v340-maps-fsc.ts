@@ -93,10 +93,15 @@ function mapOf(group: string, result: string, groupType: string): MapAsset {
     ],
   };
   const got = normalMapAssets(node).map((m) => `${m.group}.${m.result_name}`);
+  // v3.42: mask_refine appears in BOTH the volume group and a separate
+  // mask group — normalMapAssets now DEDUPES by result_name (volume-group
+  // twin preferred), so the deliverable set is exactly 5 (the v3.40
+  // expectation kept both twins and rendered "map: 6 个" + a duplicated
+  // download cell — the user's bug report).
   ok(
     got.join(",") ===
-      "volume.map,volume.map_sharp,volume.map_half_A,volume.map_half_B,volume.mask_refine,mask.mask_refine",
-    `normalMapAssets = the 5-map set (+ mask-group twin): ${got.join(",")}`
+      "volume.map,volume.map_sharp,volume.map_half_A,volume.map_half_B,volume.mask_refine",
+    `normalMapAssets = the deduped 5-map set: ${got.join(",")}`
   );
   ok(!got.some((g) => /precision/.test(g)), "precision EXCLUDED from the report set");
   ok(!got.some((g) => /mask_fsc($|_auto)/.test(g)), "mask_fsc / mask_fsc_auto stay excluded");
@@ -205,12 +210,15 @@ function mapOf(group: string, result: string, groupType: string): MapAsset {
 
 // ── 4. inline script single-file fallback ─────────────────────────────
 {
+  // v3.42 download ladder: succeeded parts are downloaded INDIVIDUALLY via
+  // their OWN url (no more re-triggering urls[0]); each job part records
+  // the url it came from.
   ok(
-    /triggerSingle\(files\[0\]\.url,files\[0\]\.name\)/.test(_REPORT_HTML_V2_SCRIPT),
-    "single-file fallback downloads the SUCCEEDED file (files[0].url), not urls[0]"
+    /files\.forEach\(function\(f\)\{triggerSingle\(f\.url,f\.name\);\}\)/.test(_REPORT_HTML_V2_SCRIPT),
+    "single-file fallback downloads each SUCCEEDED file via its own url"
   );
   ok(
-    /return \{name:nameOf\(url,i\),data:blob,url:url\}/.test(_REPORT_HTML_V2_SCRIPT),
+    /return \{name:j\.n,data:b,url:j\.u,size:b\.size\};/.test(_REPORT_HTML_V2_SCRIPT),
     "zip parts carry their own url"
   );
 }
