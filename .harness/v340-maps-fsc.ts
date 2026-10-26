@@ -208,18 +208,28 @@ function mapOf(group: string, result: string, groupType: string): MapAsset {
   ok(urls2.length === 6 && /volume\.fsc\.xml/.test(urls2[5]), "constructed URL still rides the button for old captures");
 }
 
-// ── 4. inline script single-file fallback ─────────────────────────────
+// ── 4. inline script anti-blocking zip contract ────────────────────────
 {
-  // v3.42 download ladder: succeeded parts are downloaded INDIVIDUALLY via
-  // their OWN url (no more re-triggering urls[0]); each job part records
-  // the url it came from.
+  // v3.43: ONE zip download instead of the per-file download storm that
+  // Chrome/Firefox automatic-multi-download protection blocked. All fetched
+  // parts go through __csZipStore (STORE-mode Blob-parts writer, chunked
+  // CRC32, no size cap); leftovers that cannot be fetched surface as a
+  // per-file click-to-download retry row (one user click = one download).
   ok(
-    /files\.forEach\(function\(f\)\{triggerSingle\(f\.url,f\.name\);\}\)/.test(_REPORT_HTML_V2_SCRIPT),
-    "single-file fallback downloads each SUCCEEDED file via its own url"
+    /__csZipStore\(okFiles,function\(doneBytes\)\{/.test(_REPORT_HTML_V2_SCRIPT),
+    "all fetched parts are packed into ONE zip via __csZipStore"
   );
   ok(
-    /return \{name:j\.n,data:b,url:j\.u,size:b\.size\};/.test(_REPORT_HTML_V2_SCRIPT),
-    "zip parts carry their own url"
+    /okFiles\.push\(\{name:e\.name,blob:b,url:e\.u\}\);/.test(_REPORT_HTML_V2_SCRIPT),
+    "zip parts carry their own url (for the per-file retry row)"
+  );
+  ok(
+    !/total<33554432/.test(_REPORT_HTML_V2_SCRIPT),
+    "the 32 MB zip cap is gone (real map sets are hundreds of MB)"
+  );
+  ok(
+    /dl-retry/.test(_REPORT_HTML_V2_SCRIPT),
+    "un-fetchable leftovers surface as a per-file click-to-download retry row"
   );
 }
 
