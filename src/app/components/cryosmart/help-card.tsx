@@ -123,12 +123,27 @@ export function HelpCard() {
             <AccordionTrigger className="text-[13px] hover:no-underline">
               <span className="flex items-center gap-2">
                 <Terminal className="h-3.5 w-3.5 text-teal-600" />
-                ChimeraX helper scripts (desktop only)
+                ChimeraX 流程图与 helper 脚本（网页一键 + 桌面高级）
               </span>
             </AccordionTrigger>
             <AccordionContent className="space-y-3">
+              <div className="rounded-lg border border-teal-200 bg-gradient-to-br from-teal-50 to-emerald-50 p-3 dark:border-teal-800 dark:from-teal-950/30 dark:to-emerald-950/20">
+                <div className="mb-1 flex items-center gap-2 text-[12.5px] font-semibold text-teal-800 dark:text-teal-300">
+                  <Zap className="h-3.5 w-3.5" />
+                  方法一（推荐 · 网页一键）：Workflow Figure 卡片 + ChimeraX 桥
+                </div>
+                <ol className="ml-4 list-decimal space-y-1 text-[12px] leading-relaxed text-slate-700 dark:text-slate-300">
+                  <li>完成 Smart Capture 与 Trace Lineage 后，滚动到 <strong>Workflow Figure · 一键流程图</strong> 卡片。</li>
+                  <li>在 ChimeraX（1.12+，需 GPU 桌面版）的 Command Line 运行一次（卡片内可一键复制）：<code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">open https://&lt;本站&gt;/api/cryosmart/flow-figure/relay.py</code></li>
+                  <li>点击卡片里的 <strong>生成流程图 PPTX</strong> —— 网页会自动驱动 ChimeraX：地图打开 → 5 候选拟合对齐（含 z-flip 手性检查与自动翻正）→ 90° 视角统一 → 1600×1200 截图回传 → 组装成 16:9 参考版式 PPTX 并下载。</li>
+                  <li>若 ChimeraX 无法直读内网地图，页面自动改走中转（MRC 经本应用暂存 45 分钟）。若桥不可用，可用「会话预览图 / 演示样例」两种降级模式先生成。</li>
+                </ol>
+                <div className="mt-2 rounded-md border border-slate-200 bg-white p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                  <strong>与 ChimeraX 1.12 MCP 的关系：</strong>ChimeraX 的 <code className="font-mono">mcp start</code> 启动的是官方本地 REST server（供 Claude/Cursor 等 stdio bridge 使用），其 CORS 仅放行 localhost 网页。本桥使用同一内部机制（<code className="font-mono">session.ui.thread_safe</code> + 日志捕获），但 Origin 锁定为本应用，因此公网网页也能安全驱动；亦兼容官方 REST 通道（8080/8765/8650 自动探测，仅命令诊断）。
+                </div>
+              </div>
               <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-300">
-                These four scripts ship inside every download bundle. They are <strong>not browser-portable</strong> — they require ChimeraX installed locally. Download them individually here if you only need the helpers.
+                以下桌面脚本（A4 竖版 picture_flow PPTX）仍随每个下载包提供，作为高级/离线方案：
               </p>
               <div className="grid grid-cols-1 gap-2">
                 {HELPER_FILES.map((f) => (

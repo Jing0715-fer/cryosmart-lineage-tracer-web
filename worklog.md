@@ -1966,3 +1966,27 @@ Stage Summary:
 - No MCP client and no localhost-WebSocket plumbing exist in the active app (ws-client.ts/live-client.ts/src/tools/cryosmart-bridge are unwired legacy); driving local ChimeraX 1.12 MCP from the page will need brand-new code (likely fetch to http://localhost:<mcp-port> or WS, subject to mixed-content constraints on HTTPS previews).
 - The existing ChimeraX alignment logic to replicate via MCP lives in public/helpers/CryoSmart_auto_align_export_ppt.py: candidate_specs() = [original, rot_x_180, rot_y_180, rot_z_180, flip_z (`volume flip #id axis z modelId N`)], scored by `fit #vol in #ref [search 15]` correlation (measure correlation fallback), then 90°-view optimization (base, Y±90, X±90 by thumbnail coverage) and 1600×1200 PNG export + white-trim.
 - Dev server healthy on :3000 (GET / 200, history API 200); watch the uncommitted v3.40 tree (commit 5c65c33 missing locally) before building new work on top.
+
+---
+Task ID: 15 (v3.41)
+Agent: main (Z.ai Code)
+Task: 一键生成流程图 — ChimeraX MCP/桥接驱动的 16:9 Workflow.pptx 参考版式流程图（对齐 + 手性检查 + 统一视角 + 截图回传 + 网页组装 PPTX）
+
+Work Log:
+- 调研 ChimeraX 1.12 MCP 官方机制（rbvi.ucsf.edu 文档 + GitHub RBVI/ChimeraX 源码）：`mcp start [port=8080]` = `remotecontrol rest start` + json/log 模式；REST server 端点 /run（GET/POST form），JSON 响应含 python values/log messages/error；**CORS 仅放行 localhost origin**（rest_server__server.py `_is_localhost_origin`），公网网页直连被浏览器拦截 → 需要来源锁定的薄桥。
+- 解析 upload/Workflow.pptx 参考版式（unpack + python 遍历）：16:9 单页，8pt Arial(+微软雅黑) 文本、右侧标签、2:1 缩略图、straightConnector1(w=12700, triangle 尾)/bentConnector3(arrow 尾)、空矩形占位框；四张 ChimeraX 渲染图 descr=image-J68-H1/J142-H2/J174/J175（即用户自己的 hetero→non-uniform→DeepEMhancer 流程）。参考图导出到 public/demo/workflow/ 供演示模式使用。
+- 新增 public/helpers/CryoSmart_flow_relay.py：在 ChimeraX 内运行的桥（`open <app>/api/cryosmart/flow-figure/relay.py` 一次即可），127.0.0.1:8927-8929，端点 /ping /exec /file /volstats /nextid；内部机制与官方 RESTHandler 相同（session.ui.thread_safe + StringPlainTextLog），CORS Origin 锁定为应用来源 + ACAPN。
+- 新增 src/app/api/cryosmart/flow-figure/relay.py/route.ts（按请求 origin 注入 ALLOWED_ORIGINS）与 asset/route.ts（MRC 中转暂存，45min TTL，900MB 上限；ChimeraX 无法直读内网地图时的回退通道）。
+- 新增 src/lib/cryosmart/chimerax-bridge.ts：传输层自动探测（relay 优先、官方 REST 8080/8765/8650 次之）+ 对齐引擎完整移植 auto_align 脚本：5 候选（original/rot_xyz_180/flip_z `volume flip #N axis z modelId <next>`）、`measure correlation` → `fit` → `fit search 15` 评分、参考图 90° 视角白区覆盖评分（浏览器 canvas）统一应用到全部地图、1600×1200 supersample 3 截图回传；手性判定 = flip_z 胜出→corrected、|Δscore|≤0.01→ambiguous、否则 consistent。
+- 新增 src/lib/cryosmart/fsc-xml.ts：tolerant FSC XML 解析（列表式/逐点式/多 curve 容器；x 轴自动识别 resolution Å / 1/Å / cycles-per-px 并按 pixel size 归一）+ 出版级 FSC 曲线 canvas 渲染（0.143 虚线、分辨率反转 X 轴）；parseFscAny 支持文本回退。
+- 新增 src/lib/cryosmart/workflow-figure.ts：谱系阶段模型（parent-chain 上溯 + 终任务多 volume 输入=异源并行分支，如 J68/J142；select_2D 蒙太奇阶段；头部统计 N Micrographs→Auto pick→N particles；class%+K 格式化与参考一致）+ uniformLetterbox（common_trim_box 白边统一裁剪 + 2:1 信箱化）+ imageDims PNG/JPEG 尺寸嗅探 + demo 模型。
+- 新增 src/lib/cryosmart/workflow-pptx.ts：16:9 OOXML 生成器（纯 TS + makeZip）：头部文本行 + 小箭头、分组缩略图（右对齐标签在上、stats 双行在侧）、组内垂直箭头、跨组 bent/straight 连接符、finalStats "3.46 Å"、脚注；保持 name="CryoSmartImage:<uid>/<group>" + descr="image-<uid>" 标记与桌面 helper 互换。
+- 新增 flow-figure-card.tsx UI（三模式：ChimeraX 渲染/会话预览/演示；桥状态+复制命令；FSC 开关+阶段数选择；实时日志、手性报告表、缩略图预览、再次下载）；page.tsx 挂载于 DownloadCard 后；site-chrome 增加 Flow Figure 导航 + v3.41；help-card ChimeraX 区改写为「方法一 网页一键（推荐）」+ 桌面脚本高级。
+- 验证：bun 冒烟构建 demo pptx（1.6MB）；python-pptx 结构校验（16:9、4 张带标记图片、11 段参考版式文本、6 连接符）；LibreOffice 打开渲染 1280×720 正常；Agent Browser E2E：演示模式点击生成→成功面板+4 缩略图、无控制台错误、移动端无横向溢出、页脚自然下推；curl 验证 relay.py origin 注入与 asset 字节往返；VLM 视觉 QA 版式 6 项全部通过；eslint 0 问题。
+
+Stage Summary:
+- 一键流程图功能上线（v3.41）：网页直接驱动用户本机 ChimeraX 完成全流程，对齐（fit search 15 五候选）+ 手性检查（flip_z 判定与自动翻正）+ 90° 视角统一 + 截图回传，组装 16:9 参考 Workflow.pptx 版式并自动下载。
+- ChimeraX MCP 结论：官方 mcp/mcp start 是 stdio 桥 + 本地 REST server，浏览器无法直用（CORS localhost-only）；采用同机制的应用来源锁定桥（一次 open 命令）为推荐通道，官方 REST 作为降级（仅命令诊断）。
+- 三级降级保证可用性：ChimeraX 桥（完整）→ 会话预览图（无 ChimeraX）→ 演示样例（无谱系，沙盒验证用）；ChimeraX 直读内网地图失败时自动走应用 MRC 中转（asset API，45min TTL）。
+- 新文件：chimerax-bridge.ts / fsc-xml.ts / workflow-figure.ts / workflow-pptx.ts / flow-figure-card.tsx / CryoSmart_flow_relay.py / 两个 flow-figure API 路由 / public/demo/workflow 4 张参考图；改动：page.tsx / site-chrome / help-card。
+- 限制说明：ChimeraX 渲染需用户本机运行桥（一次）；REST-only 传输无截图回传（图片退回预览）；FSC XML 解析为 tolerant 策略，实际 schema 需用户数据回归。

@@ -7,6 +7,7 @@ import { CaptureHistoryCard } from "./components/cryosmart/capture-history-card"
 import { ConfigureCard } from "./components/cryosmart/configure-card";
 import { LineagePreviewCard } from "./components/cryosmart/lineage-preview-card";
 import { DownloadCard } from "./components/cryosmart/download-card";
+import { FlowFigureCard } from "./components/cryosmart/flow-figure-card";
 import { HelpCard } from "./components/cryosmart/help-card";
 import { ScrollToTop } from "./components/cryosmart/scroll-to-top";
 import { useImportedMetadata } from "./components/cryosmart/use-imported-metadata";
@@ -213,6 +214,7 @@ export default function Home() {
             stagedImport={importState.token !== null}
           />
           <DownloadCard summary={summary} loaded={loaded} />
+          <FlowFigureCard summary={summary} loaded={loaded} />
           <HelpCard />
         </div>
       </main>
