@@ -263,7 +263,13 @@ export function buildFlowFigureModel(
   opts: BuildModelOptions = {},
 ): FlowFigureModel {
   const warnings: string[] = [];
-  const maxGroups = opts.maxGroups ?? 6;
+  // v3.45 (user report — “已折叠最早的 2 个阶段…少了前面的 dataset”): the
+  // default used to be 6 groups with the earliest single stages folded away,
+  // so a lineage with 8 stages read as incomplete. Default is now 10 (the
+  // widest selector value); a caller may pass Infinity (or any value <= 0,
+  // mapped to Infinity) for explicit never-fold semantics.
+  const rawMax = opts.maxGroups ?? 10;
+  const maxGroups = rawGroupsEffective(rawMax);
   const graph = collectLineageGraph(summary);
   const chain = walkParentChain(summary, graph); // final → ancestor
   const ancestors = [...graph.ancestorUids]
@@ -423,9 +429,17 @@ export function buildFlowFigureModel(
   };
 }
 
+/** v3.45: selector semantics — a value <= 0 (the “全部” option) means
+ * Infinity: never fold, every stage renders. Infinity passes through as-is. */
+function rawGroupsEffective(raw: number): number {
+  if (!Number.isFinite(raw)) return Infinity;
+  return raw <= 0 ? Infinity : raw;
+}
+
 /** v3.44 stage folding with branch protection: parallel groups (length
  *  > 1), the first group and the final group are mandatory; only single
- *  stages fold, earliest first. */
+ *  stages fold, earliest first. v3.45: the warning names the “全部” escape
+ *  (调到“全部”即不折叠) instead of the old “调大阶段数” hint. */
 function trimFlowGroups(
   groups: FlowFigureItem[][],
   maxGroups: number,
@@ -440,7 +454,7 @@ function trimFlowGroups(
   mandatory.add(groups.length - 1);
   if (mandatory.size >= maxGroups) {
     warnings.push(
-      `谱系阶段较多，已折叠最早的 ${groups.length - mandatory.size} 个单图阶段（并行分支与最终阶段已全部保留；可在选项中调大阶段数）。`,
+      `谱系阶段较多，已折叠最早的 ${groups.length - mandatory.size} 个单图阶段（并行分支与最终阶段已全部保留；阶段数选“全部”即不折叠）。`,
     );
     return groups.filter((_, i) => mandatory.has(i));
   }
@@ -449,7 +463,7 @@ function trimFlowGroups(
   for (let i = 0; i < groups.length && chosen.size < maxGroups; i++) chosen.add(i);
   const kept = groups.filter((_, i) => chosen.has(i));
   warnings.push(
-    `谱系阶段较多，已折叠最早的 ${groups.length - kept.length} 个阶段（并行分支已保留；可在选项中调大阶段数）。`,
+    `谱系阶段较多，已折叠最早的 ${groups.length - kept.length} 个阶段（并行分支已保留；阶段数选“全部”即不折叠）。`,
   );
   return kept;
 }

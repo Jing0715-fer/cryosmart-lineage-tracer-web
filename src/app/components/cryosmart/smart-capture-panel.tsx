@@ -149,14 +149,26 @@ export function SmartCapturePanel() {
   // is never blocked). The page then polls the import session and shows
   // live progress while the script streams jobs + log images.
   const captureScript = `
-// CryoSmart Smart Capture v3.40 — LAST-ITERATION, LAST-ROUND, LAST-OF-
+// CryoSmart Smart Capture v3.45 — LAST-ITERATION, LAST-ROUND, LAST-OF-
 // NUMBERED-SERIES, PER-JOB log images, LINEAGE-ONLY by default, FSC-XML
-// CAPTURE. Job
+// CAPTURE, LINEAGE EDGE COMPLETION. Job
 // metadata uploads for the WHOLE project immediately (fast); log images
 // are fetched for the traced lineage ONLY (the script waits for the web
 // app's Trace Lineage action to publish the lineage job list to the
 // session, then scans just those jobs — ~72 on the user's project, the
-// graph + report become useful within seconds). v3.38 removed the v3.27
+// graph + report become useful within seconds). v3.45 adds STEP 1.9
+// 谱系补边 BEFORE the upload: the upstream walk the app performs at Trace
+// time can only follow connections the SPA store actually has — a job's
+// parents/input_slot_groups materialise only after its detail view is
+// opened, so dataset branches the user never clicked vanished from the
+// lineage ("picture flow 只看到最后一个 dataset"). The script now walks
+// upstream from the end job itself, calls the SPA's own detail loader for
+// every reached job with no recorded edges (calibrated like the log
+// loader, evidence = EDGES), merges the fetched connections into the
+// uploaded metadata, and iterates until closure — every dataset's import
+// reaches the traced lineage, count-less imports included. Best-effort
+// and budgeted (≤400 calls, ≤min(240s, 15s+jobs×0.2s)); a fully-detailed
+// store costs ZERO calls; __csCaptureFinish() stops it. v3.38 removed the v3.27
 // complete-report pass that auto-widened to {all:true} and scanned every
 // UNTRACED job afterwards (hours on a 593-job project; __csCaptureAll()
 // or the strip's "Fetch all N jobs" button still fetch them on demand),
@@ -404,7 +416,7 @@ export function SmartCapturePanel() {
   // oscillator engages only while the tab is hidden — audible tabs are
   // exempt from intensive throttling AND tab freezing. Falls back to
   // plain setTimeout when Worker or blob URLs are unavailable.
-  console.log('[CryoSmart] Smart Capture v3.40 — LINEAGE-ONLY scan + FSC-curve XML capture (report 一键下载 = 5 maps + 1 fsc.xml), REST log probes OFF by default, replay self-healing + WS liveness guard, worker-pacer timers.');
+  console.log('[CryoSmart] Smart Capture v3.45 — LINEAGE-ONLY scan + FSC-curve XML capture (report 一键下载 = 5 maps + 1 fsc.xml), REST log probes OFF by default, replay self-healing + WS liveness guard, worker-pacer timers, 谱系补边 edge-completion pass.');
   var pacerWorker = null, pacerSeq = 0, pacerWaiters = {};
   try {
     var PACER_SRC = 'var t={};onmessage=function(e){var d=e.data;' +
@@ -2502,6 +2514,444 @@ export function SmartCapturePanel() {
     });
   }
 
+  // ── v3.45 escape hatches (moved UP from STEP 3) ────────────────────
+  // The edge-completion pass below runs BEFORE the metadata upload, so the
+  // escape hatches must already exist while it works — __csCaptureFinish()
+  // now stops the enrichment walk too (previously it only covered the log
+  // scan, which starts after this point).
+  var ALL_UIDS = jobs.map(function(j) { return j && j.uid; });
+  var knownRequested = null;
+  var FINISH_NOW = false;
+  var CAPTURE_ALL_LATE = false;
+  window.__csCaptureAll = function() {
+    CAPTURE_ALL_LATE = true;
+    knownRequested = ALL_UIDS.slice();
+    console.log('[CryoSmart] __csCaptureAll — fetching log images for EVERY job.');
+  };
+  window.__csCaptureFinish = function() {
+    FINISH_NOW = true;
+    console.log('[CryoSmart] __csCaptureFinish — completing without further fetching (谱系补边/日志均立即停止).');
+  };
+
+  // ── v3.45 STEP 1.9: lineage edge completion (谱系补边) ─────────────
+  // Root cause of “report 的 picture flow 只看到最后一个 dataset，少了前面
+  // 的 dataset”: the upstream walk the web app performs at Trace time can
+  // only follow job connections that the SPA STORE actually has. On real
+  // builds a job's parents / input_slot_groups only materialise after its
+  // DETAIL view is opened (getJobDetail) — every job the user never
+  // clicked stays list-level or bare, and a PARTIALLY-known parent list
+  // (only one of a merge job's inputs) silently amputates the other dataset
+  // branch (P208: J476 select_2d listed only the LAST dataset's class_2d).
+  // The fix: BEFORE uploading the metadata, walk upstream from the end job
+  // HERE, and for every reached job that is not fully detailed (no
+  // parents+input_slot_groups), call the SPA's own detail loader (the
+  // same calibrated store actions the log scan uses — the evidence this
+  // time is EDGES, not logs), UNION the fetched parents into the entry we
+  // upload (plus input_slot_groups/output groups/logs), and keep walking
+  // until closure. Best-effort: a fully-detailed store costs ZERO calls,
+  // and a build whose loader cannot be calibrated degrades to exactly the
+  // old behaviour with a loud, actionable console hint.
+  var enrichT0 = Date.now();
+  var ENRICH_MAX_FETCH = 400;    // hard cap on detail calls per run
+  var ENRICH_BUDGET_MS = Math.min(240000, 15000 + jobs.length * 200);
+  var ENRICH_POOL = 4;           // concurrent detail calls
+  var enrichStart = currentJobUid || (function pickEnrichStartUid() {
+    // Mirror the app's Start-Job suggestion: the NEWEST refinement-style
+    // job — the one the app will auto-suggest (or the user will pick)
+    // when no page job was detected, so the enrichment closure covers
+    // exactly the lineage that gets traced.
+    var RE = /refine|reconstruct|sharpen|emhancer|post_process|postprocess|polish/i;
+    var best = null, bestNum = -1;
+    for (var i = 0; i < jobs.length; i++) {
+      var j = jobs[i];
+      if (!j || !j.uid) continue;
+      if (!RE.test(String(j.job_type || ''))) continue;
+      var m = String(j.uid).match(/(\\d+)\\s*$/);
+      var n = m ? parseInt(m[1], 10) : -1;
+      if (n > bestNum) { bestNum = n; best = j.uid; }
+    }
+    return best;
+  })();
+  function bareUidOf(u) {
+    // "BJ.P208.J497" → "497" · "J497" → "497" · "497" → "497" — the store
+    // mixes full and short uid formats between jobs and connections, so
+    // every comparison goes through the bare numeric tail.
+    var s = String(u || '').trim();
+    var dot = s.lastIndexOf('.');
+    if (dot >= 0) s = s.slice(dot + 1);
+    return s.replace(/^[A-Za-z]+/, '').toLowerCase();
+  }
+  var jobIndexByBare = {};
+  for (var ei9 = 0; ei9 < jobs.length; ei9++) {
+    if (jobs[ei9] && jobs[ei9].uid) jobIndexByBare[bareUidOf(jobs[ei9].uid)] = jobs[ei9];
+  }
+  function canonicalUidOf(anyUid) {
+    var e = jobIndexByBare[bareUidOf(anyUid)];
+    return e ? e.uid : String(anyUid);
+  }
+  // Every upstream source recorded on an entry (bare-normalised, deduped).
+  function entrySourcesOf(entry) {
+    var out = [], seen = {};
+    function push(v) {
+      if (!v) return;
+      var b = bareUidOf(v);
+      if (!b || seen[b]) return;
+      seen[b] = true;
+      out.push(b);
+    }
+    try {
+      var gs = entry.input_slot_groups;
+      if (Array.isArray(gs)) {
+        for (var g = 0; g < gs.length; g++) {
+          var grp = gs[g]; if (!grp) continue;
+          var conns = grp.connections;
+          if (Array.isArray(conns)) {
+            for (var c = 0; c < conns.length; c++) {
+              if (conns[c]) push(conns[c].job_uid);
+            }
+          }
+        }
+      }
+    } catch (e) {}
+    try {
+      var ps = entry.parents;
+      if (Array.isArray(ps)) { for (var p = 0; p < ps.length; p++) push(ps[p]); }
+    } catch (e) {}
+    return out;
+  }
+  function isImportLikeType(type) {
+    return /^import_/i.test(String(type || ''));
+  }
+  function entryNeedsDetail(entry) {
+    if (!entry) return false;
+    if (isImportLikeType(entry.job_type)) {
+      // Imports are true lineage roots — no upstream walk needed. But their
+      // OUTPUT groups carry the micrograph count the report strip shows, so
+      // a count-less import still deserves ONE detail call.
+      return !(Array.isArray(entry.output_result_groups) && entry.output_result_groups.length);
+    }
+    // v3.45: a job is fully detailed only when it carries BOTH the flat
+    // parents list AND the input_slot_groups connections. List-level store
+    // entries (parents only — the cheap shape the project list carries) or
+    // completely bare entries are EXACTLY the ones whose merge branches go
+    // missing (P208: J476 select_2d showed only the last dataset's class_2d
+    // parent while its full detail lists TWO — the earlier dataset branch
+    // was invisible). Fetch the detail for those; the parents UNION merge
+    // then adds the missing upstream.
+    var hasParents = Array.isArray(entry.parents) && entry.parents.length;
+    var hasIsg = Array.isArray(entry.input_slot_groups) && entry.input_slot_groups.length;
+    return !(hasParents && hasIsg);
+  }
+  // Re-read the raw store job — the SPA mutates it in place when a detail
+  // (getJobDetail) lands, which is the primary evidence channel.
+  function storeJobByUid(uid) {
+    try {
+      var proj = socketStore.projectsInMap[projectId];
+      if (!proj) return null;
+      var b = bareUidOf(uid);
+      var exps = proj.experiments || [];
+      for (var e = 0; e < exps.length; e++) {
+        var arr = exps[e] && exps[e].jobs;
+        if (!Array.isArray(arr)) continue;
+        for (var jj = 0; jj < arr.length; jj++) {
+          if (arr[jj] && bareUidOf(arr[jj].uid) === b) return arr[jj];
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+  function detailShapeOk(obj) {
+    if (!obj || typeof obj !== 'object') return false;
+    return (Array.isArray(obj.input_slot_groups) && obj.input_slot_groups.length) ||
+           (Array.isArray(obj.parents) && obj.parents.length) ||
+           (Array.isArray(obj.output_result_groups) && obj.output_result_groups.length);
+  }
+  // Detail evidence attributed to THIS job: the object's own uid field (when
+  // present) must match — never attribute another job's detail (the same
+  // evidence discipline the v3.10 log attribution enforces).
+  function detailAttributed(obj, uid) {
+    if (!detailShapeOk(obj)) return null;
+    var oid = String(obj.uid || obj.job_uid || '');
+    if (oid && bareUidOf(oid) !== bareUidOf(uid)) return null;
+    return obj;
+  }
+  function detailFromStore(uid) {
+    return detailAttributed(storeJobByUid(uid), uid);
+  }
+  function deepFindDetail(node, uid, depth) {
+    if (!node || depth > 4) return null;
+    if (Array.isArray(node)) {
+      for (var i = 0; i < node.length; i++) {
+        var hit = deepFindDetail(node[i], uid, depth + 1);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    if (typeof node !== 'object') return null;
+    var direct = detailAttributed(node, uid);
+    if (direct) return direct;
+    try {
+      for (var k in node) {
+        if (!Object.prototype.hasOwnProperty.call(node, k)) continue;
+        var hit2 = deepFindDetail(node[k], uid, depth + 1);
+        if (hit2) return hit2;
+      }
+    } catch (e) {}
+    return null;
+  }
+  function normalizeSlotGroups(groups) {
+    // Deep-copy + canonicalise connection uids so the app's BFS (raw-uid
+    // Map lookups) matches them against the job entries we upload.
+    var out = [];
+    for (var g = 0; g < groups.length; g++) {
+      var grp = groups[g]; if (!grp || typeof grp !== 'object') continue;
+      var conns = Array.isArray(grp.connections) ? grp.connections : [];
+      var nconns = [];
+      for (var c = 0; c < conns.length; c++) {
+        var cn = conns[c]; if (!cn || typeof cn !== 'object') continue;
+        nconns.push({
+          job_uid: cn.job_uid ? canonicalUidOf(cn.job_uid) : cn.job_uid,
+          group_name: cn.group_name,
+          slots: cn.slots
+        });
+      }
+      out.push({ type: grp.type, name: grp.name, title: grp.title, connections: nconns });
+    }
+    return out;
+  }
+  function connBareSet(groups) {
+    var s = {};
+    if (!Array.isArray(groups)) return s;
+    for (var g = 0; g < groups.length; g++) {
+      var grp = groups[g]; if (!grp) continue;
+      var conns = Array.isArray(grp.connections) ? grp.connections : [];
+      for (var c = 0; c < conns.length; c++) {
+        if (conns[c] && conns[c].job_uid) s[bareUidOf(conns[c].job_uid)] = true;
+      }
+    }
+    return s;
+  }
+  function mergeDetailInto(entry, detail) {
+    if (!entry || !detail) return 0;
+    var changed = 0;
+    try {
+      // parents: UNION — a partially-known parent list (list-level store
+      // data) is exactly the merge-branch gap; keep what we had and ADD the
+      // detail's sources (canonicalised, deduped).
+      if (Array.isArray(detail.parents) && detail.parents.length) {
+        var existingParents = Array.isArray(entry.parents) ? entry.parents.slice() : [];
+        var have = {};
+        for (var pe = 0; pe < existingParents.length; pe++) have[bareUidOf(existingParents[pe])] = true;
+        var canon = existingParents.slice();
+        for (var pi = 0; pi < detail.parents.length; pi++) {
+          var du = canonicalUidOf(detail.parents[pi]);
+          if (!have[bareUidOf(du)]) { have[bareUidOf(du)] = true; canon.push(du); }
+        }
+        if (canon.length !== existingParents.length) { entry.parents = canon; changed++; }
+      }
+      // input_slot_groups: replace when the detail's connection set is a
+      // SUPERSET of the recorded one (or nothing was recorded) — the
+      // normalised copy keeps connection uids canonical for the app's BFS.
+      if (Array.isArray(detail.input_slot_groups) && detail.input_slot_groups.length) {
+        var norm = normalizeSlotGroups(detail.input_slot_groups);
+        var oldSet = connBareSet(entry.input_slot_groups);
+        var newSet = connBareSet(norm);
+        var superset = true;
+        for (var ok in oldSet) {
+          if (!newSet[ok]) { superset = false; break; }
+        }
+        var oldCount = 0, newCount = 0;
+        for (var oc in oldSet) oldCount++;
+        for (var nc in newSet) newCount++;
+        if (!oldCount || (superset && newCount > oldCount)) {
+          entry.input_slot_groups = norm;
+          changed++;
+        }
+      }
+      if (Array.isArray(detail.output_result_groups) && detail.output_result_groups.length &&
+          !(Array.isArray(entry.output_result_groups) && entry.output_result_groups.length)) {
+        entry.output_result_groups = detail.output_result_groups;
+        changed++;
+      }
+      // Detail fetches usually carry the log entries too — keep the same
+      // last-round-only discipline STEP 2 applies to cached logs.
+      if (Array.isArray(detail.image_logs) && detail.image_logs.length &&
+          !(Array.isArray(entry.image_logs) && entry.image_logs.length)) {
+        entry.image_logs = lastRoundEntries(detail.image_logs);
+      }
+    } catch (e) {}
+    return changed;
+  }
+  // ── detail-loader calibration (evidence = edges, not logs) ────────
+  var enrichLoader = null;    // { action, shapeIdx } once calibrated
+  var enrichCalibrated = false;
+  function detailActionScore(name) {
+    var n = String(name || '').toLowerCase();
+    if (/get.*job.*detail|jobdetail|getjobinfo/.test(n)) return 3;
+    if (/detail|info/.test(n)) return 2;
+    if (/log/.test(n)) return 1;   // log-only actions rarely carry edges — last resort
+    return 0;
+  }
+  async function fetchDetailVia(action, shapeIdx, uid) {
+    var shapes = shapesFor(uid);
+    var shape = shapes[shapeIdx];
+    if (shape === undefined) return null;
+    // Same guessed-shape discipline as the log calibration: the v3.35 RPC
+    // repair layer completes under-supplied payloads at the socket boundary,
+    // so the server never sees half-empty args and never pops ServerError.
+    armRepair(uid);
+    var ret = null;
+    try { ret = action.fn.call(action.store, shape); } catch (e) { ret = null; }
+    if (ret && typeof ret.then === 'function') {
+      try { ret = await withTimeout(ret.catch(function() { return null; }), 2500); }
+      catch (e) { ret = null; }
+    }
+    var det = (ret && deepFindDetail(ret, uid, 0)) || detailFromStore(uid);
+    if (det) return det;
+    // state mode: the detail may land asynchronously (WS delivery) — poll
+    // the store entry briefly, same window shape as the log calibration.
+    var deadline = Date.now() + 1600;
+    while (Date.now() < deadline) {
+      await sleepMs(160);
+      det = detailFromStore(uid);
+      if (det) return det;
+    }
+    return null;
+  }
+  async function calibrateEnrichLoader() {
+    if (enrichCalibrated) return;
+    enrichCalibrated = true;
+    var actions = findLogActions();
+    if (!actions.length) {
+      console.log('[CryoSmart] 谱系补边: 本页面没有可调用的详情动作 — 沿用页面已有的连接。');
+      return;
+    }
+    var pool = jobs.filter(function(j) { return j && entryNeedsDetail(j); });
+    if (!pool.length) return;   // every job already carries its connections
+    var RICH = /refine|class_?3d|reconstruct|abinit|select|extract/i;
+    pool.sort(function(a, b) {
+      var ra = RICH.test(String(a.job_type || '')) ? 1 : 0;
+      var rb = RICH.test(String(b.job_type || '')) ? 1 : 0;
+      if (ra !== rb) return rb - ra;
+      return bareUidOf(b.uid) < bareUidOf(a.uid) ? 1 : -1;   // later jobs first
+    });
+    var uid = pool[0].uid;
+    var ordered = actions.slice().sort(function(a, b) {
+      return detailActionScore(b.name) - detailActionScore(a.name);
+    });
+    console.log('[CryoSmart] 谱系补边: 详情加载候选动作 — ' +
+      ordered.map(function(a) { return a.name; }).join(', ') + '（在 ' + uid + ' 上校准）');
+    ensureRpcPatch();
+    phase('enrich', '寻找作业详情加载器 — ' + ordered.length + ' 个候选动作…');
+    outer_enrich:
+    for (var a = 0; a < Math.min(3, ordered.length); a++) {
+      var shapes = shapesFor(uid);
+      for (var s = 0; s < shapes.length; s++) {
+        if (FINISH_NOW || Date.now() - enrichT0 > ENRICH_BUDGET_MS) break outer_enrich;
+        phase('enrich', '校准详情加载器 ' + uid + ' — 动作 "' + ordered[a].name + '" 参数形态 ' + (s + 1) + '/' + shapes.length + '…');
+        var det = await fetchDetailVia(ordered[a], s, uid);
+        if (det) {
+          enrichLoader = { action: ordered[a], shapeIdx: s };
+          mergeDetailInto(pool[0], det);
+          console.log('[CryoSmart] 谱系补边: 详情加载器 = ' + ordered[a].name + '（参数形态 ' + (s + 1) + '）');
+          break outer_enrich;
+        }
+      }
+    }
+    if (!enrichLoader) {
+      console.log('[CryoSmart] 谱系补边: 未找到能补连接的详情加载器 — 本次只能沿用页面已有的连接，' +
+        '从未打开过的作业的上游分支不会出现在谱系里。提示: 在 CryoSmart 中打开一两个早期 dataset 的关键作业页' +
+        '（如颗粒选择/2D 分类作业），再重新运行本脚本即可补全那些分支。');
+    }
+  }
+  // ── the closure walk ──────────────────────────────────────────────
+  var enrichSeen = {};      // bare uid → visited
+  var enrichQueued = {};
+  var enrichQueue = [];
+  var enrichActive = 0;
+  var enrichFetchCount = 0;
+  var enrichEdgeAdds = 0;
+  var enrichImportReached = 0;
+  var enrichVisits = 0;
+  var enrichCutShort = false;
+  function enrichPush(anyUid) {
+    var b = bareUidOf(anyUid);
+    if (!b || enrichQueued[b]) return;
+    enrichQueued[b] = true;
+    enrichQueue.push(b);
+  }
+  function enrichEnqueueSourcesOf(entry) {
+    var srcs = entrySourcesOf(entry);
+    for (var i = 0; i < srcs.length; i++) enrichPush(srcs[i]);
+  }
+  async function enrichDetailOne(bare) {
+    var entry = jobIndexByBare[bare];
+    if (!entry || !enrichLoader) return;
+    if (enrichFetchCount >= ENRICH_MAX_FETCH) { enrichCutShort = true; return; }
+    if (Date.now() - enrichT0 > ENRICH_BUDGET_MS) { enrichCutShort = true; return; }
+    if (FINISH_NOW) return;
+    enrichFetchCount++;
+    phase('enrich', '谱系补边: 读取 ' + (entry.uid || bare) + ' 的上游连接 (' + enrichFetchCount + '/' + ENRICH_MAX_FETCH + ')…');
+    // fetchDetailVia must receive the CANONICAL uid (e.g. "J497", not the
+    // bare index key "497") — the RPC repair layer and shapesFor() both
+    // build payloads from this value and the server only knows the real one.
+    var det = await fetchDetailVia(enrichLoader.action, enrichLoader.shapeIdx, entry.uid);
+    if (det) enrichEdgeAdds += mergeDetailInto(entry, det);
+  }
+  async function enrichWalk() {
+    if (!enrichStart) return;
+    await calibrateEnrichLoader();
+    if (!enrichLoader) return;   // nothing to fetch with — skip silently (hint already printed)
+    console.log('[CryoSmart] 谱系补边: 从 ' + enrichStart + ' 向上游回溯 — 为没有连接记录的作业补全上游分支' +
+      '（可随时 __csCaptureFinish() 跳过）。');
+    enrichPush(enrichStart);
+    while ((enrichQueue.length || enrichActive > 0) && !FINISH_NOW) {
+      if (Date.now() - enrichT0 > ENRICH_BUDGET_MS) { enrichCutShort = true; break; }
+      while (enrichActive < ENRICH_POOL && enrichQueue.length && !FINISH_NOW &&
+             Date.now() - enrichT0 <= ENRICH_BUDGET_MS) {
+        var b = enrichQueue.shift();
+        if (!b || enrichSeen[b]) continue;
+        enrichSeen[b] = true;
+        enrichVisits++;
+        var entry = jobIndexByBare[b];
+        if (!entry) continue;                       // not one of this project's jobs
+        if (isImportLikeType(entry.job_type)) {
+          enrichImportReached++;
+          if (entryNeedsDetail(entry)) {
+            enrichActive++;
+            enrichDetailOne(b).then(function() { enrichActive--; },
+                                 function() { enrichActive--; });
+          }
+          continue;                                // imports are leaves
+        }
+        if (!entryNeedsDetail(entry)) {
+          enrichEnqueueSourcesOf(entry);             // fully detailed — walk on, free
+          continue;
+        }
+        enrichActive++;
+        (function(bare, ent) {
+          enrichDetailOne(bare).then(function() {
+            enrichActive--;
+            enrichEnqueueSourcesOf(ent);            // merged edges (or none) — keep walking
+          }, function() { enrichActive--; });
+        })(b, entry);
+      }
+      if (enrichActive > 0) await sleepMs(140);
+    }
+    var secs = Math.round((Date.now() - enrichT0) / 100) / 10;
+    var importCount = enrichImportReached;
+    console.log('[CryoSmart] 谱系补边完成: 回溯 ' + enrichVisits + ' 个作业 · 深挖 ' + enrichFetchCount +
+      ' 个缺连接作业的详情 · 新增 ' + enrichEdgeAdds + ' 条上游连接 · 追溯到 ' + importCount + ' 个数据集导入' +
+      (enrichCutShort ? '（超出时间预算被截断 — 重新运行脚本会从当前进度继续补全）' : '') +
+      ' · 用时 ' + secs + 's');
+    phase('enrich', '谱系补边完成 · ' + enrichVisits + ' 作业 · ' + importCount + ' 个数据集导入');
+  }
+  try {
+    await enrichWalk();
+  } catch (e) {
+    console.warn('[CryoSmart] 谱系补边异常（不影响后续流程）:', e && e.message);
+  }
+
   // ── STEP 2: embed cached logs + upload job metadata (fast) ────────
   // Cached log entries ride along INSIDE the jobs payload as raw
   // 'image_logs' entries (full fidelity: type/text/flags/imgfiles, refs
@@ -2635,19 +3085,10 @@ export function SmartCapturePanel() {
   //   Script run on the END JOB's page → the app auto-traces and this
   //   resolves within seconds. Script run on a project page → pick a
   //   Start Job in the app tab and click Trace Lineage.
-  var ALL_UIDS = pending.slice();
-  var knownRequested = null;
-  var FINISH_NOW = false;
-  var CAPTURE_ALL_LATE = false;
-  window.__csCaptureAll = function() {
-    CAPTURE_ALL_LATE = true;
-    knownRequested = ALL_UIDS.slice();
-    console.log('[CryoSmart] __csCaptureAll — fetching log images for EVERY job.');
-  };
-  window.__csCaptureFinish = function() {
-    FINISH_NOW = true;
-    console.log('[CryoSmart] __csCaptureFinish — completing without further log fetching.');
-  };
+  // v3.45: ALL_UIDS / knownRequested / FINISH_NOW / CAPTURE_ALL_LATE and
+  // the __csCaptureAll / __csCaptureFinish handlers are now defined ABOVE,
+  // before the lineage edge-completion pass (STEP 1.9) — they must be live
+  // while that pass runs, so __csCaptureFinish() can stop it.
   // v3.38: one-off REST log probe for future builds. Bypasses the
   // default-off gate AND the remembered all-404 verdict — it is an
   // explicit user action. A delivered route re-enables the REST fallback

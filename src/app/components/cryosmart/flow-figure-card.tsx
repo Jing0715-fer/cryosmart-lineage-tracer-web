@@ -71,7 +71,11 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const [bridgeTried, setBridgeTried] = useState(false);
   const [step, setStep] = useState<StepState>(IDLE);
   const [includeFsc, setIncludeFsc] = useState(false);
-  const [maxGroups, setMaxGroups] = useState("6");
+  // v3.45: default "10" — the widest numeric value (folding off for every
+  // lineage with ≤10 stages, which covers the real P208 8-stage model that
+  // used to ship with 2 collapsed stages). "0" = the “全部” selector entry
+  // (never fold, even beyond 10).
+  const [maxGroups, setMaxGroups] = useState("10");
   const [result, setResult] = useState<{ url: string; size: number; filename: string } | null>(null);
   const [thumbs, setThumbs] = useState<{ key: string; url: string }[]>([]);
   const [renderReport, setRenderReport] = useState<MapRender[]>([]);
@@ -183,7 +187,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         model = buildDemoFigureModel();
       } else {
         if (!summary) throw new Error("尚未载入谱系数据 — 请先完成 Smart Capture 与 Trace Lineage。");
-        model = buildFlowFigureModel(summary, { maxGroups: Number(maxGroups) || 6 });
+        // v3.45: "0" (the “全部” option) → 0, which buildFlowFigureModel maps
+        // to Infinity (never fold). Anything unparseable falls back to 10.
+        const parsedGroups = Number(maxGroups);
+        model = buildFlowFigureModel(summary, {
+          maxGroups: Number.isFinite(parsedGroups) ? parsedGroups : 10,
+        });
       }
       pushLog(`阶段模型: ${model.groups.length} 组 · 参考 ${model.referenceKey ?? "—"}`);
       for (const w of model.warnings) pushLog(`⚠ ${w}`);
@@ -231,16 +240,50 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         if (probe.ok && probe.modelId != null) {
           await bridgeExec(transport, `close #${probe.modelId}`);
           for (const [key, item] of uniqueMaps) sourceFor.set(key, item.map?.downloadUrl as string);
-          pushLog(`ChimeraX 可直接读取内网地图 (${fmtSize(0)} — 直连模式)`);
+          pushLog("ChimeraX 可直接读取内网地图 — 直连模式");
         } else {
-          pushLog(`ChimeraX 直接读取失败(${probe.error ?? "no model"}) → 改走应用中转:`);
+          // v3.45 (user report — “ChimeraX 直接读取失败(HTTP 401) → 改走应用
+          // 中转”之后再无下文): direct reads 401 whenever CryoSmart sits
+          // behind login (ChimeraX carries no cookies — expected). The
+          // app-relay path then needs THIS PAGE to download the bytes, which
+          // needs a session — fail with an actionable message instead of an
+          // opaque mid-loop error, isolate per-map failures so one bad map
+          // no longer kills the whole figure, and stream download progress
+          // (each MRC is 100–300 MB — the strip used to sit at one phase
+          // word for minutes).
+          if (!session) {
+            throw new Error(
+              `ChimeraX 无法直读内网地图（${probe.error ?? "no model"}），且当前载入的数据没有可代下载的 CryoSmart 凭据 — 请在已登录的 CryoSmart 页重新运行 Smart Capture（或恢复一次带凭据的快照），也可改用「会话预览图」模式。`,
+            );
+          }
+          pushLog(
+            `ChimeraX 直接读取失败(${probe.error ?? "no model"}) → 改走应用中转：页面下载 MRC → 应用暂存 → ChimeraX 读取（每个 map 100–300 MB，请稍候）`,
+          );
           setStep((s) => ({ ...s, phase: "下载并中转 MRC 文件", pct: 12 }));
           let done = 0;
+          const failedKeys: string[] = [];
           for (const [key, item] of uniqueMaps) {
             done += 1;
             setStep((s) => ({ ...s, phase: `中转地图 ${done}/${uniqueMaps.size}`, pct: 10 + (done / Math.max(1, uniqueMaps.size)) * 35 }));
-            const bytes = await cryoSmartBytes(session, item.map?.downloadUrl as string);
-            sourceFor.set(key, await uploadAsset(key, bytes, pushLog));
+            try {
+              const bytes = await cryoSmartBytes(session, item.map?.downloadUrl as string, {
+                timeoutMs: 300_000,
+                onBytes: (total) => setStep((s) => ({ ...s, phase: `下载 ${key} · ${fmtSize(total)}（${done}/${uniqueMaps.size}）` })),
+              });
+              sourceFor.set(key, await uploadAsset(key, bytes, pushLog));
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              if (key === referenceKey) {
+                throw new Error(
+                  `参考地图下载失败（${msg}）— 无法对齐。请确认 CryoSmart 已在同一浏览器中登录、本应用仍在运行，然后重试；或改用「会话预览图」模式。`,
+                );
+              }
+              failedKeys.push(key);
+              pushLog(`⚠ 地图 ${key} 中转失败，已跳过（${msg}）`);
+            }
+          }
+          if (failedKeys.length) {
+            pushLog(`⚠ 共 ${failedKeys.length} 个地图未能中转，流程图将缺少对应阶段（其余阶段照常渲染）。`);
           }
         }
 
@@ -432,9 +475,11 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {["2", "3", "4", "5", "6", "7", "8", "9", "10"].map((v) => (
+                  {["4", "5", "6", "7", "8", "9", "10"].map((v) => (
                     <SelectItem key={v} value={v}>{v}</SelectItem>
                   ))}
+                  {/* v3.45: “全部” — never fold, even beyond 10 stages. */}
+                  <SelectItem value="0">全部</SelectItem>
                 </SelectContent>
               </Select>
             </div>

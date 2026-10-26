@@ -2013,19 +2013,23 @@ export interface ReportHtmlOptions {
     // job 都显示了”): merged projects import micrographs SEVERAL times
     // (P208 has FIVE import_micrographs branches). The flow used to render
     // only the FIRST import and silently drop the rest. Collect them all.
+    // v3.45 (user report — “report 的 picture flow 只看到最后一个
+    // dataset，少了前面的 dataset”): the count filter was silently DROPPING
+    // imports whose metadata never carried output-group counts (jobs whose
+    // detail view was never opened at capture time) — a whole dataset branch
+    // vanished from the strip even after it made it into the traced lineage.
+    // Every import_(movies|micrographs) node now renders; the count is
+    // shown when known and omitted when not.
     const imports = (summary.nodes || [])
-      .filter(
-        (item) =>
-          /import_(movies|micrographs)/i.test(item.job_type || "") &&
-          item.micrograph_count !== null &&
-          item.micrograph_count !== undefined,
-      )
+      .filter((item) => /import_(movies|micrographs)/i.test(item.job_type || ""))
       .sort((a, b) => uidOrder(a) - uidOrder(b));
     // Headline = the import with the LARGEST micrograph count (the main
     // dataset — keeps the primary "N micrographs" figure stable when a
     // project re-imported a smaller early batch first, e.g. P208's J370
     // with 233 photos vs the 5,562-photo J474 mainline); ties fall back
-    // to the first import by uid order.
+    // to the first import by uid order. When NO import has a count the
+    // first import still headlines (its identity is known even when its
+    // count is not).
     let node: LineageNode | undefined = imports[0] || reportFirstMicrographNode(summary);
     for (const item of imports) {
       if ((node?.micrograph_count ?? 0) < (item.micrograph_count ?? 0)) node = item;
@@ -2053,7 +2057,10 @@ export interface ReportHtmlOptions {
           SMALL_JOB_TYPES.has(item.job_type) &&
           /ctf|motion|curate|exposure/i.test(item.job_type || ""),
       )
-      .slice(0, 8)
+      // v3.45: 8 → 24 — merged projects run one motion+CTF chain PER
+      // dataset (P208 has 5); the cap used to silently hide the earlier
+      // datasets' preprocessing rows, reading exactly like a missing branch.
+      .slice(0, 24)
       .map((item) => `${item.uid} ${item.job_type}`)
       .join("; ");
     // Every additional import branch, compact and card-linked.
@@ -2073,9 +2080,13 @@ export interface ReportHtmlOptions {
     const otherImportsHtml = otherImportRows
       ? `<div class="pf-import-list"><div class="pf-import-label">其他 micrograph 导入（${otherImports.length}）：</div>${otherImportRows}</div>`
       : "";
-    return `<div class="pf-start"><a class="pf-link" href="#card-${escHtml(node.uid)}"><div class="pf-big">${fmt(
-      node.micrograph_count,
-    )} micrographs${pixelSizeText(node) ? ` · ${escHtml(pixelSizeText(node))}` : ""}</div>${imgHtml}<div class="pf-note">${escHtml(
+    const headlineCount =
+      node.micrograph_count !== null && node.micrograph_count !== undefined
+        ? `${fmt(node.micrograph_count)} micrographs`
+        : "micrographs 导入";
+    return `<div class="pf-start"><a class="pf-link" href="#card-${escHtml(node.uid)}"><div class="pf-big">${headlineCount}${
+      pixelSizeText(node) ? ` · ${escHtml(pixelSizeText(node))}` : ""
+    }</div>${imgHtml}<div class="pf-note">${escHtml(
       node.uid,
     )} ${escHtml(node.job_type || "")}${
       preprocess ? ` · preprocessing: ${escHtml(preprocess)}` : ""
