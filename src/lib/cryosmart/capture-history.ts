@@ -38,7 +38,7 @@
 import { createHash, randomBytes } from "crypto";
 import { promises as fsp } from "fs";
 import * as path from "path";
-import type { ImportSession } from "./import-session-store";
+import type { ImportSession, FscXmlPayload } from "./import-session-store";
 import { MAP_SUFFIXES } from "./constants";
 
 /* ------------------------------------------------------------------ */
@@ -88,6 +88,9 @@ export interface HistoryCapture extends HistoryMeta {
   jobs: unknown[];
   /** { [jobUid]: [{ fileid, name, text, flags, src?, data? }] } */
   job_log_images: Record<string, unknown[]>;
+  /** v3.40: FSC-curve XML per job ({ [jobUid]: { xml?, fileid?, name? } }) —
+  *  feeds the report's one-click download (5 maps + 1 XML). */
+  job_fsc_xml?: Record<string, FscXmlPayload>;
   image_files: HistoryImageFile[];
   /** v3.15: fileids WITHOUT local bytes that carry an absolute CryoSmart
    *  URL (links-only imports). The history image endpoint falls back to a
@@ -140,6 +143,8 @@ export interface CaptureJsonExport {
   jobs: unknown[];
   /** Log-image refs keyed by job uid. */
   job_log_images: Record<string, unknown[]>;
+  /** v3.40: FSC-curve XML per job (small text — always embedded). */
+  job_fsc_xml?: Record<string, FscXmlPayload>;
   /** Every stored image with its absolute CryoSmart URL (+ bytes when embedded). */
   images: Array<{
     fileid: string;
@@ -391,6 +396,7 @@ export async function saveSessionToHistory(
           : null,
       jobs,
       job_log_images: session.jobLogImages,
+      job_fsc_xml: session.jobFscXml,
       image_files: imageFiles,
     };
     await fsp.writeFile(
@@ -708,6 +714,7 @@ export async function exportCaptureJson(
     },
     jobs: capture.jobs,
     job_log_images: capture.job_log_images || {},
+    job_fsc_xml: capture.job_fsc_xml || {},
     images,
     maps: collectMapEntries(capture.jobs, origin || null),
   };
@@ -929,6 +936,11 @@ export async function importCaptureJson(
     p.job_log_images && typeof p.job_log_images === "object"
       ? (p.job_log_images as Record<string, unknown[]>)
       : {};
+  // v3.40: FSC-curve XML per job (text payloads — tiny; pass through).
+  const jobFscXml =
+    p.job_fsc_xml && typeof p.job_fsc_xml === "object"
+      ? (p.job_fsc_xml as Record<string, FscXmlPayload>)
+      : undefined;
 
   const counts = {
     jobs: jobs.length,
@@ -974,6 +986,7 @@ export async function importCaptureJson(
       typeof credentials.cookie === "string" ? credentials.cookie : null,
     jobs,
     job_log_images: jobLogImages,
+    job_fsc_xml: jobFscXml,
     image_files: imageFiles,
     ...(linked > 0 ? { remote_image_urls: remoteUrls } : {}),
   };

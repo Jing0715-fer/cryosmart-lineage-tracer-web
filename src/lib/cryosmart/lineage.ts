@@ -44,6 +44,7 @@ import type {
   OutputResultGroup,
   ParamSpecEntry,
   ParamsSpec,
+  NodeFscXml,
   Select2DSummary,
   Slot,
   UiTileImage,
@@ -1302,6 +1303,121 @@ export function mapAssets(
   return assets;
 }
 
+/* ------------------------------------------------------------------ */
+/* FSC curve XML (v3.40)                                               */
+/* ------------------------------------------------------------------ */
+
+/** One FSC-XML candidate file found in a log entry's imgfiles/files. */
+function isFscXmlLogFile(
+  file: { filetype?: unknown; filename?: unknown; name?: unknown } | string | null | undefined,
+  fscEvidence: string
+): boolean {
+  if (!file) return false;
+  const isXmlFile = (ft: unknown, ...names: unknown[]): boolean => {
+    if (typeof ft === "string" && ft && /xml/i.test(ft)) return true;
+    for (const n of names) {
+      if (typeof n === "string" && n.trim() && /\.xml$/i.test(n.trim())) return true;
+    }
+    return false;
+  };
+  const own =
+    typeof file === "string"
+      ? file
+      : `${String(file.filename || "")} ${String(file.name || "")}`;
+  const looksXml =
+    typeof file === "string"
+      ? /\.xml$/i.test(file.trim())
+      : isXmlFile(file.filetype, file.filename, file.name);
+  if (!looksXml) return false;
+  // FSC evidence: the file's own name, or the log entry's text/flags.
+  return /fsc/i.test(own) || /fsc/i.test(fscEvidence);
+}
+
+/** Build the node's FSC-curve XML asset. Priority:
+ *   1. `job.fsc_xml` captured by the Smart Capture script (v3.40+) —
+ *      either the XML TEXT (probed from the job page, embedded as a
+ *      data: URL → works in every report context) or a bare fileid ref
+ *      (served by `/api/log_image/<fileid>`).
+ *   2. An FSC XML file ref inside the raw `image_logs` entries (JSON
+ *      upload mode / older captures that embedded raw logs).
+ *   3. Constructed best-effort: the CryoSPARC-style volume-group result
+ *      `volume.fsc.xml` via `download_result_file` — only for jobs that
+ *      actually produce a volume map (refine-family). If the server
+ *      doesn't serve it, the report's one-click ZIP silently drops it
+ *      (per-file fetch failures are already tolerated). */
+export function fscXmlAsset(
+  job: JobMetadata,
+  baseUrl: string,
+  projectId: string
+): NodeFscXml | null {
+  const uid = String(job.uid || "");
+  if (!uid || !baseUrl) return null;
+  const name = `BJ.${projectId || job.project_uid || "P"}.${uid}.volume.fsc.xml`;
+
+  // 1. Captured payload (script v3.40 / history restore).
+  const captured = job.fsc_xml as
+    | { fileid?: unknown; name?: unknown; xml?: unknown; text?: unknown }
+    | null
+    | undefined;
+  if (captured && typeof captured === "object") {
+    const xml =
+      typeof captured.xml === "string" && captured.xml.trim()
+        ? captured.xml
+        : typeof captured.text === "string" && /^\s*<\?xml|^\s*</.test(captured.text)
+          ? captured.text
+          : "";
+    if (xml) {
+      return {
+        name,
+        url: `data:text/xml;charset=utf-8,${encodeURIComponent(xml)}`,
+        xml,
+        source: "captured",
+      };
+    }
+    const fileid = typeof captured.fileid === "string" ? captured.fileid : "";
+    if (fileid) {
+      const url = logImageUrl(baseUrl, fileid);
+      if (url) return { name, url, source: "captured" };
+    }
+  }
+
+  // 2. Raw image_logs entries (JSON upload mode).
+  for (const log of job.image_logs || []) {
+    const evidence = `${String(log.text || "")} ${(log.flags || []).join(" ")}`;
+    if (!/fsc/i.test(evidence)) continue;
+    const files = (log.imgfiles && log.imgfiles.length ? log.imgfiles : log.files) || [];
+    for (const f of files) {
+      if (!f || !f.fileid) continue;
+      if (isFscXmlLogFile(f, evidence)) {
+        const url = logImageUrl(baseUrl, f.fileid);
+        if (url) {
+          return {
+            name,
+            url,
+            source: "log_ref",
+          };
+        }
+      }
+    }
+  }
+
+  // 3. Constructed best-effort — only for map-producing jobs.
+  const producesMap = (job.output_result_groups || []).some(
+    (g) =>
+      g &&
+      /volume/i.test(String(g.type || "")) &&
+      (g.contains || []).some(
+        (c) => c && /volume\.blob/i.test(String(c.type || "")) && /map/i.test(String(c.name || ""))
+      )
+  );
+  if (!producesMap) return null;
+  return {
+    name,
+    url: resultFileUrl(baseUrl, projectId || job.project_uid || "P", uid, "volume", "fsc.xml"),
+    source: "constructed",
+  };
+}
+
 /**
  * Map a volume-group name to a friendly preview image label
  * (e.g. `volume_class_3` → `volume_class_3`, `volume.map` → `volume`).
@@ -1312,15 +1428,18 @@ export function mapPreviewImageName(group: unknown): string {
   return value.replace(/\.map$/i, "");
 }
 
-/** Filter a node's map assets down to the "normal" (non-mask) map files.
+/** Filter a node's map assets down to the report's "normal" map set.
  *  Includes EVERY non-mask volume blob — not just `result_name === "map"`:
  *  CryoSmart refine jobs (nu-refine, homo/hetero/local refine, …) keep
  *  `map_sharp` + `map_half_A` + `map_half_B` (and CryoSPARC-style
  *  `half_map_A`/`half_map_B` groups) alongside `map` inside the `volume`
  *  output group; the old `result_name === "map"` filter silently dropped
- *  the sharpened map and half maps from the report. Masks are excluded
- *  BOTH by group type/name AND by result name (`mask_refine` lives inside
- *  the `volume` group). */
+ *  the sharpened map and half maps from the report.
+ *  v3.40 (user request): `mask_refine` is now part of the deliverable set
+ *  (the refine job's primary output mask — included even when it lives in
+ *  a `mask` group as `mask.mask_refine`), while `precision` (the
+ *  per-particle precision map, an analysis artifact) is EXCLUDED. The
+ *  remaining masks (`mask_fsc`, `mask_fsc_auto`, …) stay excluded. */
 export function normalMapAssets(node: {
   maps?: MapAsset[];
 }): MapAsset[] {
@@ -1330,8 +1449,11 @@ export function normalMapAssets(node: {
     const volumeGroup = item.group_type
       ? item.group_type === "volume"
       : !/mask/i.test(group);
-    const isMask = /mask/i.test(group) || /mask/i.test(result);
-    return volumeGroup && !isMask;
+    const isMaskRefine = /mask_refine/i.test(result);
+    const isMask =
+      (/mask/i.test(group) || /mask/i.test(result)) && !isMaskRefine;
+    const isPrecision = /precision/i.test(result);
+    return (volumeGroup || isMaskRefine) && !isMask && !isPrecision;
   });
 }
 
@@ -1470,6 +1592,10 @@ export function jobNode(
       : [],
     classes,
     select_2d: baseUrl ? selected2dSummary(job, baseUrl) : null,
+    // v3.40: FSC-curve XML download (report one-click + ZIP Final_Result).
+    fsc_xml: baseUrl
+      ? fscXmlAsset(job, baseUrl, projectId || job.project_uid || "")
+      : null,
   };
   if (job.job_type === "import_micrographs") {
     node.representative_micrograph_images = images

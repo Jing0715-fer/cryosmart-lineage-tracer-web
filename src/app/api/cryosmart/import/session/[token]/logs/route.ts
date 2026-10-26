@@ -5,6 +5,7 @@ import {
   sessionProgress,
   IMPORT_SESSION_CORS,
   type LogImageRef,
+  type FscXmlPayload,
 } from "@/lib/cryosmart/import-session-store";
 
 /**
@@ -15,10 +16,14 @@ import {
  * can show live progress.
  *
  * Request body (either shape):
- *   { items: [{ uid: "J374", images: [{ fileid, name, text, flags }] }, ...] }
- *   { job_uid: "J374", images: [...] }   // single-job convenience form
+ *   { items: [{ uid: "J374", images: [{ fileid, name, text, flags }],
+ *              fsc_xml: { xml: "<?xml…" } }, ...] }
+ *   { job_uid: "J374", images: [...], fsc_xml: {...} }   // single-job form
  *
  * `images` may be empty — the job still counts as scanned.
+ * v3.40: `fsc_xml` (optional) carries the job's FSC-curve XML — either the
+ * probed text (`xml`) or a bare `{ fileid }` ref. It is stored per job and
+ * lands in the report's one-click download (5 maps + 1 XML).
  */
 export async function POST(
   req: NextRequest,
@@ -44,7 +49,7 @@ export async function POST(
   }
 
   const obj = (body ?? {}) as Record<string, unknown>;
-  const items: Array<{ uid: string; images: LogImageRef[] }> = [];
+  const items: Array<{ uid: string; images: LogImageRef[]; fsc_xml?: FscXmlPayload | null }> = [];
 
   if (Array.isArray(obj.items)) {
     for (const raw of obj.items) {
@@ -53,12 +58,18 @@ export async function POST(
       items.push({
         uid: it.uid,
         images: Array.isArray(it.images) ? (it.images as LogImageRef[]) : [],
+        fsc_xml: (it.fsc_xml && typeof it.fsc_xml === "object"
+          ? (it.fsc_xml as FscXmlPayload)
+          : null),
       });
     }
   } else if (typeof obj.job_uid === "string") {
     items.push({
       uid: obj.job_uid,
       images: Array.isArray(obj.images) ? (obj.images as LogImageRef[]) : [],
+      fsc_xml: (obj.fsc_xml && typeof obj.fsc_xml === "object"
+        ? (obj.fsc_xml as FscXmlPayload)
+        : null),
     });
   }
 

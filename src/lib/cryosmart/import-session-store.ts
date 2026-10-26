@@ -41,6 +41,20 @@ export interface ImportSessionData {
   jobs?: unknown[];
 }
 
+/** v3.40: one job's FSC-curve XML, streamed by the capture script with the
+ *  log batches. `xml` carries the fetched text (probed from the job page);
+ *  `fileid` is a bare log-image ref when only the reference was captured. */
+export interface FscXmlPayload {
+  fileid?: string;
+  name?: string;
+  xml?: string;
+  text?: string;
+}
+
+/** Cap on a single FSC-XML payload (chars). The curve data is a few KB;
+ *  the cap only guards against a mis-routed multi-MB body. */
+const MAX_FSC_XML_CHARS = 2 * 1024 * 1024;
+
 export interface ImportSession {
   token: string;
   status: ImportSessionStatus;
@@ -61,6 +75,11 @@ export interface ImportSession {
   logRequest: { jobs: string[]; revision: number; requestedAt: number } | null;
   /** Log images streamed in batches: { [jobUid]: [{fileid, name, ...}] } */
   jobLogImages: Record<string, LogImageRef[]>;
+  /** v3.40: FSC-curve XML per job: { [jobUid]: { xml? , fileid?, name? } } —
+   *  probed on the CryoSmart page by the capture script and merged onto
+   *  the jobs as `fsc_xml` (feeds the report's one-click 5-maps+XML set
+   *  and the ZIP's Final_Result/FSC). */
+  jobFscXml: Record<string, FscXmlPayload>;
   /** Image BYTES uploaded by the capture script (it runs same-origin with
    * CryoSmart, so it is the only party that can fetch them). Keyed by
    * fileid; value is a `data:<mime>;base64,...` URL. Served back to the
@@ -172,6 +191,7 @@ export function createImportSession(
     lineageMode: opts?.lineageMode === true,
     logRequest: null,
     jobLogImages: {},
+    jobFscXml: {},
     imageStore: new Map(),
     imageStoreBytes: 0,
     logImagesUploaded: 0,
@@ -250,6 +270,26 @@ export function addJobsToSession(
   return session;
 }
 
+/** v3.40: sanitize + size-clamp one FSC-XML payload. Returns null when the
+ *  payload carries neither text nor a fileid (nothing worth storing). */
+function clampFscXml(raw: FscXmlPayload): FscXmlPayload | null {
+  const xml =
+    typeof raw.xml === "string" && raw.xml.trim() ? raw.xml.slice(0, MAX_FSC_XML_CHARS) : undefined;
+  const text =
+    !xml && typeof raw.text === "string" && raw.text.trim()
+      ? raw.text.slice(0, MAX_FSC_XML_CHARS)
+      : undefined;
+  const fileid = typeof raw.fileid === "string" && raw.fileid ? raw.fileid : undefined;
+  const name = typeof raw.name === "string" && raw.name ? raw.name.slice(0, 200) : undefined;
+  if (!xml && !text && !fileid) return null;
+  const out: FscXmlPayload = {};
+  if (fileid) out.fileid = fileid;
+  if (name) out.name = name;
+  if (xml) out.xml = xml;
+  if (text) out.text = text;
+  return out;
+}
+
 /**
  * Merge one batch of scanned jobs. Each item is { uid, images } — images may
  * be empty (job scanned, no log images found) so the progress count stays
@@ -257,11 +297,25 @@ export function addJobsToSession(
  */
 export function addLogBatchToSession(
   session: ImportSession,
-  items: Array<{ uid: string; images: LogImageRef[] }>
+  items: Array<{ uid: string; images: LogImageRef[]; fsc_xml?: FscXmlPayload | null }>
 ): ImportSession {
   for (const item of items) {
     if (!item || typeof item.uid !== "string") continue;
     const images = Array.isArray(item.images) ? item.images : [];
+    // v3.40: FSC-curve XML rides the same batches (best-effort — the merge
+    // keeps the RICHEST payload seen: text beats a bare fileid ref, and a
+    // later ref never clobbers an earlier text).
+    if (item.fsc_xml && typeof item.fsc_xml === "object") {
+      const next = clampFscXml(item.fsc_xml);
+      if (next) {
+        const prev = session.jobFscXml[item.uid];
+        const keepText = prev && (prev.xml || prev.text);
+        session.jobFscXml[item.uid] =
+          keepText && !(next.xml || next.text)
+            ? prev
+            : { ...(prev || {}), ...next };
+      }
+    }
     // v3.11: count DISTINCT jobs — a slow-log rescue batch re-sends a uid
     // that already streamed an (empty) batch; the progress numerator must
     // stay <= the total or the UI shows "8/7 jobs scanned".

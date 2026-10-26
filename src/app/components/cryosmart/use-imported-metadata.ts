@@ -28,6 +28,10 @@ export interface PendingData {
     cryosmart_cookie?: string;
     // Log images force-loaded from the SPA's lazy jobLogs state
     job_log_images?: Record<string, Array<{ fileid?: string; name?: string; src?: string; data?: string }>>;
+    // v3.40: FSC-curve XML per job (probed text `xml` or a `{ fileid }`
+    // ref) — merged onto jobs as `fsc_xml` for the report's one-click
+    // download (5 maps + 1 XML) and the ZIP's Final_Result/FSC.
+    job_fsc_xml?: Record<string, { fileid?: string; name?: string; xml?: string; text?: string }>;
     // Fileids whose BYTES were uploaded to the session's image store —
     // these get a same-origin /image/<fileid> src that works over HTTPS.
     uploaded_image_ids?: string[];
@@ -187,9 +191,12 @@ function mergeLogImagesIntoRaw(
   jobLogImages: PendingData["data"]["job_log_images"],
   uploadedImageIds?: string[],
   imageBase?: string | null,
-  linkedImageIds?: string[]
+  linkedImageIds?: string[],
+  jobFscXml?: PendingData["data"]["job_fsc_xml"]
 ): unknown {
-  if (!jobLogImages) return raw;
+  if (!jobLogImages && !jobFscXml) return raw;
+  const logImages: NonNullable<PendingData["data"]["job_log_images"]> =
+    jobLogImages || {};
   // v3.15: the rewrite set is the UNION of byte-uploaded ids and
   // remote-linked ids — for history restores the imageBase endpoint serves
   // both (disk bytes first, then an on-demand proxy fetch of the stored
@@ -229,11 +236,16 @@ function mergeLogImagesIntoRaw(
     const job = j as { uid?: string } | null;
     if (!job || typeof job !== "object" || !job.uid) return j;
     let out: Record<string, unknown> = { ...(job as Record<string, unknown>) };
+    // v3.40: FSC-curve XML payload (script probe / history restore) —
+    // consumed by fscXmlAsset() when the node is built.
+    if (jobFscXml && jobFscXml[job.uid]) {
+      out.fsc_xml = jobFscXml[job.uid];
+    }
     if (
-      Array.isArray(jobLogImages[job.uid]) &&
-      jobLogImages[job.uid].length > 0
+      Array.isArray(logImages[job.uid]) &&
+      logImages[job.uid].length > 0
     ) {
-      out.log_images = jobLogImages[job.uid].map(decorate);
+      out.log_images = logImages[job.uid].map(decorate);
     }
     if (sessionBase) {
       // output_group_images: { [groupName]: fileid } — feeds node.images
@@ -306,7 +318,8 @@ function toLoaded(
     data.data.job_log_images,
     data.data.uploaded_image_ids,
     imageBase,
-    data.data.remote_image_ids
+    data.data.remote_image_ids,
+    data.data.job_fsc_xml
   );
   return {
     raw: mergedRaw,

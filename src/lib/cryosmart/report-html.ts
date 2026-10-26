@@ -1356,16 +1356,20 @@ export interface ReportHtmlOptions {
     return `<aside class="job-out"><h3>输出到</h3>${rows}</aside>`;
   }
 
-  /** Filter a node's `maps` to the normal (non-mask) map files. Includes
+  /** Filter a node's `maps` to the report's "normal" map set. Includes
    *  every non-mask volume blob — sharp maps and half maps included (see
-   *  the canonical copy in lineage.ts for the full rationale). */
+   *  the canonical copy in lineage.ts for the full rationale). v3.40:
+   *  `mask_refine` joins the set (user request — the refine job's primary
+   *  output mask) while `precision` is excluded (analysis artifact). */
   export function normalMapAssets(node: LineageNode): MapAsset[] {
     return (node.maps || []).filter((item) => {
       const group = String(item.group || "");
       const result = String(item.result_name || "");
       const volumeGroup = item.group_type ? item.group_type === "volume" : !/mask/i.test(group);
-      const isMask = /mask/i.test(group) || /mask/i.test(result);
-      return volumeGroup && !isMask;
+      const isMaskRefine = /mask_refine/i.test(result);
+      const isMask = (/mask/i.test(group) || /mask/i.test(result)) && !isMaskRefine;
+      const isPrecision = /precision/i.test(result);
+      return (volumeGroup || isMaskRefine) && !isMask && !isPrecision;
     });
   }
 
@@ -1730,24 +1734,35 @@ export interface ReportHtmlOptions {
     return chunks.join("");
   }
 
-  /** Map download grid + "一键下载 map" button for a single node.
+  /** Map download grid + "一键下载 map + FSC XML" button for a single node.
    *  v2: 3 maps per row (user request — the old one-map-per-row table
    *  wasted vertical space on jobs with sharp/half map sets). Each cell:
-   *  output-group preview (click to open) + group label + download link. */
+   *  output-group preview (click to open) + group label + download link.
+   *  v3.40 (user request): the normal set is map / map_sharp / map_half_A
+   *  / map_half_B / mask_refine (precision swapped out), and the one-click
+   *  button gains the job's FSC-curve XML — 5 map files + 1 xml. The XML
+   *  rides the SAME data-urls/data-names pipe as the maps (the inline
+   *  script's fetch handles data: URLs, so a captured XML embeds and
+   *  downloads even from a blob:/file: report with no network). */
   export function reportMapDownloads(node: LineageNode, summary: LineageSummary, opts?: ReportHtmlOptions): string {
     if (Array.isArray(node.classes) && node.classes.length) return "";
     const maps = normalMapAssets(node);
     if (!maps.length) return "";
-    const urls = maps.map((item) => item.download_url).join("|");
+    const fsc = node.fsc_xml && node.fsc_xml.url ? node.fsc_xml : null;
+    const urlList = maps.map((item) => item.download_url);
     // Friendly download filenames (mirrors the ZIP maps/ naming:
     // BJ.<project>.<uid>.<group>.<result>.mrc) — without data-names the
     // inline script falls back to the URL's last path segment.
-    const dlNames = maps
-      .map(
-        (item) =>
-          `BJ.${summary.project_uid || "P"}.${node.uid}.${item.group || "volume"}.${item.result_name || "map"}.mrc`,
-      )
-      .join("|");
+    const nameList = maps.map(
+      (item) =>
+        `BJ.${summary.project_uid || "P"}.${node.uid}.${item.group || "volume"}.${item.result_name || "map"}.mrc`,
+    );
+    if (fsc) {
+      urlList.push(fsc.url);
+      nameList.push(fsc.name);
+    }
+    const urls = urlList.join("|");
+    const dlNames = nameList.join("|");
     const cells = maps
       .map((item) => {
         // Show the result name when it's not the plain "map" — nu-refine
@@ -1782,9 +1797,18 @@ export interface ReportHtmlOptions {
         )}" target="_blank">下载 map</a></div>`;
       })
       .join("");
-    return `<div class="map-block"><h3>Map / MRC</h3><div class="download-head"><b>map: ${maps.length} 个（含 sharp / half map）</b><button type="button" class="download-all" data-urls="${escHtml(
+    const fscChip = fsc
+      ? ` <a class="map-dl" href="${escHtml(fsc.url)}" target="_blank" title="${escHtml(
+          fsc.source === "captured"
+            ? "FSC 曲线 XML（采集自 CryoSmart）"
+            : "FSC 曲线 XML（CryoSmart 下载链接）",
+        )}">FSC XML</a>`
+      : "";
+    return `<div class="map-block"><h3>Map / MRC</h3><div class="download-head"><b>map: ${maps.length} 个（含 sharp / half map + mask_refine）${fsc ? " + FSC XML" : ""}</b><button type="button" class="download-all" data-zipname="BJ.${escHtml(
+      summary.project_uid || "P",
+    )}.${escHtml(node.uid)}.maps.zip" data-urls="${escHtml(
       urls,
-    )}" data-names="${escHtml(dlNames)}">一键下载 map</button></div><div class="map-grid">${cells}</div></div>`;
+    )}" data-names="${escHtml(dlNames)}">一键下载${fsc ? " map + FSC XML" : " map"}</button>${fscChip}</div><div class="map-grid">${cells}</div></div>`;
   }
 
   /** Class table (horizontal) + "一键下载 map" for class_3D / abinit / hetero. */
@@ -3359,7 +3383,7 @@ export interface ReportHtmlOptions {
    * — which broke BOTH the iframe auto-resize AND every 一键下载 button).
    * Keep it balanced; prefer appending statements rather than editing tails.
    */
-  const REPORT_HTML_V2_SCRIPT = `function __csTinyZip(files){var enc=new TextEncoder();var CRC=new Uint32Array(256);for(var n=0;n<256;n++){var c=n;for(var k=0;k<8;k++){c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);}CRC[n]=c>>>0;}function crc32(b){var c=0xFFFFFFFF;for(var i=0;i<b.length;i++){c=CRC[(c^b[i])&0xFF]^(c>>>8);}return (c^0xFFFFFFFF)>>>0;}function u16(n){return [n&0xFF,(n>>>8)&0xFF];}function u32(n){return [n&0xFF,(n>>>8)&0xFF,(n>>>16)&0xFF,(n>>>24)&0xFF];}function dosTime(d){return [((d.getHours()&0x1F)<<3)|((d.getMinutes()&0x3C)>>>2),((d.getMinutes()&0x03)<<5)|(d.getSeconds()&0x3F),(((d.getMonth()+1)&0x07)<<5)|(d.getDate()&0x1F),(((d.getFullYear()-1980)&0x7F)<<1)|0];}var local=[],central=[],offset=0,now=new Date();for(var i=0;i<files.length;i++){var f=files[i];var name=enc.encode(f.name);var data=(typeof f.data==="string")?enc.encode(f.data):f.data;var crc=crc32(data);var dos=dosTime(now);local.push.apply(local,[0x50,0x4B,0x03,0x04,20,0,0,0,dos[0],dos[1],dos[2],dos[3]]);local.push.apply(local,u32(crc));local.push.apply(local,u32(data.length));local.push.apply(local,u32(data.length));local.push.apply(local,u16(name.length));local.push.apply(local,[0,0]);for(var j=0;j<name.length;j++)local.push(name[j]);for(var j=0;j<data.length;j++)local[data[j]!==undefined?data[j]:0]=data[j];for(var j=0;j<data.length;j++)local.push(data[j]);var hdr=30+name.length;var off=offset;offset+=hdr+data.length;central.push.apply(central,[0x50,0x4B,0x01,0x02,20,20,0,0,0,0,dos[0],dos[1],dos[2],dos[3]]);central.push.apply(central,u32(crc));central.push.apply(central,u32(data.length));central.push.apply(central,u32(data.length));central.push.apply(central,u16(name.length));central.push.apply(central,[0,0,0,0,0,0,0,0,0,0,0,0]);central.push.apply(central,u32(off));for(var j=0;j<name.length;j++)central.push(name[j]);}var cdSize=central.length;var cdOffset=offset;local.push.apply(local,[0x50,0x4B,0x05,0x06,0,0,0,0]);local.push.apply(local,u16(files.length));local.push.apply(local,u16(files.length));local.push.apply(local,u32(cdSize));local.push.apply(local,u32(cdOffset));local.push.apply(local,u16(0));return new Blob([new Uint8Array(local)],{type:"application/zip"});}document.addEventListener("click",function(event){var button=event.target.closest(".download-all");if(!button)return;event.preventDefault();var urls=(button.dataset.urls||"").split("|").filter(Boolean);var names=(button.dataset.names||"").split("|").filter(Boolean);if(urls.length===0)return;function nameOf(u,i){return names[i]||u.split("/").pop()||"download";}function triggerSingle(url,name){return fetch(url).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},5000);}).catch(function(){window.open(url,"_blank");});}if(urls.length<=3){urls.forEach(function(url,index){if(!url||url.startsWith("#"))return;setTimeout(function(){triggerSingle(url,nameOf(url,index));},index*200);});return;}var zipLabel=button.dataset.zipname||"images.zip";button.disabled=true;var origText=button.textContent;button.textContent="\u5305\u88c5\u4e2d\u2026";Promise.all(urls.map(function(url,i){if(!url||url.startsWith("#"))return Promise.resolve(null);return fetch(url).then(function(r){if(!r.ok)return null;return r.blob().then(function(blob){return {name:nameOf(url,i),data:blob};});}).catch(function(){return null;});})).then(function(parts){var files=parts.filter(Boolean);if(files.length===0){window.alert("\u4e0b\u8f7d\u5931\u8d25\uff1a\u6240\u6709\u8d44\u6e90\u90fd\u8bbf\u95ee\u4e0d\u5230\u3002");return;}if(files.length===1){triggerSingle(urls[0],nameOf(urls[0],0));return;}var zipBlob=__csTinyZip(files);var a=document.createElement("a");a.href=URL.createObjectURL(zipBlob);a.download=zipLabel;a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},30000);}).catch(function(err){window.alert("\u6253\u5305\u5931\u8d25\uff1a"+(err&&err.message||err));}).then(function(){button.disabled=false;button.textContent=origText;});});document.addEventListener("click",function(e){var t=e.target;if(!t||!t.closest)return;var a=t.closest('a[href^="#"]');if(!a)return;var href=a.getAttribute("href");if(!href||href==="#")return;var el=document.getElementById(href.slice(1));if(el){e.preventDefault();try{el.scrollIntoView({behavior:"smooth",block:"start"});}catch(err){el.scrollIntoView();}}});`;
+  const REPORT_HTML_V2_SCRIPT = `function __csTinyZip(files){var enc=new TextEncoder();var CRC=new Uint32Array(256);for(var n=0;n<256;n++){var c=n;for(var k=0;k<8;k++){c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1);}CRC[n]=c>>>0;}function crc32(b){var c=0xFFFFFFFF;for(var i=0;i<b.length;i++){c=CRC[(c^b[i])&0xFF]^(c>>>8);}return (c^0xFFFFFFFF)>>>0;}function u16(n){return [n&0xFF,(n>>>8)&0xFF];}function u32(n){return [n&0xFF,(n>>>8)&0xFF,(n>>>16)&0xFF,(n>>>24)&0xFF];}function dosTime(d){return [((d.getHours()&0x1F)<<3)|((d.getMinutes()&0x3C)>>>2),((d.getMinutes()&0x03)<<5)|(d.getSeconds()&0x3F),(((d.getMonth()+1)&0x07)<<5)|(d.getDate()&0x1F),(((d.getFullYear()-1980)&0x7F)<<1)|0];}var local=[],central=[],offset=0,now=new Date();for(var i=0;i<files.length;i++){var f=files[i];var name=enc.encode(f.name);var data=(typeof f.data==="string")?enc.encode(f.data):f.data;var crc=crc32(data);var dos=dosTime(now);local.push.apply(local,[0x50,0x4B,0x03,0x04,20,0,0,0,dos[0],dos[1],dos[2],dos[3]]);local.push.apply(local,u32(crc));local.push.apply(local,u32(data.length));local.push.apply(local,u32(data.length));local.push.apply(local,u16(name.length));local.push.apply(local,[0,0]);for(var j=0;j<name.length;j++)local.push(name[j]);for(var j=0;j<data.length;j++)local[data[j]!==undefined?data[j]:0]=data[j];for(var j=0;j<data.length;j++)local.push(data[j]);var hdr=30+name.length;var off=offset;offset+=hdr+data.length;central.push.apply(central,[0x50,0x4B,0x01,0x02,20,20,0,0,0,0,dos[0],dos[1],dos[2],dos[3]]);central.push.apply(central,u32(crc));central.push.apply(central,u32(data.length));central.push.apply(central,u32(data.length));central.push.apply(central,u16(name.length));central.push.apply(central,[0,0,0,0,0,0,0,0,0,0,0,0]);central.push.apply(central,u32(off));for(var j=0;j<name.length;j++)central.push(name[j]);}var cdSize=central.length;var cdOffset=offset;local.push.apply(local,[0x50,0x4B,0x05,0x06,0,0,0,0]);local.push.apply(local,u16(files.length));local.push.apply(local,u16(files.length));local.push.apply(local,u32(cdSize));local.push.apply(local,u32(cdOffset));local.push.apply(local,u16(0));return new Blob([new Uint8Array(local)],{type:"application/zip"});}document.addEventListener("click",function(event){var button=event.target.closest(".download-all");if(!button)return;event.preventDefault();var urls=(button.dataset.urls||"").split("|").filter(Boolean);var names=(button.dataset.names||"").split("|").filter(Boolean);if(urls.length===0)return;function nameOf(u,i){return names[i]||u.split("/").pop()||"download";}function triggerSingle(url,name){return fetch(url).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.blob();}).then(function(blob){var a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},5000);}).catch(function(){window.open(url,"_blank");});}if(urls.length<=3){urls.forEach(function(url,index){if(!url||url.startsWith("#"))return;setTimeout(function(){triggerSingle(url,nameOf(url,index));},index*200);});return;}var zipLabel=button.dataset.zipname||"images.zip";button.disabled=true;var origText=button.textContent;button.textContent="\u5305\u88c5\u4e2d\u2026";Promise.all(urls.map(function(url,i){if(!url||url.startsWith("#"))return Promise.resolve(null);return fetch(url).then(function(r){if(!r.ok)return null;return r.blob().then(function(blob){return {name:nameOf(url,i),data:blob,url:url};});}).catch(function(){return null;});})).then(function(parts){var files=parts.filter(Boolean);if(files.length===0){window.alert("\u4e0b\u8f7d\u5931\u8d25\uff1a\u6240\u6709\u8d44\u6e90\u90fd\u8bbf\u95ee\u4e0d\u5230\u3002");return;}if(files.length===1){triggerSingle(files[0].url,files[0].name);return;}var zipBlob=__csTinyZip(files);var a=document.createElement("a");a.href=URL.createObjectURL(zipBlob);a.download=zipLabel;a.click();setTimeout(function(){URL.revokeObjectURL(a.href)},30000);}).catch(function(err){window.alert("\u6253\u5305\u5931\u8d25\uff1a"+(err&&err.message||err));}).then(function(){button.disabled=false;button.textContent=origText;});});document.addEventListener("click",function(e){var t=e.target;if(!t||!t.closest)return;var a=t.closest('a[href^="#"]');if(!a)return;var href=a.getAttribute("href");if(!href||href==="#")return;var el=document.getElementById(href.slice(1));if(el){e.preventDefault();try{el.scrollIntoView({behavior:"smooth",block:"start"});}catch(err){el.scrollIntoView();}}});`;
   // v3.23: the lightbox IIFE below is APPENDED as a third statement. It is
   // deliberately written with ZERO backslashes (no regex literals) — inside
   // this TS template literal an escape like \\s would silently degrade to

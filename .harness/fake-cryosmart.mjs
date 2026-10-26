@@ -1,4 +1,5 @@
-/** Tiny local "CryoSmart" server: serves /api/log_image/<fileid> as PNG. */
+/** Tiny local "CryoSmart" server: serves /api/log_image/<fileid> as PNG,
+ *  and the v3.40 FSC XML result route as XML text. */
 import { createServer } from "node:http";
 import { deflateSync as zlib } from "node:zlib";
 
@@ -33,12 +34,26 @@ const B64 = (() => {
   ]);
 })();
 
+const FSC_XML = (pid, uid) =>
+  `<?xml version="1.0" encoding="UTF-8"?>\n<fsc project="${pid}" job="${uid}">\n  <curve>\n    <point freq="0.00" corr="1.000"/>\n    <point freq="0.25" corr="0.980"/>\n  </curve>\n  <resolutionA>3.12</resolutionA>\n</fsc>\n`;
+
 createServer((req, res) => {
-  const m = req.url.match(/^\/api\/log_image\/([^/?#]+)/);
+  const cors = { "Access-Control-Allow-Origin": "*" };
+  let u = req.url;
+  const enc = u.match(/^\/api\/log_image\/(download_result_file%2F[^?#]+)/);
+  if (enc) { try { u = '/api/log_image/' + decodeURIComponent(enc[1]); } catch (e) {} }
+  const fsc = u.match(/^\/api\/log_image\/download_result_file\/([^/]+)\/([^/]+)\.volume\.fsc\.xml/);
+  if (fsc) {
+    const body = FSC_XML(fsc[1], fsc[2]);
+    res.writeHead(200, { "Content-Type": "text/xml", ...cors, "Content-Length": Buffer.byteLength(body) });
+    res.end(body);
+    return;
+  }
+  const m = u.match(/^\/api\/log_image\/([^/?#]+)/);
   if (m) {
-    res.writeHead(200, { "Content-Type": "image/png", "Content-Length": B64.length });
+    res.writeHead(200, { "Content-Type": "image/png", ...cors, "Content-Length": B64.length });
     res.end(B64);
     return;
   }
-  res.writeHead(404); res.end("no");
-}).listen(9999, () => console.log("fake cryosmart on :9999"));
+  res.writeHead(404, cors); res.end("no");
+}).listen(9999, () => console.log("fake cryosmart on :9999 (png + volume.fsc.xml)"));
