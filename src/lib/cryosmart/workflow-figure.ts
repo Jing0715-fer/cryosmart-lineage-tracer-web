@@ -122,31 +122,82 @@ function classPercentFor(summary: LineageSummary, uid: string, group: string): s
 /* Lineage walking                                                     */
 /* ------------------------------------------------------------------ */
 
-/** Final job → … → earliest ancestor (volume edges preferred). */
-function walkParentChain(summary: LineageSummary): LineageNode[] {
+/** v3.44 full-DAG lineage graph. The v3.41-43 model walked ONE
+ *  volume-preferring parent chain, so any dataset branch that merged via a
+ *  particle/other edge (P208: J474-dataset → … → J494 hetero_refine → J497
+ *  nonuniform_refine) was invisible — the stage model showed a single
+ *  branch and the earliest stages were folded away on top of it. */
+interface LineageGraph {
+  byUid: Map<string, LineageNode>;
+  parentsOf: Map<string, string[]>;
+  volParentsOf: Map<string, string[]>;
+  /** Longest-path depth from the roots (0 = import/seed). */
+  depth: Map<string, number>;
+  /** Ancestors of the final job over ALL incoming edges, every family. */
+  ancestorUids: Set<string>;
+}
+
+function collectLineageGraph(summary: LineageSummary): LineageGraph {
   const byUid = new Map<string, LineageNode>();
   for (const n of summary.nodes || []) byUid.set(n.uid, n);
 
-  const volParents = new Map<string, string[]>();
-  const anyParents = new Map<string, string[]>();
+  const parentsOf = new Map<string, string[]>();
+  const volParentsOf = new Map<string, string[]>();
   for (const e of summary.edges || []) {
-    if (!anyParents.has(e.target)) anyParents.set(e.target, []);
-    anyParents.get(e.target)!.push(e.source);
+    if (!byUid.has(e.source) || !byUid.has(e.target)) continue;
+    if (!parentsOf.has(e.target)) parentsOf.set(e.target, []);
+    parentsOf.get(e.target)!.push(e.source);
     if (e.input_type === "volume") {
-      if (!volParents.has(e.target)) volParents.set(e.target, []);
-      volParents.get(e.target)!.push(e.source);
+      if (!volParentsOf.has(e.target)) volParentsOf.set(e.target, []);
+      volParentsOf.get(e.target)!.push(e.source);
     }
   }
 
+  const ancestorUids = new Set<string>();
+  const queue: string[] = [summary.start_uid];
+  while (queue.length) {
+    const cur = queue.shift()!;
+    if (ancestorUids.has(cur)) continue;
+    ancestorUids.add(cur);
+    for (const p of parentsOf.get(cur) || []) {
+      if (!ancestorUids.has(p)) queue.push(p);
+    }
+  }
+
+  // Longest-path depth (iterate until stable — lineage graphs are small).
+  const depth = new Map<string, number>();
+  for (const uid of ancestorUids) depth.set(uid, 0);
+  let changed = true;
+  let guard = 0;
+  while (changed && guard++ < 96) {
+    changed = false;
+    for (const e of summary.edges || []) {
+      if (!ancestorUids.has(e.source) || !ancestorUids.has(e.target)) continue;
+      const d = (depth.get(e.source) ?? 0) + 1;
+      if (d > (depth.get(e.target) ?? 0)) {
+        depth.set(e.target, d);
+        changed = true;
+      }
+    }
+  }
+  return { byUid, parentsOf, volParentsOf, depth, ancestorUids };
+}
+
+/** Volume-preferring backbone chain (final → earliest ancestor). v3.44:
+ *  supplies the ORDER of the stage groups only — completeness comes from
+ *  the merge-contributor scan over the full ancestor DAG. */
+function walkParentChain(summary: LineageSummary, graph: LineageGraph): LineageNode[] {
   const chain: LineageNode[] = [];
   const seen = new Set<string>();
   let cur = summary.start_uid;
   while (cur && !seen.has(cur) && chain.length < 80) {
     seen.add(cur);
-    const node = byUid.get(cur);
+    const node = graph.byUid.get(cur);
     if (!node) break;
     chain.push(node);
-    const nexts = volParents.get(cur)?.length ? volParents.get(cur)! : anyParents.get(cur) || [];
+    const nexts = graph.volParentsOf.get(cur)?.length
+      ? graph.volParentsOf.get(cur)!
+      : graph.parentsOf.get(cur) || [];
     cur = nexts[0] || "";
   }
   return chain; // final → ancestor
@@ -212,43 +263,54 @@ export function buildFlowFigureModel(
   opts: BuildModelOptions = {},
 ): FlowFigureModel {
   const warnings: string[] = [];
-  const maxGroups = opts.maxGroups ?? 4;
-  const chain = walkParentChain(summary); // final → ancestor
-  const ancestorFirst = [...chain].reverse();
+  const maxGroups = opts.maxGroups ?? 6;
+  const graph = collectLineageGraph(summary);
+  const chain = walkParentChain(summary, graph); // final → ancestor
+  const ancestors = [...graph.ancestorUids]
+    .map((u) => graph.byUid.get(u)!)
+    .filter((n): n is LineageNode => !!n);
+  const hasMaps = (uid: string) => {
+    const n = graph.byUid.get(uid);
+    return !!n && normalMapAssets(n).length > 0;
+  };
+  const mapParentsOf = (uid: string): string[] => {
+    const out: string[] = [];
+    for (const p of graph.parentsOf.get(uid) || []) {
+      if (p !== uid && hasMaps(p) && !out.includes(p)) out.push(p);
+    }
+    return out;
+  };
+  const byDepthAsc = (a: LineageNode, b: LineageNode) =>
+    (graph.depth.get(a.uid) ?? 0) - (graph.depth.get(b.uid) ?? 0);
 
   /* Header stats */
   const micrographs =
     summary.final_micrograph_count != null && summary.final_micrograph_count > 0
       ? `${Math.round(summary.final_micrograph_count).toLocaleString("en-US")} Micrographs`
       : null;
-  const pickNode = ancestorFirst.find((n) => PICKING_JOB_TYPES.has(n.job_type));
+  const pickNode = ancestors.filter((n) => PICKING_JOB_TYPES.has(n.job_type)).sort(byDepthAsc)[0];
   const pickLabel = pickNode ? (pickNode.job_type.includes("manual") ? "Manual pick" : "Auto pick") : "Auto pick";
-  const earliestParticles = ancestorFirst.find((n) => n.particle_count != null && n.particle_count > 0);
+  const earliestParticles = ancestors
+    .filter((n) => n.particle_count != null && n.particle_count > 0)
+    .sort(byDepthAsc)[0];
   const particles =
     earliestParticles?.particle_count != null
       ? `${fmtParticles(earliestParticles.particle_count)} particles`
       : null;
 
-  /* Volume stages from the chain */
-  const mapNodes = ancestorFirst.filter((n) => normalMapAssets(n).length > 0);
-  const byUid = new Map(ancestorFirst.map((n) => [n.uid, n]));
-
-  // Branch detection: several volume inputs feed the FINAL job (the
-  // reference's J68-H1 + J142-H2 → non-uniform refinement case).
-  const finalNode = summary.start_job ?? byUid.get(summary.start_uid);
-  const volSources = (summary.edges || [])
-    .filter((e) => e.target === summary.start_uid && e.input_type === "volume")
-    .map((e) => byUid.get(e.source))
-    .filter((n): n is LineageNode => !!n && normalMapAssets(n).length > 0);
-
+  /* Final job + group accumulators. */
+  const finalNode: LineageNode | null = summary.start_job ?? graph.byUid.get(summary.start_uid) ?? null;
   const groups: FlowFigureItem[][] = [];
   const usedUids = new Set<string>();
   let referenceItem: FlowFigureItem | null = null;
   let referenceKey: string | null = null;
 
-  // 2D selection stage (image montage, no map) — optional.
+  // 2D selection stage (image montage, no map) — deepest ancestor (closest
+  // to the final job), optional.
   if (opts.includeSelect2d !== false) {
-    const s2d = ancestorFirst.find((n) => (n.select_2d != null || /select_2d/i.test(n.job_type)) && select2dImage(n));
+    const s2d = ancestors
+      .filter((n) => (n.select_2d != null || /select_2d/i.test(n.job_type)) && select2dImage(n))
+      .sort((a, b) => (graph.depth.get(b.uid) ?? 0) - (graph.depth.get(a.uid) ?? 0))[0];
     if (s2d) {
       const img = select2dImage(s2d);
       const stats: string[] = [];
@@ -268,42 +330,54 @@ export function buildFlowFigureModel(
     }
   }
 
-  // Volume branch group (parallel items).
-  if (volSources.length >= 2) {
-    const items = volSources.slice(0, 3).map((n) => itemFromNode(summary, n));
-    items.forEach((i) => usedUids.add(i.uid));
-    groups.push(items);
+  /* Stage groups along the volume backbone (ancestor → final). A merge job
+     with ≥2 DIRECT map-bearing parents renders those parents as ONE
+     parallel group (the reference's J68-H1 + J142-H2 case) — this is how
+     the second dataset's branch enters the figure even when it merges via
+     a particle edge (P208: J494 hetero_refine → J497 nonuniform_refine). */
+  const spineMapOrder = [...chain].reverse().filter((n) => hasMaps(n.uid));
+  const mergeContributors = new Map<string, string[]>();
+  for (const S of spineMapOrder) {
+    const contrib = mapParentsOf(S.uid);
+    if (contrib.length >= 2) mergeContributors.set(S.uid, contrib);
   }
-
-  // Remaining spine volume groups, ancestor → final.
-  const spine = mapNodes.filter((n) => !usedUids.has(n.uid));
-  const spineGroups: FlowFigureItem[][] = [];
-  for (const node of spine) {
-    const item = itemFromNode(summary, node, { isFinal: node.uid === summary.start_uid });
-    spineGroups.push([item]);
-    usedUids.add(node.uid);
-  }
-
-  // Interleave: keep ancestor order, but a branch group slots right before
-  // the group of the job its maps feed into (i.e. before the final job).
-  if (volSources.length >= 2) {
-    const finalIdx = spineGroups.findIndex((g) => g[0].uid === summary.start_uid);
-    if (finalIdx >= 0) {
-      groups.push(...spineGroups.slice(0, finalIdx));
-      groups.push(...spineGroups.slice(finalIdx));
-    } else {
-      groups.push(...spineGroups);
+  // Spine nodes that feed a LATER merge render inside that merge's parallel
+  // group instead of getting their own single stage.
+  const deferredSpine = new Set<string>();
+  spineMapOrder.forEach((S, i) => {
+    for (const [m, contrib] of mergeContributors) {
+      const mIdx = spineMapOrder.findIndex((n) => n.uid === m);
+      if (mIdx > i && contrib.includes(S.uid)) deferredSpine.add(S.uid);
     }
-  } else {
-    groups.push(...spineGroups);
+  });
+
+  for (const S of spineMapOrder) {
+    const contrib = mergeContributors.get(S.uid);
+    if (contrib) {
+      const fresh = contrib.filter((c) => !usedUids.has(c));
+      if (fresh.length >= 2) {
+        const items = fresh.slice(0, 3).map((c) => itemFromNode(summary, graph.byUid.get(c)!));
+        items.forEach((it) => usedUids.add(it.uid));
+        groups.push(items);
+      } else if (fresh.length === 1) {
+        const node = graph.byUid.get(fresh[0]);
+        if (node) {
+          groups.push([itemFromNode(summary, node)]);
+          usedUids.add(node.uid);
+        }
+      }
+    }
+    if (!deferredSpine.has(S.uid) && !usedUids.has(S.uid)) {
+      groups.push([itemFromNode(summary, S, { isFinal: S.uid === summary.start_uid })]);
+      usedUids.add(S.uid);
+    }
   }
 
-  // Trim to maxGroups — always keep the final groups.
-  if (groups.length > maxGroups) {
-    const dropped = groups.length - maxGroups;
-    groups.splice(1, dropped); // keep header-adjacent (first) and the tail
-    warnings.push(`谱系阶段较多，已折叠最早的 ${dropped} 个阶段（可在选项中调大）。`);
-  }
+  // v3.44 folding: only SINGLE stages fold (earliest first) — parallel
+  // branch groups and the final stage never fold. The old splice(1, n)
+  // deleted the branch group first, which is exactly how a dataset branch
+  // vanished from the 4-group figure.
+  const folded = trimFlowGroups(groups, maxGroups, warnings);
 
   // Reference = the FINAL job's map when it has one.
   if (finalNode && normalMapAssets(finalNode).length > 0) {
@@ -311,8 +385,8 @@ export function buildFlowFigureModel(
     referenceItem = ref;
     referenceKey = ref.mapKey;
   } else {
-    for (let i = groups.length - 1; i >= 0; i--) {
-      const last = groups[i][groups[i].length - 1];
+    for (let i = folded.length - 1; i >= 0; i--) {
+      const last = folded[i][folded[i].length - 1];
       if (last?.mapKey) {
         referenceItem = last;
         referenceKey = last.mapKey;
@@ -328,18 +402,18 @@ export function buildFlowFigureModel(
   if (res != null && res > 0) finalStats = `${res >= 10 ? res.toFixed(1) : res.toFixed(2)} Å`;
 
   /* FSC XML */
-  const fscNode = [summary.start_job, ...ancestorFirst].find((n) => n?.fsc_xml);
+  const fscNode = [summary.start_job, ...ancestors].find((n) => n?.fsc_xml);
   const fscXml = fscNode?.fsc_xml
     ? { xml: fscNode.fsc_xml.xml, url: fscNode.fsc_xml.url, name: fscNode.fsc_xml.name }
     : null;
 
   const projectLabel = `${summary.project_uid || "P"} / ${summary.start_uid || "J"}`;
 
-  if (!groups.length) warnings.push("谱系中未找到可用于流程图的阶段（无 volume map 且无 2D 选择步骤）。");
+  if (!folded.length) warnings.push("谱系中未找到可用于流程图的阶段（无 volume map 且无 2D 选择步骤）。");
 
   return {
     headerStats: { micrographs, pick: pickLabel, particles },
-    groups,
+    groups: folded,
     finalStats,
     referenceKey,
     referenceItem,
@@ -347,6 +421,37 @@ export function buildFlowFigureModel(
     warnings,
     projectLabel,
   };
+}
+
+/** v3.44 stage folding with branch protection: parallel groups (length
+ *  > 1), the first group and the final group are mandatory; only single
+ *  stages fold, earliest first. */
+function trimFlowGroups(
+  groups: FlowFigureItem[][],
+  maxGroups: number,
+  warnings: string[],
+): FlowFigureItem[][] {
+  if (groups.length <= maxGroups) return groups;
+  const mandatory = new Set<number>();
+  groups.forEach((g, i) => {
+    if (g.length > 1) mandatory.add(i);
+  });
+  mandatory.add(0);
+  mandatory.add(groups.length - 1);
+  if (mandatory.size >= maxGroups) {
+    warnings.push(
+      `谱系阶段较多，已折叠最早的 ${groups.length - mandatory.size} 个单图阶段（并行分支与最终阶段已全部保留；可在选项中调大阶段数）。`,
+    );
+    return groups.filter((_, i) => mandatory.has(i));
+  }
+  const chosen = new Set(mandatory);
+  for (let i = groups.length - 1; i >= 0 && chosen.size < maxGroups; i--) chosen.add(i);
+  for (let i = 0; i < groups.length && chosen.size < maxGroups; i++) chosen.add(i);
+  const kept = groups.filter((_, i) => chosen.has(i));
+  warnings.push(
+    `谱系阶段较多，已折叠最早的 ${groups.length - kept.length} 个阶段（并行分支已保留；可在选项中调大阶段数）。`,
+  );
+  return kept;
 }
 
 /** Reference-style demo model — uses the images extracted from the user's

@@ -10,10 +10,15 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
    把真实 origin 拼好了。）
 
 作用：
-  在本机 127.0.0.1 上启动一个微型 HTTP 桥（默认端口 8927，冲突时自动
-  尝试 8928/8929），之后 CryoSmart Lineage Tracer Web 页面即可直接
+  在本机启动一个微型 HTTP 桥（默认端口 8927，冲突时自动尝试 8928/8929，
+  监听所有网卡），之后 CryoSmart Lineage Tracer Web 页面即可直接
   驱动 ChimeraX 完成：地图打开 → 5 候选对齐（含 z 翻转手性检查）→
   90° 视角评分 → 高清截图回传 → 网页端组装 16:9 流程图 PPTX。
+
+  ChimeraX 与浏览器可以在不同机器上（例如 ChimeraX 装在 CryoSmart
+  服务器上、页面开在工作电脑上）——网页会同时探测 127.0.0.1 与
+  CryoSmart 服务器主机的 8927-8929；安全不受影响：CORS 仍然仅放行
+  本网页（Origin 校验，浏览器不可伪造）。
 
   内部机制与 ChimeraX 官方 MCP bridge / remotecontrol REST server 相同
   （session.ui.thread_safe 派发 + 日志捕获），但 CORS 仅放行本网页
@@ -30,6 +35,7 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
 
 import json
 import os
+import socket
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -256,9 +262,14 @@ def main(session):
 
     server = None
     bound_port = None
+    # v3.44: bind ALL interfaces (was 127.0.0.1) — ChimeraX often lives on
+    # the CryoSmart server machine while the browser is a different desktop;
+    # the strict Origin allow-list below is the security boundary, not the
+    # loopback binding. Rejected requests (bad/no Origin) never execute
+    # anything and only receive an empty 403.
     for port in PORT_PREFERENCE:
         try:
-            server = HTTPServer(("127.0.0.1", port), Handler)
+            server = HTTPServer(("", port), Handler)
             bound_port = port
             break
         except OSError:
@@ -267,11 +278,30 @@ def main(session):
         session.logger.error("CryoSmart Flow Bridge: 端口 %s 均被占用，无法启动。" % PORT_PREFERENCE)
         return
 
+    def _lan_ips():
+        ips = set()
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ips.add(info[4][0])
+        except Exception:
+            pass
+        try:
+            probe_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe_sock.connect(("8.8.8.8", 80))
+            ips.add(probe_sock.getsockname()[0])
+            probe_sock.close()
+        except Exception:
+            pass
+        return sorted(ips)
+
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
     session.logger.info("=" * 60)
-    session.logger.info("CryoSmart Flow Bridge 已启动: http://127.0.0.1:%d" % bound_port)
+    session.logger.info("CryoSmart Flow Bridge 已启动 (监听全部网卡):")
+    session.logger.info("  本机:      http://127.0.0.1:%d" % bound_port)
+    for ip in _lan_ips():
+        session.logger.info("  局域网:    http://%s:%d  (ChimeraX 与浏览器不同机时用这个)" % (ip, bound_port))
     session.logger.info("允许的网页来源: %s" % ", ".join(ALLOWED_ORIGINS))
     session.logger.info("保持 ChimeraX 打开；在网页端点击 \"生成流程图\" 即可全自动完成对齐/手性检查/截图。")
     session.logger.info("=" * 60)

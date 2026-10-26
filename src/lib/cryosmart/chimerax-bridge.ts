@@ -31,6 +31,10 @@ export type BridgeKind = "relay" | "rest";
 
 export interface FlowTransport {
   kind: BridgeKind;
+  /** Host the bridge answered on ("127.0.0.1" = the browser's machine,
+   *  otherwise e.g. the CryoSmart server's hostname — ChimeraX may live
+   *  on a different machine than the browser). */
+  host: string;
   port: number;
   base: string;
   /** Relay only: ChimeraX-side scratch dir where PNGs get saved. */
@@ -42,11 +46,20 @@ export interface FlowTransport {
 export interface ProbeOptions {
   relayPorts?: number[];
   restPorts?: number[];
+  /** v3.44: hosts to probe in order. ChimeraX may run on a different
+   *  machine than the browser (e.g. on the CryoSmart server), and the
+   *  relay binds all interfaces, so the caller passes 127.0.0.1 + the
+   *  CryoSmart server host. Default: ["127.0.0.1"]. */
+  hosts?: string[];
   timeoutMs?: number;
 }
 
 export const DEFAULT_RELAY_PORTS = [8927, 8928, 8929];
-export const DEFAULT_REST_PORTS = [8080, 8765, 8650];
+/** ChimeraX's official REST server (remotecontrol rest start) candidates.
+ *  NOTE: 8080 is CryoSmart Web's own port — kept LAST purely as a candidate
+ *  for exotic setups; the bridge never "runs on 8080 by default". */
+export const DEFAULT_REST_PORTS = [8765, 8650, 8080];
+export const DEFAULT_PROBE_HOSTS = ["127.0.0.1"];
 
 export interface ProbeResult {
   transport: FlowTransport | null;
@@ -69,49 +82,56 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 
 /**
  * Probe for a usable bridge: relay first (full capability), then the
- * official REST server (command-only).
+ * official REST server (command-only). v3.44: every port is probed on every
+ * candidate host (default 127.0.0.1; callers add the CryoSmart server host
+ * for setups where ChimeraX runs on the server machine).
  */
 export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeResult> {
   const logs: string[] = [];
   const relayPorts = opts.relayPorts ?? DEFAULT_RELAY_PORTS;
   const restPorts = opts.restPorts ?? DEFAULT_REST_PORTS;
+  const hosts = opts.hosts?.length ? [...new Set(opts.hosts)] : DEFAULT_PROBE_HOSTS;
   const timeoutMs = opts.timeoutMs ?? 4000;
 
-  for (const port of relayPorts) {
-    const base = `http://127.0.0.1:${port}`;
-    try {
-      const res = await fetchWithTimeout(`${base}/ping`, { method: "GET" }, timeoutMs);
-      if (!res.ok) {
-        logs.push(`relay :${port} → HTTP ${res.status}`);
-        continue;
+  for (const host of hosts) {
+    for (const port of relayPorts) {
+      const base = `http://${host}:${port}`;
+      try {
+        const res = await fetchWithTimeout(`${base}/ping`, { method: "GET" }, timeoutMs);
+        if (!res.ok) {
+          logs.push(`relay ${host}:${port} → HTTP ${res.status}`);
+          continue;
+        }
+        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string };
+        if (data?.ok) {
+          logs.push(`relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"})`);
+          return {
+            transport: { kind: "relay", host, port, base, workdir: data.workdir, canFetchFiles: true },
+            logs,
+          };
+        }
+        logs.push(`relay ${host}:${port} → unexpected payload`);
+      } catch (err) {
+        logs.push(`relay ${host}:${port} → ${err instanceof Error ? err.name : "unreachable"}`);
       }
-      const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string };
-      if (data?.ok) {
-        logs.push(`relay :${port} → OK (ChimeraX ${data.version ?? "?"})`);
-        return {
-          transport: { kind: "relay", port, base, workdir: data.workdir, canFetchFiles: true },
-          logs,
-        };
-      }
-      logs.push(`relay :${port} → unexpected payload`);
-    } catch (err) {
-      logs.push(`relay :${port} → ${err instanceof Error ? err.name : "unreachable"}`);
     }
   }
 
-  for (const port of restPorts) {
-    const base = `http://127.0.0.1:${port}`;
-    try {
-      // The official REST server ships a static CLI page — used for liveness
-      // by ChimeraX's own MCP bridge (a /run probe can fail on a busy UI).
-      const res = await fetchWithTimeout(`${base}/cmdline.html`, { method: "GET" }, timeoutMs);
-      if (res.ok) {
-        logs.push(`rest :${port} → OK (official REST server, no file return)`);
-        return { transport: { kind: "rest", port, base, canFetchFiles: false }, logs };
+  for (const host of hosts) {
+    for (const port of restPorts) {
+      const base = `http://${host}:${port}`;
+      try {
+        // The official REST server ships a static CLI page — used for liveness
+        // by ChimeraX's own MCP bridge (a /run probe can fail on a busy UI).
+        const res = await fetchWithTimeout(`${base}/cmdline.html`, { method: "GET" }, timeoutMs);
+        if (res.ok) {
+          logs.push(`rest ${host}:${port} → OK (official REST server, no file return)`);
+          return { transport: { kind: "rest", host, port, base, canFetchFiles: false }, logs };
+        }
+        logs.push(`rest ${host}:${port} → HTTP ${res.status}`);
+      } catch (err) {
+        logs.push(`rest ${host}:${port} → ${err instanceof Error ? err.name : "unreachable"}`);
       }
-      logs.push(`rest :${port} → HTTP ${res.status}`);
-    } catch (err) {
-      logs.push(`rest :${port} → ${err instanceof Error ? err.name : "unreachable"}`);
     }
   }
 

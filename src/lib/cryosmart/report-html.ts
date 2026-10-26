@@ -1413,6 +1413,10 @@ export interface ReportHtmlOptions {
     const m = url.match(/^(https?:\/\/[^/]+)\/(.*)$/);
     const session = opts?.session;
     if (!m || !session?.baseUrl || !opts?.webAppOrigin) return "";
+    // v3.44: a proxied twin without ANY CryoSmart credential can only ever
+    // 401 at the source — emit none so the button goes straight to the
+    // per-file navigation row instead of a doomed fetch storm.
+    if (!session.cookie && !session.auth) return "";
     const origin = String(opts.webAppOrigin).replace(/\/$/, "");
     const base = String(session.baseUrl).replace(/\/$/, "");
     const params = [
@@ -2428,6 +2432,52 @@ export interface ReportHtmlOptions {
     }</h3></div>${steps.join('<div class="pf-arrow">↓</div>')}</div>`;
   }
 
+  /** v3.44: flow-relevance filter for the completeness sweep — everything a
+   *  dataset branch is made of, minus what the micrographs strip / aux
+   *  sections already own (imports, CTF). */
+  function reportPictureFlowRelevant(node: LineageNode): boolean {
+    const type = node.job_type || "";
+    if (/import_(movies|micrographs|templates|particles)/i.test(type)) return false;
+    if (/ctf/i.test(type)) return false;
+    if (normalMapAssets(node).length > 0) return true;
+    if (node.select_2d != null || /class_2D|select_2D|rebalance_classes_2D|class_probability_filter/i.test(type)) return true;
+    if (reportIsPickingNode(node)) return true;
+    if (/extract_micrographs|homo_abinit|import_volumes|hetero|refine|reconstruct|topaz|cryolo|_3D/i.test(type)) return true;
+    return false;
+  }
+
+  /** v3.44 completeness net: the round columns render only the sub-kinds
+   *  each round builder knows about (select_2D / class_2D / map jobs /
+   *  particle steps / side inputs). A dataset branch whose jobs fall outside
+   *  every predicate used to vanish silently ("Picture Flow 丢了分支") —
+   *  sweep the VISIBLE outline nodes and chain whatever was missed into a
+   *  compact completeness strip so every upstream job of the final result
+   *  stays reachable from the flow. */
+  function reportPictureCompleteness(
+    summary: LineageSummary,
+    state: LineageReportState,
+    alreadyHtml: string,
+  ): string {
+    const nodeMap = summaryNodeMap(summary);
+    const rendered = new Set<string>();
+    for (const m of alreadyHtml.matchAll(/href="#card-([^"]+)"/g)) rendered.add(m[1]);
+    const missing = reportVisibleOutlineNodes(summary, nodeMap).filter(
+      (node) => !rendered.has(node.uid) && reportPictureFlowRelevant(node),
+    );
+    if (!missing.length) return "";
+    const items = missing
+      .map((node) => {
+        const stage = reportStageName(node, summary, state);
+        const metric = reportPictureParticleMetricText(node);
+        const em = `${escHtml(stage)}${metric ? ` · ${escHtml(metric)}` : ""}`;
+        return `<a class="pf-particle-step" href="#card-${escHtml(node.uid)}" title="${escHtml(stage)}"><b>${escHtml(
+          node.uid,
+        )}</b><span>${escHtml(node.job_type || "")}</span><em>${em}</em></a>`;
+      })
+      .join("");
+    return `<div class="pf-round"><div class="pf-round-head"><h3>其余上游补全（${missing.length}）</h3></div><div class="pf-particle-block"><div class="pf-subhead">未进入上列轮次、但属于最终结果上游的作业（点击可跳转对应卡片）</div><div class="pf-particle-steps">${items}</div></div></div>`;
+  }
+
   /** The picture-flow diagram (HTML version of the SVG flow). */
   export function reportPictureFlow(summary: LineageSummary, state: LineageReportState, opts?: ReportHtmlOptions): string {
     const rounds = Array.from(
@@ -2442,10 +2492,11 @@ export interface ReportHtmlOptions {
       .filter(Boolean)
       .join('<div class="pf-arrow">↓</div>');
     if (!roundHtml) return "";
-    return `<div class="picture-flow"><div class="picture-head"><h2>Picture Flow</h2><span>SVG 会随报告单独导出</span></div>${reportPictureMicrographs(
-      summary,
-      opts
-    )}<div class="pf-arrow">↓</div>${roundHtml}</div>`;
+    const micrographsHtml = reportPictureMicrographs(summary, opts);
+    const completenessHtml = reportPictureCompleteness(summary, state, micrographsHtml + roundHtml);
+    return `<div class="picture-flow"><div class="picture-head"><h2>Picture Flow</h2><span>SVG 会随报告单独导出</span></div>${micrographsHtml}<div class="pf-arrow">↓</div>${
+      completenessHtml ? `${completenessHtml}<div class="pf-arrow">↓</div>` : ""
+    }${roundHtml}</div>`;
   }
 
   /* ================================================================== */
@@ -3764,6 +3815,7 @@ document.addEventListener("click",function(event){
       a.rel="noopener";
       a.textContent=it.name;
       a.title=it.u;
+      if(it.why&&it.why.length)a.title=it.u+" | "+it.why.join(" | ");
       row.appendChild(a);
     });
     host.appendChild(row);
@@ -3791,7 +3843,7 @@ document.addEventListener("click",function(event){
   say("\\u4e0b\\u8f7d\\u4e2d 0/"+fetchables.length+"\\u2026");
   var okFiles=[],failed=[],done=0,seenBytes=0;
   function fetchOne(e){
-    var srcs=[];
+    var srcs=[],why=[];
     if(e.p)srcs.push(e.p);
     if(e.u&&srcs.indexOf(e.u)<0)srcs.push(e.u);
     function attempt(i){
@@ -3799,11 +3851,15 @@ document.addEventListener("click",function(event){
       return fetch(srcs[i]).then(function(r){
         if(!r.ok)throw new Error("HTTP "+r.status);
         return r.blob();
-      }).catch(function(){return attempt(i+1);});
+      }).catch(function(err){
+        why.push(((err&&err.message)||"\u5931\u8d25").slice(0,80));
+        return attempt(i+1);
+      });
     }
     return attempt(0).then(function(b){
       okFiles.push({name:e.name,blob:b,url:e.u});
     }).catch(function(){
+      e.why=why;
       failed.push(e);
     }).then(function(){
       done++;
@@ -3826,8 +3882,11 @@ document.addEventListener("click",function(event){
     for(i=0;i<okFiles.length;i++)total+=okFiles[i].blob.size;
     if(!okFiles.length){
       button.disabled=false;
+      var netErr=0,httpCode="";
+      failed.forEach(function(fe){(fe.why||[]).forEach(function(w){if(w.indexOf("HTTP ")===0){httpCode=w.slice(5);}else{netErr++;}});});
+      var diag=httpCode&&!netErr?("HTTP "+httpCode):(netErr?"[\\u4e2d\\u8f6c/\\u76f4\\u8fde\\u5747\\u4e0d\\u53ef\\u8fbe]":"");
       say("\\u81ea\\u52a8\\u4e0b\\u8f7d\\u5931\\u8d25");
-      if(leftovers.length)showRetry(leftovers,"\\u81ea\\u52a8\\u4e0b\\u8f7d\\u5931\\u8d25\\uff0c\\u8bf7\\u9010\\u4e2a\\u70b9\\u51fb\\u4e0b\\u8f7d\\uff08\\u6bcf\\u6b21\\u4e00\\u4e2a\\uff0c\\u4e0d\\u4f1a\\u88ab\\u6d4f\\u89c8\\u5668\\u62e6\\u622a\\uff09\\uff1a");
+      if(leftovers.length)showRetry(leftovers,"\\u81ea\\u52a8\\u4e0b\\u8f7d\\u5931\\u8d25"+diag+"\\uff0c\\u8bf7\\u9010\\u4e2a\\u70b9\\u51fb\\u4e0b\\u8f7d\\uff08\\u6bcf\\u6b21\\u4e00\\u4e2a\\uff0c\\u4e0d\\u4f1a\\u88ab\\u6d4f\\u89c8\\u5668\\u62e6\\u622a\\uff09\\uff1b\\u4fdd\\u6301\\u7f51\\u9875\\u5e94\\u7528\\u8fd0\\u884c\\u540e\\u91cd\\u8bd5\\u4e00\\u952e\\u4e0b\\u8f7d\\u5373\\u53ef\\u81ea\\u52a8\\u6253\\u5305 ZIP\\uff1a");
       setTimeout(function(){say();},2600);
       return;
     }

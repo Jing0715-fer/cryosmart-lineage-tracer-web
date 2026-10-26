@@ -1,5 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 
+/** CORS headers applied to EVERY response (success, 4xx and 5xx alike).
+ * v3.44: the report HTML is opened from blob:/file: origins (the
+ * "Open in new tab" blob and the user's downloaded copy), whose origin is
+ * `null` — the browser then blocks every fetch() of the proxied download
+ * twins unless the ACTUAL response carries Access-Control-Allow-Origin.
+ * Only the OPTIONS preflight used to have it, and a simple GET never
+ * preflights, so every map fetch through this route died as an opaque CORS
+ * TypeError and the one-click zip fell back to "自动下载失败". `*` is safe
+ * here: the route carries its own per-request CryoSmart credentials in the
+ * query string, no cookies of this app are involved. */
+const PROXY_CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Expose-Headers": "X-Cryosmart-Status, X-Cryosmart-Url",
+};
+
 /**
  * CryoSmart backend proxy.
  *
@@ -33,7 +50,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
   if (!base) {
     return NextResponse.json(
       { ok: false, error: "Missing 'base' query parameter (CryoSmart origin, e.g. http://192.168.4.3:8080)." },
-      { status: 400 }
+      { status: 400, headers: PROXY_CORS_HEADERS }
     );
   }
 
@@ -43,14 +60,14 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
   } catch {
     return NextResponse.json(
       { ok: false, error: `Invalid 'base' URL: ${base}` },
-      { status: 400 }
+      { status: 400, headers: PROXY_CORS_HEADERS }
     );
   }
 
   if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
     return NextResponse.json(
       { ok: false, error: `Unsupported protocol: ${baseUrl.protocol}` },
-      { status: 400 }
+      { status: 400, headers: PROXY_CORS_HEADERS }
     );
   }
 
@@ -102,6 +119,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
     return new NextResponse(upstream.body ?? null, {
       status: upstream.status,
       headers: {
+        ...PROXY_CORS_HEADERS,
         "Content-Type": contentType,
         "Cache-Control": "no-store",
         "X-Cryosmart-Status": String(upstream.status),
@@ -112,7 +130,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
       { ok: false, error: `Failed to reach CryoSmart at ${targetUrl.origin}: ${message}` },
-      { status: 502 }
+      { status: 502, headers: PROXY_CORS_HEADERS }
     );
   }
 }
@@ -120,11 +138,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ path?: stri
 export async function OPTIONS() {
   return new NextResponse(null, {
     status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    },
+    headers: PROXY_CORS_HEADERS,
   });
 }
 

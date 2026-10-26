@@ -71,7 +71,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const [bridgeTried, setBridgeTried] = useState(false);
   const [step, setStep] = useState<StepState>(IDLE);
   const [includeFsc, setIncludeFsc] = useState(false);
-  const [maxGroups, setMaxGroups] = useState("4");
+  const [maxGroups, setMaxGroups] = useState("6");
   const [result, setResult] = useState<{ url: string; size: number; filename: string } | null>(null);
   const [thumbs, setThumbs] = useState<{ key: string; url: string }[]>([]);
   const [renderReport, setRenderReport] = useState<MapRender[]>([]);
@@ -81,24 +81,54 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const session = loaded?.session ?? null;
   const relayCommand = typeof window !== "undefined" ? `open ${window.location.origin}/api/cryosmart/flow-figure/relay.py` : "";
 
+  /** v3.44: ChimeraX may run on a different machine than the browser (often
+   *  the CryoSmart server). Probe the browser machine first, then the page
+   *  host, then the CryoSmart server host from the loaded lineage. */
+  const bridgeHosts = useMemo(() => {
+    const hosts: string[] = ["127.0.0.1"];
+    try {
+      if (typeof window !== "undefined" && window.location.hostname) hosts.push(window.location.hostname);
+    } catch {}
+    const base = summary?.base_url || loaded?.session?.baseUrl || "";
+    try {
+      const h = new URL(base).hostname;
+      if (h) hosts.push(h);
+    } catch {}
+    return [...new Set(hosts)];
+  }, [summary, loaded]);
+  const cryoSmartHost = useMemo(() => {
+    const base = summary?.base_url || loaded?.session?.baseUrl || "";
+    try {
+      return new URL(base).hostname;
+    } catch {
+      return "";
+    }
+  }, [summary, loaded]);
+
   const pushLog = useCallback((line: string) => {
     setStep((s) => ({ ...s, logs: [...s.logs.slice(-300), line] }));
   }, []);
 
-  const probeBridge = useCallback(async (quiet = true) => {
-    setBridgeProbing(true);
-    try {
-      const res = await probeFlowBridge({ timeoutMs: 4000 });
-      setBridge(res.transport);
-      if (res.transport && !quiet) {
-        toast.success(`ChimeraX 桥已连接 (${res.transport.kind}:${res.transport.port})`);
+  const probeBridge = useCallback(
+    async (quiet = true) => {
+      setBridgeProbing(true);
+      try {
+        const res = await probeFlowBridge({ timeoutMs: 4000, hosts: bridgeHosts });
+        setBridge(res.transport);
+        if (res.transport && !quiet) {
+          toast.success(`ChimeraX 桥已连接 (${res.transport.kind} ${res.transport.host}:${res.transport.port})`);
+        }
+        if (!res.transport) {
+          for (const line of res.logs.slice(0, 15)) pushLog(`探测 ${line}`);
+        }
+        return res.transport;
+      } finally {
+        setBridgeProbing(false);
+        setBridgeTried(true);
       }
-      return res.transport;
-    } finally {
-      setBridgeProbing(false);
-      setBridgeTried(true);
-    }
-  }, []);
+    },
+    [bridgeHosts, pushLog],
+  );
 
   useEffect(() => {
     // Default mode: real data → ChimeraX (falls back automatically), none → demo.
@@ -153,10 +183,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         model = buildDemoFigureModel();
       } else {
         if (!summary) throw new Error("尚未载入谱系数据 — 请先完成 Smart Capture 与 Trace Lineage。");
-        model = buildFlowFigureModel(summary, { maxGroups: Number(maxGroups) || 4 });
+        model = buildFlowFigureModel(summary, { maxGroups: Number(maxGroups) || 6 });
       }
       pushLog(`阶段模型: ${model.groups.length} 组 · 参考 ${model.referenceKey ?? "—"}`);
       for (const w of model.warnings) pushLog(`⚠ ${w}`);
+      const parallel = model.groups.filter((g) => g.length > 1);
+      for (const g of parallel) {
+        pushLog(`并行分支组: ${g.map((i) => `${i.uid} ${i.label}`).join(" + ")}`);
+      }
 
       const images = new Map<string, Uint8Array>();
       const imageUrls: string[] = [];
@@ -172,10 +206,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         let transport = bridge ?? (await probeBridge());
         if (!transport) {
           throw new Error(
-            "未找到 ChimeraX 桥。请先在 ChimeraX 中运行一次: " + relayCommand + " （详见下方说明），或改用「会话预览图 / 演示样例」模式。",
+            `未找到 ChimeraX 桥（已探测 ${bridgeHosts.join(", ")} 的 8927-8929 / 8765 / 8650；8080 是 CryoSmart Web 自己的端口，桥不会在那里）。请先在 ChimeraX 中运行一次: ` +
+              relayCommand +
+              " （详见下方说明），或改用「会话预览图 / 演示样例」模式。",
           );
         }
-        pushLog(`桥接: ${transport.kind} :${transport.port}${transport.canFetchFiles ? "" : " (仅命令，无截图回传)"}`);
+        pushLog(`桥接: ${transport.kind} ${transport.host}:${transport.port}${transport.canFetchFiles ? "" : " (仅命令，无截图回传)"}`);
 
         if (transport.kind === "rest") {
           // The official REST server cannot serve rendered PNGs back —
@@ -333,12 +369,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       setStep((s) => ({ ...s, busy: false, error: message }));
       toast.error(`流程图生成失败: ${message}`);
     }
-  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, uploadAsset, pushLog, maxGroups, includeFsc]);
+  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, uploadAsset, pushLog, maxGroups, includeFsc, bridgeHosts]);
 
   const canGenerate = !step.busy && (mode === "demo" || !!summary);
   const bridgeBadge = useMemo(() => {
     if (bridgeProbing) return <Badge variant="outline" className="gap-1 text-[10px]"><Loader2 className="h-3 w-3 animate-spin" />探测中</Badge>;
-    if (bridge) return <Badge className="gap-1 bg-emerald-100 px-1.5 text-[10px] text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/40 dark:text-emerald-300"><CheckCircle2 className="h-3 w-3" />{bridge.kind}:{bridge.port}</Badge>;
+    if (bridge) return <Badge className="gap-1 bg-emerald-100 px-1.5 text-[10px] text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/40 dark:text-emerald-300"><CheckCircle2 className="h-3 w-3" />{bridge.kind} {bridge.host}:{bridge.port}</Badge>;
     if (bridgeTried) return <Badge variant="outline" className="gap-1 text-[10px] text-amber-600"><AlertTriangle className="h-3 w-3" />未连接</Badge>;
     return <Badge variant="outline" className="text-[10px] text-slate-400">待探测</Badge>;
   }, [bridge, bridgeProbing, bridgeTried]);
@@ -396,7 +432,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {["2", "3", "4", "5", "6"].map((v) => (
+                  {["2", "3", "4", "5", "6", "7", "8", "9", "10"].map((v) => (
                     <SelectItem key={v} value={v}>{v}</SelectItem>
                   ))}
                 </SelectContent>
@@ -435,9 +471,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 <div className="flex items-start gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
                   <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
-                    ChimeraX 1.12 的 MCP 由本地 REST server 支撑（<code className="font-mono">mcp start</code>），但官方 CORS 仅放行 localhost 网页；此桥用同一内部机制，Origin 校验锁定为本应用。
-                    若 ChimeraX 无法直读内网地图，会自动改走应用中转（页面下载 MRC → 应用暂存 → ChimeraX 公网读取）。
-                    高级：<a className="underline" href="/helpers/CryoSmart_flow_relay.py" download>下载桥脚本</a>；REST 直连可探测 8080/8765/8650。
+                    端口说明：此桥 open 之后在 ChimeraX 内部监听 <b>8927/8928/8929</b>；备选的官方 REST 需在 ChimeraX 里运行 <code className="font-mono">remotecontrol rest start</code>（默认 8765/8650）。
+                    <b>8080 是 CryoSmart Web 自己的端口，ChimeraX 桥不会、也不能运行在那里</b>——在 8080 上检测不到属正常。本页会同时探测
+                    {bridgeHosts.map((h) => (
+                      <code key={h} className="mx-0.5 rounded bg-slate-200 px-1 font-mono text-[10px] dark:bg-slate-800">{h}</code>
+                    ))}
+                    的上述端口（ChimeraX 装在{cryoSmartHost ? `服务器 ${cryoSmartHost} 上` : "服务器上"}也能找到——relay 监听全部网卡，可跨机访问；仅需放行系统防火墙）。
+                    若 ChimeraX 无法直读内网地图，会自动改走应用中转（页面下载 MRC → 应用暂存 → ChimeraX 读取）。ChimeraX 1.12 的 MCP 同样由本地 REST server 支撑，但官方 CORS 仅放行 localhost 网页；此桥用同一内部机制，Origin 校验锁定为本应用。高级：
+                    <a className="underline" href="/helpers/CryoSmart_flow_relay.py" download>下载桥脚本</a>。
                   </span>
                 </div>
               </div>
