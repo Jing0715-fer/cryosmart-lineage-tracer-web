@@ -230,7 +230,12 @@ const server = Bun.serve({
       resetRelayState();
       const blockHttp = new URL(req.url).searchParams.get("http") === "block";
       relayState.httpBlocked = blockHttp;
-      return Response.json({ ok: true, http_blocked: blockHttp });
+      // v3.48 drill switch: reject every legit `save "<path>.png"` so the
+      // bridge's save-error surfacing (缩略图保存失败 / 保存失败 lines) can
+      // be E2E-verified against a ChimeraX that cannot write files.
+      const rejectSave = new URL(req.url).searchParams.get("save") === "reject";
+      relayState.saveRejected = rejectSave;
+      return Response.json({ ok: true, http_blocked: blockHttp, save_rejected: rejectSave });
     }
     if (pathname === "/flow-e2e/relay-stats") {
       return new Response(JSON.stringify(relayStats(), null, 2), {
@@ -579,6 +584,10 @@ const relayState = {
   staged: new Map<string, { name: string; bytes: Uint8Array }>(),
   /** v3.47: /flow-e2e/reset?http=block — all http opens fail 503. */
   httpBlocked: false,
+  /** v3.48: `save image …` commands rejected (not a ChimeraX command). */
+  saveImageRejected: 0,
+  /** v3.48: /flow-e2e/reset?save=reject — every legit save errors (drill). */
+  saveRejected: false,
 };
 
 function resetRelayState() {
@@ -588,6 +597,8 @@ function resetRelayState() {
   relayState.commands = [];
   relayState.staged.clear();
   relayState.httpBlocked = false;
+  relayState.saveImageRejected = 0;
+  relayState.saveRejected = false;
 }
 
 function relayNextModelId(): number {
@@ -613,6 +624,8 @@ function relayStats() {
     open_legacy_text: relayState.opens.filter((o) => !o.idless && o.modelId != null).length,
     open_staged_local: relayState.opens.filter((o) => o.local && o.modelId != null).length,
     open_http_format_rejected: relayState.opens.filter((o) => o.formatRejected).length,
+    save_image_rejected: relayState.saveImageRejected,
+    save_rejected_mode: relayState.saveRejected,
   };
 }
 function u_hasAsset(u: string): boolean {
@@ -730,11 +743,33 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
     return { text: "Fit map in map, correlation = 0.87", error: null };
   }
 
-  const saveMatch = /^save\s+image\s+"([^"]+)"/i.exec(command);
+  // v3.48 REAL-ChimeraX emulation — the round-7 lesson: this mock used to
+  // accept `save image "<path>"` (the bridge's then-broken command), which
+  // green-lit the E2E while the user's real ChimeraX rejected every
+  // screenshot (relay /file 404, 覆盖率 0.0000). Real grammar (same as the
+  // proven desktop helper): save "<filename.png>" [width N] [height N]
+  // [supersample N] [transparentBackground true|false] — `save image …`
+  // parses the suffix-less word "image" as the filename and ERRORS out.
+  const saveMatch =
+    /^save\s+"([^"]+\.png)"(?:\s+width\s+\d+)?(?:\s+height\s+\d+)?(?:\s+supersample\s+\d+)?(?:\s+transparentBackground\s+(?:true|false))?\s*$/i.exec(command);
   if (saveMatch) {
-    const name = saveMatch[1].split("/").pop() || "img.png";
+    if (relayState.saveRejected) {
+      return {
+        text: "",
+        error: "OSError: [Errno 28] No space left on device (simulated /flow-e2e/reset?save=reject drill)",
+      };
+    }
+    const name = saveMatch[1].split(/[\\/]/).pop() || "img.png";
     relayState.files.set(name, MOCK_PNG);
     return { text: `saved ${saveMatch[1]}`, error: null };
+  }
+  if (/^save\s+image\b/i.test(command)) {
+    relayState.saveImageRejected++;
+    return {
+      text: "",
+      error:
+        "UserError: 'image' has no recognizable file suffix; use: save <filename.png> width <px> height <px> supersample <n> transparentBackground false",
+    };
   }
 
   // volume level/step, set bgColor, view *, turn *, wait, hide/show —

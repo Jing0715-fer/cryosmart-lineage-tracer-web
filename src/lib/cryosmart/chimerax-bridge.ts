@@ -25,6 +25,13 @@
  *   - one-time 90° view optimisation on the reference map by thumbnail
  *     white-space coverage, applied to every map
  *   - per-map export at 1600×1200 supersample 3 on white background
+ *
+ * v3.48 (round-7): screenshots are saved with plain `save <png-path> width …
+ * height … supersample … transparentBackground false` — ChimeraX has NO
+ * `save image` subcommand (the filename suffix drives the format; `save
+ * image <path>` makes `save` treat the suffix-less word "image" as the
+ * filename and error out, which silently 404'd every PNG fetch on the
+ * user's real build). Same shape as the proven desktop helper.
  */
 
 export type BridgeKind = "relay" | "rest";
@@ -378,6 +385,16 @@ function safeKeyPart(value: string): string {
   return String(value || "item").replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "item";
 }
 
+/** v3.48: join a bridge workdir + filename using the workdir's OWN separator.
+ *  Windows relays report workdirs like "C:\Users\…\cryoflow_x" — building
+ *  the save path with the native separator matches the proven desktop
+ *  helper exactly (ChimeraX/Python accept either, but a canonical path
+ *  removes one variable when diagnosing over a log). */
+function joinWorkdirPath(workdir: string, name: string): string {
+  const base = String(workdir || "").replace(/[\\/]+$/, "");
+  return base + (base.includes("\\") ? "\\" : "/") + name;
+}
+
 /* ------------------------------------------------------------------ */
 /* Thumbnail coverage scoring (browser port of score_current_view)     */
 /* ------------------------------------------------------------------ */
@@ -546,7 +563,20 @@ export async function renderFigureMaps(
       if (v.y) await exec(t, `turn y ${v.y}`, opts, true);
       await exec(t, "wait 1", opts, true);
       const thumb = `_thumb_${v.desc.replace(/[^a-z0-9]/gi, "")}.png`;
-      await exec(t, `save image ${quotePath(`${t.workdir}/${thumb}`)} width ${THUMB_SIZE} height ${THUMB_SIZE} supersample 1 transparentBackground false`, opts, true);
+      // v3.48 (round-7): plain `save <png-path> …` — `save image` is NOT a
+      // ChimeraX command and its exec error was previously swallowed by the
+      // soft flag, surfacing only as /file 404 (覆盖率 0.0000 for all five
+      // viewpoints on the user's real build). Errors are now in the log.
+      const thumbSave = await exec(
+        t,
+        `save ${quotePath(joinWorkdirPath(t.workdir, thumb))} width ${THUMB_SIZE} height ${THUMB_SIZE} supersample 1 transparentBackground false`,
+        opts,
+        true,
+      );
+      if (thumbSave.error) {
+        log(`  视角 ${v.desc}: 缩略图保存失败 — ${logSnippet(thumbSave.error, 140)}`);
+        continue;
+      }
       try {
         const bytes = await bridgeFile(t, thumb);
         const score = await thumbnailCoverageScore(bytes);
@@ -555,8 +585,8 @@ export async function renderFigureMaps(
           best = score;
           view = { ...v, score };
         }
-      } catch {
-        log(`  视角 ${v.desc}: 缩略图获取失败`);
+      } catch (err) {
+        log(`  视角 ${v.desc}: 缩略图获取失败 — ${String(err).slice(0, 140)}`);
       }
     }
     await exec(t, "view _cfbase", opts, true);
@@ -746,17 +776,21 @@ export async function renderFigureMaps(
       await exec(t, `show #${showId} models`, opts, true);
       await exec(t, "wait 1", opts, true);
       const name = `render_${safeKeyPart(r.key.replace(/\//g, "__"))}.png`;
-      await exec(
+      // v3.48: plain `save <png-path> …` — see the thumbnail note above; the
+      // save's ChimeraX error now reaches the log instead of hiding behind
+      // the subsequent /file 404.
+      const saveRes = await exec(
         t,
-        `save image ${quotePath(`${t.workdir}/${name}`)} width ${SNAPSHOT_W} height ${SNAPSHOT_H} supersample 3 transparentBackground false`,
+        `save ${quotePath(joinWorkdirPath(t.workdir, name))} width ${SNAPSHOT_W} height ${SNAPSHOT_H} supersample 3 transparentBackground false`,
         opts,
         true,
       );
       try {
+        if (saveRes.error) throw new Error(`保存失败 — ${logSnippet(saveRes.error, 160)}`);
         r.png = await bridgeFile(t, name);
         log(`  截图完成: ${r.key}`);
       } catch (err) {
-        log(`  截图获取失败 ${r.key}: ${String(err).slice(0, 100)}`);
+        log(`  截图获取失败 ${r.key}: ${String(err).slice(0, 180)}`);
       }
       await exec(t, `hide #${showId} models`, opts, true);
     }
