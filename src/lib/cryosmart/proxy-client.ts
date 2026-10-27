@@ -80,6 +80,53 @@ export function isDirectCryosmartUrl(url: string | null | undefined): boolean {
   return /^https?:\/\//i.test(String(url || "")) && String(url).includes("/api/log_image/");
 }
 
+/** v3.46: build an ABSOLUTE same-app proxy URL for a CryoSmart resource so a
+ *  NON-BROWSER client (ChimeraX, which carries no cookies) can fetch it —
+ *  the app server attaches the CryoSmart credentials server-side via the
+ *  query string, exactly like cryoSmartFetch's absolute-URL branch, but
+ *  prefixed with the app origin and safe to hand to urllib.
+ *
+ *  Used by the flow-figure card's “应用代理直连” mode: instead of the page
+ *  downloading every 100–300 MB map and re-uploading it (3 full transfers
+ *  per map), ChimeraX `open`s this URL directly — one transfer chain
+ *  (CryoSmart → app → ChimeraX), browser untouched.
+ *
+ *  Returns null when the target isn't an absolute http(s) URL and can't be
+ *  resolved against the session baseUrl (caller falls back). */
+export function buildProxyAbsoluteUrl(
+  session: CryoSmartSession,
+  targetUrl: string,
+  opts: { origin: string; timeoutMs?: number }
+): string | null {
+  const raw = String(targetUrl || "").trim();
+  if (!raw) return null;
+  let u: URL;
+  try {
+    if (/^https?:\/\//i.test(raw)) {
+      u = new URL(raw);
+    } else if (raw.startsWith("/")) {
+      // Root-relative CryoSmart path — resolve against the session origin.
+      u = new URL(raw, session.baseUrl);
+    } else {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  const params = new URLSearchParams(u.search);
+  params.set("base", u.origin);
+  if (session.cookie) params.set("cookie", session.cookie);
+  if (session.auth) params.set("auth", session.auth);
+  params.set("timeout", String(Math.round(opts.timeoutMs ?? 300_000)));
+  const safePath = u.pathname
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+  const origin = String(opts.origin || "").replace(/\/+$/, "");
+  return `${origin}/api/cryosmart/${safePath}?${params.toString()}`;
+}
+
 /**
  * Fetch a CryoSmart path via the proxy. Returns the raw Response.
  * The caller can use `.json()`, `.arrayBuffer()`, `.blob()`, or `.text()`.

@@ -231,6 +231,47 @@ export async function bridgeNextModelId(t: FlowTransport): Promise<number | null
   }
 }
 
+export interface OpenModelResult {
+  modelId: number | null;
+  /** ChimeraX-side exception text ("UserError: …"), null when open ran clean. */
+  error: string | null;
+  /** Captured open log text (for diagnostics + legacy-format id parsing). */
+  text: string;
+  /** True when the id came from the /nextid delta, not from the log text
+   *  (legacy builds whose open output names no model at all). */
+  viaDelta: boolean;
+}
+
+/** v3.46: open a MAP url/path in ChimeraX and robustly recover its model id.
+ *
+ * Three safety nets over the old raw-parse:
+ *   1. `format mrc` is appended so suffix-less proxy/asset URLs (path ends in
+ *      "asset" / "download_result_file", not ".mrc") never depend on
+ *      content sniffing;
+ *   2. parseOpenModelId now understands legacy output shapes (see there);
+ *   3. when the open ran clean but NO id could be parsed, the /nextid delta
+ *      (relay only) confirms the created model — the round-5 failure mode
+ *      (map open, no exception, legacy log, id unparsed → false “无法打开
+ *      参考地图”) becomes impossible on every bridge version. */
+export async function bridgeOpenModel(
+  t: FlowTransport,
+  source: string,
+  timeoutMs = 300_000,
+): Promise<OpenModelResult> {
+  const nextBefore = await bridgeNextModelId(t);
+  const res = await bridgeExec(t, `open ${quotePath(source)} format mrc`, timeoutMs);
+  let modelId = parseOpenModelId(res.text);
+  let viaDelta = false;
+  if (modelId == null && !res.error && nextBefore != null) {
+    const nextAfter = await bridgeNextModelId(t);
+    if (nextAfter != null && nextAfter > nextBefore) {
+      modelId = nextAfter - 1;
+      viaDelta = true;
+    }
+  }
+  return { modelId, error: res.error, text: res.text, viaDelta };
+}
+
 /* ------------------------------------------------------------------ */
 /* Parsers (port of the desktop helper's regexes)                      */
 /* ------------------------------------------------------------------ */
@@ -243,10 +284,33 @@ export function parseCorrelation(text: string | null | undefined): number | null
   return Number.isFinite(value) && value >= -1 && value <= 1 ? value : null;
 }
 
+/** Extract the opened model id from an `open` command's log text.
+ *
+ * v3.46 (user round-5: “无法在 ChimeraX 中打开参考地图 (asset-url)” with NO
+ * error suffix — the open had clearly NOT raised, the map was sitting open
+ * in ChimeraX, only the id went unparsed): ChimeraX prints the model id in
+ * DIFFERENT shapes across versions —
+ *   modern (≥ ~1.6):  "Opened x.mrc as #3.1, grid size 200,200,200, …"
+ *   legacy (≤ 1.13):  "Opened x.mrc, grid size 200,200,200, grid spacing
+ *                      1.06,1.06,1.06 on 1 model (id #3)"
+ * and some builds log only a bare mention. The old single-regex parse
+ * ("as #N") silently returned null on every legacy build, turning a
+ * successful open into a fatal “无法打开参考地图”. Order: modern "as #N",
+ * legacy "(id #N)" / "id #N", then the LAST bare "#N" mention. */
 export function parseOpenModelId(text: string): number | null {
-  const m = /as\s+#(\d+(?:\.\d+)?)/i.exec(text);
-  if (m) return parseInt(m[1], 10);
+  if (!text) return null;
+  const mModern = /as\s+#(\d+(?:\.\d+)?)/i.exec(text);
+  if (mModern) return parseInt(mModern[1], 10);
+  const mLegacy = /\(\s*id\s*#(\d+(?:\.\d+)?)\s*\)/i.exec(text) || /\bid\s+#(\d+(?:\.\d+)?)\b/i.exec(text);
+  if (mLegacy) return parseInt(mLegacy[1], 10);
+  const ids = [...text.matchAll(/#(\d+(?:\.\d+)?)/g)];
+  if (ids.length) return parseInt(ids[ids.length - 1][1], 10);
   return null;
+}
+
+/** Collapse a ChimeraX log snippet to one short line (error diagnostics). */
+function logSnippet(text: string, max = 160): string {
+  return String(text || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
 function quotePath(p: string): string {
@@ -378,13 +442,19 @@ export async function renderFigureMaps(
   /* ---- 1. reference ---- */
   progress("打开参考地图", 4);
   let refLevel: number | null = null;
-  const openRef = await exec(t, `open ${quotePath(opts.reference.sourceUrl)}`, opts);
-  const refId = parseOpenModelId(openRef.text);
+  const openRef = await bridgeOpenModel(t, opts.reference.sourceUrl);
+  const refId = openRef.modelId;
   if (refId == null) {
-    throw new Error(`无法在 ChimeraX 中打开参考地图 (${opts.reference.sourceUrl})${openRef.error ? `: ${openRef.error}` : ""}`);
+    // v3.46: include WHAT ChimeraX actually said — the round-5 report carried
+    // no error suffix at all (open clean, id unparsed), which was
+    // undiagnosable from the outside.
+    const detail = openRef.error
+      ? `: ${openRef.error}`
+      : ` — ChimeraX 未报错但未返回 model id（输出: ${logSnippet(openRef.text) || "(空)"}）`;
+    throw new Error(`无法在 ChimeraX 中打开参考地图 (${opts.reference.sourceUrl})${detail}`);
   }
   openIds.add(refId);
-  log(`参考地图 ${opts.reference.key} → model #${refId}`);
+  log(`参考地图 ${opts.reference.key} → model #${refId}${openRef.viaDelta ? "（id 经增量探测确认）" : ""}`);
 
   const refStats = await bridgeVolStats(t, refId);
   if (refStats) {
@@ -483,9 +553,11 @@ export async function renderFigureMaps(
       let activeId: number | null = null;
       let note: string | undefined;
       try {
-        const openRes = await exec(t, `open ${quotePath(req.sourceUrl)}`, opts, true);
-        activeId = parseOpenModelId(openRes.text);
-        if (activeId == null) throw new Error(openRes.error || openRes.text.slice(0, 200) || "open produced no model");
+        const openRes = await bridgeOpenModel(t, req.sourceUrl);
+        activeId = openRes.modelId;
+        if (activeId == null) {
+          throw new Error(openRes.error || logSnippet(openRes.text) || "open produced no model");
+        }
         openIds.add(activeId);
 
         const stats = await bridgeVolStats(t, activeId);
@@ -644,13 +716,15 @@ export async function renderFigureMaps(
 
 /**
  * Quick probe: can ChimeraX itself fetch this URL (e.g. a CryoSmart
- * intranet URL)? Returns the opened model id (to close afterwards) or null.
+ * intranet URL, or an app-proxy URL with server-side credentials)?
+ * Returns the opened model id (to close afterwards) or null. v3.46: rides
+ * bridgeOpenModel, so legacy open output formats and id-less logs are
+ * handled here too, and the captured text is returned for diagnostics.
  */
 export async function bridgeOpenProbe(
   t: FlowTransport,
   url: string,
-): Promise<{ ok: boolean; modelId: number | null; error?: string }> {
-  const res = await bridgeExec(t, `open ${quotePath(url)}`);
-  const id = parseOpenModelId(res.text);
-  return { ok: id != null, modelId: id, error: res.error ?? undefined };
+): Promise<{ ok: boolean; modelId: number | null; error?: string; text?: string }> {
+  const res = await bridgeOpenModel(t, url);
+  return { ok: res.modelId != null, modelId: res.modelId, error: res.error ?? undefined, text: res.text };
 }

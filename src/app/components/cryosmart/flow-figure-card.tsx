@@ -44,7 +44,7 @@ import {
 } from "@/lib/cryosmart/workflow-figure";
 import { buildWorkflowPptx } from "@/lib/cryosmart/workflow-pptx";
 import { downloadBlob } from "@/lib/cryosmart/bundle";
-import { cryoSmartBytes } from "@/lib/cryosmart/proxy-client";
+import { cryoSmartBytes, buildProxyAbsoluteUrl, probeCryosmartReachable } from "@/lib/cryosmart/proxy-client";
 
 type FigureMode = "chimerax" | "preview" | "demo";
 
@@ -244,46 +244,92 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         } else {
           // v3.45 (user report — “ChimeraX 直接读取失败(HTTP 401) → 改走应用
           // 中转”之后再无下文): direct reads 401 whenever CryoSmart sits
-          // behind login (ChimeraX carries no cookies — expected). The
-          // app-relay path then needs THIS PAGE to download the bytes, which
-          // needs a session — fail with an actionable message instead of an
-          // opaque mid-loop error, isolate per-map failures so one bad map
-          // no longer kills the whole figure, and stream download progress
-          // (each MRC is 100–300 MB — the strip used to sit at one phase
-          // word for minutes).
+          // behind login (ChimeraX carries no cookies — expected).
           if (!session) {
             throw new Error(
               `ChimeraX 无法直读内网地图（${probe.error ?? "no model"}），且当前载入的数据没有可代下载的 CryoSmart 凭据 — 请在已登录的 CryoSmart 页重新运行 Smart Capture（或恢复一次带凭据的快照），也可改用「会话预览图」模式。`,
             );
           }
-          pushLog(
-            `ChimeraX 直接读取失败(${probe.error ?? "no model"}) → 改走应用中转：页面下载 MRC → 应用暂存 → ChimeraX 读取（每个 map 100–300 MB，请稍候）`,
-          );
-          setStep((s) => ({ ...s, phase: "下载并中转 MRC 文件", pct: 12 }));
-          let done = 0;
-          const failedKeys: string[] = [];
-          for (const [key, item] of uniqueMaps) {
-            done += 1;
-            setStep((s) => ({ ...s, phase: `中转地图 ${done}/${uniqueMaps.size}`, pct: 10 + (done / Math.max(1, uniqueMaps.size)) * 35 }));
-            try {
-              const bytes = await cryoSmartBytes(session, item.map?.downloadUrl as string, {
-                timeoutMs: 300_000,
-                onBytes: (total) => setStep((s) => ({ ...s, phase: `下载 ${key} · ${fmtSize(total)}（${done}/${uniqueMaps.size}）` })),
-              });
-              sourceFor.set(key, await uploadAsset(key, bytes, pushLog));
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err);
-              if (key === referenceKey) {
-                throw new Error(
-                  `参考地图下载失败（${msg}）— 无法对齐。请确认 CryoSmart 已在同一浏览器中登录、本应用仍在运行，然后重试；或改用「会话预览图」模式。`,
-                );
-              }
-              failedKeys.push(key);
-              pushLog(`⚠ 地图 ${key} 中转失败，已跳过（${msg}）`);
+
+          /* v3.46 map-source ladder, step 2 — 应用代理直连. The round-5 log
+           * showed the page relay uploading 8 maps (≈650 MB through the
+           * BROWSER: page download + re-POST per map) only for ChimeraX to
+           * then read them back from the app anyway. The app proxy already
+           * attaches CryoSmart credentials SERVER-side, and ChimeraX proved
+           * it can reach the app (it fetched relay.py from there) — so let
+           * ChimeraX `open` the proxy URL directly: one transfer chain per
+           * map, browser untouched. */
+          const hasCreds = !!(session.cookie || session.auth);
+          let proxyMode = false;
+          if (hasCreds) {
+            pushLog(
+              `ChimeraX 直接读取失败(${probe.error ?? "no model"}) → 尝试应用代理直连（ChimeraX → 本应用 → CryoSmart，凭据由应用服务端附加）…`,
+            );
+            setStep((s) => ({ ...s, phase: "预检应用服务器可达 CryoSmart", pct: 11 }));
+            const reachable = await probeCryosmartReachable(session, 8000);
+            if (!reachable) {
+              throw new Error(
+                `应用服务器无法连接 CryoSmart (${session.baseUrl}) — 代理直连与页面中转都不可用。请确认 CryoSmart 在线且本应用所在机器可访问它，然后重试；或改用「会话预览图」模式。`,
+              );
             }
+            const proxyUrlFor = (url: string) =>
+              buildProxyAbsoluteUrl(session, url, { origin: window.location.origin, timeoutMs: 300_000 });
+            const proxyRefUrl = proxyUrlFor(refUrl);
+            if (proxyRefUrl) {
+              setStep((s) => ({ ...s, phase: "探测 ChimeraX 经应用代理读取", pct: 12 }));
+              const probe2 = await bridgeOpenProbe(transport, proxyRefUrl);
+              if (probe2.ok && probe2.modelId != null) {
+                await bridgeExec(transport, `close #${probe2.modelId}`);
+                for (const [key, item] of uniqueMaps) {
+                  const pu = proxyUrlFor(item.map?.downloadUrl ?? "");
+                  if (pu) sourceFor.set(key, pu);
+                  else pushLog(`⚠ 地图 ${key} 无法构建代理 URL，将跳过`);
+                }
+                proxyMode = true;
+                pushLog("ChimeraX 可经应用代理直读地图 — 代理直连模式（无需浏览器下载/中转大文件）");
+              } else {
+                pushLog(`⚠ 应用代理直读失败(${probe2.error ?? "no model"})`);
+              }
+            }
+          } else {
+            pushLog(`ChimeraX 直接读取失败(${probe.error ?? "no model"})，且会话无凭据 — 跳过代理直连`);
           }
-          if (failedKeys.length) {
-            pushLog(`⚠ 共 ${failedKeys.length} 个地图未能中转，流程图将缺少对应阶段（其余阶段照常渲染）。`);
+
+          /* v3.46 ladder step 3 (last resort) — the original page relay:
+           * page downloads each MRC via the app proxy, POSTs it to the
+           * in-memory asset store, ChimeraX reads the short asset URL back.
+           * Kept for setups where the proxy URL specifically fails in
+           * ChimeraX (URL length / header quirks) while a short URL works. */
+          if (!proxyMode) {
+            pushLog(
+              `→ 改走页面中转：页面下载 MRC → 应用暂存 → ChimeraX 读取（每个 map 100–300 MB，请稍候）`,
+            );
+            setStep((s) => ({ ...s, phase: "下载并中转 MRC 文件", pct: 12 }));
+            let done = 0;
+            const failedKeys: string[] = [];
+            for (const [key, item] of uniqueMaps) {
+              done += 1;
+              setStep((s) => ({ ...s, phase: `中转地图 ${done}/${uniqueMaps.size}`, pct: 10 + (done / Math.max(1, uniqueMaps.size)) * 35 }));
+              try {
+                const bytes = await cryoSmartBytes(session, item.map?.downloadUrl as string, {
+                  timeoutMs: 300_000,
+                  onBytes: (total) => setStep((s) => ({ ...s, phase: `下载 ${key} · ${fmtSize(total)}（${done}/${uniqueMaps.size}）` })),
+                });
+                sourceFor.set(key, await uploadAsset(key, bytes, pushLog));
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (key === referenceKey) {
+                  throw new Error(
+                    `参考地图下载失败（${msg}）— 无法对齐。请确认 CryoSmart 已在同一浏览器中登录、本应用仍在运行，然后重试；或改用「会话预览图」模式。`,
+                  );
+                }
+                failedKeys.push(key);
+                pushLog(`⚠ 地图 ${key} 中转失败，已跳过（${msg}）`);
+              }
+            }
+            if (failedKeys.length) {
+              pushLog(`⚠ 共 ${failedKeys.length} 个地图未能中转，流程图将缺少对应阶段（其余阶段照常渲染）。`);
+            }
           }
         }
 
@@ -522,7 +568,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                       <code key={h} className="mx-0.5 rounded bg-slate-200 px-1 font-mono text-[10px] dark:bg-slate-800">{h}</code>
                     ))}
                     的上述端口（ChimeraX 装在{cryoSmartHost ? `服务器 ${cryoSmartHost} 上` : "服务器上"}也能找到——relay 监听全部网卡，可跨机访问；仅需放行系统防火墙）。
-                    若 ChimeraX 无法直读内网地图，会自动改走应用中转（页面下载 MRC → 应用暂存 → ChimeraX 读取）。ChimeraX 1.12 的 MCP 同样由本地 REST server 支撑，但官方 CORS 仅放行 localhost 网页；此桥用同一内部机制，Origin 校验锁定为本应用。高级：
+                    若 ChimeraX 无法直读内网地图，将依次自动降级：<b>应用代理直连</b>（推荐 — ChimeraX 直接读取本应用转发的地图，凭据由服务端附加，不经浏览器）→ <b>页面中转</b>（页面下载 MRC → 应用暂存 → ChimeraX 读取）。ChimeraX 1.12 的 MCP 同样由本地 REST server 支撑，但官方 CORS 仅放行 localhost 网页；此桥用同一内部机制，Origin 校验锁定为本应用。高级：
                     <a className="underline" href="/helpers/CryoSmart_flow_relay.py" download>下载桥脚本</a>。
                   </span>
                 </div>

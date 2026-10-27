@@ -192,6 +192,53 @@ const server = Bun.serve({
         headers: { "content-type": "application/json" },
       });
     }
+    /* ── v3.46 flow-figure E2E: mock CryoSmart map endpoint ────────── */
+    if (pathname === "/favicon.ico") {
+      // Any HTTP status proves reachability for probeCryosmartReachable.
+      return new Response("mock cryosmart", { status: 404 });
+    }
+    if (pathname.startsWith("/api/log_image/download_result_file/")) {
+      const cookie = req.headers.get("Cookie") || "";
+      if (!cookie.includes("session=e2e-cookie")) {
+        // Mimic the auth-protected CryoSmart the user reported (HTTP 401
+        // for ChimeraX, which carries no cookies).
+        return Response.json(
+          { detail: "Authentication credentials were not provided." },
+          { status: 401 },
+        );
+      }
+      const bytes = mrcBytes(pathname);
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(bytes.byteLength),
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+    if (pathname === "/flow-e2e/capture.json") {
+      return new Response(JSON.stringify(flowE2eCaptureDoc()), {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+    if (pathname === "/flow-e2e/reset") {
+      resetRelayState();
+      return Response.json({ ok: true });
+    }
+    if (pathname === "/flow-e2e/relay-stats") {
+      return new Response(JSON.stringify(relayStats(), null, 2), {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+        },
+      });
+    }
     return new Response(pageHtml, { headers: { "content-type": "text/html; charset=utf-8" } });
   },
 });
@@ -449,5 +496,317 @@ function enrichVerdict(): Record<string, unknown> {
     checks,
     uploaded_uids: Object.keys(byBare).sort(),
     phases: [...enrichPhases].sort(),
+  };
+}
+
+/* ================================================================== */
+/*  v3.46 flow-figure E2E harness                                      */
+/*                                                                    */
+/*  Reproduces the user's round-5 environment end-to-end:              */
+/*    • mock CryoSmart (this origin :3021) requires a cookie for map   */
+/*      downloads → ChimeraX's direct read 401s exactly like the      */
+/*      user's intranet CryoSmart;                                    */
+/*    • a mock in-ChimeraX relay on :8927 speaks the REAL relay.py     */
+/*      HTTP contract, but its `open` output uses the LEGACY ChimeraX  */
+/*      format ("… on 1 model (id #N)") that broke parseOpenModelId    */
+/*      (the round-5 “无法在 ChimeraX 中打开参考地图” root cause), and  */
+/*      for J497-flavoured URLs it returns an ID-LESS log at all —     */
+/*      exercising the /nextid delta fallback in bridgeOpenModel.      */
+/* ================================================================== */
+
+const RELAY_PORT = 8927;
+const MOCK_APP_ORIGIN = "http://localhost:3000";
+
+/** 32×32 solid-red PNG (valid for createImageBitmap + canvas letterbox). */
+const MOCK_PNG = Uint8Array.from(
+  atob(
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKUlEQVR4nO3NsQkAAAgDsB7W//Esr3AQAtmTaU9FIBAIBAKBQCAQfAkWAwwATMGYEdYAAAAASUVORK5CYII=",
+  ),
+  (c) => c.charCodeAt(0),
+);
+
+/** Minimal plausible MRC2014 volume (8³ float32 + 1024-byte header). */
+function mrcBytes(seedSource: string): Uint8Array {
+  let seed = 0;
+  for (let i = 0; i < seedSource.length; i++) seed = (seed * 31 + seedSource.charCodeAt(i)) & 0xffff;
+  const buf = new Uint8Array(1024 + 8 * 8 * 8 * 4);
+  const dv = new DataView(buf.buffer);
+  dv.setInt32(0, 8, true); // nx
+  dv.setInt32(4, 8, true); // ny
+  dv.setInt32(8, 8, true); // nz
+  dv.setInt32(12, 2, true); // mode = float32
+  dv.setInt32(20, 1, true); // nxstart
+  dv.setInt32(40, 8, true); // mx
+  dv.setInt32(44, 8, true); // my
+  dv.setInt32(48, 8, true); // mz
+  dv.setFloat32(56, 100.0, true); // xlength
+  for (let i = 0; i < 512; i++) dv.setFloat32(1024 + i * 4, Math.sin(i * 0.13 + seed) * 0.5, true);
+  return buf;
+}
+
+/* ---- mock relay state (mirrors ChimeraX model ids: max+1) ---------- */
+interface RelayOpenRecord {
+  url: string;
+  status: number;
+  modelId: number | null;
+  idless: boolean;
+}
+const relayState = {
+  models: new Map<number, { url: string }>(),
+  files: new Map<string, Uint8Array>(),
+  opens: [] as RelayOpenRecord[],
+  commands: [] as string[],
+};
+
+function resetRelayState() {
+  relayState.models.clear();
+  relayState.files.clear();
+  relayState.opens = [];
+  relayState.commands = [];
+}
+
+function relayNextModelId(): number {
+  let max = 0;
+  for (const id of relayState.models.keys()) if (id > max) max = id;
+  return max + 1;
+}
+
+function relayStats() {
+  const viaProxy = (u: string) => u.startsWith(`${MOCK_APP_ORIGIN}/api/cryosmart/`);
+  const direct = (u: string) => !viaProxy(u) && u.includes(":3021/api/log_image/");
+  return {
+    opens: relayState.opens,
+    files: [...relayState.files.keys()],
+    commands: relayState.commands.length,
+    open_total: relayState.opens.length,
+    open_direct_401: relayState.opens.filter((o) => direct(o.url) && o.status === 401).length,
+    open_proxy_200: relayState.opens.filter((o) => viaProxy(o.url) && o.status === 200).length,
+    open_asset: relayState.opens.filter((o) => u_hasAsset(o.url)).length,
+    open_idless_resolved: relayState.opens.filter((o) => o.idless && o.modelId != null).length,
+    open_legacy_text: relayState.opens.filter((o) => !o.idless && o.modelId != null).length,
+  };
+}
+function u_hasAsset(u: string): boolean {
+  return u.includes("/api/cryosmart/flow-figure/asset");
+}
+
+/** The ChimeraX command simulator (legacy 1.13-style log output). */
+async function relaySimulate(raw: string): Promise<{ text: string; error: string | null }> {
+  const command = String(raw || "").trim();
+  relayState.commands.push(command);
+
+  const openMatch = /^open\s+"([^"]+)"(?:\s+format\s+\S+)?\s*$/i.exec(command);
+  if (openMatch) {
+    const url = openMatch[1];
+    try {
+      // ChimeraX's urllib fetch — NO cookies, no Origin.
+      const res = await fetch(url, { redirect: "follow" });
+      if (!res.ok) {
+        relayState.opens.push({ url, status: res.status, modelId: null, idless: false });
+        const reason = res.statusText || "error";
+        return { text: "", error: `UserError: HTTP Error ${res.status}: ${reason}` };
+      }
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      const id = relayNextModelId();
+      relayState.models.set(id, { url });
+      const idless = /\/J497\./.test(url);
+      relayState.opens.push({ url, status: res.status, modelId: id, idless });
+      if (idless) {
+        // A build that logs the download but never the model id — only the
+        // /nextid delta can recover it.
+        return { text: `Downloaded ${url} (${bytes.byteLength} bytes)`, error: null };
+      }
+      // LEGACY ChimeraX (≤1.13) — no "as #N" anywhere. The v3.45 regex
+      // returned null on this exact shape (round-5 root cause).
+      return {
+        text: `Opened map.mrc, grid size 8,8,8, grid spacing 1.25,1.25,1.25 on 1 model (id #${id})`,
+        error: null,
+      };
+    } catch (err) {
+      relayState.opens.push({ url, status: 0, modelId: null, idless: false });
+      return { text: "", error: `UserError: ${String(err)}` };
+    }
+  }
+
+  if (/^close\s+#\d+/i.test(command)) {
+    for (const m of command.matchAll(/#(\d+)/g)) relayState.models.delete(parseInt(m[1], 10));
+    return { text: "", error: null };
+  }
+
+  const flipMatch = /^volume\s+flip\s+#(\d+)\s+axis\s+\w+(\s+modelId\s+(\d+))?/i.exec(command);
+  if (flipMatch) {
+    const src = relayState.models.get(parseInt(flipMatch[1], 10));
+    const next = flipMatch[3] ? parseInt(flipMatch[3], 10) : relayNextModelId();
+    relayState.models.set(next, { url: src?.url || "flipped" });
+    return { text: `volume flip: new model (id #${next})`, error: null };
+  }
+
+  if (/^measure\s+correlation/i.test(command)) {
+    return { text: "  correlation = 0.42", error: null };
+  }
+  if (/^fit\s+#\d+\s+in\s+#\d+\s+search/i.test(command)) {
+    return { text: "Fit map in map, 15 positions tried, correlation = 0.93", error: null };
+  }
+  if (/^fit\s+#\d+\s+in\s+#\d+/i.test(command)) {
+    return { text: "Fit map in map, correlation = 0.87", error: null };
+  }
+
+  const saveMatch = /^save\s+image\s+"([^"]+)"/i.exec(command);
+  if (saveMatch) {
+    const name = saveMatch[1].split("/").pop() || "img.png";
+    relayState.files.set(name, MOCK_PNG);
+    return { text: `saved ${saveMatch[1]}`, error: null };
+  }
+
+  // volume level/step, set bgColor, view *, turn *, wait, hide/show —
+  // silent success, exactly like the real relay's captured empty log.
+  return { text: "", error: null };
+}
+
+const relayServer = Bun.serve({
+  port: RELAY_PORT,
+  async fetch(req) {
+    const u = new URL(req.url);
+    const cors: Record<string, string> = {
+      "Access-Control-Allow-Origin": req.headers.get("Origin") || "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Private-Network": "true",
+      "Access-Control-Max-Age": "86400",
+    };
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+    const reply = (code: number, body: unknown, ctype = "application/json") =>
+      new Response(typeof body === "string" ? body : JSON.stringify(body), {
+        status: code,
+        headers: { ...cors, "Content-Type": ctype, "Cache-Control": "no-store" },
+      });
+    try {
+      if (u.pathname === "/ping") {
+        return reply(200, {
+          ok: true,
+          workdir: "/tmp/cryoflow-mock",
+          version: "1.13-mock-legacy",
+          volumes: relayState.models.size,
+        });
+      }
+      if (u.pathname === "/nextid") return reply(200, { next: relayNextModelId() });
+      if (u.pathname === "/volstats") {
+        const id = Number(u.searchParams.get("id"));
+        if (!relayState.models.has(id)) return reply(404, { error: `model #${id} not found` });
+        return reply(200, { max: 1.0, mean: 0.1, sd: 0.2, min: -0.5 });
+      }
+      if (u.pathname === "/file") {
+        const name = u.searchParams.get("name") || "";
+        const bytes = relayState.files.get(name);
+        if (!bytes) return reply(404, { error: "file not found" });
+        return new Response(bytes, {
+          status: 200,
+          headers: { ...cors, "Content-Type": "image/png", "Cache-Control": "no-store" },
+        });
+      }
+      if (u.pathname === "/exec") {
+        let command = u.searchParams.get("command") || "";
+        if (req.method === "POST") {
+          try {
+            const body = (await req.json()) as { command?: string };
+            command = String(body?.command || "");
+          } catch {
+            command = "";
+          }
+        }
+        if (!command) return reply(400, { error: "missing command" });
+        const r = await relaySimulate(command);
+        return reply(200, { text: r.text, error: r.error });
+      }
+      return reply(404, { error: "unknown route" });
+    } catch (exc) {
+      return reply(500, { error: String(exc) });
+    }
+  },
+});
+console.log(`mock ChimeraX relay listening on http://127.0.0.1:${relayServer.port} (legacy open output + J497 id-less mode)`);
+
+/* ---- crafted P208 capture doc (post-谱系补边 full-detail state) ---- */
+function flowE2eCaptureDoc(): Record<string, unknown> {
+  const FV = (uid: string) => ({ type: "volume", name: "volume", connections: [{ job_uid: uid }] });
+  const FP = (...uids: string[]) => ({
+    type: "particle",
+    name: "particles",
+    connections: uids.map((x) => ({ job_uid: x })),
+  });
+  const FM = (uid: string) => ({ type: "micrograph", name: "micrographs", connections: [{ job_uid: uid }] });
+  const VOUT = (name: string) => ({ name, type: "volume", contains: [{ type: "volume.blob", name: "map" }] });
+  const POUT = (num: number) => ({
+    name: "particles",
+    type: "particle",
+    num_items: num,
+    contains: [{ type: "particle.blob", name: "particles" }],
+  });
+  const EOUT = (num: number) => ({
+    name: "micrographs",
+    type: "exposure",
+    num_items: num,
+    contains: [{ type: "micrograph.blob", name: "micrographs" }],
+  });
+  const mk = (
+    uid: string,
+    n: number,
+    job_type: string,
+    parents: string[],
+    isg: unknown[],
+    outputs: unknown[]
+  ) => ({
+    uid,
+    uid_num: n,
+    project_uid: "P208",
+    job_type,
+    title: `${job_type} ${uid}`,
+    status: "completed",
+    created_at: `2026-02-01T00:${String(n % 60).padStart(2, "0")}:00Z`,
+    completed_at: `2026-02-01T01:${String(n % 60).padStart(2, "0")}:00Z`,
+    parents,
+    children: [],
+    input_slot_groups: isg,
+    output_result_groups: outputs,
+  });
+  const jobs = [
+    mk("J498", 498, "deep_emhancer", ["J497"], [FV("J497")], [VOUT("volume")]),
+    mk("J497", 497, "local_refine", ["J494", "J476"], [FV("J494"), FP("J476")], [VOUT("volume")]),
+    mk("J494", 494, "hetero_refine", ["J420", "J448"], [FV("J420"), FP("J448")], [VOUT("volume_class_0")]),
+    mk("J448", 448, "nonuniform_refine", ["J443", "J476"], [FV("J443"), FP("J476")], [VOUT("volume")]),
+    mk("J443", 443, "homo_refine", ["J422", "J476"], [FV("J422"), FP("J476")], [VOUT("volume")]),
+    mk("J422", 422, "homo_refine", ["J446", "J476"], [FV("J446"), FP("J476")], [VOUT("volume")]),
+    mk("J446", 446, "import_volumes", [], [], [
+      { name: "volume", type: "volume", contains: [{ type: "volume.blob", name: "imported_volume_1" }] },
+    ]),
+    mk("J476", 476, "select_2D", ["J385", "J472"], [FP("J385"), FP("J472")], [POUT(180000)]),
+    mk("J472", 472, "class_2d", ["J483"], [FP("J483")], []),
+    mk("J483", 483, "extract_micrographs", ["J481"], [FP("J481")], []),
+    mk("J481", 481, "picker", ["J478"], [FM("J478")], []),
+    mk("J478", 478, "ctf_estimation", ["J475"], [FM("J475")], []),
+    mk("J475", 475, "motion_correction", ["J474"], [FM("J474")], []),
+    mk("J474", 474, "import_movies", [], [], [EOUT(5562)]),
+    mk("J420", 420, "homo_abinit", ["J476"], [FP("J476")], [VOUT("volume_class_0")]),
+    mk("J385", 385, "class_2d", ["J382"], [FP("J382")], []),
+    mk("J382", 382, "extract_micrographs", ["J379"], [FP("J379")], []),
+    mk("J379", 379, "picker", ["J376"], [FM("J376")], []),
+    mk("J376", 376, "ctf_estimation", ["J373"], [FM("J373")], []),
+    mk("J373", 373, "motion_correction", ["J370"], [FM("J370")], []),
+    mk("J370", 370, "import_movies", [], [], [EOUT(233)]),
+  ];
+  return {
+    format: "cryosmart-capture/v1",
+    project_uid: "P208",
+    capture: {
+      project_uid: "P208",
+      captured_at: "2026-02-14T12:00:00Z",
+      cryosmart_origin: ORIGIN,
+      end_job_uid: "J498",
+      lineage_mode: true,
+      credentials: { cookie: "session=e2e-cookie" },
+    },
+    jobs,
+    images: [],
+    job_log_images: {},
   };
 }
