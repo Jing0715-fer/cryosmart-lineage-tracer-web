@@ -289,11 +289,20 @@ export function buildFlowFigureModel(
   const byDepthAsc = (a: LineageNode, b: LineageNode) =>
     (graph.depth.get(a.uid) ?? 0) - (graph.depth.get(b.uid) ?? 0);
 
-  /* Header stats */
+  /* Header stats — v3.47 (user round-6 report — “标题的照片计数还是只统计了
+   * 一个job的照片，其他照片未统计进去”): the micrograph figure is now the
+   * SUM over EVERY import_(movies|micrographs) job (P208: 233 + 500 + 150 +
+   * 4,810 + 5,562 = 11,255), not the single mainline import's count, so
+   * every dataset's photos are counted in the headline. Falls back to the
+   * legacy final_micrograph_count when no import carries a count. */
+  const importMicroNodes = (summary.nodes || []).filter((n) => /import_(movies|micrographs)/i.test(n.job_type || ""));
+  const importMicroTotal = importMicroNodes.reduce((sum, n) => sum + (n.micrograph_count ?? 0), 0);
   const micrographs =
-    summary.final_micrograph_count != null && summary.final_micrograph_count > 0
-      ? `${Math.round(summary.final_micrograph_count).toLocaleString("en-US")} Micrographs`
-      : null;
+    importMicroTotal > 0
+      ? `${importMicroTotal.toLocaleString("en-US")} Micrographs`
+      : summary.final_micrograph_count != null && summary.final_micrograph_count > 0
+        ? `${Math.round(summary.final_micrograph_count).toLocaleString("en-US")} Micrographs`
+        : null;
   const pickNode = ancestors.filter((n) => PICKING_JOB_TYPES.has(n.job_type)).sort(byDepthAsc)[0];
   const pickLabel = pickNode ? (pickNode.job_type.includes("manual") ? "Manual pick" : "Auto pick") : "Auto pick";
   const earliestParticles = ancestors

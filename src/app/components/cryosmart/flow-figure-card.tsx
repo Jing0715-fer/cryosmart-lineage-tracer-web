@@ -158,18 +158,46 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   /* Generate                                                          */
   /* ---------------------------------------------------------------- */
 
-  const uploadAsset = useCallback(async (key: string, bytes: Uint8Array, onLog?: (s: string) => void) => {
-    const name = `${key.replace(/\//g, ".")}.mrc`;
-    onLog?.(`  上传中转 ${name} (${fmtSize(bytes.byteLength)})`);
-    const res = await fetch(`/api/cryosmart/flow-figure/asset?name=${encodeURIComponent(name)}&mime=application/octet-stream`, {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: bytes as BlobPart,
-    });
-    if (!res.ok) throw new Error(`asset relay HTTP ${res.status}`);
-    const data = (await res.json()) as { url: string };
-    return `${window.location.origin}${data.url}`;
-  }, []);
+  /** v3.47: stage a downloaded MRC on the CHIMERAX machine via the
+   *  bridge's POST /stage and return the LOCAL path ChimeraX can open.
+   *  The old "页面中转" uploaded bytes into the app's in-memory asset
+   *  store and then handed ChimeraX an http URL back — rejected by
+   *  ChimeraX ("UserError: Format 'mrc' not supported for database
+   *  'http'") on every rung, and a plain open of the suffix-less asset
+   *  URL pops the save-file dialog that blocks the whole UI thread (the
+   *  round-5/6 “保存map的窗口”). Staging to a local file is the only
+   *  ChimeraX-proof fallback path. */
+  const stageViaRelay = useCallback(
+    async (transport: FlowTransport, key: string, bytes: Uint8Array, onLog?: (s: string) => void) => {
+      const name = `${key.replace(/\//g, ".")}.mrc`;
+      onLog?.(`  上传中转 ${name} (${fmtSize(bytes.byteLength)})`);
+      if (transport.kind !== "relay" || !transport.canStage) {
+        throw new Error(
+          `当前 ChimeraX 桥不支持本地暂存（旧版 relay 脚本，无 /stage）— 请在 ChimeraX 中重新运行一次: ${relayCommand}，然后重试`,
+        );
+      }
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 600_000);
+      try {
+        const res = await fetch(`${transport.base}/stage?name=${encodeURIComponent(name)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream", "X-Filename": name },
+          body: bytes as BlobPart,
+          signal: ctrl.signal,
+          mode: "cors",
+          cache: "no-store",
+        });
+        if (!res.ok) throw new Error(`relay /stage HTTP ${res.status}`);
+        const data = (await res.json()) as { ok?: boolean; path?: string };
+        if (!data.ok || !data.path) throw new Error("relay /stage 未返回暂存路径");
+        onLog?.(`  暂存完成 → ${data.path}`);
+        return data.path;
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    [relayCommand],
+  );
 
   const generate = useCallback(async () => {
     if (step.busy) return;
@@ -258,7 +286,11 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
            * attaches CryoSmart credentials SERVER-side, and ChimeraX proved
            * it can reach the app (it fetched relay.py from there) — so let
            * ChimeraX `open` the proxy URL directly: one transfer chain per
-           * map, browser untouched. */
+           * map, browser untouched. (v3.47: the open is now a PLAIN
+           * `open <proxy-url>` — the URL path ends in `.mrc`, so ChimeraX
+           * web-fetches and sniffs the suffix; the previous `format mrc`
+           * append was rejected by ChimeraX for http sources on every
+           * build — the user's round-6 root cause.) */
           const hasCreds = !!(session.cookie || session.auth);
           let proxyMode = false;
           if (hasCreds) {
@@ -295,15 +327,23 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             pushLog(`ChimeraX 直接读取失败(${probe.error ?? "no model"})，且会话无凭据 — 跳过代理直连`);
           }
 
-          /* v3.46 ladder step 3 (last resort) — the original page relay:
-           * page downloads each MRC via the app proxy, POSTs it to the
-           * in-memory asset store, ChimeraX reads the short asset URL back.
-           * Kept for setups where the proxy URL specifically fails in
-           * ChimeraX (URL length / header quirks) while a short URL works. */
+          /* v3.47 ladder step 3 (last resort) — the page relay, now with a
+           * REAL local staging: page downloads each MRC via the app proxy,
+           * POSTs it to the bridge's /stage (written into the ChimeraX
+           * machine's workdir), ChimeraX opens the returned LOCAL path.
+           * The old version POSTed the bytes into the app's in-memory
+           * asset store and handed ChimeraX a suffix-less http URL back —
+           * rejected by ChimeraX on every build (format mrc unsupported
+           * for http; plain open pops the save dialog that blocks /exec). */
           if (!proxyMode) {
             pushLog(
-              `→ 改走页面中转：页面下载 MRC → 应用暂存 → ChimeraX 读取（每个 map 100–300 MB，请稍候）`,
+              `→ 改走页面中转：页面下载 MRC → 桥接暂存为 ChimeraX 本地文件 → ChimeraX 打开本地路径（每个 map 100–300 MB，请稍候）`,
             );
+            if (transport.kind !== "relay" || !transport.canStage) {
+              throw new Error(
+                `当前 ChimeraX 桥不支持本地暂存（旧版 relay 脚本，无 /stage 端点）。请在 ChimeraX 中重新运行一次: ${relayCommand}（无需重启 ChimeraX），然后重试；或改用「会话预览图」模式。`,
+              );
+            }
             setStep((s) => ({ ...s, phase: "下载并中转 MRC 文件", pct: 12 }));
             let done = 0;
             const failedKeys: string[] = [];
@@ -315,7 +355,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   timeoutMs: 300_000,
                   onBytes: (total) => setStep((s) => ({ ...s, phase: `下载 ${key} · ${fmtSize(total)}（${done}/${uniqueMaps.size}）` })),
                 });
-                sourceFor.set(key, await uploadAsset(key, bytes, pushLog));
+                sourceFor.set(key, await stageViaRelay(transport, key, bytes, pushLog));
               } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 if (key === referenceKey) {
@@ -344,12 +384,23 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           }))
           .filter((m) => m.sourceUrl);
 
+        /* v3.47: the reference MUST have a working source before entering
+         * the alignment pipeline — the old `?? refUrl` silent fallback sent
+         * ChimeraX the direct (401) URL and produced an unexplained open
+         * failure after 650 MB of uploads. */
+        const referenceSource = sourceFor.get(referenceKey as string);
+        if (!referenceSource) {
+          throw new Error(
+            `参考地图 ${referenceKey} 无可用来源（直连/代理/中转均未成功）— 无法对齐。请根据上方日志中各环节的失败原因处理后重试；或改用「会话预览图」模式。`,
+          );
+        }
+
         const renderRes = await renderFigureMaps(transport, {
           reference: {
             key: referenceKey as string,
             uid: referenceItem.uid,
             group: referenceItem.map?.group ?? "volume",
-            sourceUrl: sourceFor.get(referenceKey as string) ?? refUrl,
+            sourceUrl: referenceSource,
           },
           maps,
           onLog: pushLog,
@@ -458,7 +509,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       setStep((s) => ({ ...s, busy: false, error: message }));
       toast.error(`流程图生成失败: ${message}`);
     }
-  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, uploadAsset, pushLog, maxGroups, includeFsc, bridgeHosts]);
+  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, pushLog, maxGroups, includeFsc, bridgeHosts]);
 
   const canGenerate = !step.busy && (mode === "demo" || !!summary);
   const bridgeBadge = useMemo(() => {

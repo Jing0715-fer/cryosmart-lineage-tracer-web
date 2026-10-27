@@ -49,6 +49,7 @@ import {
   normalMapAssets,
   mapPreviewAssetName,
   reportFirstMicrographNode,
+  reportMicrographTotals,
   reportSelectedClassIndices,
 } from "./report-html";
 // Data-layer helpers shared via lineage.ts (report-html imports these too).
@@ -616,9 +617,33 @@ export function buildPictureFlowSvg(
   y += 28;
 
   const microNode = reportFirstMicrographNode(summary);
+  // v3.47 (user round-6 report — “标题的照片计数还是只统计了一个job的
+  // 照片”): the SVG headline shows the SUM over every import job, with a
+  // caption naming how many import jobs were totalled. The main import
+  // node still supplies the identity/images/uid line.
+  const microTotals = reportMicrographTotals(summary);
   if (microNode) {
-    body += svgText(width / 2, y, `${fmt(microNode.micrograph_count)} micrographs`, 20, 500);
+    const headline =
+      microTotals.known
+        ? `${fmt(microTotals.total)} micrographs`
+        : microNode.micrograph_count != null
+          ? `${fmt(microNode.micrograph_count)} micrographs`
+          : "micrographs 导入";
+    body += svgText(width / 2, y, headline, 20, 500);
     y += 12;
+    if (microTotals.imports.length > 1) {
+      body += svgText(
+        width / 2,
+        y,
+        `共 ${microTotals.imports.length} 个导入作业合计` +
+          (microTotals.counted < microTotals.imports.length
+            ? `（${microTotals.imports.length - microTotals.counted} 个计数未知）`
+            : ""),
+        10,
+        400,
+      );
+      y += 13;
+    }
     if (pixelSizeText(microNode)) {
       body += svgText(width / 2, y, `pixel ${pixelSizeText(microNode)}`, 11, 400);
       y += 14;

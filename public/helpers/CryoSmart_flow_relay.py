@@ -25,9 +25,18 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
   （Origin 校验，浏览器不可伪造），并且额外提供：
       GET  /ping        桥状态（工作目录、ChimeraX 版本）
       POST /exec        运行 ChimeraX 命令，返回文本输出与错误
+      POST /stage       上传大文件（如 MRC 地图）到本机暂存目录，返回
+                        ChimeraX 可直接 open 的本地绝对路径
+                        （v3.47：ChimeraX 不支持 http+mrc，也无法无后缀
+                        嗅探——网页先下载再经此接口暂存到 ChimeraX 同机，
+                        之后 open 本地文件，全程零弹窗）
       GET  /file?name=  取回 /ping 工作目录里 ChimeraX 保存的 PNG
       GET  /volstats?id= 体数据统计（max/mean/sd，用于统一等值面水平）
       GET  /nextid      下一个空闲 model id（volume flip 需要）
+
+  升级提示：若你的 ChimeraX 里还在运行旧版桥（/ping 不含 "stage":
+  true），请在 ChimeraX Command Line 重新运行一次本命令即可更新
+  （无需重启 ChimeraX）。
 
 运行环境：ChimeraX 1.12+（GUI）。保持 ChimeraX 打开即可；关闭 ChimeraX
 时桥随之消失，下次重新 open 一次。
@@ -47,6 +56,26 @@ ALLOWED_ORIGINS = ["__APP_ORIGIN__"]
 
 PORT_PREFERENCE = [8927, 8928, 8929]
 
+# v3.47 /stage limits: one MRC map is 8–300 MB; several full runs must not
+# fill the ChimeraX machine's temp disk. Oldest staged files are removed
+# first whenever the staging dir would exceed STAGING_TOTAL_CAP.
+STAGING_DIR_NAME = "staged"
+STAGE_SINGLE_CAP = 400 * 1024 * 1024   # 400 MB per upload
+STAGING_TOTAL_CAP = 1536 * 1024 * 1024  # 1.5 GB total
+
+
+def _read_exact(rfile, n):
+    """Read exactly n bytes (rfile.read may return short on sockets)."""
+    chunks = []
+    remaining = n
+    while remaining > 0:
+        chunk = rfile.read(min(remaining, 1 << 20))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
 
 def _num_list(text):
     out = []
@@ -60,6 +89,7 @@ def _num_list(text):
 
 def main(session):
     workdir = tempfile.mkdtemp(prefix="cryoflow_")
+    staging_dir = os.path.join(workdir, STAGING_DIR_NAME)
     state = {"session": session, "workdir": workdir}
 
     try:
@@ -125,8 +155,44 @@ def main(session):
             return (max(ids) + 1) if ids else 1
         return ui_run(f)
 
+    def stage_file(data, name):
+        """v3.47: write uploaded bytes into the ChimeraX-side staging dir and
+        return the local absolute path. ChimeraX cannot open http MRC URLs
+        (format mrc unsupported for the http database; suffix-less plain
+        opens pop a save dialog and block the UI thread), so the page
+        downloads each map with its login session and hands the bytes to
+        the bridge; ChimeraX then opens the LOCAL file. Oldest staged
+        files are evicted first when the size cap would be exceeded."""
+        os.makedirs(staging_dir, exist_ok=True)
+        safe = os.path.basename(name or "") or "map.mrc"
+        safe = "".join(c for c in safe if c.isalnum() or c in "._- ") or "map.mrc"
+        entries = []
+        total = 0
+        try:
+            for fn in os.listdir(staging_dir):
+                p = os.path.join(staging_dir, fn)
+                if os.path.isfile(p):
+                    sz = os.path.getsize(p)
+                    mt = os.path.getmtime(p)
+                    entries.append((mt, p, sz))
+                    total += sz
+        except OSError:
+            entries, total = [], 0
+        for _, p, sz in sorted(entries):
+            if total + len(data) - STAGING_TOTAL_CAP <= 0:
+                break
+            try:
+                os.remove(p)
+                total -= sz
+            except OSError:
+                pass
+        path = os.path.join(staging_dir, safe)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path, len(data)
+
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CryoSmartFlowBridge/1.0"
+        server_version = "CryoSmartFlowBridge/1.1"
 
         # ---------- plumbing ----------
         def _origin_ok(self):
@@ -142,7 +208,9 @@ def main(session):
             origin = self.headers.get("Origin", "")
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            # v3.47: X-Filename — the /stage upload carries the target file
+            # name in a custom header (query-param fallback kept too).
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Filename")
             self.send_header("Access-Control-Allow-Private-Network", "true")
             self.send_header("Access-Control-Max-Age", "86400")
 
@@ -185,6 +253,9 @@ def main(session):
                         "ok": True,
                         "workdir": workdir,
                         "version": version,
+                        # v3.47: the page checks this to know /stage exists —
+                        # older in-ChimeraX bridge copies don't send it.
+                        "stage": True,
                         "volumes": sum(1 for m in ui_run(lambda: list(session.models.list()))
                                        if m.__class__.__name__ == "Volume"),
                     })
@@ -230,9 +301,31 @@ def main(session):
         def do_POST(self):
             if not self._origin_ok():
                 return
-            from urllib.parse import urlparse
+            from urllib.parse import urlparse, parse_qs
             r = urlparse(self.path)
             try:
+                if r.path == "/stage":
+                    # v3.47: body = raw bytes; name = X-Filename header or
+                    # ?name= query. Returns the ChimeraX-openable local path.
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if length <= 0:
+                        self._reply(400, {"ok": False, "error": "empty body"})
+                        return
+                    if length > STAGE_SINGLE_CAP:
+                        self._reply(413, {
+                            "ok": False,
+                            "error": "file exceeds %d MB staging cap" % (STAGE_SINGLE_CAP // (1024 * 1024)),
+                        })
+                        return
+                    q = parse_qs(r.query)
+                    name = (q.get("name") or [""])[0] or self.headers.get("X-Filename") or ""
+                    data = _read_exact(self.rfile, length)
+                    if len(data) != length:
+                        self._reply(400, {"ok": False, "error": "truncated upload"})
+                        return
+                    path, size = stage_file(data, name)
+                    self._reply(200, {"ok": True, "path": path, "name": os.path.basename(path), "size": size})
+                    return
                 if r.path == "/exec":
                     length = int(self.headers.get("Content-Length") or 0)
                     body = self.rfile.read(length) if length else b"{}"
@@ -303,6 +396,7 @@ def main(session):
     for ip in _lan_ips():
         session.logger.info("  局域网:    http://%s:%d  (ChimeraX 与浏览器不同机时用这个)" % (ip, bound_port))
     session.logger.info("允许的网页来源: %s" % ", ".join(ALLOWED_ORIGINS))
+    session.logger.info("暂存目录 (v3.47 /stage): %s" % staging_dir)
     session.logger.info("保持 ChimeraX 打开；在网页端点击 \"生成流程图\" 即可全自动完成对齐/手性检查/截图。")
     session.logger.info("=" * 60)
 

@@ -41,6 +41,11 @@ export interface FlowTransport {
   workdir?: string;
   /** Whether rendered PNG bytes can be fetched back. */
   canFetchFiles: boolean;
+  /** v3.47: relay-only — the bridge script advertises POST /stage (write
+   *  uploaded bytes into the ChimeraX-side workdir and return a local
+   *  path ChimeraX can `open`). Without it, the page-relay map fallback
+   *  cannot run and the user must re-open the updated relay.py once. */
+  canStage?: boolean;
 }
 
 export interface ProbeOptions {
@@ -102,11 +107,11 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
           logs.push(`relay ${host}:${port} → HTTP ${res.status}`);
           continue;
         }
-        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string };
+        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean };
         if (data?.ok) {
-          logs.push(`relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"})`);
+          logs.push(`relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""})`);
           return {
-            transport: { kind: "relay", host, port, base, workdir: data.workdir, canFetchFiles: true },
+            transport: { kind: "relay", host, port, base, workdir: data.workdir, canFetchFiles: true, canStage: !!data.stage },
             logs,
           };
         }
@@ -244,22 +249,74 @@ export interface OpenModelResult {
 
 /** v3.46: open a MAP url/path in ChimeraX and robustly recover its model id.
  *
- * Three safety nets over the old raw-parse:
- *   1. `format mrc` is appended so suffix-less proxy/asset URLs (path ends in
- *      "asset" / "download_result_file", not ".mrc") never depend on
- *      content sniffing;
- *   2. parseOpenModelId now understands legacy output shapes (see there);
- *   3. when the open ran clean but NO id could be parsed, the /nextid delta
- *      (relay only) confirms the created model — the round-5 failure mode
- *      (map open, no exception, legacy log, id unparsed → false “无法打开
- *      参考地图”) becomes impossible on every bridge version. */
+ * v3.47 (user round-6 report — “UserError: Format 'mrc' not supported for
+ * database 'http'. Supported formats are: web fetch or HTML” on EVERY
+ * ladder rung): ChimeraX's http database does not register the mrc format
+ * AT ALL — `open <http-url> format mrc` is rejected no matter the
+ * credentials (the earlier 401 was a separate, earlier failure). What
+ * ChimeraX CAN do with an http source is web-fetch it and sniff the
+ * URL-path suffix, so the command shape now depends on the source:
+ *   - http URL ending in `.mrc`  → plain `open <url>` (web fetch + suffix
+ *     sniff — the direct CryoSmart and app-proxy URLs both qualify);
+ *   - http URL WITHOUT `.mrc`   → refused app-side, NEVER sent: a plain
+ *     open there makes ChimeraX pop its save-file dialog (the round-5/6
+ *     “保存map的窗口”) whose modal then blocks every /exec on the UI
+ *     thread, and `format mrc` is rejected for http — such URLs must be
+ *     staged to a local file first (relay POST /stage);
+ *   - local file path           → `open <path> format mrc` (mrc IS
+ *     registered for the file database).
+ * Over a command that never even runs there is no id to parse — but the
+ * three-tier parse + /nextid delta fallback (v3.46) stay for the opens
+ * that DO run, and an AbortError (relay request hung — e.g. a leftover
+ * modal save dialog) now surfaces as an actionable timeout error instead
+ * of a bare "The operation was aborted". */
 export async function bridgeOpenModel(
   t: FlowTransport,
   source: string,
   timeoutMs = 300_000,
 ): Promise<OpenModelResult> {
+  const isHttp = /^https?:\/\//i.test(source);
+  // Suffix sniffing uses the URL's PATH basename (ChimeraX's web fetch
+  // names the temp file after the path's last segment) — a map suffix that
+  // only appears inside the query string (e.g. the app asset route's
+  // ?name=J498.volume.mrc) does NOT count: the path ends in "asset", so
+  // ChimeraX would pop its save-file dialog. CryoSmart names its maps
+  // *.map (volume.map, volume_class_0.map…) — .map/.mrc/.mrcs/.ccp4 are
+  // ALL registered MRC-family suffixes for ChimeraX's suffix sniffer.
+  const MAP_SUFFIX_RE = /\.(mrc|mrcs|map|ccp4)$/i;
+  let httpPathMap = false;
+  if (isHttp) {
+    try {
+      httpPathMap = MAP_SUFFIX_RE.test(new URL(source).pathname);
+    } catch {
+      httpPathMap = /\.(?:mrc|mrcs|map|ccp4)(?:\?|#|$)/i.test(source);
+    }
+  }
+  if (isHttp && !httpPathMap) {
+    return {
+      modelId: null,
+      error:
+        "ChimeraX 不能直接打开无地图后缀的 http URL（format mrc 对 http 数据源不受支持，不带 format 又会弹出保存对话框）— 需先经桥接 /stage 暂存为本地文件再 open",
+      text: "",
+      viaDelta: false,
+    };
+  }
+  const command = `open ${quotePath(source)}${isHttp ? "" : " format mrc"}`;
   const nextBefore = await bridgeNextModelId(t);
-  const res = await bridgeExec(t, `open ${quotePath(source)} format mrc`, timeoutMs);
+  let res: ExecResult;
+  try {
+    res = await bridgeExec(t, command, timeoutMs);
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      return {
+        modelId: null,
+        error: `ChimeraX 命令超时（>${Math.round(timeoutMs / 1000)}s 未返回）— 很可能被一个模态窗口阻塞（如先前遗留的“保存文件”对话框）；请切到 ChimeraX 手动关闭该弹窗后重试`,
+        text: "",
+        viaDelta: false,
+      };
+    }
+    throw err;
+  }
   let modelId = parseOpenModelId(res.text);
   let viaDelta = false;
   if (modelId == null && !res.error && nextBefore != null) {

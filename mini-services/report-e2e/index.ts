@@ -228,7 +228,9 @@ const server = Bun.serve({
     }
     if (pathname === "/flow-e2e/reset") {
       resetRelayState();
-      return Response.json({ ok: true });
+      const blockHttp = new URL(req.url).searchParams.get("http") === "block";
+      relayState.httpBlocked = blockHttp;
+      return Response.json({ ok: true, http_blocked: blockHttp });
     }
     if (pathname === "/flow-e2e/relay-stats") {
       return new Response(JSON.stringify(relayStats(), null, 2), {
@@ -512,6 +514,19 @@ function enrichVerdict(): Record<string, unknown> {
 /*      (the round-5 “无法在 ChimeraX 中打开参考地图” root cause), and  */
 /*      for J497-flavoured URLs it returns an ID-LESS log at all —     */
 /*      exercising the /nextid delta fallback in bridgeOpenModel.      */
+/*                                                                      */
+/*      v3.47 REAL-ChimeraX emulation (the v3.46 mock accepted          */
+/*      `format mrc` over http, which real ChimeraX NEVER does — so     */
+/*      the round-6 ladder passed E2E and broke in the field):          */
+/*        - `open <http-url> format mrc`  → the exact UserError          */
+/*          "Format 'mrc' not supported for database 'http'"            */
+/*        - suffix-less http open          → refused (real ChimeraX      */
+/*          pops a save dialog + blocks the UI thread instead)          */
+/*        - plain open on a .mrc-suffixed http URL → web fetch +        */
+/*          legacy/id-less open (as before)                              */
+/*        - local staged paths (via POST /stage) → legacy open text      */
+/*        - /flow-e2e/reset?http=block → every http open 503s,          */
+/*          drilling the page-relay → /stage → local-open rung          */
 /* ================================================================== */
 
 const RELAY_PORT = 8927;
@@ -550,12 +565,20 @@ interface RelayOpenRecord {
   status: number;
   modelId: number | null;
   idless: boolean;
+  /** v3.47: `open <http-url> format mrc` — real ChimeraX rejects these. */
+  formatRejected?: boolean;
+  /** v3.47: open of a local /stage'd path. */
+  local?: boolean;
 }
 const relayState = {
   models: new Map<number, { url: string }>(),
   files: new Map<string, Uint8Array>(),
   opens: [] as RelayOpenRecord[],
   commands: [] as string[],
+  /** v3.47: path -> staged bytes (what POST /stage wrote). */
+  staged: new Map<string, { name: string; bytes: Uint8Array }>(),
+  /** v3.47: /flow-e2e/reset?http=block — all http opens fail 503. */
+  httpBlocked: false,
 };
 
 function resetRelayState() {
@@ -563,6 +586,8 @@ function resetRelayState() {
   relayState.files.clear();
   relayState.opens = [];
   relayState.commands = [];
+  relayState.staged.clear();
+  relayState.httpBlocked = false;
 }
 
 function relayNextModelId(): number {
@@ -578,12 +603,16 @@ function relayStats() {
     opens: relayState.opens,
     files: [...relayState.files.keys()],
     commands: relayState.commands.length,
+    http_blocked: relayState.httpBlocked,
+    staged_files: [...relayState.staged.keys()],
     open_total: relayState.opens.length,
     open_direct_401: relayState.opens.filter((o) => direct(o.url) && o.status === 401).length,
     open_proxy_200: relayState.opens.filter((o) => viaProxy(o.url) && o.status === 200).length,
     open_asset: relayState.opens.filter((o) => u_hasAsset(o.url)).length,
     open_idless_resolved: relayState.opens.filter((o) => o.idless && o.modelId != null).length,
     open_legacy_text: relayState.opens.filter((o) => !o.idless && o.modelId != null).length,
+    open_staged_local: relayState.opens.filter((o) => o.local && o.modelId != null).length,
+    open_http_format_rejected: relayState.opens.filter((o) => o.formatRejected).length,
   };
 }
 function u_hasAsset(u: string): boolean {
@@ -595,9 +624,59 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   const command = String(raw || "").trim();
   relayState.commands.push(command);
 
-  const openMatch = /^open\s+"([^"]+)"(?:\s+format\s+\S+)?\s*$/i.exec(command);
+  const openMatch = /^open\s+"([^"]+)"(?:\s+format\s+(\S+))?\s*$/i.exec(command);
   if (openMatch) {
     const url = openMatch[1];
+    const explicitFormat = openMatch[2] ? openMatch[2].toLowerCase() : null;
+    const isHttp = /^https?:\/\//i.test(url);
+    // v3.47 REAL-ChimeraX emulation — the ladder must fail exactly like
+    // the user's real build when a format is forced onto an http source.
+    if (isHttp && explicitFormat === "mrc") {
+      relayState.opens.push({ url, status: 415, modelId: null, idless: false, formatRejected: true });
+      return {
+        text: "",
+        error:
+          "UserError: Format 'mrc' not supported for database 'http'. Supported formats are: web fetch or HTML",
+      };
+    }
+    // v3.47: suffix sniffing mirrors ChimeraX's web fetch — the URL PATH
+    // basename must end in an MRC-family suffix (.map/.mrc/.mrcs/.ccp4;
+    // CryoSmart names its maps volume.map); a suffix that only appears in
+    // the query string (asset route ?name=…mrc) leaves the path suffix-less.
+    let httpPathMap = false;
+    try {
+      httpPathMap = /\.(mrc|mrcs|map|ccp4)$/i.test(new URL(url).pathname);
+    } catch {
+      httpPathMap = /\.(?:mrc|mrcs|map|ccp4)(?:\?|#|$)/i.test(url);
+    }
+    if (isHttp && !httpPathMap) {
+      // Real ChimeraX pops its save-file dialog here and blocks the UI
+      // thread; the v3.47 card refuses suffix-less http opens app-side, so
+      // reaching this branch is a regression.
+      relayState.opens.push({ url, status: 406, modelId: null, idless: false });
+      return { text: "", error: "UserError: suffix-less http URL (would pop a save dialog)" };
+    }
+    if (!isHttp) {
+      // LOCAL file — must have arrived through POST /stage.
+      const staged = relayState.staged.get(url);
+      if (!staged) {
+        relayState.opens.push({ url, status: 404, modelId: null, idless: false });
+        return { text: "", error: `UserError: Unable to open ${url} — file not found on the ChimeraX machine (was it staged via /stage?)` };
+      }
+      const id = relayNextModelId();
+      relayState.models.set(id, { url });
+      relayState.opens.push({ url, status: 200, modelId: id, idless: false, local: true });
+      return {
+        text: `Opened ${staged.name}, grid size 8,8,8, grid spacing 1.25,1.25,1.25 on 1 model (id #${id})`,
+        error: null,
+      };
+    }
+    if (relayState.httpBlocked) {
+      // /flow-e2e/reset?http=block — pretend ChimeraX cannot reach the app
+      // origin at all, so the ladder falls through to page relay + /stage.
+      relayState.opens.push({ url, status: 503, modelId: null, idless: false });
+      return { text: "", error: "UserError: HTTP Error 503: Service Unavailable" };
+    }
     try {
       // ChimeraX's urllib fetch — NO cookies, no Origin.
       const res = await fetch(url, { redirect: "follow" });
@@ -670,7 +749,7 @@ const relayServer = Bun.serve({
     const cors: Record<string, string> = {
       "Access-Control-Allow-Origin": req.headers.get("Origin") || "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type, X-Filename",
       "Access-Control-Allow-Private-Network": "true",
       "Access-Control-Max-Age": "86400",
     };
@@ -686,8 +765,23 @@ const relayServer = Bun.serve({
           ok: true,
           workdir: "/tmp/cryoflow-mock",
           version: "1.13-mock-legacy",
+          // v3.47: the card's page-relay rung requires POST /stage — this
+          // flag mirrors the real relay.py's /ping field.
+          stage: true,
           volumes: relayState.models.size,
         });
+      }
+      if (req.method === "POST" && u.pathname === "/stage") {
+        // v3.47: mirrors relay.py's /stage — raw body bytes + X-Filename
+        // (or ?name=), returns the ChimeraX-openable LOCAL path.
+        const raw =
+          u.searchParams.get("name") || req.headers.get("X-Filename") || "map.mrc";
+        const safe =
+          (raw.split("/").pop() || "map.mrc").replace(/[^\w.\- ]+/g, "_") || "map.mrc";
+        const bytes = new Uint8Array(await req.arrayBuffer());
+        const path = `/tmp/cryoflow-mock/staged/${safe}`;
+        relayState.staged.set(path, { name: safe, bytes });
+        return reply(200, { ok: true, path, name: safe, size: bytes.byteLength });
       }
       if (u.pathname === "/nextid") return reply(200, { next: relayNextModelId() });
       if (u.pathname === "/volstats") {

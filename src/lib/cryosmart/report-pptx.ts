@@ -74,6 +74,7 @@ import {
   safePart,
   localImageFilename,
   reportFirstMicrographNode,
+  reportMicrographTotals,
   reportSelectedClassIndices,
 } from "./report-html";
 
@@ -526,6 +527,14 @@ function buildPptOverviewSlide(summary: LineageSummary, state: LineageReportStat
   const slide = pptNewSlide("Overview");
   pptAddHeader(slide, `CryoSmart ${summary.project_uid}/${summary.start_uid}`, `${(summary.nodes || []).length} nodes · Picture Flow`);
   const microNode = reportFirstMicrographNode(summary);
+  // v3.47: headline = SUM over every import job (总数量), not one job's count.
+  const microTotals = reportMicrographTotals(summary);
+  const microHeadline =
+    microTotals.known
+      ? `${fmt(microTotals.total)} micrographs`
+      : microNode && microNode.micrograph_count != null
+        ? `${fmt(microNode.micrograph_count)} micrographs`
+        : "micrographs 导入";
   let y = 0.95;
   if (microNode) {
     pptAddText(
@@ -534,7 +543,7 @@ function buildPptOverviewSlide(summary: LineageSummary, state: LineageReportStat
       y,
       PPT_W - PPT_MARGIN * 2,
       0.28,
-      `${fmt(microNode.micrograph_count)} micrographs${pixelSizeText(microNode) ? ` · ${pixelSizeText(microNode)}` : ""}`,
+      `${microHeadline}${pixelSizeText(microNode) ? ` · ${pixelSizeText(microNode)}` : ""}`,
       { fontSize: 18, bold: true, align: "center" },
     );
     y += 0.38;
@@ -1061,8 +1070,16 @@ function buildPictureFlowPptObjectOps(
   y += 34;
 
   const microNode = reportFirstMicrographNode(summary);
+  // v3.47: headline = SUM over every import job (总数量), not one job's count.
+  const microTotalsPf = reportMicrographTotals(summary);
+  const microHeadlinePf =
+    microTotalsPf.known
+      ? `${fmt(microTotalsPf.total)} micrographs`
+      : microNode && microNode.micrograph_count != null
+        ? `${fmt(microNode.micrograph_count)} micrographs`
+        : "micrographs 导入";
   if (microNode) {
-    pptLogicalText(ops, 40, y, SVG_A4_WIDTH - 80, 24, `${fmt(microNode.micrograph_count)} micrographs${pixelSizeText(microNode) ? ` · ${pixelSizeText(microNode)}` : ""}`, {
+    pptLogicalText(ops, 40, y, SVG_A4_WIDTH - 80, 24, `${microHeadlinePf}${pixelSizeText(microNode) ? ` · ${pixelSizeText(microNode)}` : ""}`, {
       fontSize: 18,
       align: "center",
     });

@@ -166,8 +166,13 @@ const j422Step = html.slice(html.indexOf(">J422 "), html.indexOf(">J422 ") + 900
 ok(!j422Step.includes("来自:"), "single-source J422 has no 来自 note (junction-only)");
 
 /* --- 4. multi-import list ----------------------------------------- */
-ok(html.includes("5,562 micrographs"), "headline keeps the largest import count (J474, 5,562)");
-ok(html.includes(">J474 import_micrographs"), "headline import is J474 (largest)");
+// v3.47: headline = the SUM over every import job (233+500+150+4,810+5,562
+// = 11,255), a caption names how many import jobs were totalled, and the
+// main import's own count stays visible in the note (每个 job 的数量 + 总数量).
+ok(html.includes("11,255 micrographs"), "headline is the SUM of all import counts (11,255)");
+ok(html.includes("共 5 个导入作业合计"), "caption names the 5 totalled import jobs");
+ok(html.includes("5,562 micrographs"), "main import J474's own count is spelled out in the note (5,562)");
+ok(html.includes(">J474 import_micrographs"), "headline identity is J474 (largest import)");
 ok(html.includes("其他 micrograph 导入（4）"), "other-imports list shows the remaining 4 branches");
 for (const uid of ["J370", "J375", "J384", "J404"]) {
   ok(html.includes(`pf-import-row`) && html.includes(`<b>${uid}</b>`), `import row ${uid} listed`);
