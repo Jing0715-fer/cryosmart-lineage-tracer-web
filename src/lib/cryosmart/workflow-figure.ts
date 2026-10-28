@@ -804,7 +804,9 @@ interface BBox {
 
 /** v3.51: sample the canvas background from the four corners (2 px in) —
  *  renders now come back on ChimeraX's BLACK background (reference-deck
- *  style), so "trim white margins" must trim MARGINS OF THE ACTUAL BG. */
+ *  style), so "trim white margins" must trim MARGINS OF THE ACTUAL BG.
+ *  v3.53: transparent renders (save transparentBackground true) have
+ *  alpha≈0 corners — their margins are trimmed by ALPHA, not color. */
 function cornerBgColor(data: Uint8ClampedArray, w: number, h: number): [number, number, number] {
   const pts: Array<[number, number]> = [
     [2, 2],
@@ -825,6 +827,26 @@ function cornerBgColor(data: Uint8ClampedArray, w: number, h: number): [number, 
     n += 1;
   }
   return n ? [Math.round(r / n), Math.round(g / n), Math.round(b / n)] : [255, 255, 255];
+}
+
+/** v3.53: average ALPHA of the four corner pixels — a transparent render
+ *  (transparentBackground true) has corners ≈0 and must keep its alpha channel
+ *  through the letterbox step; opaque renders keep the v3.51 bg-fill. */
+function cornerBgAlpha(data: Uint8ClampedArray, w: number, h: number): number {
+  const pts: Array<[number, number]> = [
+    [2, 2],
+    [w - 3, 2],
+    [2, h - 3],
+    [w - 3, h - 3],
+  ];
+  let a = 0;
+  let n = 0;
+  for (const [x, y] of pts) {
+    if (x < 0 || y < 0 || x >= w || y >= h) continue;
+    a += data[(y * w + x) * 4 + 3];
+    n += 1;
+  }
+  return n ? a / n : 255;
 }
 
 /** Content bounding box: pixels that differ from the given background by
@@ -866,9 +888,11 @@ function bgDiffBBox(
  * Port of the desktop helper's `common_trim_box` + uniform-crop step: all
  * renders share one trim box (smallest bg margin per side + 5% keep),
  * expanded to the target aspect, then letterboxed onto identical canvases
- * (v3.51: canvas colour = each render's own sampled background — black for
- * the current ChimeraX renders, white for legacy ones) so every thumbnail
- * has the same scale AND framing.
+ * (v3.51: canvas colour = each render's own sampled background) so every
+ * thumbnail has the same scale AND framing. v3.53: renders saved with
+ * transparentBackground true (alpha≈0 corners) keep their alpha — the
+ * canvas is NOT filled, so the letterbox margins stay see-through and the
+ * maps float on the white slide exactly like the reference deck's media.
  */
 export async function uniformLetterbox(
   images: Map<string, Uint8Array>,
@@ -879,7 +903,7 @@ export async function uniformLetterbox(
   if (typeof document === "undefined" || !images.size) return out;
 
   // Decode all + compute common margins.
-  const decoded: Array<{ key: string; bmp: ImageBitmap; bg: [number, number, number] }> = [];
+  const decoded: Array<{ key: string; bmp: ImageBitmap; bg: [number, number, number]; transparent: boolean }> = [];
   let refW = 0;
   let refH = 0;
   const margins: Array<{ left: number; top: number; right: number; bottom: number }> = [];
@@ -894,8 +918,9 @@ export async function uniformLetterbox(
       ctx.drawImage(bmp, 0, 0);
       const { data } = ctx.getImageData(0, 0, bmp.width, bmp.height);
       const bg = cornerBgColor(data, bmp.width, bmp.height);
+      const transparent = cornerBgAlpha(data, bmp.width, bmp.height) < 20;
       const box = bgDiffBBox(data, bmp.width, bmp.height, bg, 8);
-      decoded.push({ key, bmp, bg });
+      decoded.push({ key, bmp, bg, transparent });
       refW = bmp.width;
       refH = bmp.height;
       if (box) {
@@ -941,14 +966,21 @@ export async function uniformLetterbox(
   const cropH = Math.max(1, Math.round(boxH));
 
   const outH = Math.round(outW / aspect);
-  for (const { key, bmp, bg } of decoded) {
+  for (const { key, bmp, bg, transparent } of decoded) {
     const canvas = document.createElement("canvas");
     canvas.width = outW;
     canvas.height = outH;
     const ctx = canvas.getContext("2d");
     if (!ctx) continue;
-    ctx.fillStyle = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
-    ctx.fillRect(0, 0, outW, outH);
+    if (!transparent) {
+      // Opaque renders keep the v3.51 behaviour: margins filled with the
+      // render's own sampled background so every thumb reads uniformly.
+      ctx.fillStyle = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+      ctx.fillRect(0, 0, outW, outH);
+    }
+    // v3.53: transparent renders — canvas left clear, the drawn image's
+    // alpha channel (including its see-through margins) is preserved as-is
+    // in the exported PNG (canvas.toBlob keeps RGBA).
     const scale = Math.min(outW / cropW, outH / cropH);
     const dw = cropW * scale;
     const dh = cropH * scale;

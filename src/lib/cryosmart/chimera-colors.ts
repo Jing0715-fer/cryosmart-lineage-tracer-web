@@ -8,19 +8,23 @@
  * sequence as the flow figure's per-class defaults (and confirmed its head
  * from their own Chimera):
  *
- *   class 1 → #b2b2b2 grey
- *   class 2 → #ffffb2 pale yellow
- *   class 3 → #b333ff violet
- *   class 4 → #b2b2ff lavender
- *   class 5+ → tan / forest green / sea green / cyan / dark cyan / blue /
+ *   class 0 → #b2b2b2 grey        (volume_class_0)
+ *   class 1 → #ffffb2 pale yellow (volume_class_1)
+ *   class 2 → #b333ff violet      (volume_class_2 — the user's paste
+ *                                 “#b333ffffffff” is violet + alpha)
+ *   class 3 → #b2b2ff lavender    (volume_class_3)
+ *   class 4+ → tan / forest green / sea green / cyan / dark cyan / blue /
  *              dark blue / slate blue / … (the same built-in list)
  *
- * A single-map stage is "class 1 of its job", so it renders grey — the same
- * thing you see when opening that one map in Chimera. v3.51's uniform
- * #8a8a8a gray made every class indistinguishable; the figure now looks
- * like the class maps opened together in Chimera, on the same black
- * background. Head values = user-confirmed; tail = Chimera's built-in list
- * (grey→slate blue is cross-checked, later entries cycle after 20).
+ * Round-12 re-confirmed the same four head colors, counting classes from 0
+ * (cryoSPARC's own volume_class_N naming); the palette itself is unchanged.
+ * A single-map stage is "class 0 of its job", so it renders grey — the same
+ * thing you see when opening that one map in Chimera. v3.53 applies every
+ * entry via `volume #<id> color <hex>` (the volume command's color option —
+ * `color #<id>` targets atoms and never touched volume surfaces on the
+ * user's real ChimeraX). Head values = user-confirmed; tail = Chimera's
+ * built-in list (grey→slate blue is cross-checked, later entries cycle
+ * after 20).
  */
 
 export interface ChimeraColor {
@@ -57,9 +61,10 @@ export const CHIMERA_MODEL_COLORS: readonly ChimeraColor[] = [
 ];
 
 /**
- * 0-based class position → Chimera's i-th open color. Single-map stages
- * pass 0 (grey). Out-of-range / negative / non-finite values fall back to
- * the first color; positions past the palette cycle (never reached in
+ * 0-based class position → Chimera's i-th open color (class 0 = grey,
+ * matching cryoSPARC's volume_class_0 naming). Single-map stages pass 0
+ * (grey). Out-of-range / negative / non-finite values fall back to the
+ * first color; positions past the palette cycle (never reached in
  * practice — MAX_FIG_CLASSES caps rows at 8).
  */
 export function chimeraClassColor(classIndex: number): string {

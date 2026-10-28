@@ -40,6 +40,7 @@
 import { _REPORT_HTML_V2_SCRIPT } from "../../src/lib/cryosmart/report-html";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 
 const PORT = 3021;
 const ORIGIN = `http://127.0.0.1:${PORT}`;
@@ -553,16 +554,93 @@ function enrichVerdict(): Record<string, unknown> {
 const RELAY_PORT = 8927;
 const MOCK_APP_ORIGIN = "http://localhost:3000";
 
-/** 64×64 black-background render with a gray map disc (v3.51: the real
- *  pipeline now renders black-bg uniform-gray thumbnails — the old solid-red
- *  placeholder scored 0.0000 coverage under the bg-adaptive scorer and made
- *  every E2E log read like a view-selection failure). */
-const MOCK_PNG = Uint8Array.from(
-  atob(
-    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAABBUlEQVR4nO2YQRKDIAxFaacH8ZQewlNylC7cOFYhyQ9lOn1v2UL4P5GIlAIAAAAAAABzeIwIum3b3V/ruuaulWagIfqOFDMJBgLSj4g2nsrkIqvXI8QroEs/EStFsALp6sMxIxWwrLQsy+ePtdbuRG8d3Aa66i+lH+nacHl42Yd26Uo/DrNUw4JvDzTSb1RvGe/aDGob3fGqV2adcBgY0Xn0tRIqoCRSL0LOIzQRDMwGA9orSX+dOQykf0ylrJXzCMUSmXKa8BloJMarpjF+2mFu16SfRl383/fAzqBzUaBPBDfxiI4Ui6leq6SUQkmH2kb1UogRuJm74pt3owAAAAAAAD/LGzFAXTQo2vIyAAAAAElFTkSuQmCC",
-  ),
-  (c) => c.charCodeAt(0),
-);
+/** v3.53: transparent-background render with an opaque colored disc — the
+ *  real pipeline now saves every screenshot with `transparentBackground
+ *  true` AND colors each map via `volume #<id> color <hex>`, so the mock
+ *  serves a PNG that mirrors BOTH: fully transparent margins (alpha 0 —
+ *  the coverage scorer + letterbox must preserve it) and the disc in the
+ *  color of the model currently shown (tracked from the volume-color +
+ *  show/hide commands, so the E2E can assert the class palette survives
+ *  all the way into the PPTX media). The old constant black-bg gray-disc
+ *  PNG would have green-lit alpha regressions invisibly. */
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(buf: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(12 + data.length);
+  new DataView(out.buffer).setUint32(0, data.length);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(data, 8);
+  new DataView(out.buffer).setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+  return out;
+}
+const DISC_PNG_CACHE = new Map<string, Uint8Array>();
+function discPng(rgb: [number, number, number]): Uint8Array {
+  const key = rgb.join(",");
+  const cached = DISC_PNG_CACHE.get(key);
+  if (cached) return cached;
+  const size = 96;
+  const r = 34;
+  const cx = size / 2;
+  const cy = size / 2;
+  const raw = new Uint8Array(size * (size * 4 + 1));
+  for (let y = 0; y < size; y++) {
+    const row = y * (size * 4 + 1);
+    raw[row] = 0; // filter: none
+    for (let x = 0; x < size; x++) {
+      const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+      const i = row + 1 + x * 4;
+      if (d <= r) {
+        raw[i] = rgb[0];
+        raw[i + 1] = rgb[1];
+        raw[i + 2] = rgb[2];
+        raw[i + 3] = 255;
+      } else {
+        raw[i] = 0;
+        raw[i + 1] = 0;
+        raw[i + 2] = 0;
+        raw[i + 3] = 0;
+      }
+    }
+  }
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, size);
+  dv.setUint32(4, size);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // color type RGBA
+  const png = new Uint8Array(8 + 12 + 13 + 12 + 0 + 12);
+  let off = 0;
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], off); off += 8;
+  png.set(pngChunk("IHDR", ihdr), off); off += 25;
+  const idat = deflateSync(raw);
+  const withIdat = new Uint8Array(off + 12 + idat.length + 12);
+  withIdat.set(png.subarray(0, off), 0);
+  withIdat.set(pngChunk("IDAT", new Uint8Array(idat)), off);
+  off += 12 + idat.length;
+  withIdat.set(pngChunk("IEND", new Uint8Array(0)), off);
+  DISC_PNG_CACHE.set(key, withIdat);
+  return withIdat;
+}
+/** The render the mock serves for a save: transparent bg + the shown
+ * model's volume-color (grey when nothing is on screen / uncolored). */
+function mockRenderPng(): Uint8Array {
+  const rgb =
+    (relayState.shownModel != null && relayState.modelColors.get(relayState.shownModel)) ||
+    ([178, 178, 178] as [number, number, number]);
+  return discPng(rgb as [number, number, number]);
+}
 
 /** Minimal plausible MRC2014 volume (8³ float32 + 1024-byte header). */
 function mrcBytes(seedSource: string): Uint8Array {
@@ -623,12 +701,26 @@ const relayState = {
   cdOk: 0,
   saveRelativeOk: 0,
   saveRelativeMissed: 0,
-  /** v3.52: `color #<id> <hex>` commands received (count) … */
+  /** v3.52→v3.53: explicit surface-color commands received (`volume #<id>
+   *  color <hex>` since v3.53 — the atom-only `color #<id> <hex>` still
+   * counts if a stale page sends it, so regressions stay visible)… */
   colorCommands: 0,
   /** … and the distinct hex values in FIRST-SEEN order — the E2E asserts
    *  Chimera's default open palette (grey/pale yellow/violet/lavender/tan
-   *  for classes 1-5) reached ChimeraX in class order. */
+   *  for classes 0-4) reached ChimeraX in class order. */
   colorHexes: [] as string[],
+  /** v3.53: model id → RGB from `volume #<id> color <hex>` — drives the
+   *  colored-disc save PNGs (mockRenderPng). */
+  modelColors: new Map<number, [number, number, number]>(),
+  /** v3.53: the model currently on screen (last `show #N models`), used to
+   *  pick the disc color at save time. */
+  shownModel: null as number | null,
+  /** v3.53: saves that passed transparentBackground true / false. */
+  saveTransparentBg: 0,
+  saveOpaqueBg: 0,
+  /** v3.53: `set bgColor` commands received — v3.53+ sends NONE (the E2E
+   *  asserts 0; any nonzero means a stale page or a regression). */
+  setBgColorCommands: 0,
 };
 
 function resetRelayState() {
@@ -649,6 +741,11 @@ function resetRelayState() {
   relayState.saveRelativeMissed = 0;
   relayState.colorCommands = 0;
   relayState.colorHexes = [];
+  relayState.modelColors.clear();
+  relayState.shownModel = null;
+  relayState.saveTransparentBg = 0;
+  relayState.saveOpaqueBg = 0;
+  relayState.setBgColorCommands = 0;
 }
 
 function relayNextModelId(): number {
@@ -684,6 +781,9 @@ function relayStats() {
     save_relative_missed: relayState.saveRelativeMissed,
     color_commands: relayState.colorCommands,
     color_hexes: [...relayState.colorHexes],
+    save_transparent_bg: relayState.saveTransparentBg,
+    save_opaque_bg: relayState.saveOpaqueBg,
+    set_bgcolor_commands: relayState.setBgColorCommands,
   };
 }
 function u_hasAsset(u: string): boolean {
@@ -695,17 +795,38 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   const command = String(raw || "").trim();
   relayState.commands.push(command);
 
-  // v3.52: record explicit `color #<id> <hex>` surface colors so the E2E
-  // can assert the Chimera default open palette arrives in class order
-  // (#b2b2b2 grey, #ffffb2 pale yellow, #b333ff violet, #b2b2ff lavender,
-  // #d2b48c tan, …). Non-hex colors (e.g. `color #1 red`) are counted but
-  // not added to the ordered set.
-  const colorMatch = /^color\s+#[\d.]+\s+(#[0-9a-fA-F]{6,8})\b/.exec(command);
-  if (colorMatch) {
+  // v3.53: record the REAL volume-surface coloring command `volume #<id>
+  // color <hex>` (plus the legacy atom-only `color #<id> <hex>` so a stale
+  // page's no-op attempt stays visible in the stats). The palette order
+  // assert is unchanged: #b2b2b2 grey, #ffffb2 pale yellow, #b333ff violet,
+  // #b2b2ff lavender, #d2b48c tan, … in class order.
+  const volColorMatch = /^volume\s+#[\d.]+\s+color\s+(#[0-9a-fA-F]{6,8})\b/.exec(command);
+  const atomColorMatch = /^color\s+#[\d.]+\s+(#[0-9a-fA-F]{6,8})\b/.exec(command);
+  if (volColorMatch || atomColorMatch) {
     relayState.colorCommands += 1;
-    const hex = colorMatch[1].slice(0, 7).toLowerCase();
-    if (!relayState.colorHexes.includes(hex)) relayState.colorHexes.push(hex);
+    const hex = (volColorMatch?.[1] ?? atomColorMatch?.[1] ?? "").slice(0, 7).toLowerCase();
+    if (hex && !relayState.colorHexes.includes(hex)) relayState.colorHexes.push(hex);
+    if (volColorMatch) {
+      const idMatch = /^volume\s+#(\d+(?:\.\d+)?)\s+color\s+/i.exec(command);
+      const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+      if (idMatch && m) {
+        relayState.modelColors.set(parseInt(idMatch[1], 10), [
+          parseInt(m[1], 16),
+          parseInt(m[2], 16),
+          parseInt(m[3], 16),
+        ]);
+      }
+    }
   }
+  // v3.53: track the on-screen model (drives per-class disc colors on
+  // save) and tripwire the retired `set bgColor` command.
+  const showMatch = /^show\s+#(\d+)\s+models/i.exec(command);
+  if (showMatch) relayState.shownModel = parseInt(showMatch[1], 10);
+  const hideMatch = /^hide\s+#(\d+)\s+models/i.exec(command);
+  if (hideMatch && relayState.shownModel === parseInt(hideMatch[1], 10)) {
+    relayState.shownModel = null;
+  }
+  if (/^set\s+bgColor\b/i.test(command)) relayState.setBgColorCommands += 1;
 
   const openMatch = /^open\s+"([^"]+)"(?:\s+format\s+(\S+))?\s*$/i.exec(command);
   if (openMatch) {
@@ -840,8 +961,12 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
     return { text: "", error: `UserError: cd: ${cdMatch[1]}: no such directory` };
   }
   const saveMatch =
-    /^save\s+"([^"]+\.png)"(?:\s+width\s+\d+)?(?:\s+height\s+\d+)?(?:\s+supersample\s+\d+)?(?:\s+transparentBackground\s+(?:true|false))?\s*$/i.exec(command);
+    /^save\s+"([^"]+\.png)"(?:\s+width\s+\d+)?(?:\s+height\s+\d+)?(?:\s+supersample\s+\d+)?(?:\s+transparentBackground\s+(true|false))?\s*$/i.exec(command);
   if (saveMatch) {
+    // v3.53: every save must ask for a transparent background now — the
+    // E2E asserts save_opaque_bg stays 0.
+    if (saveMatch[2] === "false") relayState.saveOpaqueBg += 1;
+    else relayState.saveTransparentBg += 1;
     if (relayState.saveRejected) {
       return {
         text: "",
@@ -857,13 +982,13 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
         return { text: `saved ${target}`, error: null };
       }
       const name = target.split(/[\\/]/).pop() || "img.png";
-      relayState.files.set(name, MOCK_PNG);
+      relayState.files.set(name, mockRenderPng());
       return { text: `saved ${target}`, error: null };
     }
     // Relative save — ChimeraX writes into its process cwd.
     if (relayState.cwd === relayState.workdir) {
       relayState.saveRelativeOk += 1;
-      relayState.files.set(target, MOCK_PNG);
+      relayState.files.set(target, mockRenderPng());
     } else {
       relayState.saveRelativeMissed += 1;
     }

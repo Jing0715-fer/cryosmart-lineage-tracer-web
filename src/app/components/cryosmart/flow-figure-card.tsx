@@ -308,13 +308,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       /* 2. per-mode thumbnails */
       let chiralityMeta = { corrected: 0, consistent: 0, ambiguous: 0, failed: 0, view: "" };
       const uniqueMaps = figureMapSources(model);
-      // v3.52 (round-11): Chimera 默认打开色序 —— class 1 灰、class 2 淡黄、
-      // class 3 紫、class 4 淡紫、class 5+ 同列表后续；单图阶段 = 该 job 的
-      // “class 1” → 灰。打印在日志里，便于用户对照 Chimera 核对。
+      // v3.52 (round-11): Chimera 默认打开色序 —— class 0 灰、class 1 淡黄、
+      // class 2 紫、class 3 淡紫、class 4+ 同列表后续；单图阶段 = 该 job 的
+      // “class 0” → 灰。v3.53 (round-12): 按用户的 volume_class_N 0 起计数，
+      // 打印在日志里便于对照 Chimera 核对（配色经 volume #<id> color 应用）。
       const classDepth = Math.max(0, ...[...uniqueMaps.values()].map((m) => m.classIndex + 1));
       if (uniqueMaps.size > 0) {
         pushLog(
-          `地图配色: Chimera 默认打开色序 — class 1-${classDepth} 依次 ${CHIMERA_MODEL_COLORS.slice(
+          `地图配色: Chimera 默认打开色序 — class 0-${classDepth - 1} 依次 ${CHIMERA_MODEL_COLORS.slice(
             0,
             classDepth,
           )
@@ -527,6 +528,9 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             `参考地图 ${referenceKey} 无可用来源（直连/代理/中转均未成功）— 无法对齐。请根据上方日志中各环节的失败原因处理后重试；或改用「会话预览图」模式。`,
           );
         }
+        // v3.53 (round-12): 自诊日志 —— 本次运行的两项渲染约定（透明背景 +
+        // volume color 着色）都在日志里留底，粘贴来的日志可自证版本。
+        pushLog("地图渲染: 透明背景（save transparentBackground true）· 配色经 volume #<id> color 应用（不透明表面）");
 
         const renderRes = await renderFigureMaps(transport, {
           reference: {
@@ -557,7 +561,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         };
 
         if (rendered.size) {
-          setStep((s) => ({ ...s, phase: "统一取景裁边（背景自适应）", pct: 90 }));
+          setStep((s) => ({ ...s, phase: "统一取景裁边（保留透明背景）", pct: 90 }));
           const trimmed = await uniformLetterbox(rendered, 2, 1600);
           for (const [key, bytes] of trimmed) images.set(key, bytes);
         }

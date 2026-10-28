@@ -23,8 +23,9 @@
  *     search 15`; score = fit_search ?? fit ?? measure
  *   - chirality verdict from the flip_z candidate vs. the best rigid one
  *   - one-time 90° view optimisation on the reference map by thumbnail
- *     white-space coverage, applied to every map
- *   - per-map export at 1600×1200 supersample 3 on white background
+ *     coverage scoring, applied to every map
+ *   - per-map export at 1600×1200 supersample 3 on a TRANSPARENT background
+ *     (v3.53; the alpha channel rides all the way into the PPTX)
  *
  * v3.48 (round-7): screenshots are saved with plain `save <png-path> width …
  * height … supersample … transparentBackground false` — ChimeraX has NO
@@ -55,8 +56,25 @@
  * #ffffb2, class 3 violet #b333ff, class 4 lavender #b2b2ff, class 5+ from
  * the same built-in list — see chimera-colors.ts). A multi-class row now
  * reads exactly like the job's maps opened together in Chimera, instead
- * of v3.51's uniform gray that made classes indistinguishable. The black
- * background stays (reference-deck look).
+ * of v3.51's uniform gray that made classes indistinguishable.
+ *
+ * v3.53 (round-12 “背景透明 + 颜色没生效 + 透明感”): two REAL-machine fixes
+ * verified against the official ChimeraX command docs:
+ *   - TRANSPARENT BACKGROUND: `set bgColor` explicitly ignores transparency
+ *     ("images can be saved with a (completely) transparent background using
+ *     the save command option transparentBackground true" — set.html). Every
+ *     save now passes transparentBackground true and the `set bgColor black`
+ *     command is GONE, so exported PNGs carry an alpha channel exactly like
+ *     the reference deck's own media (corner (0,0,0,0)) and the user's
+ *     ChimeraX background is left untouched.
+ *   - COLOR COMMAND: `color #<id> <hex>` targets ATOMS and silently no-ops on
+ *     volume models — the user's round-12 deck came back with every map in
+ *     ChimeraX's default gray despite the palette being sent. The volume
+ *     command's OWN color option is used instead: `volume #<id> color <hex>`
+ *     ("if one color is specified but no levels, the color applies to all
+ *     existing levels and becomes the default color for the volume model"
+ *     — volume.html). Surfaces stay opaque solids; the perceived
+ *     translucency was gray-on-black contrast.
  */
 
 import { chimeraClassColor } from "./chimera-colors";
@@ -472,7 +490,10 @@ export async function saveAndFetchPng(
   onNote?: (line: string) => void,
 ): Promise<Uint8Array> {
   if (t.kind !== "relay" || !t.workdir) throw new SaveShotError("file save requires the relay transport", "save");
-  const saveArgs = ` width ${opts.width} height ${opts.height} supersample ${opts.supersample} transparentBackground false`;
+  // v3.53: transparentBackground true — the ONLY documented way to get an
+  // alpha-channel export (set bgColor ignores transparency; the old
+  // explicit `false` here baked an opaque black canvas into every PNG).
+  const saveArgs = ` width ${opts.width} height ${opts.height} supersample ${opts.supersample} transparentBackground true`;
   const allModes: SaveMode[] = [
     "abs",
     ...(String(t.workdir).includes("\\") ? (["abs-fwd"] as SaveMode[]) : []),
@@ -561,8 +582,10 @@ function cornerBg(data: Uint8ClampedArray, w: number, h: number): [number, numbe
 }
 
 /** Fraction of the canvas NOT covered by the (sampled) background — the old
- *  white-only counter generalized to the black-background renders (a black
- *  canvas would otherwise score 1.0 for every view and pick views blind). */
+ *  white-only counter generalized to any opaque background, then to ALPHA
+ *  (v3.53): fully transparent pixels ARE the background; the old loop skipped
+ *  them without counting, so a transparent render scored coverage 1.0 for
+ *  every view and picked views blind. */
 async function thumbnailCoverageScore(png: Uint8Array): Promise<number> {
   if (typeof createImageBitmap === "undefined" || typeof document === "undefined") return 0;
   const blob = new Blob([png as BlobPart], { type: "image/png" });
@@ -577,7 +600,10 @@ async function thumbnailCoverageScore(png: Uint8Array): Promise<number> {
   const bg = cornerBg(data, width, height);
   let bgCount = 0;
   for (let i = 0; i < data.length; i += 4) {
-    if (data[i + 3] <= 10) continue;
+    if (data[i + 3] <= 10) {
+      bgCount++;
+      continue;
+    }
     if (
       Math.abs(data[i] - bg[0]) <= 25 &&
       Math.abs(data[i + 1] - bg[1]) <= 25 &&
@@ -720,12 +746,17 @@ export async function renderFigureMaps(
     const sdTry = await exec(t, `volume #${refId} level 2 sd step ${STEP} style surface`, opts, true);
     if (sdTry.error) await exec(t, `volume #${refId} step ${STEP} style surface`, opts, true);
   }
-  // v3.52: reference-deck look with Chimera default open-colors — black
-  // background, and each map explicitly `color`ed to its class position's
-  // palette entry (see requestColor above).
-  await exec(t, "set bgColor black", opts, true);
+  // v3.53 (round-12): NO set bgColor command — saves pass transparentBackground
+  // true, so the PNGs carry an alpha channel (the reference deck's own media:
+  // corner (0,0,0,0)) and the user's ChimeraX background is left untouched.
+  // The reference map is colored via `volume #<id> color <hex>` — the volume
+  // command's own option ("if one color is specified but no levels, the color
+  // applies to all existing levels and becomes the default color for the
+  // volume model" — ChimeraX volume docs); the previous `color #<id> <hex>`
+  // targets ATOMS and silently no-ops on volume models, which is why the
+  // user's round-12 deck came back with every map still default gray.
   const refColor = requestColor(opts.reference);
-  await exec(t, `color #${refId} ${refColor}`, opts, true);
+  await exec(t, `volume #${refId} color ${refColor}`, opts, true);
   await exec(t, "view pad 0.25", opts, true);
   await exec(t, "wait 1", opts, true);
 
@@ -814,7 +845,9 @@ export async function renderFigureMaps(
     const rows: CandidateRow[] = [];
     // v3.52: this map's Chimera default open-color (class position) — every
     // candidate (incl. the flipped copy) renders in it, so the screenshot
-    // matches the class maps opened together in Chimera.
+    // matches the class maps opened together in Chimera. v3.53: applied via
+    // `volume #<id> color` — the volume command's color option; `color #<id>`
+    // never touched volume surfaces on the real machine.
     const mapColor = requestColor(req);
     const openedByCandidate = new Map<string, number>();
     let chosen: { row: CandidateRow; modelId: number } | null = null;
@@ -845,7 +878,7 @@ export async function renderFigureMaps(
           const sdTry = await exec(t, `volume #${activeId} level 2 sd step ${STEP} style surface`, opts, true);
           if (sdTry.error) await exec(t, `volume #${activeId} step ${STEP} style surface`, opts, true);
         }
-        await exec(t, `color #${activeId} ${mapColor}`, opts, true);
+        await exec(t, `volume #${activeId} color ${mapColor}`, opts, true);
 
         if (spec.kind === "rotate") {
           await exec(t, `turn ${spec.axis} 180 models #${activeId} center #${activeId}`, opts, true);
@@ -875,7 +908,7 @@ export async function renderFigureMaps(
           if (level2 != null) {
             await exec(t, `volume #${activeId} level ${level2.toFixed(4)} step ${STEP}`, opts, true);
           }
-          await exec(t, `color #${activeId} ${mapColor}`, opts, true);
+          await exec(t, `volume #${activeId} color ${mapColor}`, opts, true);
         }
 
         const preRes = await exec(t, `measure correlation #${activeId} inMap #${refId}`, opts, true);

@@ -74,6 +74,10 @@ interface ConnOp {
   x2: number;
   y2: number;
   bent?: boolean;
+  /** v3.53: false = a plain line segment (no arrowhead) — the header→first
+   *  stage elbow route is drawn as explicit segments and only the LAST one
+   *  carries the arrow. */
+  arrow?: boolean;
 }
 
 interface PicOp {
@@ -135,7 +139,7 @@ function connXml(id: number, op: ConnOp): string {
   const flipH = op.x2 < op.x1 ? ' flipH="1"' : "";
   const flipV = op.y2 < op.y1 ? ' flipV="1"' : "";
   const prst = op.bent ? "bentConnector3" : "straightConnector1";
-  const tail = op.bent ? '<a:tailEnd type="arrow"/>' : '<a:tailEnd type="triangle"/>';
+  const tail = op.arrow === false ? "" : op.bent ? '<a:tailEnd type="arrow"/>' : '<a:tailEnd type="triangle"/>';
   return `<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="${id}" name="连接符 ${id}"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr><a:xfrm${flipH}${flipV}><a:off x="${IN(offX)}" y="${IN(offY)}"/><a:ext cx="${IN(extX)}" cy="${IN(extY)}"/></a:xfrm><a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom><a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>${tail}</a:ln></p:spPr></p:cxnSp>`;
 }
 
@@ -177,40 +181,15 @@ export function buildWorkflowPptx(
   const MARGIN_X = 0.45;
   const contentW = SLIDE_W_IN - 2 * MARGIN_X;
 
-  /* ---- header band: "N Micrographs" → "Auto pick" → "N particles" ---- */
+  /* ---- header band data: "N Micrographs" → "Auto pick" → "N particles".
+   * v3.53 (round-12 “2d 前面的部分”): the band LAYOUT moved below the stage
+   * rows — it must anchor to the first stage's position (see the comment
+   * on the emission block). */
   const headerItems = [
     fig.headerStats.micrographs,
     fig.headerStats.pick,
     fig.headerStats.particles,
   ].filter((t): t is string => !!t);
-  if (headerItems.length) {
-    const widths = headerItems.map(estimateTextWidth);
-    const ARROW = 0.36;
-    const total = widths.reduce((a, b) => a + b, 0) + ARROW * (headerItems.length - 1);
-    let hx = (SLIDE_W_IN - total) / 2;
-    const aligns: Align[] = ["ctr", "r", "ctr"];
-    headerItems.forEach((text, i) => {
-      ops.push({
-        kind: "text",
-        x: hx,
-        y: 0.52,
-        w: widths[i],
-        h: 0.26,
-        lines: [{ t: text, align: aligns[i] ?? "ctr" }],
-      });
-      hx += widths[i];
-      if (i < headerItems.length - 1) {
-        ops.push({
-          kind: "conn",
-          x1: hx + 0.02,
-          y1: 0.65,
-          x2: hx + ARROW - 0.02,
-          y2: 0.65,
-        });
-        hx += ARROW;
-      }
-    });
-  }
 
   /* ---- v3.51 stage groups: reference-faithful VERTICAL flow ----
    * Stages stack top→bottom exactly like the reference; one ROW per stage.
@@ -348,6 +327,78 @@ export function buildWorkflowPptx(
     rows.push({ items, top, bottom: top + rowH });
   });
 
+  /* thumbnail accessor shared by the header band + connectors (v3.53:
+   * moved above the header band — const arrow functions are TDZ'd, so it
+   * must be declared before first use). */
+  const thumbOf = (row: PlacedRow, first: boolean): Box => {
+    const item = first ? row.items[0] : row.items[row.items.length - 1];
+    const slot = first ? item.slots[0] : item.slots[item.slots.length - 1];
+    return slot.thumb;
+  };
+
+  /* ---- header band LAYOUT (v3.53, round-12 “2d 前面的部分有些问题”) ----
+   * The band used to sit centered at the slide top while the first stage
+   * lived in the LEFT column of a wrapped flow — the entry connector then
+   * hung from empty space (deck (2): band x≈4.6-8.7, 2D stage x≈1.2,
+   * connector dangling at x≈1.76 attached to nothing). Now the band is
+   * ANCHORED to the first stage: its LAST item lands above the first
+   * stage's thumbnail centre whenever the margins allow (the reference
+   * deck's own geometry — straight drop into the stage), otherwise it
+   * left-aligns at the margin and a 3-segment elbow route carries the flow
+   * down and into the first stage's label. */
+  if (headerItems.length) {
+    const widths = headerItems.map(estimateTextWidth);
+    const ARROW = 0.36;
+    const total = widths.reduce((a, b) => a + b, 0) + ARROW * (headerItems.length - 1);
+    const firstThumb = rows.length ? thumbOf(rows[0], true) : null;
+    const firstCx = firstThumb ? firstThumb.x + firstThumb.w / 2 : null;
+    // Try to end the band directly above the first stage (last item's
+    // centre on the stage's centre); clamp within the slide margins.
+    let hx =
+      firstCx == null
+        ? (SLIDE_W_IN - total) / 2
+        : firstCx - total + widths[widths.length - 1] / 2;
+    hx = Math.max(MARGIN_X, Math.min(SLIDE_W_IN - MARGIN_X - total, hx));
+    const lastCx = hx + total - widths[widths.length - 1] / 2;
+    const aligns: Align[] = ["ctr", "r", "ctr"];
+    let bx = hx;
+    headerItems.forEach((text, i) => {
+      ops.push({
+        kind: "text",
+        x: bx,
+        y: 0.52,
+        w: widths[i],
+        h: 0.26,
+        lines: [{ t: text, align: aligns[i] ?? "ctr" }],
+      });
+      bx += widths[i];
+      if (i < headerItems.length - 1) {
+        ops.push({
+          kind: "conn",
+          x1: bx + 0.02,
+          y1: 0.65,
+          x2: bx + ARROW - 0.02,
+          y2: 0.65,
+        });
+        bx += ARROW;
+      }
+    });
+    /* band → first stage: straight drop when the band's last item ended
+     * above the stage (reference-faithful); explicit elbow segments
+     * otherwise — only the final segment carries the arrowhead. */
+    if (firstCx != null) {
+      const yEnd = rows[0].top - 0.03;
+      if (Math.abs(lastCx - firstCx) <= 0.03) {
+        ops.push({ kind: "conn", x1: firstCx, y1: 0.8, x2: firstCx, y2: yEnd });
+      } else {
+        const elbowY = 0.8 + (yEnd - 0.8) / 2;
+        ops.push({ kind: "conn", x1: lastCx, y1: 0.8, x2: lastCx, y2: elbowY, arrow: false });
+        ops.push({ kind: "conn", x1: lastCx, y1: elbowY, x2: firstCx, y2: elbowY, arrow: false });
+        ops.push({ kind: "conn", x1: firstCx, y1: elbowY, x2: firstCx, y2: yEnd });
+      }
+    }
+  }
+
   /* emit per-row shapes */
   rows.forEach((row, ri) => {
     row.items.forEach((p) => {
@@ -388,11 +439,6 @@ export function buildWorkflowPptx(
 
   /* connectors: same-column stages chain downward; a column wrap rides a
    * bent connector up to the next column's first stage. */
-  const thumbOf = (row: PlacedRow, first: boolean): Box => {
-    const item = first ? row.items[0] : row.items[row.items.length - 1];
-    const slot = first ? item.slots[0] : item.slots[item.slots.length - 1];
-    return slot.thumb;
-  };
   for (let i = 0; i + 1 < rows.length; i++) {
     const a = rows[i];
     const b = rows[i + 1];
@@ -412,13 +458,6 @@ export function buildWorkflowPptx(
         bent: true,
       });
     }
-  }
-
-  /* header → first stage vertical arrow */
-  if (headerItems.length && rows.length) {
-    const t0 = thumbOf(rows[0], true);
-    const cx = t0.x + t0.w / 2;
-    ops.push({ kind: "conn", x1: cx, y1: 0.84, x2: cx, y2: rows[0].top - 0.03 });
   }
 
   /* final stats ("3.46 Å") under the last stage */

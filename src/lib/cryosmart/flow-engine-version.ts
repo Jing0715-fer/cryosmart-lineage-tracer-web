@@ -24,5 +24,15 @@
  * violet/lavender…). Old pages would keep sending v3.51 behavior invisibly;
  * the version line in every run log also tells the user which palette a
  * pasted log was rendered with.
+ *
+ * v3.53 bump reason (round-12): three REAL-machine render fixes at once —
+ * (1) every save now runs transparentBackground true (alpha-channel PNGs on
+ * the white slide; `set bgColor` is no longer sent at all), (2) per-class
+ * colors are applied via `volume #<id> color` instead of the atom-only
+ * `color #<id>` that silently no-oped on the user's ChimeraX (their round-12
+ * deck came back with every map still default gray), and (3) the header band
+ * ("Micrographs → Auto pick → particles") is anchored to the first stage so
+ * the entry connector no longer dangles from empty space. Old pages would
+ * keep the black-background + gray-maps + dangling-connector look invisibly.
  */
-export const FLOW_ENGINE_VERSION = "3.52";
+export const FLOW_ENGINE_VERSION = "3.53";
