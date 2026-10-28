@@ -18,6 +18,7 @@ import {
   AlertTriangle,
   Loader2,
   Download,
+  Link2,
   Info,
   Boxes,
   RefreshCw,
@@ -43,8 +44,8 @@ import {
   type FlowFigureModel,
 } from "@/lib/cryosmart/workflow-figure";
 import { buildWorkflowPptx } from "@/lib/cryosmart/workflow-pptx";
-import { downloadBlob } from "@/lib/cryosmart/bundle";
 import { cryoSmartBytes, buildProxyAbsoluteUrl, probeCryosmartReachable } from "@/lib/cryosmart/proxy-client";
+import { FLOW_ENGINE_VERSION } from "@/lib/cryosmart/flow-engine-version";
 
 type FigureMode = "chimerax" | "preview" | "demo";
 
@@ -64,6 +65,19 @@ function fmtSize(bytes: number): string {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
+/** v3.50: anchor-click a download — works for blob: URLs and same-origin
+ *  server URLs alike (server URLs survive sandboxed preview iframes where
+ *  in-page blob downloads can silently no-op: the visible link remains
+ *  clickable / save-as-able / copyable either way). */
+function triggerDownload(href: string, filename: string) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | null; loaded: LoadedMetadata | null }) {
   const [mode, setMode] = useState<FigureMode>("demo");
   const [bridge, setBridge] = useState<FlowTransport | null>(null);
@@ -76,9 +90,22 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   // used to ship with 2 collapsed stages). "0" = the “全部” selector entry
   // (never fold, even beyond 10).
   const [maxGroups, setMaxGroups] = useState("10");
-  const [result, setResult] = useState<{ url: string; size: number; filename: string } | null>(null);
+  const [result, setResult] = useState<{
+    url: string;
+    /** v3.50: fallback in-page blob link (kept for contexts where the
+     *  server route somehow fails). */
+    blobUrl: string;
+    /** v3.50: real server URL from the in-memory artifact store. */
+    serverUrl: string | null;
+    size: number;
+    filename: string;
+  } | null>(null);
   const [thumbs, setThumbs] = useState<{ key: string; url: string }[]>([]);
   const [renderReport, setRenderReport] = useState<MapRender[]>([]);
+  /** v3.50: server engine version when THIS page bundle is older (stale
+   *  tab from a previous dev-server session) — non-null shows the refresh
+   *  banner and blocks 生成. */
+  const [staleEngine, setStaleEngine] = useState<string | null>(null);
   const objectUrlsRef = useRef<string[]>([]);
 
   const hasSummary = !!summary;
@@ -138,6 +165,27 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
     // Default mode: real data → ChimeraX (falls back automatically), none → demo.
     setMode(hasSummary ? "chimerax" : "demo");
   }, [hasSummary]);
+
+  /** v3.50: compare this bundle's embedded engine version against the LIVE
+   *  server route. The dev server restarts between sessions while old tabs
+   *  keep running old JS against the new routes — the round-9 log carried
+   * `缩略图获取失败` WITHOUT v3.48+'s “ — <err>” suffix, i.e. it came from a
+   * v3.47-era bundle re-running the long-fixed `save image` bug. At mount +
+   * at every generate we refuse to run a stale bundle. */
+  const checkEngineFresh = useCallback(async (): Promise<string | null> => {
+    try {
+      const res = await fetch("/api/cryosmart/flow-figure/version", { cache: "no-store" });
+      if (!res.ok) return null;
+      const data = (await res.json()) as { version?: string };
+      return data.version && data.version !== FLOW_ENGINE_VERSION ? data.version : null;
+    } catch {
+      return null; // transient network failure must never block a run
+    }
+  }, []);
+
+  useEffect(() => {
+    void checkEngineFresh().then((serverVersion) => setStaleEngine(serverVersion));
+  }, [checkEngineFresh]);
 
   useEffect(() => {
     return () => {
@@ -201,12 +249,25 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
 
   const generate = useCallback(async () => {
     if (step.busy) return;
+    /* v3.50: stale-bundle gate — a page older than the live server refuses
+     * to run (its bridge JS predates the current save/fix ladder and its
+     * failures are indistinguishable from real bugs in pasted logs). */
+    const serverVersion = await checkEngineFresh();
+    if (serverVersion) {
+      const msg = `本页面是旧版本（引擎 v${FLOW_ENGINE_VERSION}），服务端已更新到 v${serverVersion} — 请刷新页面（或关闭旧标签页重新打开本应用）后再生成。`;
+      setStaleEngine(serverVersion);
+      setStep({ ...IDLE, error: msg });
+      toast.error(msg);
+      return;
+    }
+    setStaleEngine(null);
     objectUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
     objectUrlsRef.current = [];
     setResult(null);
     setThumbs([]);
     setRenderReport([]);
     setStep({ busy: true, phase: "准备", pct: 2, logs: [], error: null });
+    pushLog(`流程图引擎 v${FLOW_ENGINE_VERSION}`);
 
     try {
       /* 1. figure model */
@@ -248,7 +309,53 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               " （详见下方说明），或改用「会话预览图 / 演示样例」模式。",
           );
         }
-        pushLog(`桥接: ${transport.kind} ${transport.host}:${transport.port}${transport.canFetchFiles ? "" : " (仅命令，无截图回传)"}`);
+
+        /* v3.50: re-validate the CACHED bridge before every run. ChimeraX
+         * restarts (or a re-opened relay.py) create a NEW mkdtemp workdir
+         * while the OLD one still exists on disk — a stale cached transport
+         * would then save PNGs into the dead workdir ("successfully") while
+         * /file resolves the NEW one: clean save + /file 404 for every
+         * screenshot, round-9's exact symptom as a REAL latent bug (not
+         * just the stale-page bundle). Ping is one cheap request; on any
+         * workdir change the save-rung cache resets with it. */
+        if (transport.kind === "relay") {
+          try {
+            const res = await fetch(`${transport.base}/ping`, { cache: "no-store" });
+            if (res.ok) {
+              const data = (await res.json()) as { workdir?: string; stage?: boolean };
+              if (typeof data.workdir === "string" && data.workdir !== transport.workdir) {
+                transport = {
+                  ...transport,
+                  workdir: data.workdir,
+                  canStage: !!data.stage,
+                  saveMode: undefined,
+                  cdDone: false,
+                };
+                setBridge(transport);
+                pushLog(`桥接工作目录已更新: ${data.workdir}（ChimeraX/桥已重启 — 已自动重新校准）`);
+              } else if (typeof data.stage === "boolean" && !!data.stage !== transport.canStage) {
+                transport = { ...transport, canStage: !!data.stage };
+                setBridge(transport);
+              }
+            } else {
+              // The cached bridge died (ChimeraX closed) — re-probe.
+              const fresh = await probeBridge();
+              if (fresh) transport = fresh;
+            }
+          } catch {
+            // Relay unreachable on the cached base — full re-probe.
+            const fresh = await probeBridge();
+            if (fresh) transport = fresh;
+          }
+          if (!transport) {
+            throw new Error(`先前连接的 ChimeraX 桥已不可达（ChimeraX 已关闭？）— 请重新打开 ChimeraX 并运行一次: ${relayCommand}`);
+          }
+        }
+        pushLog(
+          `桥接: ${transport.kind} ${transport.host}:${transport.port}` +
+            (transport.kind === "relay" && transport.workdir ? ` · 工作目录 ${transport.workdir}` : "") +
+            `${transport.canFetchFiles ? "" : " (仅命令，无截图回传)"}`,
+        );
 
         if (transport.kind === "rest") {
           // The official REST server cannot serve rendered PNGs back —
@@ -480,10 +587,33 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       const blob = buildWorkflowPptx(model, { images, footnote });
       const project = mode === "demo" ? "Demo" : `${summary?.project_uid ?? "P"}_${summary?.start_uid ?? "J"}`;
       const filename = `CryoSmart_${project}_workflow.pptx`;
-      const url = URL.createObjectURL(blob);
-      objectUrlsRef.current.push(url);
-      setResult({ url, size: blob.size, filename });
-      downloadBlob(blob, filename);
+      const blobUrl = URL.createObjectURL(blob);
+      objectUrlsRef.current.push(blobUrl);
+      /* v3.50 (round-9 “pptx文件下载不了”): the finished PPTX is ALSO
+       * uploaded to the app's in-memory artifact store so the user gets a
+       * REAL same-origin URL. In-page blob: downloads silently no-op in
+       * some sandboxed preview iframes; a server URL can be re-clicked,
+       * right-click “链接另存为”, opened in a new tab, or copied, and it
+       * survives a page reload (45-minute TTL, same as the map store). */
+      let serverUrl: string | null = null;
+      try {
+        const up = await fetch(
+          `/api/cryosmart/flow-figure/asset?name=${encodeURIComponent(filename)}&mime=${encodeURIComponent(
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          )}`,
+          { method: "POST", body: blob },
+        );
+        if (up.ok) {
+          const data = (await up.json()) as { url?: string };
+          if (data.url) serverUrl = `${data.url}&download=1`;
+        }
+      } catch {
+        /* non-fatal — the blob fallback stays */
+      }
+      if (!serverUrl) pushLog("⚠ 服务端下载链接生成失败 — 将仅用页面内下载（关闭本页后链接即失效）");
+      const downloadHref = serverUrl ?? blobUrl;
+      triggerDownload(downloadHref, filename);
+      setResult({ url: downloadHref, blobUrl, serverUrl, size: blob.size, filename });
       setStep((s) => ({ ...s, busy: false, phase: "完成", pct: 100 }));
       toast.success(`流程图已生成: ${filename} (${fmtSize(blob.size)})`);
 
@@ -509,7 +639,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       setStep((s) => ({ ...s, busy: false, error: message }));
       toast.error(`流程图生成失败: ${message}`);
     }
-  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, pushLog, maxGroups, includeFsc, bridgeHosts]);
+  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, pushLog, maxGroups, includeFsc, bridgeHosts, checkEngineFresh]);
 
   const canGenerate = !step.busy && (mode === "demo" || !!summary);
   const bridgeBadge = useMemo(() => {
@@ -528,6 +658,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           </span>
           <CardTitle className="text-lg">Workflow Figure · 一键流程图</CardTitle>
           <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-slate-500 dark:text-slate-400">16:9 PPTX</Badge>
+          {/* v3.50: engine version — printed in every run log, so a pasted log
+           * names its own bundle version (a log without the 流程图引擎 line is
+           * a pre-3.50 stale page by definition). */}
+          <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-teal-700 dark:text-teal-300">引擎 v{FLOW_ENGINE_VERSION}</Badge>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
           按参考 Workflow.pptx 版式一键生成流程图：所有 map 由 ChimeraX 渲染，先拟合到参考地图保证朝向一致，再做 90° 视角统一，手性（z-flip）逐图检查并翻正；输出 16:9 PPTX。
@@ -628,6 +762,18 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           </div>
         )}
 
+        {/* v3.50: stale-page banner — a tab from an older dev-server session
+         * must not re-run old bridge JS against the new server. */}
+        {staleEngine && (
+          <div className="flex items-start gap-2 rounded-md border border-rose-300 bg-rose-50 p-2.5 text-[12px] text-rose-700 dark:border-rose-800 dark:bg-rose-950/30 dark:text-rose-300">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              本页面是<strong>旧版本</strong>（引擎 v{FLOW_ENGINE_VERSION}），服务端已更新到 v{staleEngine} — 请
+              <strong>刷新页面</strong>（或关闭旧标签页重新打开本应用）后再生成，否则流程图会按旧逻辑失败。
+            </span>
+          </div>
+        )}
+
         {/* generate */}
         <div className="flex flex-wrap items-center gap-3">
           <Button
@@ -679,7 +825,36 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   <Download className="h-3 w-3" /> 再次下载
                 </a>
               </Button>
+              {result.serverUrl && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 text-[11px]"
+                  onClick={() => {
+                    const abs = new URL(result.serverUrl as string, window.location.origin).href;
+                    void navigator.clipboard
+                      .writeText(abs)
+                      .then(() => toast.success("下载链接已复制（45 分钟内有效，可在新标签页中粘贴直达）"))
+                      .catch(() => toast.error("复制失败 — 请右键“再次下载”选择“复制链接地址”"));
+                  }}
+                >
+                  <Link2 className="h-3 w-3" /> 复制链接
+                </Button>
+              )}
             </div>
+            {/* v3.50 (round-9 “pptx文件下载不了”): in sandboxed preview iframes
+             * an auto blob download can silently no-op. The PPTX now ALSO
+             * lives on the server, so even when the auto-click is blocked the
+             * link above works (re-click / save-as / copy / new tab). */}
+            {typeof window !== "undefined" && window.self !== window.top && (
+              <div className="flex items-start gap-1.5 rounded-md border border-emerald-200 bg-white/70 p-2 text-[11px] leading-relaxed text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  若文件未自动开始下载：请点击「再次下载」；仍无反应时，可复制链接后在预览面板顶部点
+                  <strong>「在新标签页打开」</strong>，在新页面的地址栏粘贴并回车即可下载（链接 45 分钟内有效）。
+                </span>
+              </div>
+            )}
             {thumbs.length > 0 && (
               <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
                 {thumbs.map((t) => (

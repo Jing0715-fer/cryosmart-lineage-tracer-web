@@ -228,14 +228,30 @@ const server = Bun.serve({
     }
     if (pathname === "/flow-e2e/reset") {
       resetRelayState();
-      const blockHttp = new URL(req.url).searchParams.get("http") === "block";
+      const sp = new URL(req.url).searchParams;
+      const blockHttp = sp.get("http") === "block";
       relayState.httpBlocked = blockHttp;
       // v3.48 drill switch: reject every legit `save "<path>.png"` so the
       // bridge's save-error surfacing (缩略图保存失败 / 保存失败 lines) can
       // be E2E-verified against a ChimeraX that cannot write files.
-      const rejectSave = new URL(req.url).searchParams.get("save") === "reject";
+      const rejectSave = sp.get("save") === "reject";
       relayState.saveRejected = rejectSave;
-      return Response.json({ ok: true, http_blocked: blockHttp, save_rejected: rejectSave });
+      // v3.50 drill switch: absolute-path saves SUCCEED but land OUTSIDE
+      // the workdir (the user's round-7/9 symptom: clean save + /file 404)
+      // — only a bare RELATIVE save after `cd <workdir>` is fetchable.
+      const file404 = sp.get("file404");
+      relayState.divertAbsSave = file404 === "abs";
+      // v3.50 drill: rotate the reported workdir — simulates ChimeraX/relay
+      // restarting between page runs (new mkdtemp) while a stale page still
+      // caches the old one; the card must re-validate before saving.
+      if (sp.get("workdir") === "2") relayState.workdir = "/tmp/cryoflow-mock-2";
+      return Response.json({
+        ok: true,
+        http_blocked: blockHttp,
+        save_rejected: rejectSave,
+        file404_abs: relayState.divertAbsSave,
+        workdir: relayState.workdir,
+      });
     }
     if (pathname === "/flow-e2e/relay-stats") {
       return new Response(JSON.stringify(relayStats(), null, 2), {
@@ -588,6 +604,22 @@ const relayState = {
   saveImageRejected: 0,
   /** v3.48: /flow-e2e/reset?save=reject — every legit save errors (drill). */
   saveRejected: false,
+  /** v3.50: ChimeraX process cwd — null until `cd <workdir>` succeeds; a
+   *  RELATIVE save only lands in the workdir (i.e. /file-fetchable) after
+   *  the cd. */
+  cwd: null as string | null,
+  /** v3.50: the CURRENT workdir /ping reports — /file, cd and relative
+   *  saves all resolve against it; ?workdir=2 rotates it to simulate a
+   *  ChimeraX/relay restart (new mkdtemp) between page runs. */
+  workdir: "/tmp/cryoflow-mock",
+  /** v3.50: /flow-e2e/reset?file404=abs — absolute-path saves succeed but
+   *  divert OUTSIDE the workdir, recreating the user's clean-save +
+   *  /file 404 symptom. */
+  divertAbsSave: false,
+  saveAbsDiverted: 0,
+  cdOk: 0,
+  saveRelativeOk: 0,
+  saveRelativeMissed: 0,
 };
 
 function resetRelayState() {
@@ -599,6 +631,13 @@ function resetRelayState() {
   relayState.httpBlocked = false;
   relayState.saveImageRejected = 0;
   relayState.saveRejected = false;
+  relayState.cwd = null;
+  relayState.workdir = "/tmp/cryoflow-mock";
+  relayState.divertAbsSave = false;
+  relayState.saveAbsDiverted = 0;
+  relayState.cdOk = 0;
+  relayState.saveRelativeOk = 0;
+  relayState.saveRelativeMissed = 0;
 }
 
 function relayNextModelId(): number {
@@ -626,6 +665,12 @@ function relayStats() {
     open_http_format_rejected: relayState.opens.filter((o) => o.formatRejected).length,
     save_image_rejected: relayState.saveImageRejected,
     save_rejected_mode: relayState.saveRejected,
+    file404_abs_mode: relayState.divertAbsSave,
+    workdir: relayState.workdir,
+    save_absolute_diverted: relayState.saveAbsDiverted,
+    cd_ok: relayState.cdOk,
+    save_relative_ok: relayState.saveRelativeOk,
+    save_relative_missed: relayState.saveRelativeMissed,
   };
 }
 function u_hasAsset(u: string): boolean {
@@ -750,6 +795,25 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   // proven desktop helper): save "<filename.png>" [width N] [height N]
   // [supersample N] [transparentBackground true|false] — `save image …`
   // parses the suffix-less word "image" as the filename and ERRORS out.
+  //
+  // v3.50 emulation — WHERE the save lands decides whether /file can fetch
+  // it back (the round-9 lesson: a clean save is no proof the file is in
+  // the workdir):
+  //   - ABSOLUTE path (any dir separator / drive letter) → lands at that
+  //     path. Under the file404=abs drill that path is OUTSIDE the workdir
+  //     — the mock stores nothing, /file 404s, exactly like a real ChimeraX
+  //     whose path resolution diverged from the bridge's join.
+  //   - RELATIVE bare name → lands in the process CWD; only /file-fetchable
+  //     once `cd <workdir>` ran (the bridge's cd-rel rung).
+  const cdMatch = /^cd\s+"([^"]+)"\s*$/i.exec(command);
+  if (cdMatch) {
+    if (cdMatch[1] === relayState.workdir) {
+      relayState.cwd = cdMatch[1];
+      relayState.cdOk += 1;
+      return { text: "", error: null };
+    }
+    return { text: "", error: `UserError: cd: ${cdMatch[1]}: no such directory` };
+  }
   const saveMatch =
     /^save\s+"([^"]+\.png)"(?:\s+width\s+\d+)?(?:\s+height\s+\d+)?(?:\s+supersample\s+\d+)?(?:\s+transparentBackground\s+(?:true|false))?\s*$/i.exec(command);
   if (saveMatch) {
@@ -759,9 +823,26 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
         error: "OSError: [Errno 28] No space left on device (simulated /flow-e2e/reset?save=reject drill)",
       };
     }
-    const name = saveMatch[1].split(/[\\/]/).pop() || "img.png";
-    relayState.files.set(name, MOCK_PNG);
-    return { text: `saved ${saveMatch[1]}`, error: null };
+    const target = saveMatch[1];
+    const isAbsolute = /[\\/]/.test(target) || /^[A-Za-z]:/.test(target);
+    if (isAbsolute) {
+      if (relayState.divertAbsSave) {
+        // Clean save that landed OUTSIDE the workdir — /file will 404.
+        relayState.saveAbsDiverted += 1;
+        return { text: `saved ${target}`, error: null };
+      }
+      const name = target.split(/[\\/]/).pop() || "img.png";
+      relayState.files.set(name, MOCK_PNG);
+      return { text: `saved ${target}`, error: null };
+    }
+    // Relative save — ChimeraX writes into its process cwd.
+    if (relayState.cwd === relayState.workdir) {
+      relayState.saveRelativeOk += 1;
+      relayState.files.set(target, MOCK_PNG);
+    } else {
+      relayState.saveRelativeMissed += 1;
+    }
+    return { text: `saved ${target}`, error: null };
   }
   if (/^save\s+image\b/i.test(command)) {
     relayState.saveImageRejected++;
@@ -798,7 +879,7 @@ const relayServer = Bun.serve({
       if (u.pathname === "/ping") {
         return reply(200, {
           ok: true,
-          workdir: "/tmp/cryoflow-mock",
+          workdir: relayState.workdir,
           version: "1.13-mock-legacy",
           // v3.47: the card's page-relay rung requires POST /stage — this
           // flag mirrors the real relay.py's /ping field.

@@ -77,12 +77,21 @@ export async function GET(req: NextRequest) {
   if (!entry) {
     return Response.json({ error: "asset not found or expired" }, { status: 404 });
   }
+  // v3.50: ?download=1 switches the disposition to attachment — the
+  // workflow PPTX is uploaded here after assembly so the user gets a REAL
+  // server URL (works when in-page blob: downloads are blocked, survives
+  // page state loss, can be copied / saved-as / opened in a new tab for as
+  // long as the 45-minute TTL lives).
+  const asDownload = req.nextUrl.searchParams.get("download") === "1";
+  const disposition = asDownload
+    ? `attachment; filename="${encodeURIComponent(entry.name)}"; filename*=UTF-8''${encodeURIComponent(entry.name)}`
+    : `inline; filename="${encodeURIComponent(entry.name)}"`;
   return new Response(entry.bytes as unknown as BodyInit, {
     status: 200,
     headers: {
       "Content-Type": entry.mime,
       "Content-Length": String(entry.bytes.byteLength),
-      "Content-Disposition": `inline; filename="${encodeURIComponent(entry.name)}"`,
+      "Content-Disposition": disposition,
       "Cache-Control": "no-store",
     },
   });

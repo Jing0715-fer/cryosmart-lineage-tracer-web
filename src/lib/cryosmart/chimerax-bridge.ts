@@ -32,6 +32,22 @@
  * image <path>` makes `save` treat the suffix-less word "image" as the
  * filename and error out, which silently 404'd every PNG fetch on the
  * user's real build). Same shape as the proven desktop helper.
+ *
+ * v3.50 (round-9): the save→/file chain no longer trusts ONE path shape.
+ * A clean `save` whose PNG /file then 404s (the user's round-7/9 symptom —
+ * on the round-9 log the page bundle was stale and re-ran the v3.47
+ * `save image` bug, but a genuine path/tokenizer divergence is equally
+ * possible and was previously undiagnosable) now walks a ladder of save
+ * rungs until /file actually returns bytes:
+ *   abs     — `save "<workdir-sep>/<name>" …` (desktop-helper shape)
+ *   abs-fwd — same but every backslash flipped to "/" (Windows Python
+ *             accepts forward slashes; tokenizer-proof)
+ *   cd-rel  — `cd "<workdir>"` ONCE, then `save "<name>" …` (bare relative
+ *             name — nothing to mangle; ChimeraX's own `cd` resolves the
+ *             workdir on ITS side, so the file must land where /file looks)
+ * The winning rung is cached on the transport and reused for every later
+ * save of the run. Exhausting the ladder logs the workdir + tried rungs so
+ * a pasted log is self-diagnosing.
  */
 
 export type BridgeKind = "relay" | "rest";
@@ -53,7 +69,15 @@ export interface FlowTransport {
    *  path ChimeraX can `open`). Without it, the page-relay map fallback
    *  cannot run and the user must re-open the updated relay.py once. */
   canStage?: boolean;
+  /** v3.50: which save rung last produced a /file-fetchable PNG — cached
+   *  per transport so later saves go straight to the working shape. */
+  saveMode?: SaveMode;
+  /** v3.50: `cd <workdir>` already executed for this transport (the cd
+   *  persists in ChimeraX's process cwd). */
+  cdDone?: boolean;
 }
+
+export type SaveMode = "abs" | "abs-fwd" | "cd-rel";
 
 export interface ProbeOptions {
   relayPorts?: number[];
@@ -395,6 +419,108 @@ function joinWorkdirPath(workdir: string, name: string): string {
   return base + (base.includes("\\") ? "\\" : "/") + name;
 }
 
+/** v3.50: same join but ALWAYS with "/" — Windows Python accepts forward
+ *  slashes everywhere, and a quoted forward-slash path survives any
+ *  command tokenizer that eats backslashes. */
+function joinWorkdirPathFwd(workdir: string, name: string): string {
+  const base = String(workdir || "").replace(/[\\/]+$/, "").replace(/\\/g, "/");
+  return `${base}/${name}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* v3.50: save→fetch ladder                                            */
+/* ------------------------------------------------------------------ */
+
+export interface SaveShotOptions {
+  width: number;
+  height: number;
+  supersample: number;
+}
+
+export class SaveShotError extends Error {
+  /** "save" = the ChimeraX save/cd command raised; "fetch" = every rung
+   * saved clean but /file still could not return the bytes. */
+  kind: "save" | "fetch";
+  constructor(message: string, kind: "save" | "fetch") {
+    super(message);
+    this.name = "SaveShotError";
+    this.kind = kind;
+  }
+}
+
+/** v3.50: save a screenshot PNG into the bridge workdir and fetch its
+ *  bytes back, walking the save-rung ladder until /file actually returns
+ *  bytes (see the header comment). The winning rung is cached on the
+ *  transport. Throws SaveShotError — call sites format the log message
+ * from .kind, so a pasted log names the true failure layer. */
+export async function saveAndFetchPng(
+  t: FlowTransport,
+  name: string,
+  opts: SaveShotOptions,
+  exec: (command: string) => Promise<ExecResult>,
+  onNote?: (line: string) => void,
+): Promise<Uint8Array> {
+  if (t.kind !== "relay" || !t.workdir) throw new SaveShotError("file save requires the relay transport", "save");
+  const saveArgs = ` width ${opts.width} height ${opts.height} supersample ${opts.supersample} transparentBackground false`;
+  const allModes: SaveMode[] = [
+    "abs",
+    ...(String(t.workdir).includes("\\") ? (["abs-fwd"] as SaveMode[]) : []),
+    "cd-rel",
+  ];
+  // The cached winning rung goes FIRST (one clean attempt in the happy
+  // path), but the rest of the ladder still follows — a previously-working
+  // save shape must never be a dead end when the environment changes.
+  const order: SaveMode[] = t.saveMode
+    ? [t.saveMode, ...allModes.filter((m) => m !== t.saveMode)]
+    : allModes;
+  const tried: string[] = [];
+  let lastSaveError: string | null = null;
+  for (const mode of order) {
+    tried.push(mode);
+    let path = "";
+    if (mode === "abs") path = quotePath(joinWorkdirPath(t.workdir, name));
+    else if (mode === "abs-fwd") path = quotePath(joinWorkdirPathFwd(t.workdir, name));
+    if (mode === "cd-rel") {
+      if (!t.cdDone) {
+        const cd = await exec(`cd ${quotePath(t.workdir)}`);
+        if (cd.error) {
+          lastSaveError = cd.error;
+          continue; // cd failed — next rung (or exhaustion diagnostics)
+        }
+        t.cdDone = true;
+      }
+      path = quotePath(name); // bare relative name — nothing to mangle
+    }
+    const saveRes = await exec(`save ${path}${saveArgs}`);
+    if (saveRes.error) {
+      lastSaveError = saveRes.error;
+      continue; // this rung's command shape failed — try the next one
+    }
+    try {
+      const bytes = await bridgeFile(t, name);
+      if (t.saveMode !== mode) {
+        t.saveMode = mode;
+        if (mode !== "abs") {
+          onNote?.(
+            `  （已改用 ${mode === "cd-rel" ? "cd + 相对路径" : "正斜杠路径"}方式保存截图 — 后续沿用）`,
+          );
+        }
+      }
+      return bytes;
+    } catch (err) {
+      if (mode !== order[order.length - 1]) continue; // /file missed — next rung
+      throw new SaveShotError(
+        `保存命令未报错但 /file 未找到 ${name}（workdir=${t.workdir}；已尝试 ${tried.join(" → ")} 全部未命中：${String(err).slice(0, 120)}）`,
+        "fetch",
+      );
+    }
+  }
+  throw new SaveShotError(
+    `${lastSaveError ? logSnippet(lastSaveError, 160) : `所有保存方式均失败（已尝试 ${tried.join(" → ")}）`}`,
+    "save",
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Thumbnail coverage scoring (browser port of score_current_view)     */
 /* ------------------------------------------------------------------ */
@@ -564,21 +690,19 @@ export async function renderFigureMaps(
       await exec(t, "wait 1", opts, true);
       const thumb = `_thumb_${v.desc.replace(/[^a-z0-9]/gi, "")}.png`;
       // v3.48 (round-7): plain `save <png-path> …` — `save image` is NOT a
-      // ChimeraX command and its exec error was previously swallowed by the
-      // soft flag, surfacing only as /file 404 (覆盖率 0.0000 for all five
-      // viewpoints on the user's real build). Errors are now in the log.
-      const thumbSave = await exec(
-        t,
-        `save ${quotePath(joinWorkdirPath(t.workdir, thumb))} width ${THUMB_SIZE} height ${THUMB_SIZE} supersample 1 transparentBackground false`,
-        opts,
-        true,
-      );
-      if (thumbSave.error) {
-        log(`  视角 ${v.desc}: 缩略图保存失败 — ${logSnippet(thumbSave.error, 140)}`);
-        continue;
-      }
+      // ChimeraX command (errors were swallowed by the soft flag and only
+      // surfaced as /file 404; now the real error reaches the log).
+      // v3.50 (round-9): the save→fetch rides the rung ladder — abs →
+      // abs-fwd → cd+relative — so a path/tokenizer divergence self-heals
+      // instead of failing every thumbnail with a bare /file 404.
       try {
-        const bytes = await bridgeFile(t, thumb);
+        const bytes = await saveAndFetchPng(
+          t,
+          thumb,
+          { width: THUMB_SIZE, height: THUMB_SIZE, supersample: 1 },
+          (c) => exec(t, c, opts, true),
+          log,
+        );
         const score = await thumbnailCoverageScore(bytes);
         log(`  视角 ${v.desc}: 覆盖率 ${score.toFixed(4)}`);
         if (score > best) {
@@ -586,7 +710,9 @@ export async function renderFigureMaps(
           view = { ...v, score };
         }
       } catch (err) {
-        log(`  视角 ${v.desc}: 缩略图获取失败 — ${String(err).slice(0, 140)}`);
+        const saveFailed = err instanceof SaveShotError && err.kind === "save";
+        const detail = err instanceof Error ? err.message : String(err);
+        log(`  视角 ${v.desc}: 缩略图${saveFailed ? "保存" : "获取"}失败 — ${logSnippet(detail, 140)}`);
       }
     }
     await exec(t, "view _cfbase", opts, true);
@@ -781,19 +907,25 @@ export async function renderFigureMaps(
       const name = `render_${safeKeyPart(r.key.replace(/\//g, "__"))}.png`;
       // v3.48: plain `save <png-path> …` — see the thumbnail note above; the
       // save's ChimeraX error now reaches the log instead of hiding behind
-      // the subsequent /file 404.
-      const saveRes = await exec(
-        t,
-        `save ${quotePath(joinWorkdirPath(t.workdir, name))} width ${SNAPSHOT_W} height ${SNAPSHOT_H} supersample 3 transparentBackground false`,
-        opts,
-        true,
-      );
+      // the subsequent /file 404. v3.50: rides the save→fetch rung ladder
+      // (abs → abs-fwd → cd+rel), and the failure layer is named in the
+      // message: 保存失败 = ChimeraX raised; 未找到 = saved clean but /file
+      // could not return it (workdir included for diagnosis).
       try {
-        if (saveRes.error) throw new Error(`保存失败 — ${logSnippet(saveRes.error, 160)}`);
-        r.png = await bridgeFile(t, name);
+        r.png = await saveAndFetchPng(
+          t,
+          name,
+          { width: SNAPSHOT_W, height: SNAPSHOT_H, supersample: 3 },
+          (c) => exec(t, c, opts, true),
+          log,
+        );
         log(`  截图完成: ${r.key}`);
       } catch (err) {
-        log(`  截图获取失败 ${r.key}: ${String(err).slice(0, 180)}`);
+        const saveFailed = err instanceof SaveShotError && err.kind === "save";
+        const detail = err instanceof Error ? err.message : String(err);
+        log(
+          `  截图获取失败 ${r.key}: ${saveFailed ? `保存失败 — ${logSnippet(detail, 160)}` : logSnippet(detail, 180)}`,
+        );
       }
       shotDone += 1;
       // v3.49 (round-8): the card owns the last stretch (裁剪白边 90 →
