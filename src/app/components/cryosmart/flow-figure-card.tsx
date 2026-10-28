@@ -41,6 +41,7 @@ import {
   fscPng,
   uniformLetterbox,
   figureFootnote,
+  figureMapSources,
   type FlowFigureModel,
 } from "@/lib/cryosmart/workflow-figure";
 import { buildWorkflowPptx } from "@/lib/cryosmart/workflow-pptx";
@@ -283,7 +284,16 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           maxGroups: Number.isFinite(parsedGroups) ? parsedGroups : 10,
         });
       }
-      pushLog(`阶段模型: ${model.groups.length} 组 · 参考 ${model.referenceKey ?? "—"}`);
+      const multiClassGroups = model.groups.filter((g) => g.some((i) => (i.classes?.length ?? 0) > 1));
+      const mapTotal = model.groups.flat().reduce(
+        (s, i) => s + (i.classes?.length ?? (i.mapKey || i.imageUrl ? 1 : 0)),
+        0,
+      );
+      pushLog(
+        `阶段模型: ${model.groups.length} 组 · ${mapTotal} 张缩略图` +
+          (multiClassGroups.length ? ` · ${multiClassGroups.length} 个多 class 行（每行并排: ${multiClassGroups.map((g) => g[0].uid).join(" + ")}）` : "") +
+          ` · 参考 ${model.referenceKey ?? "—"}`,
+      );
       for (const w of model.warnings) pushLog(`⚠ ${w}`);
       const parallel = model.groups.filter((g) => g.length > 1);
       for (const g of parallel) {
@@ -296,8 +306,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
 
       /* 2. per-mode thumbnails */
       let chiralityMeta = { corrected: 0, consistent: 0, ambiguous: 0, failed: 0, view: "" };
-      const mapItems = model.groups.flat().filter((i) => i.mapKey && i.map?.downloadUrl);
-      const uniqueMaps = new Map(mapItems.map((i) => [i.mapKey as string, i]));
+      const uniqueMaps = figureMapSources(model);
 
       if (mode === "chimerax") {
         setStep((s) => ({ ...s, phase: "连接 ChimeraX", pct: 6 }));
@@ -367,14 +376,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         const referenceKey = model.referenceKey;
         const referenceItem = uniqueMaps.get(referenceKey ?? "");
         if (!referenceItem) throw new Error("参考地图缺失，无法对齐。");
-        const refUrl = referenceItem.map?.downloadUrl as string;
+        const refUrl = referenceItem.downloadUrl;
 
         setStep((s) => ({ ...s, phase: "探测 ChimeraX 直接读取 CryoSmart", pct: 10 }));
         const probe = await bridgeOpenProbe(transport, refUrl);
         const sourceFor = new Map<string, string>();
         if (probe.ok && probe.modelId != null) {
           await bridgeExec(transport, `close #${probe.modelId}`);
-          for (const [key, item] of uniqueMaps) sourceFor.set(key, item.map?.downloadUrl as string);
+          for (const [key, item] of uniqueMaps) sourceFor.set(key, item.downloadUrl);
           pushLog("ChimeraX 可直接读取内网地图 — 直连模式");
         } else {
           // v3.45 (user report — “ChimeraX 直接读取失败(HTTP 401) → 改走应用
@@ -420,7 +429,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               if (probe2.ok && probe2.modelId != null) {
                 await bridgeExec(transport, `close #${probe2.modelId}`);
                 for (const [key, item] of uniqueMaps) {
-                  const pu = proxyUrlFor(item.map?.downloadUrl ?? "");
+                  const pu = proxyUrlFor(item.downloadUrl);
                   if (pu) sourceFor.set(key, pu);
                   else pushLog(`⚠ 地图 ${key} 无法构建代理 URL，将跳过`);
                 }
@@ -458,7 +467,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               done += 1;
               setStep((s) => ({ ...s, phase: `中转地图 ${done}/${uniqueMaps.size}`, pct: 10 + (done / Math.max(1, uniqueMaps.size)) * 35 }));
               try {
-                const bytes = await cryoSmartBytes(session, item.map?.downloadUrl as string, {
+                const bytes = await cryoSmartBytes(session, item.downloadUrl, {
                   timeoutMs: 300_000,
                   onBytes: (total) => setStep((s) => ({ ...s, phase: `下载 ${key} · ${fmtSize(total)}（${done}/${uniqueMaps.size}）` })),
                 });
@@ -482,12 +491,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
 
         /* align + chirality + screenshots */
         const maps = [...uniqueMaps.values()]
-          .filter((i) => i.mapKey !== referenceKey)
-          .map((i) => ({
-            key: i.mapKey as string,
-            uid: i.uid,
-            group: i.map?.group ?? "volume",
-            sourceUrl: sourceFor.get(i.mapKey as string) ?? "",
+          .filter((m) => m.key !== referenceKey)
+          .map((m) => ({
+            key: m.key,
+            uid: m.uid,
+            group: m.group,
+            sourceUrl: sourceFor.get(m.key) ?? "",
           }))
           .filter((m) => m.sourceUrl);
 
@@ -506,7 +515,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           reference: {
             key: referenceKey as string,
             uid: referenceItem.uid,
-            group: referenceItem.map?.group ?? "volume",
+            group: referenceItem.group,
             sourceUrl: referenceSource,
           },
           maps,
@@ -528,7 +537,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         };
 
         if (rendered.size) {
-          setStep((s) => ({ ...s, phase: "统一裁剪白边", pct: 90 }));
+          setStep((s) => ({ ...s, phase: "统一取景裁边（背景自适应）", pct: 90 }));
           const trimmed = await uniformLetterbox(rendered, 2, 1600);
           for (const [key, bytes] of trimmed) images.set(key, bytes);
         }
@@ -538,7 +547,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         for (const [key, item] of uniqueMaps) {
           done += 1;
           setStep((s) => ({ ...s, phase: `预览图 ${done}/${uniqueMaps.size}`, pct: 30 + (done / Math.max(1, uniqueMaps.size)) * 50 }));
-          const url = item.map?.previewUrl;
+          const url = item.previewUrl;
           if (!url) continue;
           try {
             images.set(key, await cryoSmartBytes(session, url));
@@ -622,14 +631,19 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       const shown = new Set<string>();
       for (const group of model.groups) {
         for (const item of group) {
-          const key = item.mapKey ?? item.imageUrl ?? null;
-          if (!key || shown.has(key)) continue;
-          const bytes = images.get(key) ?? (item.imageUrl ? images.get(item.imageUrl) : null);
-          if (bytes) {
-            shown.add(key);
-            const u = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "image/png" }));
-            objectUrlsRef.current.push(u);
-            previewThumbs.push({ key, url: u });
+          // v3.51: every class slot gets its own preview thumb.
+          const keys = item.classes?.length
+            ? item.classes.map((c) => c.mapKey)
+            : [item.mapKey ?? item.imageUrl ?? null];
+          for (const key of keys) {
+            if (!key || shown.has(key)) continue;
+            const bytes = images.get(key) ?? (item.imageUrl ? images.get(item.imageUrl) : null);
+            if (bytes) {
+              shown.add(key);
+              const u = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "image/png" }));
+              objectUrlsRef.current.push(u);
+              previewThumbs.push({ key, url: u });
+            }
           }
         }
       }

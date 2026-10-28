@@ -212,11 +212,15 @@ export function buildWorkflowPptx(
     });
   }
 
-  /* ---- v3.49 stage groups: reference-faithful VERTICAL flow ----
-   * Stages stack top→bottom exactly like the reference; one row per stage,
-   * parallel branches side by side within the row. A single column is
-   * preferred (the reference's look); it wraps into 2 (at most 3) columns
-   * only when thumbnails would fall below the readability floor. */
+  /* ---- v3.51 stage groups: reference-faithful VERTICAL flow ----
+   * Stages stack top→bottom exactly like the reference; one ROW per stage.
+   * v3.51 (round-10 request — “每个 job 的多个 class 并列成一排”): a
+   * class-split job (ab-initio / hetero / 3D-class) now renders EVERY class
+   * volume side by side INSIDE its stage row — ONE job label above the whole
+   * class span, per-class stats under each thumbnail. Parallel branches keep
+   * their own labels. A single column is preferred (the reference's look);
+   * it wraps into 2 (at most 3) columns only when thumbnails would fall
+   * below the readability floor. */
   const groups = fig.groups.filter((g) => g.length > 0);
   const n = Math.max(1, groups.length);
   const FLOW_TOP = 1.18;
@@ -232,19 +236,43 @@ export function buildWorkflowPptx(
   const REF_IMG_W = 3.12; // the reference's own thumbnail width (2:1)
   const MIN_IMG_W = 1.45; // readability floor before wrapping columns
 
+  /** v3.51: expand an item into its thumbnail slots (classes, or the single
+   *  mapKey/imageUrl slot for demo/FSC/montage/legacy items). */
+  const itemSlotsOf = (
+    item: FlowFigureItem,
+  ): Array<{ key: string | null; stats: string[]; groupTag?: string }> => {
+    if (item.classes?.length) {
+      const multi = item.classes.length > 1;
+      return item.classes.map((c) => ({
+        key: c.mapKey,
+        stats: multi ? c.stats : item.stats.length ? item.stats : c.stats,
+        groupTag: multi ? c.group : undefined,
+      }));
+    }
+    return [{ key: item.mapKey ?? item.imageUrl, stats: item.stats }];
+  };
+  const rowThumbTotal = (g: FlowFigureItem[]) =>
+    g.reduce((s, it) => s + Math.max(1, itemSlotsOf(it).length), 0);
+  const rowGapUnits = (g: FlowFigureItem[]) =>
+    g.reduce((s, it) => s + Math.max(0, itemSlotsOf(it).length - 1), 0) + Math.max(0, g.length - 1);
+
   const colWFor = (c: number) => (contentW - (c - 1) * COL_GAP) / c;
   const pitchFor = (c: number) => availH / Math.max(1, Math.ceil(n / c));
-  const anyParallel = groups.some((g) => g.length >= 2);
-  const rowHExtra = anyParallel ? UNDER_H : 0;
+  const anyMultiThumb = groups.some((g) => rowThumbTotal(g) > 1);
+  const rowHExtra = anyMultiThumb ? UNDER_H : 0;
   const imgWFor = (c: number) => 2 * (pitchFor(c) - LABEL_H - ROW_GAP - rowHExtra);
   /** Widest thumbnail every stage row fits at column count c, capped by the
-   *  reference's 3.12 in and by each row's share of the column width. */
+   *  reference's 3.12 in and by each row's share of the column width
+   *  (v3.51: a row's share now counts EVERY class thumbnail in it). */
   const effectiveImgW = (c: number) => {
     let w = Math.min(REF_IMG_W, imgWFor(c));
     const cw = colWFor(c);
     for (const g of groups) {
-      const k = Math.max(1, g.length);
-      const extras = k === 1 ? STATS_W + STATS_GAP : (k - 1) * ITEM_GAP;
+      const k = Math.max(1, rowThumbTotal(g));
+      const slots0 = itemSlotsOf(g[0]);
+      const extras =
+        rowGapUnits(g) * ITEM_GAP +
+        (k === 1 && slots0[0]?.stats.length ? STATS_W + STATS_GAP : 0);
       w = Math.min(w, (cw - extras) / k);
     }
     return w;
@@ -259,11 +287,17 @@ export function buildWorkflowPptx(
   const rowsPerCol = Math.ceil(n / cols);
   const pitch = pitchFor(cols);
 
+  interface PlacedSlot {
+    thumb: Box;
+    stats: Box | null;
+    statsLines: string[];
+    key: string | null;
+    descr: string;
+  }
   interface PlacedItem {
     item: FlowFigureItem;
     label: Box;
-    thumb: Box;
-    stats: Box | null;
+    slots: PlacedSlot[];
   }
   interface PlacedRow {
     items: PlacedItem[];
@@ -273,74 +307,97 @@ export function buildWorkflowPptx(
 
   const rows: PlacedRow[] = [];
   groups.forEach((group, i) => {
-    const k = Math.max(1, group.length);
-    const side = k === 1;
-    const rowW = k * imgW + (k - 1) * ITEM_GAP + (side ? STATS_W + STATS_GAP : 0);
+    const thumbsTotal = rowThumbTotal(group);
+    const side = thumbsTotal === 1;
+    const firstSlots = itemSlotsOf(group[0]);
+    const sideStats = side && firstSlots[0]?.stats.length ? STATS_W + STATS_GAP : 0;
+    const rowW = thumbsTotal * imgW + rowGapUnits(group) * ITEM_GAP + sideStats;
     const col = Math.floor(i / rowsPerCol);
     const x0 = MARGIN_X + col * (colW + COL_GAP) + (colW - rowW) / 2;
     const rowH = LABEL_H + imgH + (side ? 0 : UNDER_H);
     const top = FLOW_TOP + (i % rowsPerCol) * pitch + Math.max(0, (pitch - rowH) / 2);
     const items: PlacedItem[] = [];
-    group.forEach((item, ii) => {
-      const x = x0 + ii * (imgW + ITEM_GAP);
-      const label: Box = { x, y: top, w: imgW, h: LABEL_H };
-      const thumb: Box = { x, y: top + LABEL_H, w: imgW, h: imgH };
-      const stats: Box | null = item.stats.length
-        ? side
-          ? { x: x + imgW + STATS_GAP, y: thumb.y + imgH / 2 - 0.21, w: STATS_W, h: 0.42 }
-          : { x, y: thumb.y + imgH + 0.04, w: imgW, h: UNDER_H - 0.08 }
-        : null;
-      items.push({ item, label, thumb, stats });
+    let x = x0;
+    group.forEach((item) => {
+      const slots = itemSlotsOf(item);
+      const multi = slots.length > 1;
+      const itemW = slots.length * imgW + (slots.length - 1) * ITEM_GAP;
+      const label: Box = { x, y: top, w: itemW, h: LABEL_H };
+      const placed: PlacedSlot[] = [];
+      slots.forEach((s, jj) => {
+        const tx = x + jj * (imgW + ITEM_GAP);
+        const thumb: Box = { x: tx, y: top + LABEL_H, w: imgW, h: imgH };
+        const statsLines = s.stats;
+        let stats: Box | null = null;
+        if (statsLines.length) {
+          stats = side
+            ? { x: x0 + imgW + STATS_GAP, y: thumb.y + imgH / 2 - 0.21, w: STATS_W, h: 0.42 }
+            : { x: tx, y: thumb.y + imgH + 0.04, w: imgW, h: UNDER_H - 0.08 };
+        }
+        placed.push({
+          thumb,
+          stats,
+          statsLines,
+          key: s.key,
+          descr: multi && s.groupTag ? `image-${item.uid}_${s.groupTag}` : `image-${item.uid}`,
+        });
+      });
+      items.push({ item, label, slots: placed });
+      x += itemW + ITEM_GAP;
     });
     rows.push({ items, top, bottom: top + rowH });
   });
 
   /* emit per-row shapes */
   rows.forEach((row, ri) => {
-    row.items.forEach((p, ii) => {
+    row.items.forEach((p) => {
       ops.push({
         kind: "text",
         ...p.label,
         lines: [{ t: p.item.label, align: "r" }],
       } as TextOp);
-      // Thumbnail or placeholder frame.
-      const bytes =
-        (p.item.mapKey && options.images.get(p.item.mapKey)) ||
-        (p.item.imageUrl && options.images.get(p.item.imageUrl)) ||
-        null;
-      if (bytes) {
-        const dims = imageDims(bytes);
-        const placed = containBox(p.thumb, Math.max(0.05, dims.width / Math.max(1, dims.height)));
-        pics.push({
-          kind: "pic",
-          x: placed.x,
-          y: placed.y,
-          w: placed.w,
-          h: placed.h,
-          mediaKey: p.item.mapKey || p.item.imageUrl || `img-${ri}-${ii}`,
-          descr: `image-${p.item.uid}`,
-          bytes,
-        });
-      } else {
-        ops.push({ kind: "frame", ...p.thumb });
-      }
-      if (p.stats) {
-        ops.push({
-          kind: "text",
-          ...p.stats,
-          lines: p.item.stats.map((t) => ({ t, align: "ctr" as Align })),
-        } as TextOp);
-      }
+      p.slots.forEach((s, si) => {
+        // Thumbnail or placeholder frame.
+        const bytes = (s.key && options.images.get(s.key)) || null;
+        if (bytes) {
+          const dims = imageDims(bytes);
+          const placed = containBox(s.thumb, Math.max(0.05, dims.width / Math.max(1, dims.height)));
+          pics.push({
+            kind: "pic",
+            x: placed.x,
+            y: placed.y,
+            w: placed.w,
+            h: placed.h,
+            mediaKey: s.key || `img-${ri}-${si}`,
+            descr: s.descr,
+            bytes,
+          });
+        } else {
+          ops.push({ kind: "frame", ...s.thumb });
+        }
+        if (s.stats && s.statsLines.length) {
+          ops.push({
+            kind: "text",
+            ...s.stats,
+            lines: s.statsLines.map((t) => ({ t, align: "ctr" as Align })),
+          } as TextOp);
+        }
+      });
     });
   });
 
   /* connectors: same-column stages chain downward; a column wrap rides a
    * bent connector up to the next column's first stage. */
+  const thumbOf = (row: PlacedRow, first: boolean): Box => {
+    const item = first ? row.items[0] : row.items[row.items.length - 1];
+    const slot = first ? item.slots[0] : item.slots[item.slots.length - 1];
+    return slot.thumb;
+  };
   for (let i = 0; i + 1 < rows.length; i++) {
     const a = rows[i];
     const b = rows[i + 1];
-    const aLast = a.items[a.items.length - 1].thumb;
-    const bFirst = b.items[0].thumb;
+    const aLast = thumbOf(a, false);
+    const bFirst = thumbOf(b, true);
     const sameCol = Math.floor(i / rowsPerCol) === Math.floor((i + 1) / rowsPerCol);
     if (sameCol) {
       const x = bFirst.x + bFirst.w / 2;
@@ -359,7 +416,7 @@ export function buildWorkflowPptx(
 
   /* header → first stage vertical arrow */
   if (headerItems.length && rows.length) {
-    const t0 = rows[0].items[0].thumb;
+    const t0 = thumbOf(rows[0], true);
     const cx = t0.x + t0.w / 2;
     ops.push({ kind: "conn", x1: cx, y1: 0.84, x2: cx, y2: rows[0].top - 0.03 });
   }
@@ -367,7 +424,7 @@ export function buildWorkflowPptx(
   /* final stats ("3.46 Å") under the last stage */
   if (fig.finalStats && rows.length) {
     const lastRow = rows[rows.length - 1];
-    const lastThumb = lastRow.items[lastRow.items.length - 1].thumb;
+    const lastThumb = thumbOf(lastRow, false);
     ops.push({
       kind: "text",
       x: Math.max(MARGIN_X, lastThumb.x + lastThumb.w / 2 - 0.7),

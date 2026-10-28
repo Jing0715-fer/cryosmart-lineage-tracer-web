@@ -19,4 +19,4 @@
  * line so a pasted log is self-diagnosing (a log WITHOUT the line is pre-3.50
  * and stale by definition).
  */
-export const FLOW_ENGINE_VERSION = "3.50";
+export const FLOW_ENGINE_VERSION = "3.51";

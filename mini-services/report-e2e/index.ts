@@ -553,10 +553,13 @@ function enrichVerdict(): Record<string, unknown> {
 const RELAY_PORT = 8927;
 const MOCK_APP_ORIGIN = "http://localhost:3000";
 
-/** 32×32 solid-red PNG (valid for createImageBitmap + canvas letterbox). */
+/** 64×64 black-background render with a gray map disc (v3.51: the real
+ *  pipeline now renders black-bg uniform-gray thumbnails — the old solid-red
+ *  placeholder scored 0.0000 coverage under the bg-adaptive scorer and made
+ *  every E2E log read like a view-selection failure). */
 const MOCK_PNG = Uint8Array.from(
   atob(
-    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKUlEQVR4nO3NsQkAAAgDsB7W//Esr3AQAtmTaU9FIBAIBAKBQCAQfAkWAwwATMGYEdYAAAAASUVORK5CYII=",
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAABBUlEQVR4nO2YQRKDIAxFaacH8ZQewlNylC7cOFYhyQ9lOn1v2UL4P5GIlAIAAAAAAABzeIwIum3b3V/ruuaulWagIfqOFDMJBgLSj4g2nsrkIqvXI8QroEs/EStFsALp6sMxIxWwrLQsy+ePtdbuRG8d3Aa66i+lH+nacHl42Yd26Uo/DrNUw4JvDzTSb1RvGe/aDGob3fGqV2adcBgY0Xn0tRIqoCRSL0LOIzQRDMwGA9orSX+dOQykf0ylrJXzCMUSmXKa8BloJMarpjF+2mFu16SfRl383/fAzqBzUaBPBDfxiI4Ui6leq6SUQkmH2kb1UogRuJm74pt3owAAAAAAAD/LGzFAXTQo2vIyAAAAAElFTkSuQmCC",
   ),
   (c) => c.charCodeAt(0),
 );
@@ -946,6 +949,20 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
   });
   const FM = (uid: string) => ({ type: "micrograph", name: "micrographs", connections: [{ job_uid: uid }] });
   const VOUT = (name: string) => ({ name, type: "volume", contains: [{ type: "volume.blob", name: "map" }] });
+  // v3.51: per-class particle groups — classSplits() pairs particles_class_N
+  // with volume_class_N and derives the percentages from particles_all_classes.
+  const PCLASS = (i: number, num: number) => ({
+    name: `particles_class_${i}`,
+    type: "particle",
+    num_items: num,
+    contains: [{ type: "particle.blob", name: "particles" }],
+  });
+  const PALL = (num: number) => ({
+    name: "particles_all_classes",
+    type: "particle",
+    num_items: num,
+    contains: [{ type: "particle.blob", name: "particles" }],
+  });
   const POUT = (num: number) => ({
     name: "particles",
     type: "particle",
@@ -982,7 +999,17 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
   const jobs = [
     mk("J498", 498, "deep_emhancer", ["J497"], [FV("J497")], [VOUT("volume")]),
     mk("J497", 497, "local_refine", ["J494", "J476"], [FV("J494"), FP("J476")], [VOUT("volume")]),
-    mk("J494", 494, "hetero_refine", ["J420", "J448"], [FV("J420"), FP("J448")], [VOUT("volume_class_0")]),
+    mk("J494", 494, "hetero_refine", ["J420", "J448"], [FV("J420"), FP("J448")], [
+      // v3.51: a 3-class hetero split — the figure must show all three
+      // classes side by side in one row with per-class stats.
+      VOUT("volume_class_0"),
+      VOUT("volume_class_1"),
+      VOUT("volume_class_2"),
+      PCLASS(0, 120000),
+      PCLASS(1, 40000),
+      PCLASS(2, 20000),
+      PALL(180000),
+    ]),
     mk("J448", 448, "nonuniform_refine", ["J443", "J476"], [FV("J443"), FP("J476")], [VOUT("volume")]),
     mk("J443", 443, "homo_refine", ["J422", "J476"], [FV("J422"), FP("J476")], [VOUT("volume")]),
     mk("J422", 422, "homo_refine", ["J446", "J476"], [FV("J446"), FP("J476")], [VOUT("volume")]),
@@ -996,7 +1023,14 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
     mk("J478", 478, "ctf_estimation", ["J475"], [FM("J475")], []),
     mk("J475", 475, "motion_correction", ["J474"], [FM("J474")], []),
     mk("J474", 474, "import_movies", [], [], [EOUT(5562)]),
-    mk("J420", 420, "homo_abinit", ["J476"], [FP("J476")], [VOUT("volume_class_0")]),
+    mk("J420", 420, "homo_abinit", ["J476"], [FP("J476")], [
+      // v3.51: a 2-class ab-initio split (2/3 + 1/3 of the particles).
+      VOUT("volume_class_0"),
+      VOUT("volume_class_1"),
+      PCLASS(0, 80000),
+      PCLASS(1, 40000),
+      PALL(120000),
+    ]),
     mk("J385", 385, "class_2d", ["J382"], [FP("J382")], []),
     mk("J382", 382, "extract_micrographs", ["J379"], [FP("J379")], []),
     mk("J379", 379, "picker", ["J376"], [FM("J376")], []),

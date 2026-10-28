@@ -525,6 +525,33 @@ export async function saveAndFetchPng(
 /* Thumbnail coverage scoring (browser port of score_current_view)     */
 /* ------------------------------------------------------------------ */
 
+/** v3.51: sample the canvas background from the four corners — works for
+ *  the new black renders AND legacy white ones. */
+function cornerBg(data: Uint8ClampedArray, w: number, h: number): [number, number, number] {
+  const pts: Array<[number, number]> = [
+    [2, 2],
+    [w - 3, 2],
+    [2, h - 3],
+    [w - 3, h - 3],
+  ];
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (const [x, y] of pts) {
+    if (x < 0 || y < 0 || x >= w || y >= h) continue;
+    const i = (y * w + x) * 4;
+    r += data[i];
+    g += data[i + 1];
+    b += data[i + 2];
+    n += 1;
+  }
+  return n ? [Math.round(r / n), Math.round(g / n), Math.round(b / n)] : [255, 255, 255];
+}
+
+/** Fraction of the canvas NOT covered by the (sampled) background — the old
+ *  white-only counter generalized to the black-background renders (a black
+ *  canvas would otherwise score 1.0 for every view and pick views blind). */
 async function thumbnailCoverageScore(png: Uint8Array): Promise<number> {
   if (typeof createImageBitmap === "undefined" || typeof document === "undefined") return 0;
   const blob = new Blob([png as BlobPart], { type: "image/png" });
@@ -536,12 +563,20 @@ async function thumbnailCoverageScore(png: Uint8Array): Promise<number> {
   if (!ctx) return 0;
   ctx.drawImage(bmp, 0, 0);
   const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  let white = 0;
+  const bg = cornerBg(data, width, height);
+  let bgCount = 0;
   for (let i = 0; i < data.length; i += 4) {
-    if (data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240) white++;
+    if (data[i + 3] <= 10) continue;
+    if (
+      Math.abs(data[i] - bg[0]) <= 25 &&
+      Math.abs(data[i + 1] - bg[1]) <= 25 &&
+      Math.abs(data[i + 2] - bg[2]) <= 25
+    ) {
+      bgCount++;
+    }
   }
   const total = width * height;
-  return total ? (total - white) / total : 0;
+  return total ? (total - bgCount) / total : 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -555,6 +590,13 @@ const CHIRALITY_EPSILON = 0.01;
 const THUMB_SIZE = 220;
 const SNAPSHOT_W = 1600;
 const SNAPSHOT_H = 1200;
+/** v3.51 (round-10 “颜色不统一”): ChimeraX auto-assigns a DIFFERENT pastel
+ *  hue to every newly opened model, so a figure came back pink / yellow /
+ *  lavender / cyan / gray at random. The user's reference deck renders every
+ *  map the SAME mid-gray on a black background — that is now enforced:
+ *  `set bgColor black` + one explicit surface colour on EVERY model
+ *  (reference and every alignment candidate, including flipped copies). */
+const UNIFORM_MAP_COLOR = "#8a8a8a";
 
 export type ChiralityStatus = "consistent" | "corrected" | "ambiguous" | "unknown";
 
@@ -665,7 +707,10 @@ export async function renderFigureMaps(
     const sdTry = await exec(t, `volume #${refId} level 2 sd step ${STEP} style surface`, opts, true);
     if (sdTry.error) await exec(t, `volume #${refId} step ${STEP} style surface`, opts, true);
   }
-  await exec(t, "set bgColor white", opts, true);
+  // v3.51: reference-deck look — black background, one uniform gray for
+  // every map (see UNIFORM_MAP_COLOR above).
+  await exec(t, "set bgColor black", opts, true);
+  await exec(t, `color #${refId} ${UNIFORM_MAP_COLOR}`, opts, true);
   await exec(t, "view pad 0.25", opts, true);
   await exec(t, "wait 1", opts, true);
 
@@ -781,6 +826,7 @@ export async function renderFigureMaps(
           const sdTry = await exec(t, `volume #${activeId} level 2 sd step ${STEP} style surface`, opts, true);
           if (sdTry.error) await exec(t, `volume #${activeId} step ${STEP} style surface`, opts, true);
         }
+        await exec(t, `color #${activeId} ${UNIFORM_MAP_COLOR}`, opts, true);
 
         if (spec.kind === "rotate") {
           await exec(t, `turn ${spec.axis} 180 models #${activeId} center #${activeId}`, opts, true);
@@ -810,6 +856,7 @@ export async function renderFigureMaps(
           if (level2 != null) {
             await exec(t, `volume #${activeId} level ${level2.toFixed(4)} step ${STEP}`, opts, true);
           }
+          await exec(t, `color #${activeId} ${UNIFORM_MAP_COLOR}`, opts, true);
         }
 
         const preRes = await exec(t, `measure correlation #${activeId} inMap #${refId}`, opts, true);

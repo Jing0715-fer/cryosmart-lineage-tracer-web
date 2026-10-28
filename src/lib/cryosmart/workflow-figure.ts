@@ -48,6 +48,72 @@ export interface FlowFigureItem {
   } | null;
   /** Captured image (2D montage etc.) used when the item has no map. */
   imageUrl: string | null;
+  /** v3.51: EVERY class volume of this job, one row side by side. Null for
+   *  single-map stages (where mapKey/map carry the one map) and captured
+   *  images (2D montage / demo / FSC). */
+  classes?: FigureClassSlot[] | null;
+}
+
+/** v3.51: one per-class thumbnail slot inside a stage row. */
+export interface FigureClassSlot {
+  /** Canonical map key "uid/group" — image marker + render lookup key. */
+  mapKey: string;
+  group: string;
+  resultName: string;
+  downloadUrl: string;
+  previewUrl: string | null;
+  /** Per-class stats ("50%", "58K particles") rendered under the thumbnail. */
+  stats: string[];
+}
+
+/** v3.51: every ChimeraX-renderable map in the figure (all classes), keyed by
+ *  mapKey — the card's source-of-truth for proxy/staging/preview/render loops. */
+export interface FigureMapSource {
+  key: string;
+  uid: string;
+  group: string;
+  resultName: string;
+  downloadUrl: string;
+  previewUrl: string | null;
+}
+
+/** v3.51: most classes shown per job row — a wider row shrinks EVERY
+ *  thumbnail on the slide, so a big hetero split is truncated with a
+ *  warning instead of turning the whole figure into confetti. */
+export const MAX_FIG_CLASSES = 4;
+
+export function figureMapSources(model: FlowFigureModel): Map<string, FigureMapSource> {
+  const out = new Map<string, FigureMapSource>();
+  const items = [...model.groups.flat()];
+  if (model.referenceItem) items.push(model.referenceItem);
+  for (const item of items) {
+    if (item.classes?.length) {
+      for (const c of item.classes) {
+        if (!out.has(c.mapKey)) {
+          out.set(c.mapKey, {
+            key: c.mapKey,
+            uid: item.uid,
+            group: c.group,
+            resultName: c.resultName,
+            downloadUrl: c.downloadUrl,
+            previewUrl: c.previewUrl,
+          });
+        }
+      }
+    } else if (item.mapKey && item.map) {
+      if (!out.has(item.mapKey)) {
+        out.set(item.mapKey, {
+          key: item.mapKey,
+          uid: item.uid,
+          group: item.map.group,
+          resultName: item.map.resultName,
+          downloadUrl: item.map.downloadUrl,
+          previewUrl: item.map.previewUrl,
+        });
+      }
+    }
+  }
+  return out;
 }
 
 export interface FlowFigureModel {
@@ -214,32 +280,136 @@ function mapAssetFor(node: LineageNode): MapAsset | null {
   return plain ?? assets[0];
 }
 
+function fmtClassPercent(pct: number): string {
+  return `${Math.round(pct * 10) / 10}%`;
+}
+
+/** v3.51: enumerate EVERY class volume of a job as thumbnail slots (the
+ *  round-10 request — "每个 job 的多个 class 并列成一排"). Authoritative
+ *  source: the node's own `classes` split (per-class map downloads +
+ *  particle percent/count), falling back to `summary.class_split_jobs`,
+ *  then to the raw `volume_class_*` groups in node.maps. A job with < 2
+ *  usable classes degrades to the previous single-primary-map behavior.
+ *  Rows are capped at MAX_FIG_CLASSES (warning pushed when truncated). */
+function classSlotsFor(
+  summary: LineageSummary,
+  node: LineageNode,
+  opts: { isFinal?: boolean; warnings?: string[] } = {},
+): FigureClassSlot[] {
+  const isFinal = !!opts.isFinal;
+  const pushStats = (slotStats: string[], percent: number | null, count: number | null) => {
+    if (!isFinal && percent != null) slotStats.push(fmtClassPercent(percent));
+    if (count != null) slotStats.push(`${fmtParticles(count)} particles`);
+  };
+
+  const splits =
+    node.classes?.length
+      ? node.classes
+      : (summary.class_split_jobs || []).find((j) => j.uid === node.uid)?.classes ?? [];
+
+  const slots: FigureClassSlot[] = [];
+  for (const cls of [...splits].sort((a, b) => (a.class_index ?? 0) - (b.class_index ?? 0))) {
+    const primaryMap =
+      cls.maps?.find((m) => /^map$/i.test(m.result_name)) ?? cls.maps?.[0] ?? null;
+    const group = String(cls.volume_group || `volume_class_${cls.class_index}`);
+    if (!primaryMap?.download_url) continue;
+    const stats: string[] = [];
+    pushStats(stats, cls.particle_percent, cls.particle_count);
+    slots.push({
+      mapKey: `${node.uid}/${group}`,
+      group,
+      resultName: primaryMap.result_name,
+      downloadUrl: primaryMap.download_url,
+      previewUrl: cls.mrc_preview_url ?? null,
+      stats,
+    });
+  }
+
+  if (slots.length < 2) {
+    // Fallback: raw volume_class_* groups on the node (jobs whose split
+    // summary wasn't captured but whose map list still enumerates classes).
+    const raw = new Map<string, MapAsset>();
+    for (const asset of node.maps || []) {
+      const m = /^volume_class_(\d+)$/.exec(String(asset.group || ""));
+      if (!m) continue;
+      const prev = raw.get(asset.group);
+      if (!prev || (/^map$/i.test(asset.result_name) && !/^map$/i.test(prev.result_name))) {
+        raw.set(asset.group, asset);
+      }
+    }
+    const rawSlots: FigureClassSlot[] = [];
+    for (const [group, asset] of [...raw.entries()].sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))) {
+      const pct = classPercentFor(summary, node.uid, group);
+      const stats: string[] = [];
+      if (!isFinal && pct) stats.push(pct);
+      rawSlots.push({
+        mapKey: `${node.uid}/${group}`,
+        group,
+        resultName: asset.result_name,
+        downloadUrl: asset.download_url,
+        previewUrl: asset.preview_url,
+        stats,
+      });
+    }
+    if (rawSlots.length >= 2) {
+      slots.push(...rawSlots);
+    }
+  }
+
+  if (slots.length < 2) {
+    // Single-map stage — previous behavior (primary asset, job-level stats).
+    const asset = mapAssetFor(node);
+    if (!asset) return [];
+    const stats: string[] = [];
+    if (!isFinal) {
+      const pct = classPercentFor(summary, node.uid, asset.group);
+      if (pct) stats.push(pct);
+    }
+    if (node.particle_count != null) stats.push(`${fmtParticles(node.particle_count)} particles`);
+    return [
+      {
+        mapKey: `${node.uid}/${asset.group}`,
+        group: asset.group,
+        resultName: asset.result_name,
+        downloadUrl: asset.download_url,
+        previewUrl: asset.preview_url,
+        stats,
+      },
+    ];
+  }
+
+  if (slots.length > MAX_FIG_CLASSES) {
+    const dropped = slots.length - MAX_FIG_CLASSES;
+    opts.warnings?.push(
+      `${node.uid} 有 ${slots.length} 个 class，每行最多并排 ${MAX_FIG_CLASSES} 个 — 已省略 ${dropped} 个（class ${MAX_FIG_CLASSES} 及之后）。`,
+    );
+    return slots.slice(0, MAX_FIG_CLASSES);
+  }
+  return slots;
+}
+
 function itemFromNode(
   summary: LineageSummary,
   node: LineageNode,
-  opts: { isFinal?: boolean } = {},
+  opts: { isFinal?: boolean; warnings?: string[] } = {},
 ): FlowFigureItem {
-  const asset = mapAssetFor(node);
-  const group = asset?.group || "volume";
-  const stats: string[] = [];
-  if (!opts.isFinal) {
-    const pct = classPercentFor(summary, node.uid, group);
-    if (pct) stats.push(pct);
-  }
-  if (node.particle_count != null) stats.push(`${fmtParticles(node.particle_count)} particles`);
+  const slots = classSlotsFor(summary, node, opts);
+  const primary = slots[0] ?? null;
+  const stats = slots.length <= 1 ? (primary?.stats ?? []) : [];
   return {
     uid: node.uid,
     label: jobTypeLabel(node.job_type),
     stats,
-    mapKey: asset ? `${node.uid}/${group}` : null,
-    map: asset
+    mapKey: primary?.mapKey ?? null,
+    map: primary
       ? {
-          group,
-          resultName: asset.result_name,
-          downloadUrl: asset.download_url,
-          previewUrl: asset.preview_url,
+          group: primary.group,
+          resultName: primary.resultName,
+          downloadUrl: primary.downloadUrl,
+          previewUrl: primary.previewUrl,
         }
       : null,
+    classes: slots.length ? slots : null,
     imageUrl: null,
   };
 }
@@ -371,19 +541,19 @@ export function buildFlowFigureModel(
     if (contrib) {
       const fresh = contrib.filter((c) => !usedUids.has(c));
       if (fresh.length >= 2) {
-        const items = fresh.slice(0, 3).map((c) => itemFromNode(summary, graph.byUid.get(c)!));
+        const items = fresh.slice(0, 3).map((c) => itemFromNode(summary, graph.byUid.get(c)!, { warnings }));
         items.forEach((it) => usedUids.add(it.uid));
         groups.push(items);
       } else if (fresh.length === 1) {
         const node = graph.byUid.get(fresh[0]);
         if (node) {
-          groups.push([itemFromNode(summary, node)]);
+          groups.push([itemFromNode(summary, node, { warnings })]);
           usedUids.add(node.uid);
         }
       }
     }
     if (!deferredSpine.has(S.uid) && !usedUids.has(S.uid)) {
-      groups.push([itemFromNode(summary, S, { isFinal: S.uid === summary.start_uid })]);
+      groups.push([itemFromNode(summary, S, { isFinal: S.uid === summary.start_uid, warnings })]);
       usedUids.add(S.uid);
     }
   }
@@ -396,7 +566,7 @@ export function buildFlowFigureModel(
 
   // Reference = the FINAL job's map when it has one.
   if (finalNode && normalMapAssets(finalNode).length > 0) {
-    const ref = itemFromNode(summary, finalNode, { isFinal: true });
+    const ref = itemFromNode(summary, finalNode, { isFinal: true, warnings });
     referenceItem = ref;
     referenceKey = ref.mapKey;
   } else {
@@ -610,7 +780,41 @@ interface BBox {
   bottom: number;
 }
 
-function nonWhiteBBox(data: Uint8ClampedArray, w: number, h: number, delta: number): BBox | null {
+/** v3.51: sample the canvas background from the four corners (2 px in) —
+ *  renders now come back on ChimeraX's BLACK background (reference-deck
+ *  style), so "trim white margins" must trim MARGINS OF THE ACTUAL BG. */
+function cornerBgColor(data: Uint8ClampedArray, w: number, h: number): [number, number, number] {
+  const pts: Array<[number, number]> = [
+    [2, 2],
+    [w - 3, 2],
+    [2, h - 3],
+    [w - 3, h - 3],
+  ];
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  let n = 0;
+  for (const [x, y] of pts) {
+    if (x < 0 || y < 0 || x >= w || y >= h) continue;
+    const i = (y * w + x) * 4;
+    r += data[i];
+    g += data[i + 1];
+    b += data[i + 2];
+    n += 1;
+  }
+  return n ? [Math.round(r / n), Math.round(g / n), Math.round(b / n)] : [255, 255, 255];
+}
+
+/** Content bounding box: pixels that differ from the given background by
+ *  more than `delta` on any channel (the old white-only test generalized —
+ *  identical behaviour for white-background renders). */
+function bgDiffBBox(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  bg: [number, number, number],
+  delta: number,
+): BBox | null {
   let minX = w;
   let minY = h;
   let maxX = -1;
@@ -619,7 +823,11 @@ function nonWhiteBBox(data: Uint8ClampedArray, w: number, h: number, delta: numb
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
       if (data[i + 3] <= 10) continue;
-      const dist = Math.max(255 - data[i], 255 - data[i + 1], 255 - data[i + 2]);
+      const dist = Math.max(
+        Math.abs(data[i] - bg[0]),
+        Math.abs(data[i + 1] - bg[1]),
+        Math.abs(data[i + 2] - bg[2]),
+      );
       if (dist > delta) {
         if (x < minX) minX = x;
         if (y < minY) minY = y;
@@ -634,9 +842,11 @@ function nonWhiteBBox(data: Uint8ClampedArray, w: number, h: number, delta: numb
 
 /**
  * Port of the desktop helper's `common_trim_box` + uniform-crop step: all
- * renders share one trim box (smallest white margin per side + 5% keep),
- * expanded to the target aspect, then letterboxed onto identical white
- * canvases so every thumbnail has the same scale AND framing.
+ * renders share one trim box (smallest bg margin per side + 5% keep),
+ * expanded to the target aspect, then letterboxed onto identical canvases
+ * (v3.51: canvas colour = each render's own sampled background — black for
+ * the current ChimeraX renders, white for legacy ones) so every thumbnail
+ * has the same scale AND framing.
  */
 export async function uniformLetterbox(
   images: Map<string, Uint8Array>,
@@ -647,7 +857,7 @@ export async function uniformLetterbox(
   if (typeof document === "undefined" || !images.size) return out;
 
   // Decode all + compute common margins.
-  const decoded: Array<{ key: string; bmp: ImageBitmap }> = [];
+  const decoded: Array<{ key: string; bmp: ImageBitmap; bg: [number, number, number] }> = [];
   let refW = 0;
   let refH = 0;
   const margins: Array<{ left: number; top: number; right: number; bottom: number }> = [];
@@ -661,8 +871,9 @@ export async function uniformLetterbox(
       if (!ctx) continue;
       ctx.drawImage(bmp, 0, 0);
       const { data } = ctx.getImageData(0, 0, bmp.width, bmp.height);
-      const box = nonWhiteBBox(data, bmp.width, bmp.height, 8);
-      decoded.push({ key, bmp });
+      const bg = cornerBgColor(data, bmp.width, bmp.height);
+      const box = bgDiffBBox(data, bmp.width, bmp.height, bg, 8);
+      decoded.push({ key, bmp, bg });
       refW = bmp.width;
       refH = bmp.height;
       if (box) {
@@ -708,13 +919,13 @@ export async function uniformLetterbox(
   const cropH = Math.max(1, Math.round(boxH));
 
   const outH = Math.round(outW / aspect);
-  for (const { key, bmp } of decoded) {
+  for (const { key, bmp, bg } of decoded) {
     const canvas = document.createElement("canvas");
     canvas.width = outW;
     canvas.height = outH;
     const ctx = canvas.getContext("2d");
     if (!ctx) continue;
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
     ctx.fillRect(0, 0, outW, outH);
     const scale = Math.min(outW / cropW, outH / cropH);
     const dw = cropW * scale;
