@@ -478,7 +478,11 @@ function trimFlowGroups(
 }
 
 /** Reference-style demo model — uses the images extracted from the user's
- *  own Workflow.pptx sample (public/demo/workflow/*.png). */
+ *  own Workflow.pptx sample (public/demo/workflow/*.png). v3.49: mirrors the
+ *  reference deck EXACTLY — four single-map stages top→bottom (2*Hetero →
+ *  Hetero → Non-uniform → DeepEMhancer), the stats boxes belong to the same
+ *  stages as in the reference (32.9%/1638K on the first row, 26.3%/431K on
+ *  the second), and the final line keeps its "C1, 3.46 Å" shape. */
 export function buildDemoFigureModel(): FlowFigureModel {
   return {
     headerStats: { micrographs: "14,482 Micrographs", pick: "Auto pick", particles: "4980K particles" },
@@ -486,16 +490,18 @@ export function buildDemoFigureModel(): FlowFigureModel {
       [
         {
           uid: "J68",
-          label: "Hetero refinement",
+          label: "2*Hetero refinement",
           stats: ["32.9%", "1638K particles"],
           mapKey: "J68/volume",
           map: null,
           imageUrl: "/demo/workflow/J68_H1.png",
         },
+      ],
+      [
         {
           uid: "J142",
           label: "Hetero refinement",
-          stats: [],
+          stats: ["26.3%", "431K particles"],
           mapKey: "J142/volume",
           map: null,
           imageUrl: "/demo/workflow/J142_H2.png",
@@ -505,7 +511,7 @@ export function buildDemoFigureModel(): FlowFigureModel {
         {
           uid: "J174",
           label: "Non-uniform refinement",
-          stats: ["26.3%", "431K particles"],
+          stats: [],
           mapKey: "J174/volume",
           map: null,
           imageUrl: "/demo/workflow/J174.png",
@@ -522,7 +528,7 @@ export function buildDemoFigureModel(): FlowFigureModel {
         },
       ],
     ],
-    finalStats: "3.46 Å",
+    finalStats: "C1, 3.46 Å",
     referenceKey: "J174/volume",
     referenceItem: null,
     fscXml: null,

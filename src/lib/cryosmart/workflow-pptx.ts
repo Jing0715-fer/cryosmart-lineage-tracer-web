@@ -1,18 +1,21 @@
 /**
- * 16:9 workflow-figure PPTX builder (v3.41).
+ * 16:9 workflow-figure PPTX builder (v3.41; layout rebuilt in v3.49).
  *
  * Format modelled after the user's reference `upload/Workflow.pptx`
- * (WPS-authored, single 12192000 × 6858000 EMU slide):
- *   - 8 pt Arial text runs (East-Asian font 微软雅黑), black on white
- *   - a header text row: "N Micrographs" → "Auto pick" → "N particles"
- *   - map thumbnails (3.1 × 1.56 in, no border) with right-aligned labels
- *     above them, stacked vertically for parallel branches with tiny
- *     vertical arrows between
- *   - 2-line stat boxes ("32.9%" / "1638k particles") beside each thumbnail
- *   - straightConnector1 (w=12700, triangle tail) between aligned stages,
- *     bentConnector3 (arrow tail) for cross-height transitions
- *   - final resolution text bottom-right ("C1, 3.46 Å" style)
+ * (WPS-authored, single 12192000 × 6858000 EMU slide) — a VERTICAL
+ * stage flow, verified against the reference's own geometry:
+ *   - header band top: "N Micrographs" → "Auto pick" → "N particles"
+ *   - each stage one ROW top→bottom: right-aligned 8 pt Arial label above
+ *     a wide 2:1 thumbnail (reference 3.12 × 1.56 in), 2-line stats box
+ *     beside single-map stages / under each map of a parallel branch
+ *   - thin black straightConnector1 arrows chaining the stages downward
+ *   - final resolution text centered under the last stage ("3.46 Å")
  *   - a thin-black-border empty frame when a thumbnail is unavailable
+ *   - many stages: one column would shrink thumbnails below readability,
+ *     so the flow wraps into 2 (at most 3) columns, continuing at the next
+ *     column's top via a bent connector — the reference itself does a
+ *     partial wrap (its last two stages sit side by side).
+ *   - 8 pt Arial text runs (East-Asian font 微软雅黑), black on white
  *
  * Map thumbnails keep the `name="CryoSmartImage:<uid>/<group>"` marker on
  * <p:cNvPr> (same contract as the A4 picture-flow PPTX) so the desktop
@@ -151,14 +154,6 @@ export interface BuildPptxOptions {
   images: Map<string, Uint8Array>;
 }
 
-interface ItemPlacement {
-  item: FlowFigureItem;
-  label: Box;
-  image: Box;
-  stats: Box | null;
-  groupCx: number;
-}
-
 function estimateTextWidth(text: string): number {
   return Math.max(0.6, text.length * 0.062 + 0.22);
 }
@@ -217,49 +212,92 @@ export function buildWorkflowPptx(
     });
   }
 
-  /* ---- stage groups ---- */
+  /* ---- v3.49 stage groups: reference-faithful VERTICAL flow ----
+   * Stages stack top→bottom exactly like the reference; one row per stage,
+   * parallel branches side by side within the row. A single column is
+   * preferred (the reference's look); it wraps into 2 (at most 3) columns
+   * only when thumbnails would fall below the readability floor. */
   const groups = fig.groups.filter((g) => g.length > 0);
   const n = Math.max(1, groups.length);
-  const slot = contentW / n;
-  const statsSide = n <= 3;
-  const IMG_RATIO = 0.5; // 2:1 thumbnails
-  const imgW = Math.max(1.2, Math.min(3.12, slot - (statsSide ? 1.18 : 0.38)));
-  const imgH = imgW * IMG_RATIO;
-  const labelH = 0.22;
-  const statsW = 0.95;
-  const statsH = 0.42;
-  const statsUnderH = 0.24;
-  const itemH = labelH + imgH + (statsSide ? 0 : statsUnderH);
-  const gap = 0.3;
-  const bandTop = 1.35;
-  const bandBottom = 6.78;
+  const FLOW_TOP = 1.18;
+  const FLOW_BOTTOM = SLIDE_H_IN - 0.44; // keep the footnote strip clear
+  const availH = Math.max(2.4, FLOW_BOTTOM - FLOW_TOP);
+  const LABEL_H = 0.22;
+  const ROW_GAP = 0.16;
+  const ITEM_GAP = 0.16;
+  const STATS_W = 0.95;
+  const STATS_GAP = 0.1;
+  const UNDER_H = 0.3;
+  const COL_GAP = 0.7;
+  const REF_IMG_W = 3.12; // the reference's own thumbnail width (2:1)
+  const MIN_IMG_W = 1.45; // readability floor before wrapping columns
 
-  const placements: ItemPlacement[][] = [];
-  const groupContentW = imgW + (statsSide ? statsW + 0.08 : 0);
+  const colWFor = (c: number) => (contentW - (c - 1) * COL_GAP) / c;
+  const pitchFor = (c: number) => availH / Math.max(1, Math.ceil(n / c));
+  const anyParallel = groups.some((g) => g.length >= 2);
+  const rowHExtra = anyParallel ? UNDER_H : 0;
+  const imgWFor = (c: number) => 2 * (pitchFor(c) - LABEL_H - ROW_GAP - rowHExtra);
+  /** Widest thumbnail every stage row fits at column count c, capped by the
+   *  reference's 3.12 in and by each row's share of the column width. */
+  const effectiveImgW = (c: number) => {
+    let w = Math.min(REF_IMG_W, imgWFor(c));
+    const cw = colWFor(c);
+    for (const g of groups) {
+      const k = Math.max(1, g.length);
+      const extras = k === 1 ? STATS_W + STATS_GAP : (k - 1) * ITEM_GAP;
+      w = Math.min(w, (cw - extras) / k);
+    }
+    return w;
+  };
+  let cols = 1;
+  while (cols < 3 && effectiveImgW(cols) < MIN_IMG_W && effectiveImgW(cols + 1) > effectiveImgW(cols) + 0.01) {
+    cols += 1;
+  }
+  const imgW = Math.max(1.0, effectiveImgW(cols));
+  const imgH = imgW / 2;
+  const colW = colWFor(cols);
+  const rowsPerCol = Math.ceil(n / cols);
+  const pitch = pitchFor(cols);
 
-  groups.forEach((group, gi) => {
-    const groupH = group.length * itemH + (group.length - 1) * gap;
-    const top = bandTop + Math.max(0, (bandBottom - bandTop - groupH) / 2);
-    const itemX = MARGIN_X + gi * slot + (slot - groupContentW) / 2;
-    const list: ItemPlacement[] = [];
-    let cur = top;
+  interface PlacedItem {
+    item: FlowFigureItem;
+    label: Box;
+    thumb: Box;
+    stats: Box | null;
+  }
+  interface PlacedRow {
+    items: PlacedItem[];
+    top: number;
+    bottom: number;
+  }
+
+  const rows: PlacedRow[] = [];
+  groups.forEach((group, i) => {
+    const k = Math.max(1, group.length);
+    const side = k === 1;
+    const rowW = k * imgW + (k - 1) * ITEM_GAP + (side ? STATS_W + STATS_GAP : 0);
+    const col = Math.floor(i / rowsPerCol);
+    const x0 = MARGIN_X + col * (colW + COL_GAP) + (colW - rowW) / 2;
+    const rowH = LABEL_H + imgH + (side ? 0 : UNDER_H);
+    const top = FLOW_TOP + (i % rowsPerCol) * pitch + Math.max(0, (pitch - rowH) / 2);
+    const items: PlacedItem[] = [];
     group.forEach((item, ii) => {
-      const label: Box = { x: itemX, y: cur, w: imgW, h: labelH };
-      const image: Box = { x: itemX, y: cur + labelH, w: imgW, h: imgH };
+      const x = x0 + ii * (imgW + ITEM_GAP);
+      const label: Box = { x, y: top, w: imgW, h: LABEL_H };
+      const thumb: Box = { x, y: top + LABEL_H, w: imgW, h: imgH };
       const stats: Box | null = item.stats.length
-        ? statsSide
-          ? { x: itemX + imgW + 0.08, y: image.y + imgH / 2 - statsH / 2, w: statsW, h: statsH }
-          : { x: itemX, y: image.y + imgH + 0.01, w: imgW, h: statsUnderH }
+        ? side
+          ? { x: x + imgW + STATS_GAP, y: thumb.y + imgH / 2 - 0.21, w: STATS_W, h: 0.42 }
+          : { x, y: thumb.y + imgH + 0.04, w: imgW, h: UNDER_H - 0.08 }
         : null;
-      list.push({ item, label, image, stats, groupCx: itemX + imgW / 2 });
-      cur += itemH + (ii < group.length - 1 ? gap : 0);
+      items.push({ item, label, thumb, stats });
     });
-    placements.push(list);
+    rows.push({ items, top, bottom: top + rowH });
   });
 
-  /* emit per-group shapes */
-  placements.forEach((list, gi) => {
-    list.forEach((p, ii) => {
+  /* emit per-row shapes */
+  rows.forEach((row, ri) => {
+    row.items.forEach((p, ii) => {
       ops.push({
         kind: "text",
         ...p.label,
@@ -272,19 +310,19 @@ export function buildWorkflowPptx(
         null;
       if (bytes) {
         const dims = imageDims(bytes);
-        const placed = containBox(p.image, Math.max(0.05, dims.width / Math.max(1, dims.height)));
+        const placed = containBox(p.thumb, Math.max(0.05, dims.width / Math.max(1, dims.height)));
         pics.push({
           kind: "pic",
           x: placed.x,
           y: placed.y,
           w: placed.w,
           h: placed.h,
-          mediaKey: p.item.mapKey || p.item.imageUrl || `img-${gi}-${ii}`,
+          mediaKey: p.item.mapKey || p.item.imageUrl || `img-${ri}-${ii}`,
           descr: `image-${p.item.uid}`,
           bytes,
         });
       } else {
-        ops.push({ kind: "frame", ...p.image });
+        ops.push({ kind: "frame", ...p.thumb });
       }
       if (p.stats) {
         ops.push({
@@ -293,63 +331,47 @@ export function buildWorkflowPptx(
           lines: p.item.stats.map((t) => ({ t, align: "ctr" as Align })),
         } as TextOp);
       }
-      if (ii < list.length - 1) {
-        // Tiny vertical arrow between stacked branches.
-        const nextLabel = list[ii + 1].label;
-        ops.push({
-          kind: "conn",
-          x1: p.groupCx,
-          y1: p.image.y + p.image.h + 0.02,
-          x2: p.groupCx,
-          y2: nextLabel.y - 0.02,
-        });
-      }
     });
   });
 
-  /* connectors between groups */
-  for (let gi = 0; gi + 1 < placements.length; gi++) {
-    const src = placements[gi];
-    const tgt = placements[gi + 1];
-    const srcItem = src[src.length - 1];
-    const tgtItem = tgt[0];
-    const srcRight = srcItem.image.x + srcItem.image.w + (statsSide ? statsW + 0.08 : 0);
-    const srcY = srcItem.image.y + srcItem.image.h / 2;
-    const tgtLeft = tgtItem.image.x;
-    const tgtY = tgtItem.image.y + tgtItem.image.h / 2;
-    const bent = Math.abs(srcY - tgtY) > 0.06;
-    ops.push({
-      kind: "conn",
-      x1: srcRight + 0.03,
-      y1: srcY,
-      x2: tgtLeft - 0.03,
-      y2: tgtY,
-      bent,
-    });
+  /* connectors: same-column stages chain downward; a column wrap rides a
+   * bent connector up to the next column's first stage. */
+  for (let i = 0; i + 1 < rows.length; i++) {
+    const a = rows[i];
+    const b = rows[i + 1];
+    const aLast = a.items[a.items.length - 1].thumb;
+    const bFirst = b.items[0].thumb;
+    const sameCol = Math.floor(i / rowsPerCol) === Math.floor((i + 1) / rowsPerCol);
+    if (sameCol) {
+      const x = bFirst.x + bFirst.w / 2;
+      ops.push({ kind: "conn", x1: x, y1: a.bottom + 0.02, x2: x, y2: b.top - 0.03 });
+    } else {
+      ops.push({
+        kind: "conn",
+        x1: aLast.x + aLast.w + 0.03,
+        y1: aLast.y + aLast.h / 2,
+        x2: bFirst.x - 0.03,
+        y2: b.top - 0.03,
+        bent: true,
+      });
+    }
   }
 
   /* header → first stage vertical arrow */
-  if (headerItems.length && placements.length) {
-    const first = placements[0][0];
-    ops.push({
-      kind: "conn",
-      x1: first.groupCx,
-      y1: 0.84,
-      x2: first.groupCx,
-      y2: first.label.y - 0.03,
-    });
+  if (headerItems.length && rows.length) {
+    const t0 = rows[0].items[0].thumb;
+    const cx = t0.x + t0.w / 2;
+    ops.push({ kind: "conn", x1: cx, y1: 0.84, x2: cx, y2: rows[0].top - 0.03 });
   }
 
-  /* final stats ("3.46 Å") under the last group */
-  if (fig.finalStats && placements.length) {
-    const lastGroup = placements[placements.length - 1];
-    const lastItem = lastGroup[lastGroup.length - 1];
-    const cx = lastItem.image.x + lastItem.image.w / 2;
-    const y = lastItem.stats && !statsSide ? lastItem.stats.y + lastItem.stats.h + 0.05 : lastItem.image.y + lastItem.image.h + (lastItem.item.stats.length && !statsSide ? statsUnderH + 0.05 : 0.05);
+  /* final stats ("3.46 Å") under the last stage */
+  if (fig.finalStats && rows.length) {
+    const lastRow = rows[rows.length - 1];
+    const lastThumb = lastRow.items[lastRow.items.length - 1].thumb;
     ops.push({
       kind: "text",
-      x: Math.max(MARGIN_X, cx - 0.7),
-      y,
+      x: Math.max(MARGIN_X, lastThumb.x + lastThumb.w / 2 - 0.7),
+      y: Math.min(lastRow.bottom + 0.06, SLIDE_H_IN - 0.58),
       w: 1.4,
       h: 0.24,
       lines: [{ t: fig.finalStats, align: "ctr" }],

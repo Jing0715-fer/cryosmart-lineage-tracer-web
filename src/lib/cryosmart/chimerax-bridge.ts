@@ -601,7 +601,7 @@ export async function renderFigureMaps(
   /* ---- 3. per-map 5-candidate alignment ---- */
   const renders: MapRender[] = [];
   const all = [opts.reference, ...opts.maps];
-  const perMapPct = 70 / Math.max(1, all.length);
+  const perMapPct = 45 / Math.max(1, all.length);
   let pct = 15;
 
   for (const req of all) {
@@ -764,7 +764,10 @@ export async function renderFigureMaps(
 
   /* ---- 4. screenshots ---- */
   if (t.canFetchFiles && t.workdir) {
-    progress("逐图导出高清截图 (1600×1200)", 88);
+    const shotTargets = renders.filter((r) => r.modelId != null);
+    const shotTotal = Math.max(1, shotTargets.length);
+    let shotDone = 0;
+    progress("逐图导出高清截图 (1600×1200)", 60);
     for (const id of openIds) {
       await exec(t, `hide #${id} models`, opts, true);
     }
@@ -792,6 +795,11 @@ export async function renderFigureMaps(
       } catch (err) {
         log(`  截图获取失败 ${r.key}: ${String(err).slice(0, 180)}`);
       }
+      shotDone += 1;
+      // v3.49 (round-8): the card owns the last stretch (裁剪白边 90 →
+      // 组装 94 → 完成 100) — this pipeline used to report 100 here, so the
+      // progress bar read "完成" while the PPTX was still assembling.
+      progress(`导出截图 ${shotDone}/${shotTotal}`, Math.min(88, 60 + Math.round((26 * shotDone) / shotTotal)));
       await exec(t, `hide #${showId} models`, opts, true);
     }
     for (const id of openIds) {
@@ -801,7 +809,7 @@ export async function renderFigureMaps(
     for (const r of renders) r.png = null;
   }
 
-  progress("ChimeraX 渲染完成", 100);
+  progress("ChimeraX 渲染完成", 88);
   return { renders, view, referenceKey: opts.reference.key, logs };
 }
 
