@@ -48,7 +48,18 @@
  * The winning rung is cached on the transport and reused for every later
  * save of the run. Exhausting the ladder logs the workdir + tried rungs so
  * a pasted log is self-diagnosing.
+ *
+ * v3.52 (round-11 “颜色依次…”): every map is colored with Chimera's own
+ * default multi-model "open" palette — the request carries the color of
+ * the map's class position (class 1 grey #b2b2b2, class 2 pale yellow
+ * #ffffb2, class 3 violet #b333ff, class 4 lavender #b2b2ff, class 5+ from
+ * the same built-in list — see chimera-colors.ts). A multi-class row now
+ * reads exactly like the job's maps opened together in Chimera, instead
+ * of v3.51's uniform gray that made classes indistinguishable. The black
+ * background stays (reference-deck look).
  */
+
+import { chimeraClassColor } from "./chimera-colors";
 
 export type BridgeKind = "relay" | "rest";
 
@@ -590,13 +601,12 @@ const CHIRALITY_EPSILON = 0.01;
 const THUMB_SIZE = 220;
 const SNAPSHOT_W = 1600;
 const SNAPSHOT_H = 1200;
-/** v3.51 (round-10 “颜色不统一”): ChimeraX auto-assigns a DIFFERENT pastel
- *  hue to every newly opened model, so a figure came back pink / yellow /
- *  lavender / cyan / gray at random. The user's reference deck renders every
- *  map the SAME mid-gray on a black background — that is now enforced:
- *  `set bgColor black` + one explicit surface colour on EVERY model
- *  (reference and every alignment candidate, including flipped copies). */
-const UNIFORM_MAP_COLOR = "#8a8a8a";
+/** v3.52 (round-11 “颜色依次…”): per-request Chimera default open-color
+ *  for the map's class position (grey → pale yellow → violet → lavender →
+ *  tan → …). A single-map stage = class 1 = grey. Missing → grey. */
+function requestColor(req: { color?: string }): string {
+  return /^#[0-9a-fA-F]{6}$/.test(req.color ?? "") ? (req.color as string) : chimeraClassColor(0);
+}
 
 export type ChiralityStatus = "consistent" | "corrected" | "ambiguous" | "unknown";
 
@@ -605,6 +615,9 @@ export interface FigureMapRequest {
   key: string;
   uid: string;
   group: string;
+  /** v3.52: Chimera default open-color for this map's class position
+   *  ("#b2b2b2" class 1 …) — sent as `color #<id> <hex>`; grey if absent. */
+  color?: string;
   /** Absolute URL ChimeraX can `open` (CryoSmart intranet URL or app asset). */
   sourceUrl: string;
 }
@@ -707,10 +720,12 @@ export async function renderFigureMaps(
     const sdTry = await exec(t, `volume #${refId} level 2 sd step ${STEP} style surface`, opts, true);
     if (sdTry.error) await exec(t, `volume #${refId} step ${STEP} style surface`, opts, true);
   }
-  // v3.51: reference-deck look — black background, one uniform gray for
-  // every map (see UNIFORM_MAP_COLOR above).
+  // v3.52: reference-deck look with Chimera default open-colors — black
+  // background, and each map explicitly `color`ed to its class position's
+  // palette entry (see requestColor above).
   await exec(t, "set bgColor black", opts, true);
-  await exec(t, `color #${refId} ${UNIFORM_MAP_COLOR}`, opts, true);
+  const refColor = requestColor(opts.reference);
+  await exec(t, `color #${refId} ${refColor}`, opts, true);
   await exec(t, "view pad 0.25", opts, true);
   await exec(t, "wait 1", opts, true);
 
@@ -797,6 +812,10 @@ export async function renderFigureMaps(
     pct += perMapPct * 0.75;
 
     const rows: CandidateRow[] = [];
+    // v3.52: this map's Chimera default open-color (class position) — every
+    // candidate (incl. the flipped copy) renders in it, so the screenshot
+    // matches the class maps opened together in Chimera.
+    const mapColor = requestColor(req);
     const openedByCandidate = new Map<string, number>();
     let chosen: { row: CandidateRow; modelId: number } | null = null;
 
@@ -826,7 +845,7 @@ export async function renderFigureMaps(
           const sdTry = await exec(t, `volume #${activeId} level 2 sd step ${STEP} style surface`, opts, true);
           if (sdTry.error) await exec(t, `volume #${activeId} step ${STEP} style surface`, opts, true);
         }
-        await exec(t, `color #${activeId} ${UNIFORM_MAP_COLOR}`, opts, true);
+        await exec(t, `color #${activeId} ${mapColor}`, opts, true);
 
         if (spec.kind === "rotate") {
           await exec(t, `turn ${spec.axis} 180 models #${activeId} center #${activeId}`, opts, true);
@@ -856,7 +875,7 @@ export async function renderFigureMaps(
           if (level2 != null) {
             await exec(t, `volume #${activeId} level ${level2.toFixed(4)} step ${STEP}`, opts, true);
           }
-          await exec(t, `color #${activeId} ${UNIFORM_MAP_COLOR}`, opts, true);
+          await exec(t, `color #${activeId} ${mapColor}`, opts, true);
         }
 
         const preRes = await exec(t, `measure correlation #${activeId} inMap #${refId}`, opts, true);
@@ -907,7 +926,7 @@ export async function renderFigureMaps(
       } else {
         chirality = "consistent";
       }
-      log(`  → ${req.key} 选中 ${bestRow.candidate} (score=${bestRow.score})，手性: ${chirality}`);
+      log(`  → ${req.key} 选中 ${bestRow.candidate} (score=${bestRow.score})，手性: ${chirality}，配色 ${mapColor}`);
       renders.push({
         key: req.key,
         uid: req.uid,

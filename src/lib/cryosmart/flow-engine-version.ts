@@ -18,5 +18,11 @@
  * blocks the run with a 刷新页面 banner, and every run log prints its version
  * line so a pasted log is self-diagnosing (a log WITHOUT the line is pre-3.50
  * and stale by definition).
+ *
+ * v3.52 bump reason: the ChimeraX render pipeline changed COLOR semantics
+ * (uniform gray → per-class Chimera default open-colors, grey/pale yellow/
+ * violet/lavender…). Old pages would keep sending v3.51 behavior invisibly;
+ * the version line in every run log also tells the user which palette a
+ * pasted log was rendered with.
  */
-export const FLOW_ENGINE_VERSION = "3.51";
+export const FLOW_ENGINE_VERSION = "3.52";

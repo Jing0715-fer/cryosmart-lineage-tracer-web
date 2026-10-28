@@ -45,6 +45,7 @@ import {
   type FlowFigureModel,
 } from "@/lib/cryosmart/workflow-figure";
 import { buildWorkflowPptx } from "@/lib/cryosmart/workflow-pptx";
+import { CHIMERA_MODEL_COLORS, chimeraClassColor } from "@/lib/cryosmart/chimera-colors";
 import { cryoSmartBytes, buildProxyAbsoluteUrl, probeCryosmartReachable } from "@/lib/cryosmart/proxy-client";
 import { FLOW_ENGINE_VERSION } from "@/lib/cryosmart/flow-engine-version";
 
@@ -307,6 +308,20 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       /* 2. per-mode thumbnails */
       let chiralityMeta = { corrected: 0, consistent: 0, ambiguous: 0, failed: 0, view: "" };
       const uniqueMaps = figureMapSources(model);
+      // v3.52 (round-11): Chimera 默认打开色序 —— class 1 灰、class 2 淡黄、
+      // class 3 紫、class 4 淡紫、class 5+ 同列表后续；单图阶段 = 该 job 的
+      // “class 1” → 灰。打印在日志里，便于用户对照 Chimera 核对。
+      const classDepth = Math.max(0, ...[...uniqueMaps.values()].map((m) => m.classIndex + 1));
+      if (uniqueMaps.size > 0) {
+        pushLog(
+          `地图配色: Chimera 默认打开色序 — class 1-${classDepth} 依次 ${CHIMERA_MODEL_COLORS.slice(
+            0,
+            classDepth,
+          )
+            .map((c) => `${c.hex}（${c.label}）`)
+            .join("、")}`,
+        );
+      }
 
       if (mode === "chimerax") {
         setStep((s) => ({ ...s, phase: "连接 ChimeraX", pct: 6 }));
@@ -496,6 +511,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             key: m.key,
             uid: m.uid,
             group: m.group,
+            // v3.52: per-class Chimera default open-color (see chimera-colors.ts).
+            color: chimeraClassColor(m.classIndex),
             sourceUrl: sourceFor.get(m.key) ?? "",
           }))
           .filter((m) => m.sourceUrl);
@@ -516,6 +533,9 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             key: referenceKey as string,
             uid: referenceItem.uid,
             group: referenceItem.group,
+            // v3.52: the reference map's own class color (single-map final
+            // stage → grey; a class map keeps its palette position).
+            color: chimeraClassColor(uniqueMaps.get(referenceKey as string)?.classIndex ?? 0),
             sourceUrl: referenceSource,
           },
           maps,

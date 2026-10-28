@@ -623,6 +623,12 @@ const relayState = {
   cdOk: 0,
   saveRelativeOk: 0,
   saveRelativeMissed: 0,
+  /** v3.52: `color #<id> <hex>` commands received (count) … */
+  colorCommands: 0,
+  /** … and the distinct hex values in FIRST-SEEN order — the E2E asserts
+   *  Chimera's default open palette (grey/pale yellow/violet/lavender/tan
+   *  for classes 1-5) reached ChimeraX in class order. */
+  colorHexes: [] as string[],
 };
 
 function resetRelayState() {
@@ -641,6 +647,8 @@ function resetRelayState() {
   relayState.cdOk = 0;
   relayState.saveRelativeOk = 0;
   relayState.saveRelativeMissed = 0;
+  relayState.colorCommands = 0;
+  relayState.colorHexes = [];
 }
 
 function relayNextModelId(): number {
@@ -674,6 +682,8 @@ function relayStats() {
     cd_ok: relayState.cdOk,
     save_relative_ok: relayState.saveRelativeOk,
     save_relative_missed: relayState.saveRelativeMissed,
+    color_commands: relayState.colorCommands,
+    color_hexes: [...relayState.colorHexes],
   };
 }
 function u_hasAsset(u: string): boolean {
@@ -684,6 +694,18 @@ function u_hasAsset(u: string): boolean {
 async function relaySimulate(raw: string): Promise<{ text: string; error: string | null }> {
   const command = String(raw || "").trim();
   relayState.commands.push(command);
+
+  // v3.52: record explicit `color #<id> <hex>` surface colors so the E2E
+  // can assert the Chimera default open palette arrives in class order
+  // (#b2b2b2 grey, #ffffb2 pale yellow, #b333ff violet, #b2b2ff lavender,
+  // #d2b48c tan, …). Non-hex colors (e.g. `color #1 red`) are counted but
+  // not added to the ordered set.
+  const colorMatch = /^color\s+#[\d.]+\s+(#[0-9a-fA-F]{6,8})\b/.exec(command);
+  if (colorMatch) {
+    relayState.colorCommands += 1;
+    const hex = colorMatch[1].slice(0, 7).toLowerCase();
+    if (!relayState.colorHexes.includes(hex)) relayState.colorHexes.push(hex);
+  }
 
   const openMatch = /^open\s+"([^"]+)"(?:\s+format\s+(\S+))?\s*$/i.exec(command);
   if (openMatch) {
@@ -1000,14 +1022,21 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
     mk("J498", 498, "deep_emhancer", ["J497"], [FV("J497")], [VOUT("volume")]),
     mk("J497", 497, "local_refine", ["J494", "J476"], [FV("J494"), FP("J476")], [VOUT("volume")]),
     mk("J494", 494, "hetero_refine", ["J420", "J448"], [FV("J420"), FP("J448")], [
-      // v3.51: a 3-class hetero split — the figure must show all three
-      // classes side by side in one row with per-class stats.
+      // v3.52: a 5-class hetero split — the figure must show all five
+      // classes side by side in one row (MAX_FIG_CLASSES was raised 4 → 8),
+      // which drives the Chimera default open palette through classes 1-5:
+      // grey #b2b2b2, pale yellow #ffffb2, violet #b333ff, lavender #b2b2ff,
+      // tan #d2b48c (relay-stats color_hexes asserts exactly this order).
       VOUT("volume_class_0"),
       VOUT("volume_class_1"),
       VOUT("volume_class_2"),
-      PCLASS(0, 120000),
+      VOUT("volume_class_3"),
+      VOUT("volume_class_4"),
+      PCLASS(0, 90000),
       PCLASS(1, 40000),
-      PCLASS(2, 20000),
+      PCLASS(2, 30000),
+      PCLASS(3, 12000),
+      PCLASS(4, 8000),
       PALL(180000),
     ]),
     mk("J448", 448, "nonuniform_refine", ["J443", "J476"], [FV("J443"), FP("J476")], [VOUT("volume")]),

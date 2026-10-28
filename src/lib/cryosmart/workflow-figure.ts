@@ -58,6 +58,11 @@ export interface FlowFigureItem {
 export interface FigureClassSlot {
   /** Canonical map key "uid/group" — image marker + render lookup key. */
   mapKey: string;
+  /** v3.52: 0-based position of this class within its job (class 1 → 0) —
+   *  drives the Chimera default open-color (grey → pale yellow → violet →
+   *  lavender → …). Computed AFTER sorting/dedup so it is the position the
+   * map would get when the job's maps are opened together in Chimera. */
+  classIndex: number;
   group: string;
   resultName: string;
   downloadUrl: string;
@@ -67,7 +72,9 @@ export interface FigureClassSlot {
 }
 
 /** v3.51: every ChimeraX-renderable map in the figure (all classes), keyed by
- *  mapKey — the card's source-of-truth for proxy/staging/preview/render loops. */
+ *  mapKey — the card's source-of-truth for proxy/staging/preview/render loops.
+ *  v3.52: carries classIndex so the card can attach the Chimera default
+ *  open-color to each render request (grey/pale yellow/violet/lavender…). */
 export interface FigureMapSource {
   key: string;
   uid: string;
@@ -75,12 +82,19 @@ export interface FigureMapSource {
   resultName: string;
   downloadUrl: string;
   previewUrl: string | null;
+  /** 0-based class position within the source job (single-map stages: 0). */
+  classIndex: number;
 }
 
 /** v3.51: most classes shown per job row — a wider row shrinks EVERY
- *  thumbnail on the slide, so a big hetero split is truncated with a
- *  warning instead of turning the whole figure into confetti. */
-export const MAX_FIG_CLASSES = 4;
+ *  thumbnail on the slide, so a huge split is truncated with a warning
+ *  instead of turning the whole figure into confetti. v3.52 (round-11):
+ *  raised 4 → 8 — the user asked for classes past 4 to KEEP rendering in
+ *  the Chimera default open-colors ("尽量也都改成chimera中默认的打开的
+ *  颜色"), so realistic 5-8-class hetero/hyper splits stay visible; the
+ *  row-aware width solver folds the whole figure into columns when the
+ *  per-thumbnail readability floor (1.45") is crossed. */
+export const MAX_FIG_CLASSES = 8;
 
 export function figureMapSources(model: FlowFigureModel): Map<string, FigureMapSource> {
   const out = new Map<string, FigureMapSource>();
@@ -97,6 +111,7 @@ export function figureMapSources(model: FlowFigureModel): Map<string, FigureMapS
             resultName: c.resultName,
             downloadUrl: c.downloadUrl,
             previewUrl: c.previewUrl,
+            classIndex: c.classIndex,
           });
         }
       }
@@ -109,6 +124,7 @@ export function figureMapSources(model: FlowFigureModel): Map<string, FigureMapS
           resultName: item.map.resultName,
           downloadUrl: item.map.downloadUrl,
           previewUrl: item.map.previewUrl,
+          classIndex: 0,
         });
       }
     }
@@ -317,6 +333,10 @@ function classSlotsFor(
     pushStats(stats, cls.particle_percent, cls.particle_count);
     slots.push({
       mapKey: `${node.uid}/${group}`,
+      // v3.52: slot POSITION (after sort + downloadability filter), not the
+      // raw class_index — opening the job's available maps in Chimera hands
+      // out grey/pale yellow/violet/lavender by this order.
+      classIndex: slots.length,
       group,
       resultName: primaryMap.result_name,
       downloadUrl: primaryMap.download_url,
@@ -344,6 +364,7 @@ function classSlotsFor(
       if (!isFinal && pct) stats.push(pct);
       rawSlots.push({
         mapKey: `${node.uid}/${group}`,
+        classIndex: rawSlots.length,
         group,
         resultName: asset.result_name,
         downloadUrl: asset.download_url,
@@ -369,6 +390,7 @@ function classSlotsFor(
     return [
       {
         mapKey: `${node.uid}/${asset.group}`,
+        classIndex: 0,
         group: asset.group,
         resultName: asset.result_name,
         downloadUrl: asset.download_url,
@@ -381,7 +403,7 @@ function classSlotsFor(
   if (slots.length > MAX_FIG_CLASSES) {
     const dropped = slots.length - MAX_FIG_CLASSES;
     opts.warnings?.push(
-      `${node.uid} 有 ${slots.length} 个 class，每行最多并排 ${MAX_FIG_CLASSES} 个 — 已省略 ${dropped} 个（class ${MAX_FIG_CLASSES} 及之后）。`,
+      `${node.uid} 有 ${slots.length} 个 class，每行最多并排 ${MAX_FIG_CLASSES} 个 — 已省略 ${dropped} 个（class ${MAX_FIG_CLASSES + 1} 起不显示）。`,
     );
     return slots.slice(0, MAX_FIG_CLASSES);
   }
