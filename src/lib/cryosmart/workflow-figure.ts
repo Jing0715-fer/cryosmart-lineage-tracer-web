@@ -176,6 +176,26 @@ export interface FlowFigureModel {
 export interface BuildModelOptions {
   maxGroups?: number;
   includeSelect2d?: boolean;
+  /** v3.61 (round-20 “极简模式还是有问题，很多上下游的job放在同一级了，
+   *  应该是精选出几个job展示，上下游关系还是不能混乱”): build the CURATED
+   *  MAINLINE figure instead of the full merge-assembly:
+   *  - rows come from the particle MAINLINE only (walkParentChain's
+   *    map-bearing spine, ancestor → final): EVERY job gets its OWN row —
+   *    the merge-contributor parallel groups that crammed an upstream
+   *    refinement and a downstream one into the same visual level (P268's
+   *    “Import Volumes + Non-uniform refinement” rows) are never built;
+   *  - imported reference volumes (import_volumes and other import_*
+   *    seeds — map-bearing but pure data inputs) are excluded from the
+   *    funnel (they render as workflow STEPS nowhere in the reference
+   *    deck); the exclusion lifts only when it would empty the chain;
+   *  - no select_2D montage row (the reference's funnel starts at the
+   *    first map stage; the header band carries the entry counts);
+   *  - the simplified passes (bootstrap/redundant drops + funnel) still
+   *    run underneath, and the row cap falls to the same first+last /
+   *    fill-from-the-end selection round-19 approved (curateMinimalFlow).
+   *  Implies nothing about the LAYOUT style; pair with workflow-pptx's
+   *  style:"minimal" for the workflow.pptx look. */
+  minimal?: boolean;
   /** v3.54 (round-13 "简化模式"): build the SIMPLIFIED stage figure —
    *  (a) OMIT small-subset bootstrap steps (2D classification / 2D
    *      selection / ab-initio jobs that ran on materially fewer
@@ -333,12 +353,26 @@ function collectLineageGraph(summary: LineageSummary): LineageGraph {
  *  the first map-bearing ancestor found; volume parents are explored only
  *  after the particle subtree is exhausted (they are reference-map side
  *  inputs — e.g. J28 ← J27). A volume-parent chain therefore still works
- *  when no particle ancestor carries maps (the pre-v3.58 look). */
+ *  when no particle ancestor carries maps (the pre-v3.58 look).
+ *
+ *  v3.61 (round-20): `skipImportSeeds` — the 极简 curated-mainline variant.
+ *  When several VOLUME-side ancestors compete after the particle subtree
+ *  dies, the LIFO pops them in REVERSE push order, so an import_volumes
+ *  reference (J220, pushed after the true initial model J230) can win the
+ *  stop and hide the ab-initio behind it. The 极简 walk refuses to STOP on
+ *  an import_* seed (it explores THROUGH it like a map-less step) so the
+ *  real initial-model stage stays on the curated mainline; the standard
+ *  walk keeps the old stop-on-first-map semantics (v3.58 unchanged). */
 function spineUpstreamOf(
   uid: string,
   graph: LineageGraph,
   seen: Set<string>,
+  skipImportSeeds = false,
 ): string {
+  const isImportSeed = (u: string) => {
+    const n = graph.byUid.get(u);
+    return !!n && /^import_/i.test(n.job_type || "");
+  };
   const stack: string[] = [];
   const pushParents = (u: string) => {
     const vol = graph.volParentsOf.get(u) || [];
@@ -354,14 +388,15 @@ function spineUpstreamOf(
     const cur = stack.pop()!;
     if (seen.has(cur)) continue;
     const node = graph.byUid.get(cur);
-    if (node && normalMapAssets(node).length > 0) {
+    if (node && normalMapAssets(node).length > 0 && !(skipImportSeeds && isImportSeed(cur))) {
       // Do NOT mark the found spine node here — the caller's loop marks
       // nodes when APPENDING them to the chain, and its `!seen.has(cur)`
       // guard must not reject the node we just returned.
       return cur;
     }
-    // Dead-branch exploration marker: map-less intermediates can never be
-    // spine members, so remembering them only skips redundant re-walks.
+    // Dead-branch exploration marker: map-less intermediates (and, for the
+    // 极简 walk, import seeds) can never be spine members, so remembering
+    // them only skips redundant re-walks.
     seen.add(cur);
     pushParents(cur);
   }
@@ -371,8 +406,14 @@ function spineUpstreamOf(
 /** Spine chain (final → earliest ancestor). v3.44: supplies the ORDER of
  *  the stage groups only — completeness comes from the merge-contributor
  *  scan over the full ancestor DAG. v3.58: each step now runs the
- *  particle-first search above (see spineUpstreamOf). */
-function walkParentChain(summary: LineageSummary, graph: LineageGraph): LineageNode[] {
+ *  particle-first search above (see spineUpstreamOf). v3.61: the 极简
+ *  curation passes { skipImportSeeds: true } so imported reference volumes
+ *  never steal the stop from the real initial-model stage. */
+function walkParentChain(
+  summary: LineageSummary,
+  graph: LineageGraph,
+  opts: { skipImportSeeds?: boolean } = {},
+): LineageNode[] {
   const chain: LineageNode[] = [];
   const seen = new Set<string>();
   let cur = summary.start_uid;
@@ -381,7 +422,7 @@ function walkParentChain(summary: LineageSummary, graph: LineageGraph): LineageN
     const node = graph.byUid.get(cur);
     if (!node) break;
     chain.push(node);
-    cur = spineUpstreamOf(cur, graph, seen);
+    cur = spineUpstreamOf(cur, graph, seen, !!opts.skipImportSeeds);
   }
   return chain; // final → ancestor
 }
@@ -647,7 +688,47 @@ export function buildFlowFigureModel(
    * SUCCESSOR-based post-pass (see dropSimplifiedBootstrap) — group
    * building below stays untouched; only the flag is threaded here. */
   const simplified = !!opts.simplified;
+  /* v3.61 (round-20): 极简 CURATION — one job per row along the particle
+   *  MAINLINE, never the merge-assembly's parallel cramping. */
+  const minimal = !!opts.minimal;
 
+  const spineMapOrder = [...chain].reverse().filter((n) => hasMaps(n.uid));
+
+  if (minimal) {
+    /* v3.61 (round-20 “应该是精选出几个job展示，上下游关系还是不能混乱”):
+     *  the curated funnel = the particle mainline's map-bearing stages,
+     *  ancestor → final, EVERY job in its OWN row. No select_2D montage
+     *  row (the reference deck's funnel starts at the first map stage;
+     *  the header band carries the entry counts), no merge-contributor
+     *  parallel groups (they are what crammed an upstream refinement and
+     *  a downstream one onto the SAME visual level in P268's garbled
+     *  deck), and imported reference volumes (import_* seeds) are not
+     *  workflow STEPS — excluded unless the chain would be empty (a
+     *  lineage traced from an imported map still needs an entry row).
+     *  The walk skips import seeds (skipImportSeeds) so a volume-imported
+     *  reference can never steal the stop from the real initial model. */
+    const isImportSeed = (n: LineageNode) => /^import_/i.test(n.job_type || "");
+    const chainCurated = walkParentChain(summary, graph, { skipImportSeeds: true });
+    const spineCurated = [...chainCurated].reverse().filter((n) => hasMaps(n.uid));
+    const curatedStages = spineCurated.filter((n) => !isImportSeed(n));
+    /* safety: a lineage whose ONLY map ancestors are imported volumes must
+     * still render — fall back to the plain spine's stages (imports and
+     * all) when the curated walk surfaced nothing beyond them. */
+    const fallbackStages = spineMapOrder.filter((n) => !isImportSeed(n));
+    const stages = curatedStages.length ? curatedStages : fallbackStages.length ? fallbackStages : spineMapOrder;
+    for (const S of stages) {
+      groups.push([itemFromNode(summary, S, { isFinal: S.uid === summary.start_uid, warnings })]);
+      usedUids.add(S.uid);
+    }
+    const excludedImports = spineMapOrder.filter((n) => isImportSeed(n) && !stages.includes(n)).length;
+    warnings.push(
+      `极简模式: 已精选颗粒主线上的 ${stages.length} 个阶段 — 每个 job 独占一行、按上下游顺序排列；并行输入分支不进入极简图` +
+        (excludedImports
+          ? `；另排除 ${excludedImports} 个导入/种子阶段（参考体积等输入不作为流程阶段展示）`
+          : "") +
+        "。",
+    );
+  } else {
   // 2D selection stage (image montage, no map) — deepest ancestor (closest
   // to the final job), optional.
   if (opts.includeSelect2d !== false) {
@@ -679,7 +760,6 @@ export function buildFlowFigureModel(
      parallel group (the reference's J68-H1 + J142-H2 case) — this is how
      the second dataset's branch enters the figure even when it merges via
      a particle edge (P208: J494 hetero_refine → J497 nonuniform_refine). */
-  const spineMapOrder = [...chain].reverse().filter((n) => hasMaps(n.uid));
   const mergeContributors = new Map<string, string[]>();
   for (const S of spineMapOrder) {
     const contrib = mapParentsOf(S.uid);
@@ -716,6 +796,7 @@ export function buildFlowFigureModel(
       usedUids.add(S.uid);
     }
   }
+  } // !minimal (v3.61: the 极简 figure never builds the merge assembly)
 
   // v3.54 (round-13 “简化模式”): OMIT small-subset bootstrap steps — 2D
   // classification / 2D selection / ab-initio stages whose particle count
@@ -736,7 +817,13 @@ export function buildFlowFigureModel(
   // branch groups and the final stage never fold. The old splice(1, n)
   // deleted the branch group first, which is exactly how a dataset branch
   // vanished from the 4-group figure.
-  const folded = trimFlowGroups(staged, maxGroups, warnings);
+  // v3.61 (round-20): the 极简 figure curates its all-single mainline with
+  // first+last mandatory and the middle filling from the END (closest to
+  // the final map carries the resolution story) — the same selection
+  // round-19 approved on the P96 chain, now on a cramp-free mainline.
+  const folded = minimal
+    ? curateMinimalFlow(staged, maxGroups, warnings)
+    : trimFlowGroups(staged, maxGroups, warnings);
 
   // v3.54 (round-13 “简化模式”): enforce the 多→少 reading over the
   // DISPLAYED count lines (stage-to-stage; the header's pick count is
@@ -904,6 +991,31 @@ function trimFlowGroups(
   const kept = groups.filter((_, i) => chosen.has(i));
   warnings.push(
     `谱系阶段较多，已折叠最早的 ${groups.length - kept.length} 个阶段（并行分支已保留；阶段数选“全部”即不折叠）。`,
+  );
+  return kept;
+}
+
+/** v3.61 (round-20 “应该是精选出几个job展示，上下游关系还是不能混乱”):
+ *  the 极简 row cap. The curated mainline is all-single rows, so there are
+ *  no parallel groups to protect — the FIRST stage (the funnel entry) and
+ *  the FINAL stage (the resolution story) are mandatory, and the remaining
+ *  budget fills from the END: the stages closest to the final map are the
+ *  most refined ones, so earlier middle steps drop first. The dropped
+ *  stages' upstream→downstream ORDER among the survivors is untouched —
+ *  curation only REMOVES rungs, it never re-levels them. */
+function curateMinimalFlow(
+  groups: FlowFigureItem[][],
+  maxGroups: number,
+  warnings: string[],
+): FlowFigureItem[][] {
+  if (groups.length <= maxGroups) return groups;
+  const chosen = new Set<number>();
+  chosen.add(0);
+  chosen.add(groups.length - 1);
+  for (let i = groups.length - 2; i > 0 && chosen.size < maxGroups; i--) chosen.add(i);
+  const kept = groups.filter((_, i) => chosen.has(i));
+  warnings.push(
+    `极简模式: 主线共 ${groups.length} 个阶段，已精选 ${kept.length} 个关键阶段（首尾必留、其余自后向前保留 — 未选阶段不渲染，上下游顺序保持不变）。`,
   );
   return kept;
 }

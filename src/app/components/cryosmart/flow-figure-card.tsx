@@ -64,8 +64,11 @@ type FigureStyle = "standard" | "minimal";
  *   standard   完整谱系，标准版式（job id 标注 + 每 class 统计）
  *   simplified 简化合并（少量数据 2D / 默认 12 Å ab-initio 省略，
  *              相邻同颗粒数 non-uniform 合并，颗粒数从多到少）
- *   minimal    极简 — 在简化合并基础上最多只保留 MINIMAL_ROW_CAP 行
- *              图片 + workflow.pptx 版式（选中 class 细框 + 留存颗粒数标注）
+ *   minimal    极简 — v3.61 (round-20): 精选颗粒主线上的关键 job，每个
+ *              job 独占一行、上下游顺序不乱（并行输入/导入参考
+ *              体积分支不进入图），简化合并规则照跑，最多
+ *              MINIMAL_ROW_CAP 行图片 + workflow.pptx 版式（选中
+ *              class 细框 + 留存颗粒数标注）
  *   manual     手动勾选要体现的 job（标准版式） */
 type FlowModeOption = "standard" | "simplified" | "minimal" | "manual";
 /** round-19 “极简（合并部分步骤，最多只保留5行图片）”。 */
@@ -81,7 +84,7 @@ const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
   },
   minimal: {
     label: `极简（最多 ${MINIMAL_ROW_CAP} 行）`,
-    hint: `在简化合并的基础上最多只保留 ${MINIMAL_ROW_CAP} 行图片；workflow.pptx 版式：选中 class 细框 + 箭头旁留存颗粒数标注，无 job id/页脚`,
+    hint: `精选颗粒主线上的关键 job — 每个 job 独占一行、上下游顺序不乱（并行输入/导入参考体积分支不进入图）；简化合并规则照跑，最多 ${MINIMAL_ROW_CAP} 行图片；workflow.pptx 版式：选中 class 细框 + 箭头旁留存颗粒数标注，无 job id/页脚`,
   },
   manual: {
     label: "手动",
@@ -419,9 +422,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         // to Infinity (never fold). Anything unparseable falls back to 10.
         // v3.60: 极简 caps the effective value at 5 image rows
         // (effectiveMaxGroups); 简化/极简 share simplified=true.
+        // v3.61 (round-20): 极简 additionally builds the CURATED MAINLINE
+        // (minimal:true) — one job per row, no parallel cramping.
         model = buildFlowFigureModel(summary, {
           maxGroups: effectiveMaxGroups,
           simplified,
+          minimal: flowMode === "minimal",
         });
       }
       /* v3.59 手动模式: trim the model to the checked jobs BEFORE any
@@ -441,7 +447,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
        * carries the merge rules too: simplified=true runs under it). */
       if (flowMode === "minimal") {
         pushLog(
-          `极简模式: 在简化规则之上（少量数据 2D 与默认 12 Å ab-initio 省略 · 相邻同颗粒数 non-uniform 合并 · 颗粒数从多到少），最多只保留 ${MINIMAL_ROW_CAP} 行图片`,
+          "极简模式: 精选颗粒主线上的关键 job — 每个 job 独占一行、按上下游顺序排列（并行输入/导入参考体积分支不进入图）",
+        );
+        pushLog(
+          `极简规则: 简化合并照跑（默认 12 Å ab-initio 省略 · 相邻同颗粒数 non-uniform 合并 · 颗粒数从多到少）· 最多 ${MINIMAL_ROW_CAP} 行图片`,
         );
         pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头 · 选中 class 细框 · 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
       } else if (flowMode === "simplified") {
@@ -926,7 +935,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-teal-700 dark:text-teal-300">引擎 v{FLOW_ENGINE_VERSION}</Badge>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          竖向单列排版，箭头固定尺寸、直线连接；所有 map 由 ChimeraX 渲染并统一朝向与手性。用「模式」选择 标准 / 简化 / 极简（合并部分步骤，最多 5 行图片）/ 手动勾选。
+          竖向单列排版，箭头固定尺寸、直线连接；所有 map 由 ChimeraX 渲染并统一朝向与手性。用「模式」选择 标准 / 简化 / 极简（精选主线关键 job，每个 job 独占一行、上下游顺序不乱，最多 5 行图片）/ 手动勾选。
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -1291,7 +1300,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
           <Boxes className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
           <span>
-            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（在简化基础上最多只保留 5 行图片；选中 class 细框 + 箭头旁留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先在 ChimeraX 里做 5 候选拟合（original / x·y·z 180° 旋转 / z-flip），按 <code className="font-mono">fit search 15</code> 相关性选最优 ——
+            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线上的关键 job — 每个 job 独占一行、上下游顺序不乱，导入参考体积等输入分支不进入图；简化合并照跑，最多 5 行图片；选中 class 细框 + 箭头旁留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先在 ChimeraX 里做 5 候选拟合（original / x·y·z 180° 旋转 / z-flip），按 <code className="font-mono">fit search 15</code> 相关性选最优 ——
             z-flip 胜出即手性相反、已自动翻正；参考地图做 90° 视角白区评分后统一应用到所有地图，保证朝向与比例一致。图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
           </span>
         </div>

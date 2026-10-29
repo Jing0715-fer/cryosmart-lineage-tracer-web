@@ -52,7 +52,21 @@
  * label 37.2% (590,421 / 1,588,675 — the reference deck's own number),
  * 2 selection frames (J34 + J39, the only multi-slot rows with a next
  * rep), and the final Å.
- */
+ *
+ * v3.61 (round-20 “极简模式还是有问题，很多上下游的job放在同一级了，
+ * 应该是精选出几个job展示，上下游关系还是不能混乱”): 极简 is now the
+ * CURATED MAINLINE — buildFlowFigureModel({…, minimal: true}) builds one
+ * row per mainline map stage (no merge-assembly parallel groups, no
+ * import_* seeds, no select_2D montage) and caps via curateMinimalFlow.
+ * The P96 fold must stay EXACTLY [J28, J34, J37, J39, J41] (continuity
+ * with the round-19-approved deck), and a NEW P268-like fixture (imported
+ * reference volumes + a local refinement merging ≥2 map-bearing parents
+ * + a small-subset 2D branch) reproduces the reported disease in the OLD
+ * paths — the standard assembly crams [J230+J220] and [J270+J250] into
+ * parallel rows, Import Volumes enters the funnel, and the round-19 极简
+ * still carries the crammed row — while the NEW minimal build yields the
+ * clean 5-row mainline [J240, J250, J270, J280, J290] with a monotone
+ * funnel, 2 selection frames, and NO Import Volumes / job-id runs.  */
 import { buildFlowFigureModel, figureMapSources, applyManualSelection } from "../src/lib/cryosmart/workflow-figure";
 import { chimeraClassColor } from "../src/lib/cryosmart/chimera-colors";
 import { buildWorkflowPptx } from "../src/lib/cryosmart/workflow-pptx";
@@ -660,13 +674,17 @@ console.log("== minimal pptx ==", OUT_MINIMAL, buf3.length, "bytes");
 
 /* ------------------------------------------------------------------
  * v3.60 (round-19): 极简模式 — 简化合并 + 最多 5 行图片.
- * The card's 极简 mode passes simplified:true with maxGroups clamped to
- * the 5-row cap (阶段数 4/5, “全部”→5). On the P96 chain the simplified
- * pass leaves 6 groups [J28, J31, J34, J37, J39, J41]; the 5-row fold
- * keeps first+last and fills from the END → [J28, J34, J37, J39, J41].
+ * v3.61 (round-20): 极简 = the CURATED MAINLINE. The card's 极简 mode
+ * now passes minimal:true with simplified:true and maxGroups clamped to
+ * the 5-row cap. On the P96 chain the mainline is [J27, J28, J31, J33,
+ * J34, J35, J37, J39, J40, J41]; the simplified drops leave [J28, J31,
+ * J34, J37, J39, J41] and the 5-row curation keeps first+last and fills
+ * from the END → [J28, J34, J37, J39, J41] — EXACTLY the round-19
+ * approved fold (continuity: the new mainline curation must not change
+ * a deck the user already signed off).
  * ------------------------------------------------------------------ */
 const OUT_MINIMAL5 = path.join(OUT_DIR, "out-minimal5.pptx");
-const modelMini = buildFlowFigureModel(summary, { maxGroups: 5, simplified: true });
+const modelMini = buildFlowFigureModel(summary, { maxGroups: 5, simplified: true, minimal: true });
 console.log("== 极简 groups ==", modelMini.groups.length);
 for (const g of modelMini.groups) {
   console.log(
@@ -694,6 +712,249 @@ const blobMini = buildWorkflowPptx(modelMini, { images: imagesMini, style: "mini
 const bufMini = Buffer.from(await blobMini.arrayBuffer());
 fs.writeFileSync(OUT_MINIMAL5, bufMini);
 console.log("== 极简 pptx ==", OUT_MINIMAL5, bufMini.length, "bytes");
+
+/* ------------------------------------------------------------------
+ * v3.61 (round-20): the P268-like fixture — 极简 must CURATE the
+ * mainline, never parallel-cram upstream/downstream jobs into one row.
+ *
+ * DAG (mirrors the shapes behind the user's garbled P268 deck):
+ *   J201 import_micrographs (14,404) → J210 topaz_extract (4,812,000,
+ *   the mainline pick) → J212 class_2D → J215 select_2D (12,259 — a
+ *   small-subset 2D branch with a montage image) → J230 abinit on that
+ *   selection (default-12, drops);
+ *   J220 import_volumes (3 reference maps) feeds volume inputs ALL the
+ *   way down (P268's “Import Volumes” rows);
+ *   J240 hetero runs on the FULL extract (particle edge straight from
+ *   J210, P96-J28 style) with J230's map as reference → classes c0
+ *   1,900,000 feeds J250 hetero (1,900,000; 3 classes) → c0 1,178,700
+ *   feeds J260 nonuniform (dual J250 parent: particles + reference map)
+ *   → J270 nonuniform (dual J260 parent, same 1,178,700 → simplified
+ *   merges) → J280 local_refine (1,000,000; ≥2 map-bearing DIRECT
+ *   parents: J270 + J250's re-entering reference + J220 — the cramping
+ *   merge) → J290 deepemhancer (2.70 Å).
+ * ------------------------------------------------------------------ */
+const J201 = mkNode("J201", "import_micrographs", { micrograph_count: 14404 });
+const J210 = mkNode("J210", "topaz_extract", { particle_count: 4812000, micrograph_count: 14404 });
+const J212 = mkNode("J212", "class_2D", { particle_count: 4812000 });
+const J215 = mkNode("J215", "select_2D", {
+  particle_count: 12259,
+  select_2d: { particles_selected: 12259, classes_selected: 6 },
+  images: [
+    {
+      kind: "log_image",
+      name: "log_image",
+      url: "http://cryosmart.test/api/log_image/j215",
+      src: "http://cryosmart.test/api/log_image/j215",
+      original_url: "http://cryosmart.test/api/log_image/j215",
+    },
+  ],
+});
+const J220 = mkNode("J220", "import_volumes", {
+  maps: [mkMapAsset("J220", "volume_class_0"), mkMapAsset("J220", "volume_class_1"), mkMapAsset("J220", "volume_class_2")],
+});
+const J230 = mkNode("J230", "homo_abinit", {
+  // ran on the 12,259-particle 2D selection; NO Maximum-resolution
+  // parameter — absent = the cryoSPARC default 12 Å → simplified drops it.
+  particle_count: 12259,
+  maps: [mkMapAsset("J230", "volume_class_0"), mkMapAsset("J230", "volume_class_1")],
+  classes: mkClasses("J230", [
+    [0, 50.0, 6129],
+    [1, 35.0, 4290],
+  ]),
+});
+const J240 = mkNode("J240", "hetero_refine", {
+  // the FULL-extract hetero (particle edge straight from J210) with
+  // J230's map as reference — P96-J28's shape; its selected class 0
+  // (1,900,000) feeds J250.
+  particle_count: 4812000,
+  maps: [mkMapAsset("J240", "volume_class_0"), mkMapAsset("J240", "volume_class_1"), mkMapAsset("J240", "volume_class_2")],
+  classes: mkClasses("J240", [
+    [0, 39.5, 1900000],
+    [1, 31.2, 1500000],
+    [2, 29.3, 1412000],
+  ]),
+});
+const J250 = mkNode("J250", "hetero_refine", {
+  particle_count: 1900000,
+  maps: [mkMapAsset("J250", "volume_class_0"), mkMapAsset("J250", "volume_class_1"), mkMapAsset("J250", "volume_class_2")],
+  classes: mkClasses("J250", [
+    [0, 62.0, 1178700],
+    [1, 21.1, 400000],
+    [2, 16.9, 321300],
+  ]),
+});
+const J260 = mkNode("J260", "nonuniform_refine_new", {
+  // dual J250 parent: particles AND reference map — NOT a merge (one
+  // map-bearing direct parent), so J250 stays fresh for J280's merge.
+  particle_count: 1178700,
+  maps: [mkMapAsset("J260", "volume")],
+});
+const J270 = mkNode("J270", "nonuniform_refine_new", {
+  // dual J260 parent (particles + map); same count as J260 → simplified
+  // merges the earlier one away.
+  particle_count: 1178700,
+  maps: [mkMapAsset("J270", "volume")],
+});
+const J280 = mkNode("J280", "new_local_refine", {
+  // ≥2 map-bearing DIRECT parents (J270 + the re-entering J250 reference
+  // + J220): the merge-assembly's cramping merge.
+  particle_count: 1000000,
+  maps: [mkMapAsset("J280", "volume")],
+});
+const J290 = mkNode("J290", "deepemhancer", {
+  particle_count: 1000000,
+  resolution_A: 2.7,
+  maps: [mkMapAsset("J290", "volume")],
+});
+const nodes268 = [J201, J210, J212, J215, J220, J230, J240, J250, J260, J270, J280, J290];
+const rawEdges268: Array<[string, string, "volume" | null]> = [
+  ["J201", "J210", null],
+  ["J210", "J212", null],
+  ["J212", "J215", null],
+  ["J215", "J230", null],
+  ["J220", "J230", "volume"],
+  ["J210", "J240", null],
+  ["J230", "J240", "volume"],
+  ["J220", "J240", "volume"],
+  ["J240", "J250", null],
+  ["J220", "J250", "volume"],
+  ["J250", "J260", null],
+  ["J250", "J260", "volume"],
+  ["J260", "J270", null],
+  ["J260", "J270", "volume"],
+  ["J270", "J280", null],
+  ["J250", "J280", "volume"],
+  ["J220", "J280", "volume"],
+  ["J280", "J290", "volume"],
+];
+const edges268 = rawEdges268.map(([source, target, kind]) => ({
+  source,
+  target,
+  input_type: kind,
+  input_name: kind,
+  input_title: null,
+  source_group: null,
+  slots: [],
+}));
+const uidIndex268 = new Map(nodes268.map((n, i) => [n.uid, i] as const));
+for (const e of rawEdges268) {
+  const child = nodes268[uidIndex268.get(e[1])!];
+  if (!child.parents.includes(e[0])) child.parents.push(e[0]);
+  const parent = nodes268[uidIndex268.get(e[0])!];
+  if (!parent.children.includes(e[1])) parent.children.push(e[1]);
+}
+const summary268: any = {
+  ok: true,
+  project_uid: "P268",
+  base_url: "http://cryosmart.test",
+  start_uid: "J290",
+  start_job: J290,
+  final_particle_count: 16000,
+  final_micrograph_count: 14404,
+  final_resolution_A: 2.7,
+  resolution_note: "",
+  map_download_urls: {},
+  nodes: nodes268,
+  edges: edges268,
+  import_or_leaf_jobs: [J201],
+  class_split_jobs: [J230, J240, J250].map((n) => ({ uid: n.uid, job_type: n.job_type, classes: n.classes })),
+  focused_mermaid: "",
+  micrograph_pixel_size_A: 0.5,
+};
+
+/* (a) the STANDARD assembly reproduces the reported disease: TWO parallel
+ * rows cram an upstream + a downstream job onto the same level
+ * ([J230+J220] then [J270+J250]), the imported volume J220 enters the
+ * funnel, and J250 — a true mainline stage — renders ONLY inside the
+ * crammed merge row (it never gets its own level). */
+const std268 = buildFlowFigureModel(summary268, { maxGroups: 0 });
+console.log("== P268 standard groups ==", std268.groups.length);
+for (const g of std268.groups) {
+  console.log(
+    " p268-std:",
+    g.map((i) => `${i.uid}[${i.classes ? i.classes.map((c) => c.mapKey.split("/")[1]).join("+") : i.imageUrl ? "img" : "-"}]`).join(" + "),
+  );
+}
+const parallels268 = std268.groups.filter((g) => g.length > 1);
+if (parallels268.length < 2)
+  fail.push(`P268 fixture must reproduce the cramping in the standard assembly (expected ≥2 parallel rows), got ${parallels268.length}`);
+const cramA = parallels268.find((g) => g.some((i) => i.uid === "J230") && g.some((i) => i.uid === "J220"));
+if (!cramA) fail.push("P268 standard: the ab-initio must be crammed beside the imported volumes [J230+J220]");
+const cramB = parallels268.find((g) => g.some((i) => i.uid === "J270") && g.some((i) => i.uid === "J250"));
+if (!cramB) fail.push("P268 standard: the nonuniform must be crammed beside its own upstream hetero [J270+J250]");
+if (!std268.groups.flat().some((i) => i.uid === "J220"))
+  fail.push("P268 standard: Import Volumes must be in the funnel (the reported disease)");
+if (!std268.groups.flat().some((i) => i.uid === "J215"))
+  fail.push("P268 standard: the 2D-selection montage row must be present (contrast with the 极简 build)");
+if (std268.groups.some((g) => g.length === 1 && g[0].uid === "J250"))
+  fail.push("P268 standard: J250 must render ONLY inside the crammed merge row (never its own level)");
+
+/* (b) the round-19 极简 (simplified + 5-row cap, NO curation) still carries
+ * the crammed row — the mandatory-parallel protection keeps [J270+J250]
+ * while folding away the MAINLINE hetero J240 entirely: the exact
+ * “很多上下游的job放在同一级，该展示的却没了” deck the user uploaded. */
+const oldMini268 = buildFlowFigureModel(summary268, { maxGroups: 5, simplified: true });
+if (!oldMini268.groups.some((g) => g.length > 1))
+  fail.push("P268 fixture: round-19 极简 must still cram (reproduces the uploaded deck's bug)");
+if (oldMini268.groups.flat().some((i) => i.uid === "J240"))
+  fail.push("P268 fixture: round-19 极简 folded away the MAINLINE hetero J240 while keeping the crammed row (the reported bug)");
+if (!oldMini268.groups.flat().some((i) => i.uid === "J215"))
+  fail.push("P268 fixture: round-19 极简 must waste a row on the side-branch 2D montage J215 (the uploaded deck's noise)");
+
+/* (c) the NEW 极简 (v3.61 curated mainline) = one job per row, the
+ * upstream→downstream order intact, Import Volumes / the 2D side branch /
+ * the default-12 ab-initio all out, ≤5 rows, monotone funnel. Expected:
+ * mainline [J230, J240, J250, J260, J270, J280, J290] − J230 (default-12)
+ * − J260 (same-count nonuniform merge) = [J240, J250, J270, J280, J290]. */
+const mini268 = buildFlowFigureModel(summary268, { maxGroups: 5, simplified: true, minimal: true });
+console.log("== P268 极简 groups ==", mini268.groups.length);
+console.log("== P268 极简 warnings ==", JSON.stringify(mini268.warnings, null, 1));
+for (const g of mini268.groups) {
+  console.log(
+    " p268-mini:",
+    g.map((i) => `${i.uid}[${i.classes ? i.classes.map((c) => c.mapKey.split("/")[1]).join("+") : "-"}]`).join(" + "),
+  );
+}
+if (mini268.groups.length !== 5) fail.push(`P268 极简 expected 5 rows, got ${mini268.groups.length}`);
+if (mini268.groups.some((g) => g.length > 1))
+  fail.push("P268 极简: every row must be ONE job — no parallel cramping");
+const mini268Uids = mini268.groups.flat().map((i) => i.uid).join(">");
+if (mini268Uids !== "J240>J250>J270>J280>J290")
+  fail.push(`P268 极简 mainline expected J240>J250>J270>J280>J290, got ${mini268Uids}`);
+for (const absent of ["J220", "J215", "J230", "J260"])
+  if (mini268.groups.flat().some((i) => i.uid === absent))
+    fail.push(`P268 极简 must not carry ${absent} (import / side-2D / dropped bootstrap / merged nonuniform)`);
+{
+  const totals = mini268.groups.map((g) => Math.max(...g.map((it) => it.particleTotal ?? 0)));
+  for (let i = 1; i < totals.length; i++) {
+    if (totals[i] > totals[i - 1]) fail.push(`P268 极简 funnel broke at group ${i}: ${totals[i]} > ${totals[i - 1]}`);
+  }
+}
+if (!mini268.warnings.some((w) => w.includes("已精选颗粒主线上的 7 个阶段")))
+  fail.push("P268 极简: missing the mainline-curation banner warning");
+if (!mini268.warnings.some((w) => w.includes("另排除 1 个导入/种子阶段")))
+  fail.push("P268 极简: missing the import-seed exclusion warning");
+if (!mini268.warnings.some((w) => w.includes("已省略 ab-initio 步骤 J230")))
+  fail.push("P268 极简: missing the default-12 Å J230 drop warning");
+if (!mini268.warnings.some((w) => w.includes("已合并连续 Non-uniform 精修 J260 → J270")))
+  fail.push("P268 极简: missing the J260→J270 non-uniform merge warning");
+if (mini268.headerStats.micrographs !== "14,404 Micrographs")
+  fail.push(`P268 header micrographs got ${mini268.headerStats.micrographs}`);
+if (mini268.headerStats.particles !== "4812K particles")
+  fail.push(`P268 header particles got ${mini268.headerStats.particles}`);
+if (mini268.finalStats !== "2.70 Å") fail.push(`P268 极简 finalStats got ${mini268.finalStats}`);
+if (mini268.referenceKey !== "J290/volume") fail.push(`P268 极简 referenceKey got ${mini268.referenceKey}`);
+const srcs268 = figureMapSources(mini268);
+if (srcs268.size !== 9) fail.push(`P268 极简 render set expected 9 (3+3+1+1+1), got ${srcs268.size}`);
+const OUT_MINIMAL_P268 = path.join(OUT_DIR, "out-minimal-p268.pptx");
+const imagesP268 = new Map<string, Uint8Array>();
+for (const [key, src] of srcs268) {
+  imagesP268.set(key, discPng(hexToRgb(chimeraClassColor(src.classIndex))));
+}
+const blobP268 = buildWorkflowPptx(mini268, { images: imagesP268, style: "minimal" });
+const bufP268 = Buffer.from(await blobP268.arrayBuffer());
+fs.writeFileSync(OUT_MINIMAL_P268, bufP268);
+console.log("== P268 极简 pptx ==", OUT_MINIMAL_P268, bufP268.length, "bytes");
 
 /* ------------------------------------------------------------------ */
 /* v3.54 default-12 Å ab-initio final: resolution info ignored         */
@@ -763,6 +1024,7 @@ const xmlFull = slide1Xml(OUT);
 const xmlSimplified = slide1Xml(OUT_SIMPLIFIED);
 const xmlMinimal = slide1Xml(OUT_MINIMAL);
 const xmlMini = slide1Xml(OUT_MINIMAL5);
+const xmlP268 = slide1Xml(OUT_MINIMAL_P268);
 const EMU = 914400;
 console.log("== slide xml uid-run checks ==");
 if (!xmlFull.includes(" · J31") || !xmlFull.includes(" · J41"))
@@ -786,6 +1048,7 @@ for (const [deckPath, deckXml, deck] of [
   [OUT_SIMPLIFIED, xmlSimplified, "simplified deck"],
   [OUT_MINIMAL, xmlMinimal, "minimal deck"],
   [OUT_MINIMAL5, xmlMini, "极简 capped deck"],
+  [OUT_MINIMAL_P268, xmlP268, "P268 极简 deck"],
 ] as Array<[string, string, string]>) {
   const presXml = zipPartText(deckPath, "ppt/presentation.xml");
   const sz = /<p:sldSz cx="(\d+)" cy="(\d+)"/.exec(presXml);
@@ -835,6 +1098,7 @@ for (const [deckXml, deck] of [
   [xmlFull, "full deck"],
   [xmlMinimal, "minimal deck"],
   [xmlMini, "极简 capped deck"],
+  [xmlP268, "P268 极简 deck"],
 ] as Array<[string, string]>) {
   const texts = [...deckXml.matchAll(/<p:sp>.*?<\/p:sp>/gs)]
     .map((m) => {
@@ -902,6 +1166,38 @@ if (!xmlMini.includes("3.20 Å")) fail.push("极简 capped deck missing the fina
   if (framesMini !== 2) fail.push(`极简 capped deck expected exactly 2 selection frames (J34 + J39), got ${framesMini}`);
   const picsMini = (xmlMini.match(/<p:pic>/g) || []).length;
   if (picsMini !== 9) fail.push(`极简 capped deck expected 9 thumbnails (1+3+1+3+1 over 5 rows), got ${picsMini}`);
+}
+
+/* P268 极简 deck specifics (v3.61 round-20): the curated mainline reads as
+ * five ONE-JOB rows — 3-class hetero → 3-class hetero → non-uniform →
+ * local → DeepEMhancer — with the 2 selection frames (J240 c0 + J250 c0),
+ * the exact retention labels of the mainline funnel (50.0% / 61.6% /
+ * 89.4% + the count-only 16,000 line), NO Import Volumes text, NO
+ * dropped-stage counts (58,048 / 12,259 never print), no job ids, no
+ * footnote, and the final Å on the spine. */
+{
+  if (xmlP268.includes("Import Volumes")) fail.push("P268 极简 deck must NOT carry the Import Volumes label");
+  if (xmlP268.includes(" · J")) fail.push("P268 极简 deck must NOT carry job-id label runs");
+  if (xmlP268.includes("CryoSmart Workflow Figure")) fail.push("P268 极简 deck must NOT carry the footnote");
+  for (const frag of ["39.5%", "1,900,000 particles", "62.0%", "1,178,700 particles", "84.8%", "1,000,000 particles", "2.70 Å"])
+    if (!xmlP268.includes(frag)) fail.push(`P268 极简 deck missing "${frag}"`);
+  if (xmlP268.includes("12,259")) fail.push("P268 极简 deck must not print the dropped ab-initio / 2D-selection count");
+  if (xmlP268.includes("100.0%")) fail.push("P268 极简 deck must not print a 100% retention line");
+  const framesP268 = (xmlP268.match(/name="矩形 /g) || []).length;
+  if (framesP268 !== 2) fail.push(`P268 极简 deck expected exactly 2 selection frames (J240 c0 + J250 c0), got ${framesP268}`);
+  const picsP268 = (xmlP268.match(/<p:pic>/g) || []).length;
+  if (picsP268 !== 9) fail.push(`P268 极简 deck expected 9 thumbnails (3+3+1+1+1 over 5 rows), got ${picsP268}`);
+  const connsP268 = (xmlP268.match(/直接箭头连接符/g) || []).length;
+  if (connsP268 !== 5) fail.push(`P268 极简 deck expected 5 fixed arrows (header→row1 + 4 inter-row), got ${connsP268}`);
+  /* every stage label must appear EXACTLY as its own row's name — the
+   * curated rows are one job each, so “Hetero refinement” prints twice
+   * (the reference deck's own two consecutive hetero rows) while
+   * “Non-uniform refinement” / “Local refinement” / “DeepEMhancer”
+   * print once each. */
+  const labelOf = (frag: string) => (xmlP268.match(new RegExp(`>${frag}<`, "g")) || []).length;
+  if (labelOf("Hetero refinement") !== 2) fail.push(`P268 极简 deck expected 2 Hetero refinement rows, got ${labelOf("Hetero refinement")}`);
+  for (const frag of ["Non-uniform refinement", "Local refinement", "DeepEMhancer"])
+    if (labelOf(frag) !== 1) fail.push(`P268 极简 deck expected exactly 1 ${frag} row, got ${labelOf(frag)}`);
 }
 
 /* ------------------------------------------------------------------
@@ -974,6 +1270,7 @@ assertNoConnectorCrossing(xmlFull, "full deck");
 assertNoConnectorCrossing(xmlSimplified, "simplified deck");
 assertNoConnectorCrossing(xmlMinimal, "minimal deck");
 assertNoConnectorCrossing(xmlMini, "极简 capped deck");
+assertNoConnectorCrossing(xmlP268, "P268 极简 deck");
 
 /* ------------------------------------------------------------------ */
 /* v3.55 unit: abinitMaxResolutionFromJob params_spec extraction        */

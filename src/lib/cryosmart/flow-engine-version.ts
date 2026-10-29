@@ -108,5 +108,20 @@
  * overlapped the content below; the list is now a native max-h-64
  * overflow-y-auto box. Old pages keep the three scattered controls and
  * the overflowing checklist.
+ *
+ * v3.61 bump reason (round-20 “极简模式还是有问题，很多上下游的job放在
+ * 同一级了，应该是精选出几个job展示，上下游关系还是不能混乱”): the 极简
+ * model is now a CURATED MAINLINE instead of the folded merge-assembly —
+ * rows come from the particle mainline's map-bearing spine only (every
+ * job in its OWN row, ancestor → final), the merge-contributor parallel
+ * groups that crammed an upstream refinement and a downstream one onto
+ * the same visual level (P268's “Import Volumes + Non-uniform
+ * refinement” rows, counts jumping 17,887 → 43,977 → 2,084,655) are
+ * never built, imported reference volumes (import_* seeds) and the
+ * select_2D montage row no longer enter the 极简 funnel, and the ≤5 row
+ * cap keeps first+last with the middle filling from the end
+ * (curateMinimalFlow — same selection round-19 approved on the P96
+ * chain: [J28, J34, J37, J39, J41]). Old pages keep the folded
+ * merge-assembly 极简 (parallel rows intact).
  */
-export const FLOW_ENGINE_VERSION = "3.60";
+export const FLOW_ENGINE_VERSION = "3.61";
