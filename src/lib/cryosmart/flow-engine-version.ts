@@ -34,5 +34,18 @@
  * ("Micrographs → Auto pick → particles") is anchored to the first stage so
  * the entry connector no longer dangles from empty space. Old pages would
  * keep the black-background + gray-maps + dangling-connector look invisibly.
+ *
+ * v3.54 bump reason (round-13): (1) the per-class palette is corrected to
+ * Chimera classic's OWN 16-bit model colors (the user pasted the true list:
+ * #b333b333b333 grey, #ffffffffb333 pale yellow, #b333ffffffff PALE CYAN —
+ * v3.52/53's "#b333ff violet" was a mis-parse of the 16-bit paste —
+ * #b333b333ffff pale blue, #ffffb333ffff pale magenta, #ffffb333b333 pale
+ * salmon, #b333ffffb333 pale green, #e666bfff9999 tan; cycles past class 7),
+ * so every multi-class row renders with materially different colors; and
+ * (2) a NEW 简化模式 — small-subset 2D / select-2D / ab-initio bootstrap
+ * steps are omitted, displayed particle counts are funneled 多→少, and a
+ * default-12 Å ab-initio final's resolution info is ignored. Old pages
+ * would keep the stale violet/tan palette and cannot produce simplified
+ * figures at all.
  */
-export const FLOW_ENGINE_VERSION = "3.53";
+export const FLOW_ENGINE_VERSION = "3.54";

@@ -1,71 +1,61 @@
 /**
- * Chimera classic's built-in multi-model "open" color sequence (v3.52).
+ * Chimera classic's built-in multi-model "open" color sequence (v3.54).
  *
- * Round-11 (“颜色依次用这几种作为默认吧”): when Chimera opens a file with
- * several models at once — e.g. the volume_class_0..N maps of one
- * 3D-classification / hetero job — it auto-assigns each model the NEXT
- * color from a fixed built-in palette. The user asked for exactly that
- * sequence as the flow figure's per-class defaults (and confirmed its head
- * from their own Chimera):
+ * Round-11/12 head (“颜色依次用这几种作为默认吧”) was confirmed from the
+ * user's own Chimera, but round-13 supplies the AUTHORITATIVE full list —
+ * the user pasted Chimera classic's own 16-bit RGBA model colors (4 hex
+ * digits per channel, alpha last):
  *
- *   class 0 → #b2b2b2 grey        (volume_class_0)
- *   class 1 → #ffffb2 pale yellow (volume_class_1)
- *   class 2 → #b333ff violet      (volume_class_2 — the user's paste
- *                                 “#b333ffffffff” is violet + alpha)
- *   class 3 → #b2b2ff lavender    (volume_class_3)
- *   class 4+ → tan / forest green / sea green / cyan / dark cyan / blue /
- *              dark blue / slate blue / … (the same built-in list)
+ *   class 0 → #b333b333b333   grey         (0.70, 0.70, 0.70)
+ *   class 1 → #ffffffffb333   pale yellow  (1.00, 1.00, 0.70)
+ *   class 2 → #b333ffffffff   pale cyan    (0.70, 1.00, 1.00)
+ *   class 3 → #b333b333ffff   pale blue    (0.70, 0.70, 1.00)
+ *   class 4 → #ffffb333ffff   pale magenta (1.00, 0.70, 1.00)
+ *   class 5 → #ffffb333b333   pale salmon  (1.00, 0.70, 0.70)
+ *   class 6 → #b333ffffb333   pale green   (0.70, 1.00, 0.70)
+ *   class 7 → #e666bfff9999   tan          (0.90, 0.75, 0.60)
+ *   class 8 → CYCLES back to class 0 — Chimera's built-in list is exactly
+ *             these 8 entries and repeats, so a 9th model gets grey again.
  *
- * Round-12 re-confirmed the same four head colors, counting classes from 0
- * (cryoSPARC's own volume_class_N naming); the palette itself is unchanged.
- * A single-map stage is "class 0 of its job", so it renders grey — the same
- * thing you see when opening that one map in Chimera. v3.53 applies every
- * entry via `volume #<id> color <hex>` (the volume command's color option —
- * `color #<id>` targets atoms and never touched volume surfaces on the
- * user's real ChimeraX). Head values = user-confirmed; tail = Chimera's
- * built-in list (grey→slate blue is cross-checked, later entries cycle
- * after 20).
+ * v3.52/53's "#b333ff violet" for class 2 was a MIS-PARSE of the user's
+ * 16-bit paste "#b333ffffffff" (read as RGB+alpha); the true 16-bit value
+ * is pale cyan, and the entries after pale blue are pale magenta/salmon/
+ * green — NOT the CSS named colors (tan #d2b48c, forest green …) that the
+ * recollection-based tail previously guessed. The list below is the user's
+ * round-13 paste, converted to the 8-bit hex ChimeraX's `volume #<id> color`
+ * expects (16-bit ÷ 257, anchored on the user's own round-11 8-bit values
+ * #b2b2b2 / #ffffb2 / #b2b2ff for the 0xb333 channels).
  */
 
 export interface ChimeraColor {
-  /** Chimera's own colorTable name for the color. */
+  /** Chimera classic's own colorTable name for the color. */
   name: string;
-  /** Chimera's RGB value for that name (what `color #<id> <hex>` sends). */
+  /** 8-bit hex actually sent to ChimeraX `volume #<id> color <hex>`. */
   hex: string;
+  /** The user-confirmed Chimera classic 16-bit RGBA (4 hex digits/channel). */
+  rgba16: string;
   /** Short Chinese label for logs. */
   label: string;
 }
 
-/** The default colors Chimera assigns per model position on open. */
+/** The default colors Chimera assigns per model position on open (v3.54:
+ *  the exact 8-entry built-in list — cycles past class 7). */
 export const CHIMERA_MODEL_COLORS: readonly ChimeraColor[] = [
-  { name: "grey", hex: "#b2b2b2", label: "灰" },
-  { name: "pale yellow", hex: "#ffffb2", label: "淡黄" },
-  { name: "violet", hex: "#b333ff", label: "紫" },
-  { name: "lavender", hex: "#b2b2ff", label: "淡紫" },
-  { name: "tan", hex: "#d2b48c", label: "棕褐" },
-  { name: "forest green", hex: "#228b22", label: "森林绿" },
-  { name: "sea green", hex: "#2e8b57", label: "海洋绿" },
-  { name: "cyan", hex: "#00ffff", label: "青" },
-  { name: "dark cyan", hex: "#008b8b", label: "暗青" },
-  { name: "blue", hex: "#0000ff", label: "蓝" },
-  { name: "dark blue", hex: "#00008b", label: "暗蓝" },
-  { name: "slate blue", hex: "#6a5acd", label: "石板蓝" },
-  { name: "magenta", hex: "#ff00ff", label: "品红" },
-  { name: "hot pink", hex: "#ff69b4", label: "亮粉" },
-  { name: "pink", hex: "#ffc0cb", label: "粉" },
-  { name: "red", hex: "#ff0000", label: "红" },
-  { name: "orange", hex: "#ffa500", label: "橙" },
-  { name: "brown", hex: "#a52a2a", label: "棕" },
-  { name: "rosy brown", hex: "#bc8f8f", label: "玫瑰棕" },
-  { name: "yellow", hex: "#ffff00", label: "黄" },
+  { name: "grey", hex: "#b2b2b2", rgba16: "#b333b333b333", label: "灰" },
+  { name: "pale yellow", hex: "#ffffb2", rgba16: "#ffffffffb333", label: "淡黄" },
+  { name: "pale cyan", hex: "#b2ffff", rgba16: "#b333ffffffff", label: "淡青" },
+  { name: "pale blue", hex: "#b2b2ff", rgba16: "#b333b333ffff", label: "淡蓝" },
+  { name: "pale magenta", hex: "#ffb2ff", rgba16: "#ffffb333ffff", label: "淡品红" },
+  { name: "pale salmon", hex: "#ffb2b2", rgba16: "#ffffb333b333", label: "淡红" },
+  { name: "pale green", hex: "#b2ffb2", rgba16: "#b333ffffb333", label: "淡绿" },
+  { name: "tan", hex: "#e6bf99", rgba16: "#e666bfff9999", label: "棕褐" },
 ];
 
 /**
  * 0-based class position → Chimera's i-th open color (class 0 = grey,
- * matching cryoSPARC's volume_class_0 naming). Single-map stages pass 0
- * (grey). Out-of-range / negative / non-finite values fall back to the
- * first color; positions past the palette cycle (never reached in
- * practice — MAX_FIG_CLASSES caps rows at 8).
+ * matching cryoSPARC's volume_class_N naming). Single-map stages pass 0
+ * (grey). Past the 8-entry list the palette CYCLES (class 8 → grey) —
+ * exactly what Chimera itself does with a 9th simultaneously-open model.
  */
 export function chimeraClassColor(classIndex: number): string {
   const n = CHIMERA_MODEL_COLORS.length;

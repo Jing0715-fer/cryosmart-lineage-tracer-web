@@ -1,20 +1,134 @@
 /**
- * v3.51 figure-model + layout drill (Task 7).
+ * v3.51→v3.54 figure-model + layout drill.
  *
  * Crafts a P96/J41-like LineageSummary (10 stage groups; 6 of them class
  * splits with 2-3 classes each) and runs the REAL model builder + REAL
- * workflow-PPTX layout against synthetic thumbnails (black bg + uniform
- * gray, labelled), then dumps the resulting slide geometry for assertions.
+ * workflow-PPTX layout. v3.54: thumbnails are SYNTHESIZED in-process
+ * (transparent margins + a disc in the class's Chimera open-color), so the
+ * drill no longer depends on /tmp leftovers, and a second pass builds the
+ * SIMPLIFIED figure (small-subset bootstrap drops + 多→少 funnel) plus a
+ * default-12 Å ab-initio-final case.
  *
  * Run: cd /home/z/my-project && bun .harness/v351-figure-test.ts
  */
 import { buildFlowFigureModel, figureMapSources } from "../src/lib/cryosmart/workflow-figure";
+import { chimeraClassColor } from "../src/lib/cryosmart/chimera-colors";
 import { buildWorkflowPptx } from "../src/lib/cryosmart/workflow-pptx";
+import { deflateSync } from "node:zlib";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const THUMB_DIR = "/tmp/figtest/thumbs";
-const OUT = "/tmp/figtest/out.pptx";
+const OUT_DIR = "/tmp/figtest";
+const OUT = path.join(OUT_DIR, "out.pptx");
+const OUT_SIMPLIFIED = path.join(OUT_DIR, "out-simplified.pptx");
+fs.mkdirSync(OUT_DIR, { recursive: true });
+
+/* ------------------------------------------------------------------ */
+/* Tiny RGBA PNG writer — transparent margins + an opaque disc        */
+/* ------------------------------------------------------------------ */
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(buf: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function pngChunk(type: string, data: Uint8Array): Uint8Array {
+  const out = new Uint8Array(12 + data.length);
+  new DataView(out.buffer).setUint32(0, data.length);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(data, 8);
+  new DataView(out.buffer).setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+  return out;
+}
+function hexToRgb(hex: string): [number, number, number] {
+  return [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16),
+  ];
+}
+/** One disc on a transparent canvas — the class-colored "map render". */
+function discPng(rgb: [number, number, number], w = 320, h = 160, r = 52): Uint8Array {
+  const raw = new Uint8Array(h * (w * 4 + 1));
+  const cx = w / 2;
+  const cy = h / 2;
+  for (let y = 0; y < h; y++) {
+    const row = y * (w * 4 + 1);
+    raw[row] = 0; // filter: none
+    for (let x = 0; x < w; x++) {
+      const i = row + 1 + x * 4;
+      if (Math.hypot(x + 0.5 - cx, y + 0.5 - cy) <= r) {
+        raw[i] = rgb[0];
+        raw[i + 1] = rgb[1];
+        raw[i + 2] = rgb[2];
+        raw[i + 3] = 255;
+      } else {
+        raw[i] = raw[i + 1] = raw[i + 2] = raw[i + 3] = 0;
+      }
+    }
+  }
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, w);
+  dv.setUint32(4, h);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // RGBA
+  const idat = new Uint8Array(deflateSync(raw));
+  let png = new Uint8Array(8 + 25 + 12 + idat.length + 12 + 12);
+  let off = 0;
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], off); off += 8;
+  png.set(pngChunk("IHDR", ihdr), off); off += 25;
+  png.set(pngChunk("IDAT", idat), off); off += 12 + idat.length;
+  png.set(pngChunk("IEND", new Uint8Array(0)), off);
+  return png;
+}
+/** The 2D-classification montage: a 4×2 grid of small grey discs. */
+function montagePng(w = 320, h = 160): Uint8Array {
+  const raw = new Uint8Array(h * (w * 4 + 1));
+  const cols = 4;
+  const rows = 2;
+  for (let y = 0; y < h; y++) {
+    const row = y * (w * 4 + 1);
+    raw[row] = 0;
+    for (let x = 0; x < w; x++) {
+      const i = row + 1 + x * 4;
+      const cw = w / cols;
+      const ch = h / rows;
+      const cx = (Math.floor((x + 0.5) / cw) + 0.5) * cw;
+      const cy = (Math.floor((y + 0.5) / ch) + 0.5) * ch;
+      const inDisc = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) <= Math.min(cw, ch) * 0.35;
+      raw[i] = raw[i + 1] = raw[i + 2] = inDisc ? 130 : 0;
+      raw[i + 3] = inDisc ? 255 : 0;
+    }
+  }
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, w);
+  dv.setUint32(4, h);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const idat = new Uint8Array(deflateSync(raw));
+  let png = new Uint8Array(8 + 25 + 12 + idat.length + 12 + 12);
+  let off = 0;
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], off); off += 8;
+  png.set(pngChunk("IHDR", ihdr), off); off += 25;
+  png.set(pngChunk("IDAT", idat), off); off += 12 + idat.length;
+  png.set(pngChunk("IEND", new Uint8Array(0)), off);
+  return png;
+}
+
+/* ------------------------------------------------------------------ */
+/* Summary craft (P96/J41-like)                                        */
+/* ------------------------------------------------------------------ */
 
 const mapUrl = (uid: string, group: string) => `http://cryosmart.test/api/download/${uid}.${group}.map`;
 
@@ -191,7 +305,10 @@ const summary: any = {
   micrograph_pixel_size_A: 0.5,
 };
 
-/* ---- model ---- */
+/* ------------------------------------------------------------------ */
+/* Full-fidelity model + assertions                                    */
+/* ------------------------------------------------------------------ */
+
 const model = buildFlowFigureModel(summary, { maxGroups: 0 });
 console.log("== groups ==", model.groups.length);
 for (const g of model.groups) {
@@ -206,7 +323,6 @@ console.log("== warnings ==", JSON.stringify(model.warnings));
 const srcs = figureMapSources(model);
 console.log("== figureMapSources ==", srcs.size, [...srcs.keys()].join(", "));
 
-/* ---- assertions ---- */
 const byUid = (uid: string) => model.groups.flat().filter((i) => i.uid === uid);
 const j31 = byUid("J31")[0];
 const j41 = byUid("J41")[0];
@@ -224,15 +340,12 @@ if (model.headerStats.micrographs !== "6,060 Micrographs") fail.push(`header mic
 if (model.headerStats.particles !== "164,291 particles") fail.push(`header particles got ${model.headerStats.particles}`);
 if (model.finalStats !== "3.20 Å") fail.push(`finalStats got ${model.finalStats}`);
 
-/* ---- pptx ---- */
+/* synthesized thumbnails: one class-colored disc per map source */
 const images = new Map<string, Uint8Array>();
-for (const key of srcs.keys()) {
-  const p = path.join(THUMB_DIR, `${key.replace(/\//g, "__")}.png`);
-  if (fs.existsSync(p)) images.set(key, new Uint8Array(fs.readFileSync(p)));
-  else fail.push(`missing thumb ${p}`);
+for (const [key, src] of srcs) {
+  images.set(key, discPng(hexToRgb(chimeraClassColor(src.classIndex))));
 }
-const montagePath = path.join(THUMB_DIR, "J12_montage.png");
-images.set(j12.imageUrl as string, new Uint8Array(fs.readFileSync(montagePath)));
+images.set(j12.imageUrl as string, montagePng());
 
 const blob = buildWorkflowPptx(model, {
   images,
@@ -242,6 +355,98 @@ const blob = buildWorkflowPptx(model, {
 const buf = Buffer.from(await blob.arrayBuffer());
 fs.writeFileSync(OUT, buf);
 console.log("== pptx ==", OUT, buf.length, "bytes");
+
+/* ------------------------------------------------------------------ */
+/* v3.54 simplified model + assertions                                 */
+/* ------------------------------------------------------------------ */
+
+const model2 = buildFlowFigureModel(summary, { maxGroups: 0, simplified: true });
+console.log("== simplified groups ==", model2.groups.length);
+for (const g of model2.groups) {
+  console.log(
+    " s-group:",
+    g.map((i) => `${i.uid}[${i.classes ? i.classes.map((c) => c.mapKey.split("/")[1]).join("+") : i.imageUrl ? "img" : "-"}]`).join(" + "),
+  );
+}
+console.log("== simplified warnings ==", JSON.stringify(model2.warnings, null, 1));
+
+const sUids = new Set(model2.groups.flat().map((i) => i.uid));
+if (model2.groups.length !== 8) fail.push(`simplified groups expected 8 (J12+J27 dropped) got ${model2.groups.length}`);
+if (sUids.has("J12")) fail.push("simplified should drop the small-subset select_2D montage J12");
+if (sUids.has("J27")) fail.push("simplified should drop the small-subset ab-initio J27");
+if (!sUids.has("J39")) fail.push("simplified must KEEP the mainline ab-initio J39 (its successor only shrinks)");
+if (!model2.warnings.some((w) => w.includes("已省略少量数据步骤 J12") && w.includes("12,259"))) fail.push("missing J12 drop warning");
+if (!model2.warnings.some((w) => w.includes("已省略少量数据步骤 J27") && w.includes("58,048"))) fail.push("missing J27 drop warning");
+if (model2.warnings.some((w) => w.includes("从多到少"))) fail.push("funnel hiding should NOT fire on the monotone P96 chain");
+
+/* funnel: every kept stage's displayed count must be ≤ its predecessor's */
+{
+  const totals: Array<number | null> = model2.groups.map((g) => {
+    const cs = g.map((it) => it.particleTotal ?? null).filter((v): v is number => v != null);
+    return cs.length ? Math.max(...cs) : null;
+  });
+  let running: number | null = null;
+  totals.forEach((t, i) => {
+    if (t == null) return;
+    if (running != null && t > running) fail.push(`simplified funnel broke at group ${i}: ${t} > ${running}`);
+    running = t;
+  });
+  // every count line still displayed must not resurrect a hidden number
+  const j41s = model2.groups.flat().find((i) => i.uid === "J41");
+  if (j41s?.stats.join("|") !== "209,127 particles") fail.push(`simplified J41 stats got ${j41s?.stats.join("|")}`);
+  const j31s = model2.groups.flat().find((i) => i.uid === "J31");
+  if (j31s?.classes?.[0]?.stats.join("|") !== "77%|590,411 particles") fail.push(`simplified J31 c0 stats got ${j31s?.classes?.[0]?.stats.join("|")}`);
+}
+
+/* map sources shrink with the dropped stages (16 → 14) */
+const srcs2 = figureMapSources(model2);
+console.log("== simplified figureMapSources ==", srcs2.size);
+if (srcs2.size !== 14) fail.push(`simplified figureMapSources expected 14 got ${srcs2.size}`);
+if (srcs2.has("J27/volume_class_0")) fail.push("J27 maps must be gone from the simplified render set");
+
+const images2 = new Map<string, Uint8Array>();
+for (const [key, src] of srcs2) {
+  images2.set(key, discPng(hexToRgb(chimeraClassColor(src.classIndex))));
+}
+const blob2 = buildWorkflowPptx(model2, {
+  images: images2,
+  footnote: "简化模式 · 所有地图已对齐至参考 J41/volume · CryoSmart Workflow Figure (ChimeraX aligned)",
+});
+const buf2 = Buffer.from(await blob2.arrayBuffer());
+fs.writeFileSync(OUT_SIMPLIFIED, buf2);
+console.log("== simplified pptx ==", OUT_SIMPLIFIED, buf2.length, "bytes");
+
+/* ------------------------------------------------------------------ */
+/* v3.54 default-12 Å ab-initio final: resolution info ignored         */
+/* ------------------------------------------------------------------ */
+
+const J50 = mkNode("J50", "homo_abinit", {
+  particle_count: 58048,
+  resolution_A: 12,
+  maps: [mkMapAsset("J50", "volume_class_0"), mkMapAsset("J50", "volume_class_1")],
+  classes: mkClasses("J50", [
+    [0, 50, 29024],
+    [1, 35, 20317],
+  ]),
+});
+const chain50 = [J1, J50];
+const summary50: any = {
+  ...summary,
+  start_uid: "J50",
+  start_job: J50,
+  final_particle_count: 58048,
+  final_resolution_A: 12,
+  nodes: chain50,
+  edges: [{ source: "J1", target: "J50", input_type: "volume", input_name: "volume", input_title: null, source_group: null, slots: [] }],
+  class_split_jobs: [{ uid: "J50", job_type: "homo_abinit", classes: J50.classes }],
+};
+const full50 = buildFlowFigureModel(summary50, { maxGroups: 0 });
+if (full50.finalStats !== "12.0 Å") fail.push(`ab-initio-final full-mode finalStats expected "12.0 Å" got ${full50.finalStats}`);
+const simplified50 = buildFlowFigureModel(summary50, { maxGroups: 0, simplified: true });
+if (simplified50.finalStats !== null) fail.push(`ab-initio-final simplified finalStats expected null got ${simplified50.finalStats}`);
+if (!simplified50.warnings.some((w) => w.includes("已忽略") && w.includes("12.0 Å"))) fail.push("missing default-12 Å ignore warning");
+if (!simplified50.groups.flat().some((i) => i.uid === "J50")) fail.push("the FINAL ab-initio must never be dropped");
+console.log("== 12Å case ==", JSON.stringify({ full: full50.finalStats, simplified: simplified50.finalStats }));
 
 if (fail.length) {
   console.error("ASSERT FAILURES:\n" + fail.map((f) => " - " + f).join("\n"));

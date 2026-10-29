@@ -798,8 +798,9 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   // v3.53: record the REAL volume-surface coloring command `volume #<id>
   // color <hex>` (plus the legacy atom-only `color #<id> <hex>` so a stale
   // page's no-op attempt stays visible in the stats). The palette order
-  // assert is unchanged: #b2b2b2 grey, #ffffb2 pale yellow, #b333ff violet,
-  // #b2b2ff lavender, #d2b48c tan, … in class order.
+  // assert is the v3.54 user-pasted Chimera classic list: #b2b2b2 grey,
+  // #ffffb2 pale yellow, #b2ffff pale cyan, #b2b2ff pale blue, #ffb2ff
+  // pale magenta, … in class order.
   const volColorMatch = /^volume\s+#[\d.]+\s+color\s+(#[0-9a-fA-F]{6,8})\b/.exec(command);
   const atomColorMatch = /^color\s+#[\d.]+\s+(#[0-9a-fA-F]{6,8})\b/.exec(command);
   if (volColorMatch || atomColorMatch) {
@@ -1146,12 +1147,13 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
   const jobs = [
     mk("J498", 498, "deep_emhancer", ["J497"], [FV("J497")], [VOUT("volume")]),
     mk("J497", 497, "local_refine", ["J494", "J476"], [FV("J494"), FP("J476")], [VOUT("volume")]),
-    mk("J494", 494, "hetero_refine", ["J420", "J448"], [FV("J420"), FP("J448")], [
+    mk("J494", 494, "hetero_refine", ["J420", "J448", "J455"], [FV("J420"), FP("J448"), FV("J455")], [
       // v3.52: a 5-class hetero split — the figure must show all five
       // classes side by side in one row (MAX_FIG_CLASSES was raised 4 → 8),
-      // which drives the Chimera default open palette through classes 1-5:
-      // grey #b2b2b2, pale yellow #ffffb2, violet #b333ff, lavender #b2b2ff,
-      // tan #d2b48c (relay-stats color_hexes asserts exactly this order).
+      // which drives the Chimera default open palette through classes 0-4
+      // (v3.54 user-pasted values): grey #b2b2b2, pale yellow #ffffb2, pale
+      // cyan #b2ffff, pale blue #b2b2ff, pale magenta #ffb2ff (relay-stats
+      // color_hexes asserts exactly this order).
       VOUT("volume_class_0"),
       VOUT("volume_class_1"),
       VOUT("volume_class_2"),
@@ -1184,6 +1186,19 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
       PCLASS(0, 80000),
       PCLASS(1, 40000),
       PALL(120000),
+    ]),
+    // v3.54 (round-13 简化模式 E2E): a SMALL-SUBSET bootstrap ab-initio —
+    // 20,000 of the lineage's max 180,000 particles (< SIMPLIFIED_SUBSET_
+    // FRACTION × max) feeds J494 as an extra volume parent. Normal mode
+    // renders it beside J420/J448 in the merge row; simplified mode MUST
+    // omit it with a named warning (and its maps drop out of the render
+    // set entirely).
+    mk("J455", 455, "homo_abinit", ["J476"], [FP("J476")], [
+      VOUT("volume_class_0"),
+      VOUT("volume_class_1"),
+      PCLASS(0, 12000),
+      PCLASS(1, 8000),
+      PALL(20000),
     ]),
     mk("J385", 385, "class_2d", ["J382"], [FP("J382")], []),
     mk("J382", 382, "extract_micrographs", ["J379"], [FP("J379")], []),

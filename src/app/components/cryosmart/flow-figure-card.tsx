@@ -87,6 +87,11 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const [bridgeTried, setBridgeTried] = useState(false);
   const [step, setStep] = useState<StepState>(IDLE);
   const [includeFsc, setIncludeFsc] = useState(false);
+  // v3.54 (round-13): 简化模式 — omit small-subset 2D / initial-model
+  // bootstrap steps, funnel the displayed particle counts 多→少, and ignore
+  // a default-12 Å ab-initio final's resolution info (BuildModelOptions.
+  // simplified). Default OFF: the full-fidelity figure stays the default.
+  const [simplified, setSimplified] = useState(false);
   // v3.45: default "10" — the widest numeric value (folding off for every
   // lineage with ≤10 stages, which covers the real P208 8-stage model that
   // used to ship with 2 collapsed stages). "0" = the “全部” selector entry
@@ -283,7 +288,16 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         const parsedGroups = Number(maxGroups);
         model = buildFlowFigureModel(summary, {
           maxGroups: Number.isFinite(parsedGroups) ? parsedGroups : 10,
+          simplified,
         });
+      }
+      if (mode !== "demo" && simplified) {
+        // v3.54: self-diagnosing run log — the simplified pipeline's three
+        // guarantees, named up front (the per-stage omissions/hidings then
+        // arrive as ⚠ model warnings below).
+        pushLog(
+          "简化模式: 已开启 — 少量数据的 2D / 初始模型步骤将省略 · 颗粒数按「从多到少」显示 · 默认 12 Å 的 ab-initio 分辨率忽略",
+        );
       }
       const multiClassGroups = model.groups.filter((g) => g.some((i) => (i.classes?.length ?? 0) > 1));
       const mapTotal = model.groups.flat().reduce(
@@ -308,10 +322,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       /* 2. per-mode thumbnails */
       let chiralityMeta = { corrected: 0, consistent: 0, ambiguous: 0, failed: 0, view: "" };
       const uniqueMaps = figureMapSources(model);
-      // v3.52 (round-11): Chimera 默认打开色序 —— class 0 灰、class 1 淡黄、
-      // class 2 紫、class 3 淡紫、class 4+ 同列表后续；单图阶段 = 该 job 的
-      // “class 0” → 灰。v3.53 (round-12): 按用户的 volume_class_N 0 起计数，
-      // 打印在日志里便于对照 Chimera 核对（配色经 volume #<id> color 应用）。
+      // v3.54 (round-13): Chimera classic 的默认打开色序 —— class 0 灰、
+      // class 1 淡黄、class 2 淡青、class 3 淡蓝、class 4-7 淡品红/淡红/
+      // 淡绿/棕褐（用户粘贴的 16-bit 列表，v3.52/53 的“紫”是对
+      // #b333ffffffff 的误读），class 8+ 循环；单图阶段 = 该 job 的
+      // “class 0” → 灰。打印在日志里便于对照 Chimera 核对（配色经
+      // volume #<id> color 应用）。
       const classDepth = Math.max(0, ...[...uniqueMaps.values()].map((m) => m.classIndex + 1));
       if (uniqueMaps.size > 0) {
         pushLog(
@@ -677,7 +693,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       setStep((s) => ({ ...s, busy: false, error: message }));
       toast.error(`流程图生成失败: ${message}`);
     }
-  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, pushLog, maxGroups, includeFsc, bridgeHosts, checkEngineFresh]);
+  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, pushLog, maxGroups, includeFsc, simplified, bridgeHosts, checkEngineFresh]);
 
   const canGenerate = !step.busy && (mode === "demo" || !!summary);
   const bridgeBadge = useMemo(() => {
@@ -732,7 +748,21 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <span className="block text-[10.5px] text-slate-500 dark:text-slate-400">{hint}</span>
             </button>
           ))}
-          <div className="ml-auto flex items-center gap-4">
+          <div className="ml-auto flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2" title="省略少量数据的 2D / 初始模型步骤；隐藏破坏「从多到少」的计数；忽略默认 12 Å 的 ab-initio 分辨率">
+              <Switch
+                id="flow-simplified"
+                checked={simplified}
+                onCheckedChange={setSimplified}
+                disabled={mode === "demo"}
+              />
+              <Label
+                htmlFor="flow-simplified"
+                className={`text-[11.5px] ${mode === "demo" ? "text-slate-400 dark:text-slate-500" : "text-slate-600 dark:text-slate-300"}`}
+              >
+                简化模式
+              </Label>
+            </div>
             <div className="flex items-center gap-2">
               <Switch id="flow-fsc" checked={includeFsc} onCheckedChange={setIncludeFsc} />
               <Label htmlFor="flow-fsc" className="text-[11.5px] text-slate-600 dark:text-slate-300">附 FSC 曲线</Label>

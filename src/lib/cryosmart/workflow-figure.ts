@@ -13,6 +13,12 @@
  *     reference, handedness-checked, uniform camera — see chimerax-bridge.ts)
  *   - "preview":  captured preview images from the session
  *   - "demo":     the reference-style sample images shipped in /demo
+ *
+ * v3.54 (round-13): a SIMPLIFIED figure mode (BuildModelOptions.simplified)
+ * builds the 多→少 funnel reading — small-subset 2D / select-2D / ab-initio
+ * bootstrap steps are omitted, count lines that would break the
+ * non-increasing flow are hidden, and a default-12 Å ab-initio final's
+ * resolution info is ignored (see simplifiedFunnelPass + dropBootstrap).
  */
 
 import type {
@@ -52,6 +58,12 @@ export interface FlowFigureItem {
    *  single-map stages (where mapKey/map carry the one map) and captured
    *  images (2D montage / demo / FSC). */
   classes?: FigureClassSlot[] | null;
+  /** v3.54: the stage's representative particle count — the job's own
+   *  particle_count, else the sum of its class counts (select_2D montage
+   *  items carry the SELECTED count). Null when unknown. The simplified
+   *  mode's small-subset drop + 从多到少 funnel read it; rendering ignores
+   *  it. */
+  particleTotal?: number | null;
 }
 
 /** v3.51: one per-class thumbnail slot inside a stage row. */
@@ -59,9 +71,10 @@ export interface FigureClassSlot {
   /** Canonical map key "uid/group" — image marker + render lookup key. */
   mapKey: string;
   /** v3.52: 0-based position of this class within its job (class 1 → 0) —
-   *  drives the Chimera default open-color (grey → pale yellow → violet →
-   *  lavender → …). Computed AFTER sorting/dedup so it is the position the
-   * map would get when the job's maps are opened together in Chimera. */
+   *  drives the Chimera default open-color (grey → pale yellow → pale cyan →
+   *  pale blue → …, the v3.54 8-entry list; cycles past class 7).
+   *  Computed AFTER sorting/dedup so it is the position the
+   *  map would get when the job's maps are opened together in Chimera. */
   classIndex: number;
   group: string;
   resultName: string;
@@ -69,12 +82,17 @@ export interface FigureClassSlot {
   previewUrl: string | null;
   /** Per-class stats ("50%", "58K particles") rendered under the thumbnail. */
   stats: string[];
+  /** v3.54: the numeric particle count behind this slot's "N particles"
+   *  stats line (null when unknown). The simplified mode's 从多到少
+   *  funnel hides count lines that would break the non-increasing flow;
+   *  the PPTX layer ignores this field. */
+  particleCount?: number | null;
 }
 
 /** v3.51: every ChimeraX-renderable map in the figure (all classes), keyed by
  *  mapKey — the card's source-of-truth for proxy/staging/preview/render loops.
  *  v3.52: carries classIndex so the card can attach the Chimera default
- *  open-color to each render request (grey/pale yellow/violet/lavender…). */
+ *  open-color to each render request (grey/pale yellow/pale cyan/pale blue…). */
 export interface FigureMapSource {
   key: string;
   uid: string;
@@ -149,7 +167,32 @@ export interface FlowFigureModel {
 export interface BuildModelOptions {
   maxGroups?: number;
   includeSelect2d?: boolean;
+  /** v3.54 (round-13 "简化模式"): build the SIMPLIFIED stage figure —
+   *  (a) OMIT small-subset bootstrap steps (2D classification / 2D
+   *      selection / ab-initio jobs that ran on materially fewer
+   *      particles than the lineage's funnel top),
+   *  (b) guarantee the DISPLAYED particle counts read 多→少 (count
+   *      lines that would break the non-increasing flow are hidden),
+   *  (c) IGNORE the final ab-initio's resolution info when it is the
+   *      cryoSPARC-default 12 Å (an unrefined ab-initio map's nominal
+   *      resolution carries no information). */
+  simplified?: boolean;
 }
+
+/** v3.54: a 2D-classification / 2D-selection / ab-initio stage whose
+ * particle count falls below this fraction of its successor stage's count
+ * is a "少量数据" bootstrap step and is omitted in simplified mode (the
+ * flow visibly jumps back up after such a step — the signature of a
+ * template / initial-model side branch, P96's J12 12,259 / J27 58,048 vs
+ * the mainline hetero's 766,560). At-or-above the fraction stays, so a
+ * mainline ab-initio that consumed the full remaining stream (its
+ * successor only SHRINKS) never drops. */
+export const SIMPLIFIED_SUBSET_FRACTION = 0.5;
+
+/** v3.54: cryoSPARC ab-initio jobs report a nominal 12 Å output resolution
+ * by default — within ±0.5 Å of 12 counts as "the default 12 Å". */
+const ABINIT_DEFAULT_RESOLUTION_A = 12;
+const ABINIT_DEFAULT_RESOLUTION_TOL_A = 0.5;
 
 /* ------------------------------------------------------------------ */
 /* Formatting helpers (match the reference's style)                    */
@@ -335,13 +378,14 @@ function classSlotsFor(
       mapKey: `${node.uid}/${group}`,
       // v3.52: slot POSITION (after sort + downloadability filter), not the
       // raw class_index — opening the job's available maps in Chimera hands
-      // out grey/pale yellow/violet/lavender by this order.
+      // out grey/pale yellow/pale cyan/pale blue by this order.
       classIndex: slots.length,
       group,
       resultName: primaryMap.result_name,
       downloadUrl: primaryMap.download_url,
       previewUrl: cls.mrc_preview_url ?? null,
       stats,
+      particleCount: cls.particle_count ?? null,
     });
   }
 
@@ -370,6 +414,7 @@ function classSlotsFor(
         downloadUrl: asset.download_url,
         previewUrl: asset.preview_url,
         stats,
+        particleCount: null,
       });
     }
     if (rawSlots.length >= 2) {
@@ -396,6 +441,7 @@ function classSlotsFor(
         downloadUrl: asset.download_url,
         previewUrl: asset.preview_url,
         stats,
+        particleCount: node.particle_count ?? null,
       },
     ];
   }
@@ -418,6 +464,15 @@ function itemFromNode(
   const slots = classSlotsFor(summary, node, opts);
   const primary = slots[0] ?? null;
   const stats = slots.length <= 1 ? (primary?.stats ?? []) : [];
+  // v3.54: the stage's representative count — its own particle_count when
+  // known, else the sum of the rendered class counts (both null → null).
+  const classSum = slots.reduce((s, c) => s + (c.particleCount ?? 0), 0);
+  const particleTotal =
+    node.particle_count != null
+      ? node.particle_count
+      : classSum > 0
+        ? classSum
+        : null;
   return {
     uid: node.uid,
     label: jobTypeLabel(node.job_type),
@@ -432,6 +487,7 @@ function itemFromNode(
         }
       : null,
     classes: slots.length ? slots : null,
+    particleTotal,
     imageUrl: null,
   };
 }
@@ -512,6 +568,11 @@ export function buildFlowFigureModel(
   let referenceItem: FlowFigureItem | null = null;
   let referenceKey: string | null = null;
 
+  /* v3.54 (round-13 “简化模式”): the small-subset bootstrap drop is a
+   * SUCCESSOR-based post-pass (see dropSimplifiedBootstrap) — group
+   * building below stays untouched; only the flag is threaded here. */
+  const simplified = !!opts.simplified;
+
   // 2D selection stage (image montage, no map) — deepest ancestor (closest
   // to the final job), optional.
   if (opts.includeSelect2d !== false) {
@@ -531,6 +592,7 @@ export function buildFlowFigureModel(
           mapKey: null,
           map: null,
           imageUrl: img?.url ?? null,
+          particleTotal: s2d.select_2d?.particles_selected ?? s2d.particle_count ?? null,
         },
       ]);
       usedUids.add(s2d.uid);
@@ -580,11 +642,27 @@ export function buildFlowFigureModel(
     }
   }
 
+  // v3.54 (round-13 “简化模式”): OMIT small-subset bootstrap steps — 2D
+  // classification / 2D selection / ab-initio stages whose particle count
+  // is materially below their successor's (the tell-tale “flow jumps back
+  // up after it” of a template / initial-model side branch). Runs as a
+  // post-pass over the built groups, BEFORE folding, so the geometry and
+  // the merge logic above stay untouched.
+  let staged = groups;
+  if (simplified && groups.length) {
+    staged = dropSimplifiedBootstrap(groups, summary.start_uid, graph.byUid, warnings);
+  }
+
   // v3.44 folding: only SINGLE stages fold (earliest first) — parallel
   // branch groups and the final stage never fold. The old splice(1, n)
   // deleted the branch group first, which is exactly how a dataset branch
   // vanished from the 4-group figure.
-  const folded = trimFlowGroups(groups, maxGroups, warnings);
+  const folded = trimFlowGroups(staged, maxGroups, warnings);
+
+  // v3.54 (round-13 “简化模式”): enforce the 多→少 reading over the
+  // DISPLAYED count lines (stage-to-stage; the header's pick count is
+  // about picking and is not enforced against re-extraction merges).
+  if (simplified && folded.length) simplifiedFunnelPass(folded, warnings);
 
   // Reference = the FINAL job's map when it has one.
   if (finalNode && normalMapAssets(finalNode).length > 0) {
@@ -606,7 +684,21 @@ export function buildFlowFigureModel(
   /* Final stats */
   let finalStats: string | null = null;
   const res = summary.final_resolution_A ?? finalNode?.resolution_A ?? null;
-  if (res != null && res > 0) finalStats = `${res >= 10 ? res.toFixed(1) : res.toFixed(2)} Å`;
+  // v3.54 (round-13 “简化模式”): an ab-initio final reporting the default
+  // 12 Å has never been refined — its nominal resolution carries no
+  // information, so the simplified figure ignores it.
+  const finalIsAbinit = finalNode ? /abinit/i.test(finalNode.job_type || "") : false;
+  const finalResIsDefaultAbinit =
+    res != null &&
+    finalIsAbinit &&
+    Math.abs(res - ABINIT_DEFAULT_RESOLUTION_A) <= ABINIT_DEFAULT_RESOLUTION_TOL_A;
+  if (simplified && finalResIsDefaultAbinit) {
+    warnings.push(
+      `简化模式: 最终 ab-initio 的分辨率为默认 ${res.toFixed(1)} Å，已忽略（未精修的初始模型不携带分辨率信息）。`,
+    );
+  } else if (res != null && res > 0) {
+    finalStats = `${res >= 10 ? res.toFixed(1) : res.toFixed(2)} Å`;
+  }
 
   /* FSC XML */
   const fscNode = [summary.start_job, ...ancestors].find((n) => n?.fsc_xml);
@@ -667,6 +759,126 @@ function trimFlowGroups(
     `谱系阶段较多，已折叠最早的 ${groups.length - kept.length} 个阶段（并行分支已保留；阶段数选“全部”即不折叠）。`,
   );
   return kept;
+}
+
+/** v3.54 (round-13 “简化模式”): OMIT small-subset bootstrap steps from the
+ *  built stage groups. A 2D-classification / 2D-selection / ab-initio item
+ *  whose particle count is < SIMPLIFIED_SUBSET_FRACTION × its successor
+ *  group's count is removed (an empty group disappears with it; a shrunken
+ *  parallel group keeps its remaining items). The final stage never drops;
+ *  items without a usable count stay (can't be judged); every drop is named
+ *  in the warnings so the run log explains the simplified figure. */
+function dropSimplifiedBootstrap(
+  groups: FlowFigureItem[][],
+  startUid: string,
+  byUid: Map<string, LineageNode>,
+  warnings: string[],
+): FlowFigureItem[][] {
+  const isBootstrapJobType = (jobType: string) => /class_2d|select_2d|homo_abinit/i.test(jobType || "");
+  // Each group's representative count, in flow order.
+  const groupCounts = groups.map((g) => {
+    const cs = g
+      .map((it) => it.particleTotal ?? null)
+      .filter((v): v is number => v != null && v > 0);
+    return cs.length ? Math.max(...cs) : null;
+  });
+  const dropped = new Set<string>();
+  for (let gi = 0; gi < groups.length; gi++) {
+    // Successor = the next group's known count (parallel-row siblings are
+    // NOT successors of each other).
+    let successorCount: number | null = null;
+    for (let gj = gi + 1; gj < groups.length; gj++) {
+      if (groupCounts[gj] != null) {
+        successorCount = groupCounts[gj];
+        break;
+      }
+    }
+    if (successorCount == null) continue;
+    for (const item of groups[gi]) {
+      if (item.uid === startUid) continue; // the final stage never drops
+      const node = byUid.get(item.uid);
+      if (!node || !isBootstrapJobType(node.job_type)) continue;
+      const count = item.particleTotal;
+      if (count == null || count <= 0) continue;
+      if (count >= successorCount * SIMPLIFIED_SUBSET_FRACTION) continue;
+      if (!dropped.has(item.uid)) {
+        dropped.add(item.uid);
+        warnings.push(
+          `简化模式: 已省略少量数据步骤 ${item.uid}（${item.label}，${fmtParticles(count)} ≪ 下一阶段 ${fmtParticles(successorCount)} particles）。`,
+        );
+      }
+    }
+  }
+  if (!dropped.size) return groups;
+  const out: FlowFigureItem[][] = [];
+  for (const g of groups) {
+    const kept = g.filter((it) => !dropped.has(it.uid));
+    if (kept.length) out.push(kept);
+  }
+  return out;
+}
+
+/** v3.54 (round-13 “简化模式”): enforce the 多→少 reading over the
+ *  DISPLAYED particle-count lines. Walks the kept stage groups in flow
+ *  order with a running maximum (initialized to +∞ — the header's pick
+ *  count is about PICKING, and a later re-extraction / merged dataset may
+ *  legitimately exceed it, so only stage-to-stage counts are enforced):
+ *
+ *    - a stage whose representative count EXCEEDS the running maximum has
+ *      ALL of its count lines hidden ("… particles" / "… selected";
+ *      percentages stay — they are per-stage-relative and never break the
+ *      funnel) and does NOT lower the bar;
+ *    - a stage at or below the maximum keeps its counts and becomes the
+ *      new bar.
+ *
+ *  Every hiding is named in the warnings so the run log explains itself. */
+function simplifiedFunnelPass(groups: FlowFigureItem[][], warnings: string[]) {
+  const isCountLine = (line: string) => / (particles|selected)$/.test(line);
+  let runningMax = Infinity;
+  for (const group of groups) {
+    const totals = group
+      .map((it) => it.particleTotal ?? null)
+      .filter((v): v is number => v != null && v > 0);
+    const groupTotal = totals.length ? Math.max(...totals) : null;
+    const overflow = groupTotal != null && groupTotal > runningMax;
+    const hiddenUids: string[] = [];
+    for (const item of group) {
+      if (item.classes?.length) {
+        for (const c of item.classes) {
+          const cOver =
+            overflow ||
+            (c.particleCount != null && c.particleCount > runningMax);
+          if (cOver && c.stats.some(isCountLine)) {
+            c.stats = c.stats.filter((l) => !isCountLine(l));
+            if (!hiddenUids.includes(item.uid)) hiddenUids.push(item.uid);
+          }
+        }
+        // single-class rows: item.stats carries the same lines the one slot
+        // was built from — filter it too so the PPTX layer's item.stats
+        // preference never resurrects a hidden count.
+        if (overflow && item.stats.some(isCountLine)) {
+          item.stats = item.stats.filter((l) => !isCountLine(l));
+          if (!hiddenUids.includes(item.uid)) hiddenUids.push(item.uid);
+        }
+      } else if (item.stats.some(isCountLine)) {
+        const over =
+          overflow ||
+          (item.particleTotal != null && item.particleTotal > runningMax);
+        if (over) {
+          item.stats = item.stats.filter((l) => !isCountLine(l));
+          hiddenUids.push(item.uid);
+        }
+      }
+    }
+    if (overflow && hiddenUids.length) {
+      warnings.push(
+        `简化模式: ${hiddenUids.join(" + ")} 的粒子数（${fmtParticles(groupTotal as number)}）大于上一阶段（${runningMax === Infinity ? "—" : fmtParticles(runningMax)}），已隐藏其计数统计，保证流程「颗粒从多到少」。`,
+      );
+    }
+    if (!overflow && groupTotal != null) {
+      runningMax = Math.min(runningMax, groupTotal);
+    }
+  }
 }
 
 /** Reference-style demo model — uses the images extracted from the user's

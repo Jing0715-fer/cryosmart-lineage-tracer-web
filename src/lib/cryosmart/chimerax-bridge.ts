@@ -52,9 +52,10 @@
  *
  * v3.52 (round-11 “颜色依次…”): every map is colored with Chimera's own
  * default multi-model "open" palette — the request carries the color of
- * the map's class position (class 1 grey #b2b2b2, class 2 pale yellow
- * #ffffb2, class 3 violet #b333ff, class 4 lavender #b2b2ff, class 5+ from
- * the same built-in list — see chimera-colors.ts). A multi-class row now
+ * the map's class position (see chimera-colors.ts; v3.54 corrected the
+ * values to the user's pasted Chimera classic 16-bit list — grey / pale
+ * yellow / pale cyan / pale blue / pale magenta / pale salmon / pale
+ * green / tan, cycling). A multi-class row now
  * reads exactly like the job's maps opened together in Chimera, instead
  * of v3.51's uniform gray that made classes indistinguishable.
  *
@@ -75,6 +76,14 @@
  *     existing levels and becomes the default color for the volume model"
  *     — volume.html). Surfaces stay opaque solids; the perceived
  *     translucency was gray-on-black contrast.
+ *
+ * v3.54 (round-13): the palette values themselves are corrected in
+ * chimera-colors.ts — the request still carries a #rrggbb hex applied via
+ * `volume #<id> color`, but class 2 is now PALE CYAN #b2ffff (the user's
+ * 16-bit "#b333ffffffff" was mis-read as violet #b333ff in v3.52/53) and
+ * classes 4-7 are pale magenta / pale salmon / pale green / tan per the
+ * user's pasted Chimera classic 16-bit list, cycling past class 7. The
+ * transport / alignment / save pipeline here is unchanged.
  */
 
 import { chimeraClassColor } from "./chimera-colors";
