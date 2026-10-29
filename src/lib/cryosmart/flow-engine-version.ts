@@ -71,5 +71,16 @@
  * uploads land in the cache under the same canonical name, so every later
  * run of the same workflow downloads nothing). Old pages have no cache
  * check and would keep re-downloading every map on every run.
+ *
+ * v3.57 bump reason (round-16, Windows-openability): the exported
+ * workflow deck opened on Mac PowerPoint but Windows reported it as
+ * corrupt until a Mac re-save (the theme carried ONE-entry
+ * fillStyleLst/lnStyleLst/effectStyleLst/bgFillStyleLst — OOXML requires
+ * exactly three of each — plus fonts without <a:cs>, and slideLayout1
+ * had NO relationship to its slide master). Mac validates leniently and
+ * its re-save writes a legal theme, which is why re-saved decks opened.
+ * v3.57 writes the canonical Office style matrix, cs fonts, the required
+ * layout→master relationship, master txStyles and layout clrMapOvr. Old
+ * pages still produce the rejected package.
  */
-export const FLOW_ENGINE_VERSION = "3.56";
+export const FLOW_ENGINE_VERSION = "3.57";
