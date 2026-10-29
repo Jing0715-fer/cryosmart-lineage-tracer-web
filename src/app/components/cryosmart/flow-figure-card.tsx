@@ -69,10 +69,14 @@ type FigureStyle = "standard" | "minimal";
  *              体积分支不进入图），简化合并规则照跑，最多
  *              MINIMAL_ROW_CAP 行图片 + workflow.pptx 版式（选中
  *              class 细框 + 留存颗粒数标注）
+ *              v3.62 (round-21 “极简模式变成4，5，6行” + “省略的步骤
+ *              写为几*hetero refine”): cap 4/5/6，连续同类型阶段合并为
+ *              一行「N× 类型」，省略步骤在箭头旁注明，选中 class 恒居脊柱
  *   manual     手动勾选要体现的 job（标准版式） */
 type FlowModeOption = "standard" | "simplified" | "minimal" | "manual";
-/** round-19 “极简（合并部分步骤，最多只保留5行图片）”。 */
-const MINIMAL_ROW_CAP = 5;
+/** round-19 “极简（合并部分步骤，最多只保留5行图片）” → round-21
+ *  “极简模式变成4，5，6行” — the cap widened to 6. */
+const MINIMAL_ROW_CAP = 6;
 const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
   standard: {
     label: "标准",
@@ -83,8 +87,8 @@ const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
     hint: "合并/省略可省的步骤：少量数据的 2D 与默认 12 Å ab-initio 整体省略，相邻同颗粒数的 non-uniform 合并，颗粒数按「从多到少」显示",
   },
   minimal: {
-    label: `极简（最多 ${MINIMAL_ROW_CAP} 行）`,
-    hint: `精选颗粒主线上的关键 job — 每个 job 独占一行、上下游顺序不乱（并行输入/导入参考体积分支不进入图）；简化合并规则照跑，最多 ${MINIMAL_ROW_CAP} 行图片；workflow.pptx 版式：选中 class 细框 + 箭头旁留存颗粒数标注，无 job id/页脚`,
+    label: `极简（4–6 行）`,
+    hint: `精选颗粒主线上的关键 job — 上下游顺序不乱，连续同类型阶段合并为一行「N× 类型」（参考 workflow.pptx 的 2*Hetero refinement），省略的步骤在箭头旁以「N× 类型」注明；并行输入/导入参考体积分支不进入图；简化合并规则照跑，阶段数可选 4/5/6（最多 ${MINIMAL_ROW_CAP} 行）；选中 class 恒居脊柱细框 + 箭头旁留存颗粒数标注，无 job id/页脚`,
   },
   manual: {
     label: "手动",
@@ -92,10 +96,11 @@ const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
   },
 };
 
-/** v3.60: the 阶段数 options per mode — 极简 only offers values ≤ the 5-row
- * cap (4/5), every other mode keeps the full ladder + “全部”. */
+/** v3.60: the 阶段数 options per mode — v3.62 (round-21 “极简模式变成
+ * 4，5，6行”): 极简 offers the 4/5/6 ladder (round-19 was 4/5 with a 5
+ * cap), every other mode keeps the full ladder + “全部”. */
 function stageOptionsFor(mode: FlowModeOption): string[] {
-  return mode === "minimal" ? ["4", "5"] : ["4", "5", "6", "7", "8", "9", "10", "0"];
+  return mode === "minimal" ? ["4", "5", "6"] : ["4", "5", "6", "7", "8", "9", "10", "0"];
 }
 
 interface StepState {
@@ -155,18 +160,19 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const simplified = flowMode === "simplified" || flowMode === "minimal";
   const parsedMaxGroups = Number(maxGroups);
   const rawMaxGroups = Number.isFinite(parsedMaxGroups) ? parsedMaxGroups : 10;
-  /** 极简 caps the deck at 5 image rows (round-19). "全部" maps to the cap;
-   * an explicit smaller 阶段数 (4) stays smaller. */
+  /** 极简 caps the deck at 6 image rows (round-21: the 4/5/6 ladder —
+   * round-19's 5-row cap widened; “全部” maps to the cap; an explicit
+   * smaller 阶段数 (4/5) stays smaller). */
   const effectiveMaxGroups =
     flowMode === "minimal"
       ? rawMaxGroups <= 0
         ? MINIMAL_ROW_CAP
-        : Math.min(rawMaxGroups, MINIMAL_ROW_CAP)
+        : Math.min(Math.max(rawMaxGroups, 4), MINIMAL_ROW_CAP)
       : rawMaxGroups;
 
-  /** v3.60: switching into 极简 clamps the 阶段数 selector to 4/5 so the
-   * control never promises more rows than the mode renders (选“全部”时
-   * 自动回落到 5). */
+  /** v3.60→v3.62: switching into 极简 clamps the 阶段数 selector to the
+   * 4/5/6 ladder so the control never promises more rows than the mode
+   * renders (选“全部”时自动回落到 6). */
   const onFlowModeChange = useCallback(
     (v: string) => {
       const next = v as FlowModeOption;
@@ -420,10 +426,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         if (!summary) throw new Error("尚未载入谱系数据 — 请先完成 Smart Capture 与 Trace Lineage。");
         // v3.45: "0" (the “全部” option) → 0, which buildFlowFigureModel maps
         // to Infinity (never fold). Anything unparseable falls back to 10.
-        // v3.60: 极简 caps the effective value at 5 image rows
-        // (effectiveMaxGroups); 简化/极简 share simplified=true.
+        // v3.60: 极简 caps the effective value at its row ladder
+        // (effectiveMaxGroups — 4/5/6 since v3.62); 简化/极简 share
+        // simplified=true.
         // v3.61 (round-20): 极简 additionally builds the CURATED MAINLINE
         // (minimal:true) — one job per row, no parallel cramping.
+        // v3.62 (round-21): the mainline MERGES consecutive same-type
+        // stages into “N×” rows and reports dropped gaps via
+        // model.omissions (the PPTX's “omitted: N× …” notes).
         model = buildFlowFigureModel(summary, {
           maxGroups: effectiveMaxGroups,
           simplified,
@@ -447,12 +457,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
        * carries the merge rules too: simplified=true runs under it). */
       if (flowMode === "minimal") {
         pushLog(
-          "极简模式: 精选颗粒主线上的关键 job — 每个 job 独占一行、按上下游顺序排列（并行输入/导入参考体积分支不进入图）",
+          "极简模式: 精选颗粒主线上的关键 job — 上下游顺序不乱（并行输入/导入参考体积分支不进入图）；连续同类型阶段合并为一行「N× 类型」，选中 class 恒居脊柱正中",
         );
         pushLog(
-          `极简规则: 简化合并照跑（默认 12 Å ab-initio 省略 · 相邻同颗粒数 non-uniform 合并 · 颗粒数从多到少）· 最多 ${MINIMAL_ROW_CAP} 行图片`,
+          `极简规则: 简化合并照跑（默认 12 Å ab-initio 省略 · 相邻同颗粒数 non-uniform 合并 · 颗粒数从多到少）· 阶段数 4/5/6（最多 ${MINIMAL_ROW_CAP} 行）· 省略的步骤在箭头旁以「N× 类型」注明`,
         );
-        pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头 · 选中 class 细框 · 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
+        pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头 · 选中 class 细框（居中）· 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
       } else if (flowMode === "simplified") {
         pushLog(
           "简化模式: 少量数据的 2D 步骤将省略 · 默认 12 Å ab-initio 阶段整体省略（直接衔接后续精修） · 相邻同颗粒数 non-uniform 合并 · 颗粒数按「从多到少」显示",
@@ -935,7 +945,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-teal-700 dark:text-teal-300">引擎 v{FLOW_ENGINE_VERSION}</Badge>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          竖向单列排版，箭头固定尺寸、直线连接；所有 map 由 ChimeraX 渲染并统一朝向与手性。用「模式」选择 标准 / 简化 / 极简（精选主线关键 job，每个 job 独占一行、上下游顺序不乱，最多 5 行图片）/ 手动勾选。
+          竖向单列排版，箭头固定尺寸、直线连接；所有 map 由 ChimeraX 渲染并统一朝向与手性。用「模式」选择 标准 / 简化 / 极简（精选主线关键 job，连续同类型合并为「N×」行，省略步骤在图上注明，4/5/6 行可选）/ 手动勾选。
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -995,7 +1005,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               className="flex items-center gap-2"
               title={
                 flowMode === "minimal"
-                  ? `极简模式最多保留 ${MINIMAL_ROW_CAP} 行图片 — 阶段数已联动为不超过 ${MINIMAL_ROW_CAP}`
+                  ? `极简模式阶段数可选 4/5/6（最多 ${MINIMAL_ROW_CAP} 行）— 超出的主线阶段合并或在箭头旁注明`
                   : "超过阶段数时折叠最早的单图阶段；“全部”即不折叠"
               }
             >
@@ -1011,7 +1021,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                       <SelectItem key={v} value={v}>{v}</SelectItem>
                     ))}
                   {/* v3.45: “全部” — never fold, even beyond 10 stages.
-                   *  v3.60: hidden in 极简 mode (capped at 5 anyway). */}
+                   *  v3.60: hidden in 极简 mode (capped at 6 anyway). */}
                   {flowMode !== "minimal" && <SelectItem value="0">全部</SelectItem>}
                 </SelectContent>
               </Select>
@@ -1300,7 +1310,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
           <Boxes className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
           <span>
-            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线上的关键 job — 每个 job 独占一行、上下游顺序不乱，导入参考体积等输入分支不进入图；简化合并照跑，最多 5 行图片；选中 class 细框 + 箭头旁留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先在 ChimeraX 里做 5 候选拟合（original / x·y·z 180° 旋转 / z-flip），按 <code className="font-mono">fit search 15</code> 相关性选最优 ——
+            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线上的关键 job — 上下游顺序不乱，导入参考体积等输入分支不进入图；连续同类型阶段合并为一行「N× 类型」，省略的步骤在箭头旁以「N×」注明；阶段数可选 4/5/6；选中 class 恒居脊柱细框 + 留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先在 ChimeraX 里做 5 候选拟合（original / x·y·z 180° 旋转 / z-flip），按 <code className="font-mono">fit search 15</code> 相关性选最优 ——
             z-flip 胜出即手性相反、已自动翻正；参考地图做 90° 视角白区评分后统一应用到所有地图，保证朝向与比例一致。图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
           </span>
         </div>

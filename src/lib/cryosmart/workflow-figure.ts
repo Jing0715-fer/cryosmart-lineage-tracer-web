@@ -159,6 +159,18 @@ export function figureMapSources(model: FlowFigureModel): Map<string, FigureMapS
   return out;
 }
 
+/** v3.62 (round-21 “省略的步骤可能需要写为几*hetero refine或几*abinitio
+ * 这样”): one stage type the 极简 deck dropped from between two displayed
+ * rows — the PPTX renders the gap note “omitted: 2× Hetero refinement”
+ * under the retention label, so a curated figure never skips steps
+ * silently. */
+export interface FlowOmission {
+  /** Displayed stage type (jobTypeLabel output), e.g. "Hetero refinement". */
+  label: string;
+  /** How many dropped stages of this type sit in this gap. */
+  count: number;
+}
+
 export interface FlowFigureModel {
   headerStats: { micrographs: string | null; pick: string | null; particles: string | null };
   /** Ordered ancestor → final; each group is a vertical stack of parallel items. */
@@ -171,6 +183,12 @@ export interface FlowFigureModel {
   fscXml: { xml?: string; url?: string; name?: string } | null;
   warnings: string[];
   projectLabel: string;
+  /** v3.62: 极简 builds only — per-GAP omitted-stage notes: omissions[i]
+   *  lists the stages removed between groups[i] and groups[i+1],
+   *  aggregated by displayed type. Undefined for non-minimal builds
+   *  (标准/简化 decks keep their round-19/20 look; 手动 drops are the
+   *  user's own choice and stay named in the run log only). */
+  omissions?: FlowOmission[][];
 }
 
 export interface BuildModelOptions {
@@ -193,6 +211,12 @@ export interface BuildModelOptions {
    *  - the simplified passes (bootstrap/redundant drops + funnel) still
    *    run underneath, and the row cap falls to the same first+last /
    *    fill-from-the-end selection round-19 approved (curateMinimalFlow).
+   *  v3.62 (round-21): consecutive same-type stages MERGE into one
+   *  “N× <type>” row (the reference deck's own “2*Hetero refinement”)
+   *  BEFORE the cap, and every stage the deck omits between two kept
+   *  rows is annotated per gap (model.omissions → the PPTX's
+   *  “omitted: N× <type>” note) — a curated figure never skips steps
+   *  silently (“省略的步骤可能需要写为几*hetero refine或几*abinitio这样”).
    *  Implies nothing about the LAYOUT style; pair with workflow-pptx's
    *  style:"minimal" for the workflow.pptx look. */
   minimal?: boolean;
@@ -231,8 +255,11 @@ const ABINIT_DEFAULT_RESOLUTION_TOL_A = 0.5;
 /* Formatting helpers (match the reference's style)                    */
 /* ------------------------------------------------------------------ */
 
+/** v3.62 (round-21, the uploaded P268 deck's “4812K particles”): always
+ * the FULL separator format — the reference header itself prints
+ * “1,588,675 particles”; the old ≥1e6 → “1635K”/“4812K” truncation read as
+ * a typo next to the full numbers every other label carries. */
 function fmtParticles(n: number): string {
-  if (n >= 1_000_000) return `${Math.round(n / 1_000)}K`;
   return Math.round(n).toLocaleString("en-US");
 }
 
@@ -251,6 +278,7 @@ export function jobTypeLabel(jobType: string): string {
     class_2D: "2D classification",
     select_2D: "2D class selection",
     select_2d: "2D class selection",
+    homo_reconstruct: "Reconstruction",
     helix_refine: "Helical refinement",
     relion_auto_refine: "Auto refinement",
     relion_3d_classification: "3D classification",
@@ -689,8 +717,11 @@ export function buildFlowFigureModel(
    * building below stays untouched; only the flag is threaded here. */
   const simplified = !!opts.simplified;
   /* v3.61 (round-20): 极简 CURATION — one job per row along the particle
-   *  MAINLINE, never the merge-assembly's parallel cramping. */
+   *  MAINLINE, never the merge-assembly's parallel cramping.
+   *  v3.62 (round-21): the ORIGINAL mainline (pre-simplified) is kept
+   *  for the per-gap omission notes. */
   const minimal = !!opts.minimal;
+  let minimalMainline: Array<{ uid: string; label: string }> | null = null;
 
   const spineMapOrder = [...chain].reverse().filter((n) => hasMaps(n.uid));
 
@@ -720,9 +751,14 @@ export function buildFlowFigureModel(
       groups.push([itemFromNode(summary, S, { isFinal: S.uid === summary.start_uid, warnings })]);
       usedUids.add(S.uid);
     }
+    /* v3.62 (round-21): snapshot the ORIGINAL curated mainline (uid +
+     *  displayed label, ancestor → final) BEFORE the simplified passes —
+     *  the per-gap omission notes below read it to name what each
+     *  displayed gap skips (简化 drops + row-cap drops alike). */
+    minimalMainline = stages.map((n) => ({ uid: n.uid, label: jobTypeLabel(n.job_type) }));
     const excludedImports = spineMapOrder.filter((n) => isImportSeed(n) && !stages.includes(n)).length;
     warnings.push(
-      `极简模式: 已精选颗粒主线上的 ${stages.length} 个阶段 — 每个 job 独占一行、按上下游顺序排列；并行输入分支不进入极简图` +
+      `极简模式: 已精选颗粒主线上的 ${stages.length} 个阶段 — 关键 job 逐个成行、按上下游顺序排列（连续同类型阶段将合并为一行「N×」标注，省略的步骤在图上注明；并行输入分支不进入极简图）` +
         (excludedImports
           ? `；另排除 ${excludedImports} 个导入/种子阶段（参考体积等输入不作为流程阶段展示）`
           : "") +
@@ -813,6 +849,20 @@ export function buildFlowFigureModel(
     staged = dropSimplifiedRedundant(staged, summary.start_uid, graph, warnings);
   }
 
+  /* v3.62 (round-21, the uploaded P268 deck's back-to-back “Ab-initio
+   * reconstruction” rows): the 极简 mainline MERGES consecutive
+   * same-type stages into ONE “N× <type>” row BEFORE the row cap —
+   * the reference deck's own “2*Hetero refinement” pattern. Merging
+   * first also frees row budget, so the cap drops fewer distinct
+   * stages. Runs only on the minimal build: 标准/简化 decks keep the
+   * round-19/20 look the user signed off. */
+  let mergedMemberUids: Set<string> | null = null;
+  if (minimal && staged.length) {
+    const merged = mergeMinimalRuns(staged, warnings);
+    staged = merged.groups;
+    mergedMemberUids = merged.mergedUids;
+  }
+
   // v3.44 folding: only SINGLE stages fold (earliest first) — parallel
   // branch groups and the final stage never fold. The old splice(1, n)
   // deleted the branch group first, which is exactly how a dataset branch
@@ -824,6 +874,17 @@ export function buildFlowFigureModel(
   const folded = minimal
     ? curateMinimalFlow(staged, maxGroups, warnings)
     : trimFlowGroups(staged, maxGroups, warnings);
+
+  /* v3.62 (round-21 “省略的步骤可能需要写为几*hetero refine或几*abinitio
+   * 这样”): per-gap omission notes — which ORIGINAL mainline stages each
+   * adjacent displayed pair skips (简化 drops + row-cap drops),
+   * aggregated by type. Merged “N×” members are NOT omissions (the
+   * multiplier label already represents them); stages beyond the
+   * first/last kept row have no gap to live in (the run log names them). */
+  const omissions =
+    minimal && minimalMainline
+      ? computeMinimalOmissions(folded, minimalMainline, mergedMemberUids)
+      : undefined;
 
   // v3.54 (round-13 “简化模式”): enforce the 多→少 reading over the
   // DISPLAYED count lines (stage-to-stage; the header's pick count is
@@ -894,6 +955,9 @@ export function buildFlowFigureModel(
     fscXml,
     warnings,
     projectLabel,
+    /* v3.62: 极简 only — undefined for every other build (the spread in
+     * applyManualSelection carries undefined harmlessly). */
+    omissions,
   };
 }
 
@@ -1002,7 +1066,10 @@ function trimFlowGroups(
  *  budget fills from the END: the stages closest to the final map are the
  *  most refined ones, so earlier middle steps drop first. The dropped
  *  stages' upstream→downstream ORDER among the survivors is untouched —
- *  curation only REMOVES rungs, it never re-levels them. */
+ *  curation only REMOVES rungs, it never re-levels them.
+ *  v3.62 (round-21): runs on the POST-MERGE sequence (mergeMinimalRuns
+ *  folds same-type runs first), and the warning now points the reader at
+ *  the per-gap “omitted: N×” notes the deck carries for the drops. */
 function curateMinimalFlow(
   groups: FlowFigureItem[][],
   maxGroups: number,
@@ -1015,9 +1082,88 @@ function curateMinimalFlow(
   for (let i = groups.length - 2; i > 0 && chosen.size < maxGroups; i--) chosen.add(i);
   const kept = groups.filter((_, i) => chosen.has(i));
   warnings.push(
-    `极简模式: 主线共 ${groups.length} 个阶段，已精选 ${kept.length} 个关键阶段（首尾必留、其余自后向前保留 — 未选阶段不渲染，上下游顺序保持不变）。`,
+    `极简模式: 合并同类型后主线共 ${groups.length} 行，已精选 ${kept.length} 行（首尾必留、其余自后向前保留 — 未选阶段在图上以「N×」省略标注，上下游顺序保持不变）。`,
   );
   return kept;
+}
+
+/** v3.62 (round-21 “省略的步骤可能需要写为几*hetero refine或几*abinitio
+ * 这样”): the 极简 same-type run merge. Consecutive single-item rows whose
+ * labels match collapse into ONE row labelled “N× <type>” — the reference
+ * deck's own “2*Hetero refinement” row (the uploaded P268 deck instead
+ * spent two identical “Ab-initio reconstruction” rows on one run). The
+ * merged row keeps the LAST (most downstream) member's classes montage
+ * and particle count — the ones feeding the next stage — so the funnel,
+ * the anchor selection and the retention labels all read unchanged.
+ * Only truly CONSECUTIVE rows merge: a different stage type between two
+ * heteros disqualifies the pair (the true flow order must never be
+ * flattened). Returns the member uids so the omission pass can tell
+ * “represented by an N× row” apart from “dropped". */
+function mergeMinimalRuns(
+  groups: FlowFigureItem[][],
+  warnings: string[],
+): { groups: FlowFigureItem[][]; mergedUids: Set<string> } {
+  const out: FlowFigureItem[][] = [];
+  const mergedUids = new Set<string>();
+  let i = 0;
+  while (i < groups.length) {
+    const run: FlowFigureItem[][] = [groups[i]];
+    while (
+      i + 1 < groups.length &&
+      groups[i + 1].length === 1 &&
+      run[run.length - 1].length === 1 &&
+      run[run.length - 1][0].label === groups[i + 1][0].label
+    ) {
+      run.push(groups[i + 1]);
+      i += 1;
+    }
+    i += 1;
+    if (run.length === 1) {
+      out.push(run[0]);
+      continue;
+    }
+    const rep = run[run.length - 1][0];
+    for (const g of run) mergedUids.add(g[0].uid);
+    out.push([{ ...rep, label: `${run.length}× ${rep.label}` }]);
+    warnings.push(
+      `极简模式: 已合并主线上连续 ${run.length} 个同类型阶段 ${run.map((g) => g[0].uid).join(" → ")} 为一行「${run.length}× ${rep.label}」（缩略图与颗粒数取最下游 ${rep.uid}）。`,
+    );
+  }
+  return { groups: out, mergedUids };
+}
+
+/** v3.62: the 极简 per-gap omission notes — which ORIGINAL mainline stages
+ * each adjacent displayed pair skips (简化 drops + row-cap drops),
+ * aggregated by displayed type. Runs over the pre-simplified mainline
+ * snapshot so a stage the 简化 passes removed still gets NAMED (the user's
+ * “省略的步骤写为几×…”). Merged N× members are excluded (their multiplier
+ * label already represents them); so are displayed reps; stages before
+ * the first / after the last kept row have no gap to live in (the run
+ * log's warnings already name them). */
+function computeMinimalOmissions(
+  folded: FlowFigureItem[][],
+  mainline: Array<{ uid: string; label: string }>,
+  mergedUids: Set<string> | null,
+): FlowOmission[][] {
+  const displayed = new Set(folded.flat().map((it) => it.uid));
+  const indexOf = new Map(mainline.map((m, i) => [m.uid, i] as const));
+  const out: FlowOmission[][] = [];
+  for (let i = 0; i + 1 < folded.length; i++) {
+    const a = folded[i][folded[i].length - 1]?.uid ?? "";
+    const b = folded[i + 1][folded[i + 1].length - 1]?.uid ?? "";
+    const aIdx = indexOf.get(a);
+    const bIdx = indexOf.get(b);
+    const byLabel = new Map<string, number>();
+    if (aIdx != null && bIdx != null && bIdx > aIdx) {
+      for (let k = aIdx + 1; k < bIdx; k++) {
+        const m = mainline[k];
+        if (displayed.has(m.uid) || mergedUids?.has(m.uid)) continue;
+        byLabel.set(m.label, (byLabel.get(m.label) ?? 0) + 1);
+      }
+    }
+    out.push([...byLabel].map(([label, count]) => ({ label, count })));
+  }
+  return out;
 }
 
 /** v3.55 (round-14): does this node read as an UNREFINED default-12 Å
@@ -1272,16 +1418,20 @@ function simplifiedFunnelPass(groups: FlowFigureItem[][], warnings: string[]) {
  *  reference deck EXACTLY — four single-map stages top→bottom (2*Hetero →
  *  Hetero → Non-uniform → DeepEMhancer), the stats boxes belong to the same
  *  stages as in the reference (32.9%/1638K on the first row, 26.3%/431K on
- *  the second), and the final line keeps its "C1, 3.46 Å" shape. */
+ *  the second), and the final line keeps its "C1, 3.46 Å" shape.
+ *  v3.62 (round-21): the merged row label and the counts follow the NEW
+ *  generator conventions — “2× Hetero refinement” (the reference's own
+ *  “2*Hetero refinement” row, now with the typographic ×) and full
+ *  separator numbers everywhere (“4,980,000 particles”, not “4980K”). */
 export function buildDemoFigureModel(): FlowFigureModel {
   return {
-    headerStats: { micrographs: "14,482 Micrographs", pick: "Auto pick", particles: "4980K particles" },
+    headerStats: { micrographs: "14,482 Micrographs", pick: "Auto pick", particles: "4,980,000 particles" },
     groups: [
       [
         {
           uid: "J68",
-          label: "2*Hetero refinement",
-          stats: ["32.9%", "1638K particles"],
+          label: "2× Hetero refinement",
+          stats: ["32.9%", "1,638,000 particles"],
           mapKey: "J68/volume",
           map: null,
           imageUrl: "/demo/workflow/J68_H1.png",
@@ -1291,7 +1441,7 @@ export function buildDemoFigureModel(): FlowFigureModel {
         {
           uid: "J142",
           label: "Hetero refinement",
-          stats: ["26.3%", "431K particles"],
+          stats: ["26.3%", "431,000 particles"],
           mapKey: "J142/volume",
           map: null,
           imageUrl: "/demo/workflow/J142_H2.png",

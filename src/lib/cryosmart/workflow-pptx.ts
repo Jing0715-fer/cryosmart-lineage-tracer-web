@@ -21,6 +21,15 @@
  *     next stage — 矩形 26/28/43) and the arrow retention labels
  *     (“37.2% / 590,421 particles”) centred on the spine in the inter-row
  *     gap, and puts the final resolution (“C1, 2.70 Å”) under the last map
+ *   - v3.62 (round-21 “对齐的算法还是不是对每个样品都有效 + 排版还是不太
+ *     美观”): in 极简 style the flow-anchor class is centred ON the spine —
+ *     the anchor swaps into the strip's centre slot and the strip shifts
+ *     (margin-clamped) to land the frame exactly under the flow arrows, so
+ *     the selection frame never floats off to the side like P268's third
+ *     row; every inter-row gap keeps the SAME band height even without a
+ *     retention label (uniform vertical rhythm), and stages the model
+ *     omitted between two rows are named under the gap — “omitted: 2×
+ *     Hetero refinement” (model.omissions, 极简 only)
  *   - 标准 style keeps the richer v3.55 conventions (job-id label runs,
  *     per-class stats under each thumbnail / side stats for single-map
  *     rows, footnote) — now on the same spine layout
@@ -252,7 +261,14 @@ export function buildWorkflowPptx(
   /** 标准 style: side stats box for single-map rows. */
   const STATS_W = 0.95;
   /** 极简 style: retention label height in the inter-row gap. */
-  const RETAIN_H = 0.37;
+  const RETAIN_H = 0.31;
+  /** v3.62: 极简 — the fixed inter-row band = retention slot + omission
+   *  line + padding. EVERY minimal gap keeps this height (label or not,
+   * note or not), so the vertical rhythm is uniform down the whole
+   * slide — the uploaded P268 deck's label-less rows used to sit 0.29 in
+   * closer to their neighbours. */
+  const OMIT_H = 0.16;
+  const MIN_GAP_BAND = RETAIN_H + OMIT_H + 0.02;
   const REF_IMG_W = minimal ? 1.58 : 3.12;
 
   /** v3.56: expand an item into its thumbnail slots (classes, or the
@@ -361,12 +377,28 @@ export function buildWorkflowPptx(
    * The anchor = the class slot whose particle count feeds the next stage
    * (fallback: the largest-count slot). Computed per row UP FRONT because
    * the next row's ENTRY GAP depends on it: when the anchor's selection
-   * rectangle would sit under the spine (the middle class of an odd strip),
-   * the incoming arrow must stop at the frame's top edge instead of the
-   * image top — the tip would otherwise poke through the frame. */
+   * rectangle sits under the spine, the incoming arrow must stop at the
+   * frame's top edge instead of the image top — the tip would otherwise
+   * poke through the frame.
+   *
+   * v3.62 (round-21 “对齐的算法还是不是对每个样品都有效"): the anchor no
+   * longer merely REPORTS whether it lands on the spine — the row is now
+   * LAID OUT so it does. `target` = the render POSITION the anchor takes:
+   * the strip's centre slot (odd thumb counts swap the anchor into the
+   * exact middle; even counts use the left-of-centre slot), and `x0` = the
+   * strip's left edge shifted so the anchor's own box centres on the
+   * spine, clamped to the page margins (a 2-thumb row always fits; ≥4
+   * thumbs may clamp, leaving the frame near — but not on — the spine).
+   * The frame therefore reads ON the flow for every sample: P268's third
+   * row framed the LEFT class while the arrow ran through the middle
+   * thumb. Parallel rows keep the plain centred strip. */
   interface AnchorInfo {
     item: number;
     slot: number;
+    /** v3.62: the render POSITION the anchor occupies after the swap. */
+    target: number;
+    /** v3.62: the strip's left edge that centres the anchor on the spine. */
+    x0: number;
     onSpine: boolean;
   }
   const anchorInfoOf = (g: FlowFigureItem[], nextRep: number | null): AnchorInfo | null => {
@@ -395,18 +427,17 @@ export function buildWorkflowPptx(
     };
     const hit = counted.find((f) => f.count === nextRep) ?? maxCountSlot();
     if (!hit) return null;
-    /* deterministic thumb x of that slot (strip is centred on the spine) */
     const stripW = rowThumbTotal(g) * imgW + rowGapUnits(g) * ITEM_GAP;
-    let x = SPINE - stripW / 2;
-    let anchorX = 0;
-    g.forEach((it, ii) => {
-      const n = Math.max(1, itemSlotsOf(it).length);
-      if (ii === hit.item) {
-        anchorX = x + hit.slot * (imgW + ITEM_GAP);
-      }
-      x += n * imgW + (n - 1) * ITEM_GAP + ITEM_GAP;
-    });
-    return { item: hit.item, slot: hit.slot, onSpine: anchorX - 0.05 <= SPINE && SPINE <= anchorX + imgW + 0.05 };
+    let target = hit.slot;
+    let x0 = SPINE - stripW / 2;
+    if (hit.item === 0 && g.length === 1) {
+      const n = rowThumbTotal(g);
+      target = n % 2 === 1 ? (n - 1) / 2 : n / 2 - 1;
+      const anchorCenter = target * (imgW + ITEM_GAP) + imgW / 2;
+      x0 = Math.max(MARGIN_X, Math.min(PAGE_W_IN - MARGIN_X - stripW, SPINE - anchorCenter));
+    }
+    const onSpine = Math.abs(x0 + target * (imgW + ITEM_GAP) + imgW / 2 - SPINE) <= 0.06;
+    return { item: hit.item, slot: hit.slot, target, x0, onSpine };
   };
   const anchorInfos = groups.map((g, i) => anchorInfoOf(g, i + 1 < groups.length ? repCounts[i + 1] : null));
 
@@ -414,8 +445,8 @@ export function buildWorkflowPptx(
   const rows: PlacedRow[] = [];
   /** distance from an arrow tip to the NEXT row's image top: single rows
    * put their label band in the arrow's shadow (text ends left of the
-   * spine, reference-faithful) — except when the row's own selection frame
-   * sits under the spine, where the arrow stops at the frame's top edge;
+   * spine, reference-faithful) — v3.62: minimal style keeps ONE uniform
+   * 0.07 standoff (framed or not) so every row sits at the same pitch;
    * parallel rows need the arrow to stop ABOVE their per-item label band
    * (a right item's label may reach the spine, so the band must not share
    * y with the arrow). */
@@ -423,7 +454,7 @@ export function buildWorkflowPptx(
     const g = groups[i];
     if (!g) return 0.01;
     if (g.length > 1) return PLABEL_H + 0.02;
-    return anchorInfos[i]?.onSpine ? 0.07 : 0.01;
+    return minimal ? 0.07 : 0.01;
   };
 
   let headerBottom = 0;
@@ -461,7 +492,11 @@ export function buildWorkflowPptx(
     const thumbsTotal = rowThumbTotal(group);
     const hasUnderStats = !minimal && thumbsTotal > 1;
     const stripW = thumbsTotal * imgW + rowGapUnits(group) * ITEM_GAP;
-    const x0 = SPINE - stripW / 2;
+    /* v3.62: a row with a precomputed anchor lays out so the ANCHOR's
+     * box centres on the spine (anchorInfoOf computed x0 + the centre
+     * slot); every other row centres the whole strip as before. */
+    const ai0 = anchorInfos[i];
+    const x0 = !parallel && ai0 ? ai0.x0 : SPINE - stripW / 2;
 
     const top = cursor;
     const imgBottom = top + imgH;
@@ -472,9 +507,23 @@ export function buildWorkflowPptx(
     group.forEach((item, ii) => {
       const slots = itemSlotsOf(item);
       const itemW = slots.length * imgW + (slots.length - 1) * ITEM_GAP;
+      /* v3.62: 极简 single rows render the flow-anchor class in the
+       * strip's CENTRE slot — order[pos] = the original slot that renders
+       * at position pos (the anchor and the centre slot swap). Class
+       * thumbnails carry no per-class labels in this style, so the swap
+       * is visually just a reordered montage; the selection frame then
+       * always sits under the spine arrows for EVERY sample. Parallel
+       * rows and 标准 style keep the natural order. */
+      const order: number[] = slots.map((_, k) => k);
+      if (!parallel && ai0 && slots.length > 1) {
+        const tmp = order[ai0.slot];
+        order[ai0.slot] = ai0.target;
+        order[ai0.target] = tmp;
+      }
       const placed: PlacedSlot[] = [];
-      slots.forEach((s, jj) => {
-        const tx = x + jj * (imgW + ITEM_GAP);
+      order.forEach((orig, pos) => {
+        const s = slots[orig];
+        const tx = x + pos * (imgW + ITEM_GAP);
         const thumb: Box = { x: tx, y: top, w: imgW, h: imgH };
         let stats: Box | null = null;
         if (!minimal && s.stats.length) {
@@ -501,11 +550,12 @@ export function buildWorkflowPptx(
       x += itemW + ITEM_GAP;
     });
 
-    /* 极简: resolve the precomputed anchor to its placed slot. */
+    /* 极简: resolve the precomputed anchor to its placed slot — after the
+     * v3.62 swap the anchor renders at position `target`. */
     const ai = anchorInfos[i];
     const anchor =
       minimal && ai
-        ? items[ai.item]?.slots[ai.slot] ?? null
+        ? items[ai.item]?.slots[ai.target] ?? items[ai.item]?.slots[ai.slot] ?? null
         : null;
 
     rows.push({ items, top, bottom, parallel, anchor });
@@ -513,12 +563,29 @@ export function buildWorkflowPptx(
     /* connector + 极简 retention label into the next row */
     if (i + 1 < groups.length) {
       const nextRep = repCounts[i + 1];
-      const gap = minimal ? (nextRep != null ? RETAIN_H + 0.02 : 0.1) : 0.12;
+      /* v3.62 (round-21 “省略的步骤可能需要写为几*hetero refine或几*abinitio
+       * 这样”): the gap note names every stage the model omitted between
+       * the two adjacent rows, aggregated per displayed type (capped at 3
+       * entries + ellipsis). */
+      const oms = minimal ? fig.omissions?.[i] ?? [] : [];
+      const note =
+        oms.length > 0
+          ? `omitted: ${oms
+              .slice(0, 3)
+              .map((o) => `${o.count}× ${o.label}`)
+              .join(" · ")}${oms.length > 3 ? " · …" : ""}`
+          : null;
+      /* v3.62 (round-21 “排版还是不太美观”): UNIFORM minimal pitch — every
+       * inter-row band keeps the SAME fixed height (retention slot +
+       * omission-line slot) whether or not the gap carries a retention
+       * label or a note, so rows never sit closer to some neighbours than
+       * to others. 标准 keeps the fixed 0.12 connector gap. */
+      const gap = minimal ? MIN_GAP_BAND : 0.12;
       const arrowStart = bottom + gap;
       ops.push({ kind: "conn", x1: SPINE, y1: arrowStart, x2: SPINE, y2: arrowStart + ARROW_LEN });
       cursor = arrowStart + ARROW_LEN + entryGap(i + 1);
 
-      if (minimal && nextRep != null) {
+      if (minimal && (nextRep != null || note)) {
         /* v3.59: the reference's arrow label — the retention percentage
          * and the particle count that continue down the funnel
          * ("37.2%" / "590,421 particles"), centred on the spine in the
@@ -527,21 +594,39 @@ export function buildWorkflowPptx(
          * noise, the reference never prints one). */
         const lines: TextLine[] = [];
         const repCur = repCounts[i];
-        const pct = repCur && repCur > 0 ? nextRep / repCur : null;
-        if (pct != null && pct < 0.995) {
+        const pct = repCur && repCur > 0 && nextRep != null ? nextRep / repCur : null;
+        if (nextRep != null && pct != null && pct < 0.995) {
           lines.push({ t: `${(pct * 100).toFixed(1)}%`, align: "ctr" });
         }
-        lines.push({ t: `${nextRep.toLocaleString("en-US")} particles`, align: "ctr" });
-        const textW = Math.max(...lines.map((l) => estimateTextWidth(l.t ?? "")));
-        const w = Math.max(1.05, textW + 0.06);
-        ops.push({
-          kind: "text",
-          x: Math.max(MARGIN_X, SPINE - w / 2),
-          y: bottom + 0.01,
-          w,
-          h: RETAIN_H,
-          lines,
-        });
+        if (nextRep != null) {
+          lines.push({ t: `${nextRep.toLocaleString("en-US")} particles`, align: "ctr" });
+        }
+        if (lines.length) {
+          const textW = Math.max(...lines.map((l) => estimateTextWidth(l.t ?? "")));
+          const w = Math.max(1.05, textW + 0.06);
+          ops.push({
+            kind: "text",
+            x: Math.max(MARGIN_X, SPINE - w / 2),
+            y: bottom + 0.01,
+            w,
+            h: RETAIN_H,
+            lines,
+          });
+        }
+        /* v3.62: the omission note — its OWN small gray line in the fixed
+         * slot under the retention text (same slot in every gap, note or
+         * not). */
+        if (note) {
+          const noteW = Math.max(1.05, estimateRunsWidth([{ t: note, sz: 650 }]) + 0.06);
+          ops.push({
+            kind: "text",
+            x: Math.max(MARGIN_X, SPINE - noteW / 2),
+            y: bottom + RETAIN_H + 0.02,
+            w: noteW,
+            h: OMIT_H - 0.01,
+            lines: [{ runs: [{ t: note, sz: 650, color: "808080" }], align: "ctr" }],
+          });
+        }
       }
     }
   });

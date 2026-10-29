@@ -123,5 +123,26 @@
  * (curateMinimalFlow — same selection round-19 approved on the P96
  * chain: [J28, J34, J37, J39, J41]). Old pages keep the folded
  * merge-assembly 极简 (parallel rows intact).
+ *
+ * v3.62 bump reason (round-21 “对齐的算法还是不是对每个样品都有效 + 省略的
+ * 步骤可能需要写为几*hetero refine或几*abinitio + 极简模式变成4，5，6行 +
+ * 排版还是不太美观”, from the uploaded P268_J266 deck): (1) the 极简 mainline
+ * now MERGES consecutive same-type stages into ONE row labelled “N×
+ * <type>” (the reference deck's own “2*Hetero refinement” row — P268's
+ * back-to-back Ab-initio reconstruction rows collapse into “2× Ab-initio
+ * reconstruction”), keeping the most downstream member's montage + count;
+ * (2) stages the 极简 deck OMITS (简化 drops + the row cap) are no longer
+ * silent — each gap annotates “omitted: N× <type>” under the retention
+ * label; (3) the row cap is now 4/5/6 (阶段数 offers all three, “全部”
+ * → 6); (4) EVERY 极简 row centres its flow-anchor class on the spine —
+ * the anchor swaps into the strip's centre slot and the strip shifts to
+ * land it exactly under the arrow (odd counts exact, even counts nudged
+ * + margin-clamped), so the selection frame always sits on the flow for
+ * EVERY sample (P268's third row framed the LEFT class while the arrow
+ * ran through the middle one); (5) uniform inter-row pitch (rows without
+ * a retention label keep the same gap height) and full separator count
+ * formatting (“4,812,000 particles”, not “4812K”). Old pages keep the
+ * duplicated-stage rows, silent omissions, the 4/5-only cap, the
+ * off-spine frames and the uneven pitch.
  */
-export const FLOW_ENGINE_VERSION = "3.61";
+export const FLOW_ENGINE_VERSION = "3.62";
