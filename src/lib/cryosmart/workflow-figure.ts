@@ -321,9 +321,57 @@ function collectLineageGraph(summary: LineageSummary): LineageGraph {
   return { byUid, parentsOf, volParentsOf, depth, ancestorUids };
 }
 
-/** Volume-preferring backbone chain (final → earliest ancestor). v3.44:
- *  supplies the ORDER of the stage groups only — completeness comes from
- *  the merge-contributor scan over the full ancestor DAG. */
+/** v3.58 (round-17 “怎么缺少了 J28”): particle-first spine search. The old
+ *  walk followed a job's VOLUME (map) input first — for P96's J31 that
+ *  meant jumping straight back to J27 (J31's reference maps came directly
+ *  from the ab-initio), so the entire particle mainline between them
+ *  (J28 hetero refinement on the FULL 1.59M extract → J29 dedup → J30 →
+ *  J31) never entered the figure: J28 rides only PARTICLE edges and was
+ *  invisible. The figure is a WORKFLOW picture, so the search now prefers
+ *  the PARTICLE ancestry: DFS upstream through non-volume edges first
+ *  (passing through map-less steps like dedup / inspect / ctf), taking
+ *  the first map-bearing ancestor found; volume parents are explored only
+ *  after the particle subtree is exhausted (they are reference-map side
+ *  inputs — e.g. J28 ← J27). A volume-parent chain therefore still works
+ *  when no particle ancestor carries maps (the pre-v3.58 look). */
+function spineUpstreamOf(
+  uid: string,
+  graph: LineageGraph,
+  seen: Set<string>,
+): string {
+  const stack: string[] = [];
+  const pushParents = (u: string) => {
+    const vol = graph.volParentsOf.get(u) || [];
+    const all = graph.parentsOf.get(u) || [];
+    // LIFO: non-volume parents go in LAST so they pop FIRST.
+    for (const p of vol) if (!seen.has(p) && !stack.includes(p)) stack.push(p);
+    for (const p of all)
+      if (!seen.has(p) && !vol.includes(p) && !stack.includes(p)) stack.push(p);
+  };
+  pushParents(uid);
+  let expansions = 0;
+  while (stack.length && expansions++ < 64) {
+    const cur = stack.pop()!;
+    if (seen.has(cur)) continue;
+    const node = graph.byUid.get(cur);
+    if (node && normalMapAssets(node).length > 0) {
+      // Do NOT mark the found spine node here — the caller's loop marks
+      // nodes when APPENDING them to the chain, and its `!seen.has(cur)`
+      // guard must not reject the node we just returned.
+      return cur;
+    }
+    // Dead-branch exploration marker: map-less intermediates can never be
+    // spine members, so remembering them only skips redundant re-walks.
+    seen.add(cur);
+    pushParents(cur);
+  }
+  return "";
+}
+
+/** Spine chain (final → earliest ancestor). v3.44: supplies the ORDER of
+ *  the stage groups only — completeness comes from the merge-contributor
+ *  scan over the full ancestor DAG. v3.58: each step now runs the
+ *  particle-first search above (see spineUpstreamOf). */
 function walkParentChain(summary: LineageSummary, graph: LineageGraph): LineageNode[] {
   const chain: LineageNode[] = [];
   const seen = new Set<string>();
@@ -333,10 +381,7 @@ function walkParentChain(summary: LineageSummary, graph: LineageGraph): LineageN
     const node = graph.byUid.get(cur);
     if (!node) break;
     chain.push(node);
-    const nexts = graph.volParentsOf.get(cur)?.length
-      ? graph.volParentsOf.get(cur)!
-      : graph.parentsOf.get(cur) || [];
-    cur = nexts[0] || "";
+    cur = spineUpstreamOf(cur, graph, seen);
   }
   return chain; // final → ancestor
 }
@@ -681,6 +726,10 @@ export function buildFlowFigureModel(
   let staged = groups;
   if (simplified && groups.length) {
     staged = dropSimplifiedBootstrap(groups, summary.start_uid, graph.byUid, warnings);
+    // v3.58 (round-17): redundant non-uniform refinements merge and
+    // reconstruct-only stages drop — AFTER the bootstrap pass so "adjacent"
+    // refers to the displayed sequence.
+    staged = dropSimplifiedRedundant(staged, summary.start_uid, graph, warnings);
   }
 
   // v3.44 folding: only SINGLE stages fold (earliest first) — parallel
@@ -885,6 +934,94 @@ function dropSimplifiedBootstrap(
           `简化模式: 已省略少量数据步骤 ${item.uid}（${item.label}，${fmtParticles(count)} ≪ 下一阶段 ${fmtParticles(successorCount)} particles）。`,
         );
       }
+    }
+  }
+  if (!dropped.size) return groups;
+  const out: FlowFigureItem[][] = [];
+  for (const g of groups) {
+    const kept = g.filter((it) => !dropped.has(it.uid));
+    if (kept.length) out.push(kept);
+  }
+  return out;
+}
+
+/** v3.58 (round-17): 简化模式 redundant-stage drops — two user-named rules:
+ *  (1) non-uniform → (CTF 矫正) → non-uniform: the earlier refinement of
+ *      the pair is superseded — show only the LATER one (P96's J35 → J36
+ *      ctf → J37, both 378,677 particles, rendered the same map twice);
+ *      the merge also fires for adjacent non-uniforms with EQUAL particle
+ *      counts (the user's 或者-clause);
+ *  (2) homo-reconstruct-only jobs (Reconstruct without refinement — P96's
+ *      J40) add nothing to a presentation figure and are omitted; the
+ *      flow connects their neighbours directly (J39 class 2 → J41).
+ *  The FINAL stage never drops. Runs on the DISPLAYED group sequence right
+ *  after dropSimplifiedBootstrap, so "adjacent" means adjacent in the
+ *  figure (bootstrap stages are already gone). */
+function dropSimplifiedRedundant(
+  groups: FlowFigureItem[][],
+  startUid: string,
+  graph: LineageGraph,
+  warnings: string[],
+): FlowFigureItem[][] {
+  const jobTypeOf = (uid: string) => graph.byUid.get(uid)?.job_type || "";
+  const isNonuniform = (uid: string) => /nonuniform/i.test(jobTypeOf(uid));
+  const isCtfish = (uid: string) => /ctf/i.test(jobTypeOf(uid));
+  /** particle-parents of uid = incoming edges that are NOT volume inputs. */
+  const particleParentsOf = (uid: string): string[] => {
+    const vol = new Set(graph.volParentsOf.get(uid) || []);
+    return (graph.parentsOf.get(uid) || []).filter((p) => p !== uid && !vol.has(p));
+  };
+  /** true when the particle path from `later` back to `earlier` passes
+   *  only through CTF-refinement steps (none of which render as stages —
+   *  they have no maps). Any non-CTF intermediate disqualifies the merge. */
+  const ctfOnlyBetween = (earlier: string, later: string): boolean => {
+    const stack = [later];
+    const visited = new Set<string>([later]);
+    let expansions = 0;
+    while (stack.length && expansions++ < 24) {
+      const cur = stack.pop()!;
+      for (const p of particleParentsOf(cur)) {
+        if (p === earlier) return true;
+        if (visited.has(p) || !isCtfish(p)) continue;
+        visited.add(p);
+        stack.push(p);
+      }
+    }
+    return false;
+  };
+
+  const dropped = new Set<string>();
+  // (1) adjacent displayed non-uniform pairs — keep the LATER one.
+  for (let gi = 0; gi + 1 < groups.length; gi++) {
+    const a = groups[gi];
+    const b = groups[gi + 1];
+    if (a.length !== 1 || b.length !== 1) continue;
+    const aUid = a[0].uid;
+    const bUid = b[0].uid;
+    if (aUid === startUid || bUid === startUid) continue;
+    if (dropped.has(aUid)) continue;
+    if (!isNonuniform(aUid) || !isNonuniform(bUid)) continue;
+    const sameCount =
+      a[0].particleTotal != null &&
+      b[0].particleTotal != null &&
+      a[0].particleTotal === b[0].particleTotal;
+    if (!sameCount && !ctfOnlyBetween(aUid, bUid)) continue;
+    dropped.add(aUid);
+    warnings.push(
+      `简化模式: 已合并连续 Non-uniform 精修 ${aUid} → ${bUid}（${
+        sameCount ? "颗粒数相同" : "其间仅 CTF 矫正"
+      } — 图中只保留后一次精修结果）。`,
+    );
+  }
+  // (2) homo-reconstruct-only stages.
+  for (const g of groups) {
+    for (const it of g) {
+      if (it.uid === startUid || dropped.has(it.uid)) continue;
+      if (!/^homo_reconstruct$/i.test(jobTypeOf(it.uid))) continue;
+      dropped.add(it.uid);
+      warnings.push(
+        `简化模式: 已省略仅重建步骤 ${it.uid}（Homo Reconstruct 不含精修环节 — 颗粒数与上一阶段相同）。`,
+      );
     }
   }
   if (!dropped.size) return groups;

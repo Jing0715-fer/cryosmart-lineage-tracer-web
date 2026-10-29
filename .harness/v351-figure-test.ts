@@ -21,6 +21,15 @@
  * absent / non-abinit).
  *
  * Run: cd /home/z/my-project && bun .harness/v351-figure-test.ts
+ *
+ * v3.58 (round-17): the summary now models the REAL P96 DAG — J28 hetero
+ * on the full 1.59M extract (particle-only classes 1/2, single volume)
+ * feeding J29 dedup → J30 → J31, J36 ctf_refinement between the two
+ * non-uniforms, J40 = homo_reconstruct. Asserts: the particle-first spine
+ * must surface J28 (J27 < J28 < J31); 简化模式 merges J35→J37 (same
+ * count) and omits the reconstruct-only J40; connector invariants —
+ * axis-aligned segments only, no bentConnector, and NO segment may cross
+ * a thumbnail or stats/label box (deck (6)'s wrap-crossing bug class).
  */
 import { buildFlowFigureModel, figureMapSources } from "../src/lib/cryosmart/workflow-figure";
 import { chimeraClassColor } from "../src/lib/cryosmart/chimera-colors";
@@ -231,11 +240,41 @@ const J27 = mkNode("J27", "homo_abinit", {
     [1, 35.0, 20317],
   ]),
 });
+/* v3.58 (round-17 “怎么缺少了 J28”): the REAL P96 mainline between the
+ * extract and J31 — J28 hetero_refine ran on the FULL 1.59M extract with
+ * J27's class-0 map as reference (3 particle classes, only class 0 has a
+ * volume), its selected class 0 fed J29 dedup (769,822) → J30 → J31
+ * (766,560). The old volume-first spine walk jumped J31 → J27 and never
+ * saw J28; the particle-first walk must reach it. Classes 1/2 carry NO
+ * map (volume_1) so the stage renders single-map. */
+const J28 = mkNode("J28", "hetero_refine", {
+  particle_count: 1588675,
+  maps: [mkMapAsset("J28", "volume_class_0")],
+  classes: [
+    { class_index: 0, particle_count: 769822, particle_percent: 48.5, total_particles: null,
+      volume_group: "volume_class_0",
+      mrc_preview_url: "http://cryosmart.test/api/log_image/j28_c0",
+      mrc_preview_src: null, mrc_preview_original_url: null,
+      maps: [{ result_name: "map", download_url: mapUrl("J28", "volume_class_0") }] },
+    { class_index: 1, particle_count: 402000, particle_percent: 25.3, total_particles: null,
+      volume_group: "volume_class_1",
+      mrc_preview_url: "http://cryosmart.test/api/log_image/j28_c1",
+      mrc_preview_src: null, mrc_preview_original_url: null,
+      maps: [] },
+    { class_index: 2, particle_count: 416853, particle_percent: 26.2, total_particles: null,
+      volume_group: "volume_class_2",
+      mrc_preview_url: "http://cryosmart.test/api/log_image/j28_c2",
+      mrc_preview_src: null, mrc_preview_original_url: null,
+      maps: [] },
+  ],
+});
+const J29 = mkNode("J29", "remove_duplicate_particles", { particle_count: 769822 });
+const J30 = mkNode("J30", "inspect_particles_select", { particle_count: 766560 });
 const J31 = mkNode("J31", "hetero_refine", {
   particle_count: 766560,
   maps: [mkMapAsset("J31", "volume_class_0"), mkMapAsset("J31", "volume_class_1"), mkMapAsset("J31", "volume_class_2")],
   classes: mkClasses("J31", [
-    [0, 77, 590411],
+    [0, 77, 590421],
     [1, 12, 91987],
     [2, 11, 84321],
   ]),
@@ -255,16 +294,23 @@ const J33 = mkNode("J33", "homo_abinit", {
 });
 const J34 = mkNode("J34", "hetero_refine", {
   particle_count: 590421,
-  maps: [mkMapAsset("J34", "volume_class_0"), mkMapAsset("J34", "volume_class_1")],
+  // v3.58: the REAL 3-class split — class 0 (378,677) is the FLOW
+  // ANCHOR feeding the non-uniform J37; the connector must leave from
+  // under IT, not under the middle class.
+  maps: [mkMapAsset("J34", "volume_class_0"), mkMapAsset("J34", "volume_class_1"), mkMapAsset("J34", "volume_class_2")],
   classes: mkClasses("J34", [
-    [0, 64.1, 378680],
-    [1, 22, 129893],
+    [0, 64.1, 378677],
+    [1, 18.6, 109606],
+    [2, 17.3, 102138],
   ]),
 });
 const J35 = mkNode("J35", "nonuniform_refine_new", {
   particle_count: 378677,
   maps: [mkMapAsset("J35", "volume")],
 });
+/* v3.58: the CTF-refinement step between the two non-uniforms (no maps,
+ * never a stage row) — J37's particles come from J36, its map from J35. */
+const J36 = mkNode("J36", "ctf_refinement", { particle_count: 378677 });
 const J37 = mkNode("J37", "nonuniform_refine_new", {
   particle_count: 378677,
   maps: [mkMapAsset("J37", "volume")],
@@ -275,20 +321,21 @@ const J39 = mkNode("J39", "homo_abinit", {
   // the user refined the initial-model generation, so the simplified
   // figure KEEPS this ab-initio (only the count rule could drop it, and
   // its successor only shrinks: 378,677 → J40's 209,127).
+  // v3.58: the REAL 3-class split — class 2 (209,127) feeds J40/J41.
   abinit_max_resolution_A: 6,
-  maps: [mkMapAsset("J39", "volume_class_0"), mkMapAsset("J39", "volume_class_1")],
+  maps: [mkMapAsset("J39", "volume_class_0"), mkMapAsset("J39", "volume_class_1"), mkMapAsset("J39", "volume_class_2")],
   classes: mkClasses("J39", [
-    [0, 4.2, 15904],
-    [1, 40, 151471],
+    [0, 4.2, 15755],
+    [1, 40.6, 153795],
+    [2, 55.2, 209127],
   ]),
 });
-const J40 = mkNode("J40", "hetero_refine", {
+/* v3.58 (round-17 “homo reconstruct only的job也可以忽略”): J40 is the REAL
+ * reconstruct-only job (homo_reconstruct, single volume, 209,127) — kept
+ * in the FULL figure, dropped by 简化模式. */
+const J40 = mkNode("J40", "homo_reconstruct", {
   particle_count: 209127,
-  maps: [mkMapAsset("J40", "volume_class_0"), mkMapAsset("J40", "volume_class_1")],
-  classes: mkClasses("J40", [
-    [0, 55, 115020],
-    [1, 45, 94107],
-  ]),
+  maps: [mkMapAsset("J40", "volume")],
 });
 const J41 = mkNode("J41", "new_local_refine", {
   particle_count: 209127,
@@ -296,23 +343,56 @@ const J41 = mkNode("J41", "new_local_refine", {
   maps: [mkMapAsset("J41", "volume")],
 });
 
-const chain = [J1, J9, J25, J26, J12, J27, J31, J33, J34, J35, J37, J39, J40, J41];
-const nodes = chain;
-const edges = chain.slice(1).map((n, i) => ({
-  source: chain[i].uid,
-  target: n.uid,
-  input_type: "volume",
-  input_name: "volume",
+/* v3.58: the REAL P96 DAG — particle edges (null input_type) vs volume
+ * edges, mirroring the captured lineage: the extract feeds BOTH the 2D
+ * branch (J12→J27) and J28; J27 supplies reference MAPS to J28 AND J31
+ * while the particle mainline runs J28→J29→J30→J31. */
+const nodes = [J1, J9, J25, J26, J12, J27, J28, J29, J30, J31, J33, J34, J35, J36, J37, J39, J40, J41];
+const rawEdges: Array<[string, string, "volume" | null]> = [
+  ["J1", "J9", null],
+  ["J1", "J25", null],
+  ["J25", "J26", null],
+  ["J26", "J12", null],
+  ["J12", "J27", null],
+  ["J27", "J28", "volume"],
+  ["J26", "J28", null],
+  ["J28", "J29", null],
+  ["J29", "J30", null],
+  ["J30", "J31", null],
+  ["J27", "J31", "volume"],
+  ["J31", "J33", null],
+  ["J31", "J33", "volume"],
+  ["J33", "J34", null],
+  ["J33", "J34", "volume"],
+  ["J34", "J35", null],
+  ["J34", "J35", "volume"],
+  ["J35", "J36", null],
+  ["J36", "J37", null],
+  ["J35", "J37", "volume"],
+  ["J37", "J39", null],
+  ["J39", "J40", null],
+  ["J39", "J40", "volume"],
+  ["J40", "J41", null],
+  ["J40", "J41", "volume"],
+];
+const edges = rawEdges.map(([source, target, kind]) => ({
+  source,
+  target,
+  input_type: kind,
+  input_name: kind,
   input_title: null,
   source_group: null,
   slots: [],
 }));
-for (let i = 0; i < chain.length; i++) {
-  chain[i].parents = chain.slice(0, i).map((n) => n.uid).slice(-1);
-  chain[i].children = chain.slice(i + 1).map((n) => n.uid).slice(0, 1);
+const uidIndex = new Map(nodes.map((n, i) => [n.uid, i] as const));
+for (const e of rawEdges) {
+  const child = nodes[uidIndex.get(e[1])!];
+  if (!child.parents.includes(e[0])) child.parents.push(e[0]);
+  const parent = nodes[uidIndex.get(e[0])!];
+  if (!parent.children.includes(e[1])) parent.children.push(e[1]);
 }
 
-const classJobs = [J27, J31, J33, J34, J39, J40].map((n) => ({
+const classJobs = [J27, J28, J31, J33, J34, J39].map((n) => ({
   uid: n.uid,
   job_type: n.job_type,
   classes: n.classes,
@@ -359,15 +439,34 @@ const byUid = (uid: string) => model.groups.flat().filter((i) => i.uid === uid);
 const j31 = byUid("J31")[0];
 const j41 = byUid("J41")[0];
 const j12 = byUid("J12")[0];
+const j28 = byUid("J28")[0];
 const fail: string[] = [];
-if (model.groups.length !== 10) fail.push(`groups expected 10 got ${model.groups.length}`);
+/* v3.58: [J12 montage] + spine [J27, J28, J31, J33, J34, J35, J37, J39,
+ * J40, J41] = 11 groups — the particle-first walk must reach J28
+ * THROUGH J30/J29 (the volume edge J31←J27 must not bypass it). */
+if (model.groups.length !== 11) fail.push(`groups expected 11 got ${model.groups.length}`);
+const spineUids = model.groups.flat().map((i) => i.uid).join(">");
+if (!spineUids.includes("J28")) fail.push(`J28 missing from the full figure — got ${spineUids}`);
+if (j28) {
+  const idx = model.groups.findIndex((g) => g.some((i) => i.uid === "J28"));
+  const idx31 = model.groups.findIndex((g) => g.some((i) => i.uid === "J31"));
+  const idx27 = model.groups.findIndex((g) => g.some((i) => i.uid === "J27"));
+  if (idx < 0 || idx31 < 0 || idx27 < 0 || !(idx27 < idx && idx < idx31))
+    fail.push(`spine order wrong: expected J27 < J28 < J31, got indices ${idx27}/${idx}/${idx31}`);
+  if (j28.classes?.length !== 1) fail.push(`J28 single-map expected (volume_1), got ${j28.classes?.length} slots`);
+  if (j28.particleTotal !== 1588675) fail.push(`J28 particleTotal expected 1588675 got ${j28.particleTotal}`);
+  if (j28.label !== "Hetero refinement") fail.push(`J28 label got ${j28.label}`);
+} else fail.push("J28 item missing entirely");
 if (!j31?.classes || j31.classes.length !== 3) fail.push(`J31 classes expected 3 got ${j31?.classes?.length}`);
-if (j31 && j31.classes?.[0]?.stats.join("|") !== "77%|590,411 particles") fail.push(`J31 c0 stats got ${j31?.classes?.[0]?.stats.join("|")}`);
+if (j31 && j31.classes?.[0]?.stats.join("|") !== "77%|590,421 particles") fail.push(`J31 c0 stats got ${j31?.classes?.[0]?.stats.join("|")}`);
 if (!j41?.classes || j41.classes.length !== 1) fail.push(`J41 classes expected 1 got ${j41?.classes?.length}`);
 if (j41?.stats.length !== 1) fail.push(`J41 final stats should be particles-only, got ${j41?.stats.join("|")}`);
 if (!j12?.imageUrl) fail.push("J12 montage imageUrl missing");
 if (model.referenceKey !== "J41/volume") fail.push(`referenceKey got ${model.referenceKey}`);
-if (srcs.size !== 16) fail.push(`figureMapSources expected 16 got ${srcs.size}`);
+/* v3.58: sources = J27:2 + J28:1 + J31:3 + J33:2 + J34:3 + J35:1 +
+ * J37:1 + J39:3 + J40:1 + J41:1 = 18. */
+if (srcs.size !== 18) fail.push(`figureMapSources expected 18 got ${srcs.size}`);
+if (!srcs.has("J28/volume_class_0")) fail.push("J28/volume_class_0 missing from the render set");
 if (model.headerStats.micrographs !== "6,060 Micrographs") fail.push(`header micrographs got ${model.headerStats.micrographs}`);
 /* v3.55 (round-14): the MAINLINE pick — J25 topaz_extract's 1,634,842
  * ("1635K"), NOT the earliest subset pick J9's 164,291 (the old rule). */
@@ -405,17 +504,24 @@ for (const g of model2.groups) {
 console.log("== simplified warnings ==", JSON.stringify(model2.warnings, null, 1));
 
 const sUids = new Set(model2.groups.flat().map((i) => i.uid));
-/* v3.55: J12 (subset), J27 (absent param = default 12) and J33 (explicit
- * default 12) drop; J39 (non-default 6 Å) stays → 10 - 3 = 7 groups. */
-if (model2.groups.length !== 7)
-  fail.push(`simplified groups expected 7 (J12+J27+J33 dropped) got ${model2.groups.length}`);
+/* v3.58: bootstrap drops (J12 subset, J27 absent-12, J33 explicit-12) +
+ * NEW redundant drops (J35 merged into J37 — same 378,677; J40
+ * reconstruct-only) → [J28, J31, J34, J37, J39, J41] = 6 groups. */
+if (model2.groups.length !== 6)
+  fail.push(`simplified groups expected 6 (J12/J27/J33/J35/J40 dropped) got ${model2.groups.length}`);
 if (sUids.has("J12")) fail.push("simplified should drop the small-subset select_2D montage J12");
 if (sUids.has("J27")) fail.push("simplified should drop the default-12 Å (absent param) ab-initio J27");
 if (sUids.has("J33")) fail.push("simplified should drop the explicit default-12 Å ab-initio J33 (hetero J31 → hetero J34 directly)");
+if (sUids.has("J35")) fail.push("simplified must MERGE the earlier non-uniform J35 into J37 (same particle count)");
+if (sUids.has("J40")) fail.push("simplified must omit the reconstruct-only J40");
+if (!sUids.has("J28")) fail.push("simplified must KEEP the particle-mainline hetero J28");
 if (!sUids.has("J39")) fail.push("simplified must KEEP the deliberately non-default 6 Å ab-initio J39");
 if (!model2.warnings.some((w) => w.includes("已省略少量数据步骤 J12") && w.includes("12,259"))) fail.push("missing J12 drop warning");
 if (!model2.warnings.some((w) => w.includes("已省略 ab-initio 步骤 J27") && w.includes("12"))) fail.push("missing J27 default-12 drop warning");
 if (!model2.warnings.some((w) => w.includes("已省略 ab-initio 步骤 J33") && w.includes("12.0"))) fail.push("missing J33 default-12 drop warning");
+if (!model2.warnings.some((w) => w.includes("已合并连续 Non-uniform 精修 J35 → J37") && w.includes("颗粒数相同")))
+  fail.push("missing J35→J37 non-uniform merge warning");
+if (!model2.warnings.some((w) => w.includes("已省略仅重建步骤 J40"))) fail.push("missing J40 reconstruct-only drop warning");
 if (model2.warnings.some((w) => w.includes("从多到少"))) fail.push("funnel hiding should NOT fire on the monotone P96 chain");
 
 /* funnel: every kept stage's displayed count must be ≤ its predecessor's */
@@ -434,15 +540,19 @@ if (model2.warnings.some((w) => w.includes("从多到少"))) fail.push("funnel h
   const j41s = model2.groups.flat().find((i) => i.uid === "J41");
   if (j41s?.stats.join("|") !== "209,127 particles") fail.push(`simplified J41 stats got ${j41s?.stats.join("|")}`);
   const j31s = model2.groups.flat().find((i) => i.uid === "J31");
-  if (j31s?.classes?.[0]?.stats.join("|") !== "77%|590,411 particles") fail.push(`simplified J31 c0 stats got ${j31s?.classes?.[0]?.stats.join("|")}`);
+  if (j31s?.classes?.[0]?.stats.join("|") !== "77%|590,421 particles") fail.push(`simplified J31 c0 stats got ${j31s?.classes?.[0]?.stats.join("|")}`);
 }
 
-/* map sources shrink with the dropped stages (16 → 12: J27 2 + J33 2 gone) */
+/* map sources shrink with the dropped stages (18 → 12: J27 2 + J33 2 +
+ * J35 1 + J40 1 gone; J28's single map stays) */
 const srcs2 = figureMapSources(model2);
 console.log("== simplified figureMapSources ==", srcs2.size);
 if (srcs2.size !== 12) fail.push(`simplified figureMapSources expected 12 got ${srcs2.size}`);
 if (srcs2.has("J27/volume_class_0")) fail.push("J27 maps must be gone from the simplified render set");
 if (srcs2.has("J33/volume_class_0")) fail.push("J33 maps must be gone from the simplified render set");
+if (srcs2.has("J35/volume")) fail.push("J35 maps must be gone from the simplified render set (merged into J37)");
+if (srcs2.has("J40/volume")) fail.push("J40 maps must be gone from the simplified render set (reconstruct-only)");
+if (!srcs2.has("J28/volume_class_0")) fail.push("J28 maps must STAY in the simplified render set");
 
 const images2 = new Map<string, Uint8Array>();
 for (const [key, src] of srcs2) {
@@ -522,11 +632,84 @@ const xmlSimplified = slide1Xml(OUT_SIMPLIFIED);
 console.log("== slide xml uid-run checks ==");
 if (!xmlFull.includes(" · J31") || !xmlFull.includes(" · J41"))
   fail.push("full deck labels missing the gray job-id runs (· J31 / · J41)");
+if (!xmlFull.includes(" · J28")) fail.push("full deck missing the J28 stage label id");
+if (!xmlFull.includes(" · J40")) fail.push("full deck missing the reconstruct-only J40 stage (kept in full mode)");
 if (!xmlFull.includes('sz="700"') || !xmlFull.includes('val="808080"'))
   fail.push("full deck job-id runs missing the 7 pt gray styling");
-if (!xmlSimplified.includes(" · J39")) fail.push("simplified deck missing the kept J39 label id");
+if (!xmlSimplified.includes(" · J39") || !xmlSimplified.includes(" · J28")) fail.push("simplified deck missing the kept J39/J28 label ids");
 if (xmlSimplified.includes(" · J33") || xmlSimplified.includes(" · J27"))
   fail.push("simplified deck must NOT label the dropped J27/J33 stages");
+if (xmlSimplified.includes(" · J35")) fail.push("simplified deck must NOT label the merged-away non-uniform J35");
+if (xmlSimplified.includes(" · J40")) fail.push("simplified deck must NOT label the dropped reconstruct-only J40");
+
+/* ------------------------------------------------------------------
+ * v3.58 (round-17 “连线还是会出现错位”): connector geometry invariants.
+ * Every connector is an axis-aligned straightConnector1 (the bent wrap is
+ * gone — assert that), and NO segment may cross the interior of a
+ * thumbnail or a stats/label/Å text box (below the header band y<0.79,
+ * whose inter-item arrows ride inside the band's own right-aligned text
+ * slots). This is the invariant that deck (6) violated: the wrap
+ * crossed J34's class-2 thumbnail and J37's side stats box. */
+function slideGeometry(xml: string) {
+  const EMU = 914400;
+  const segRe = /<p:cxnSp>.*?<\/p:cxnSp>/gs;
+  const segs: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+  let sawBent = false;
+  let sawDiagonal = false;
+  for (const m of xml.matchAll(segRe)) {
+    const cn = m[0];
+    if (/bentConnector/.test(cn)) sawBent = true;
+    const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(cn);
+    const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(cn);
+    if (!off || !ext) continue;
+    const x = +off[1] / EMU, y = +off[2] / EMU, w = +ext[1] / EMU, h = +ext[2] / EMU;
+    if (w === 0) segs.push({ x1: x, y1: y, x2: x, y2: y + h });
+    else if (h === 0) segs.push({ x1: x, y1: y, x2: x + w, y2: y });
+    else sawDiagonal = true;
+  }
+  const boxes: Array<{ x: number; y: number; w: number; h: number; tag: string }> = [];
+  const spRe = /<p:sp>.*?<\/p:sp>/gs;
+  for (const m of xml.matchAll(spRe)) {
+    const sp = m[0];
+    const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(sp);
+    const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(sp);
+    if (!off || !ext) continue;
+    const y = +off[2] / EMU;
+    if (y < 0.79) continue; // header band arrows live inside the band's own slots
+    const text = (sp.match(/<a:t>([^<]*)<\/a:t>/g) || []).map((t) => t.replace(/<[^>]+>/g, "")).join("|");
+    boxes.push({ x: +off[1] / EMU, y, w: +ext[1] / EMU, h: +ext[2] / EMU, tag: text });
+  }
+  const picRe = /<p:pic>.*?<\/p:pic>/gs;
+  for (const m of xml.matchAll(picRe)) {
+    const pic = m[0];
+    const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(pic);
+    const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(pic);
+    if (!off || !ext) continue;
+    const descr = /descr="([^"]*)"/.exec(pic);
+    boxes.push({ x: +off[1] / EMU, y: +off[2] / EMU, w: +ext[1] / EMU, h: +ext[2] / EMU, tag: descr ? descr[1] : "pic" });
+  }
+  return { segs, boxes, sawBent, sawDiagonal };
+}
+function assertNoConnectorCrossing(xml: string, deck: string) {
+  const { segs, boxes, sawBent, sawDiagonal } = slideGeometry(xml);
+  const TOL = 0.015;
+  if (sawBent) fail.push(`${deck}: bentConnector still present — the wrap must be explicit segments`);
+  if (sawDiagonal) fail.push(`${deck}: non-axis-aligned connector emitted`);
+  for (const s of segs) {
+    for (const b of boxes) {
+      const inside =
+        s.x1 === s.x2
+          ? s.x1 > b.x + TOL && s.x1 < b.x + b.w - TOL && Math.max(s.y1, s.y2) > b.y + TOL && Math.min(s.y1, s.y2) < b.y + b.h - TOL
+          : s.y1 > b.y + TOL && s.y1 < b.y + b.h - TOL && Math.max(s.x1, s.x2) > b.x + TOL && Math.min(s.x1, s.x2) < b.x + b.w - TOL;
+      if (inside) {
+        fail.push(`${deck}: connector segment (${s.x1.toFixed(2)},${s.y1.toFixed(2)})→(${s.x2.toFixed(2)},${s.y2.toFixed(2)}) crosses box "${b.tag}" (${b.x.toFixed(2)},${b.y.toFixed(2)}) ${b.w.toFixed(2)}x${b.h.toFixed(2)}`);
+      }
+    }
+  }
+}
+console.log("== connector no-crossing checks ==");
+assertNoConnectorCrossing(xmlFull, "full deck");
+assertNoConnectorCrossing(xmlSimplified, "simplified deck");
 
 /* ------------------------------------------------------------------ */
 /* v3.55 unit: abinitMaxResolutionFromJob params_spec extraction        */

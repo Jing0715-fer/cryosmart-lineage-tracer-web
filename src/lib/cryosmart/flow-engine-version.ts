@@ -82,5 +82,18 @@
  * v3.57 writes the canonical Office style matrix, cs fonts, the required
  * layout→master relationship, master txStyles and layout clrMapOvr. Old
  * pages still produce the rejected package.
+ *
+ * v3.58 bump reason (round-17 “缺少 J28 + 合并 non-uniform + homo
+ * reconstruct 忽略 + 连线错位”): (1) the stage spine now searches the
+ * PARTICLE ancestry first — P96's J28 (hetero refinement on the full
+ * 1.59M extract feeding J29 dedup → J30 → J31) was invisible because the
+ * old walk followed the volume edge J31→J27 directly; (2) 简化模式 merges
+ * adjacent non-uniform refinements (same particle count OR only CTF
+ * refinement between them) into the LAST one and omits
+ * homo-reconstruct-only stages (J40); (3) connectors attach at the flow
+ * anchor — the upstream class whose particle count feeds the next stage —
+ * with elbow routes when anchor/entry x differ, and the column wrap rides
+ * a below-content lane + inter-column gutter instead of the crossing
+ * bentConnector3. Old pages keep all three behaviors.
  */
-export const FLOW_ENGINE_VERSION = "3.57";
+export const FLOW_ENGINE_VERSION = "3.58";

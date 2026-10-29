@@ -39,6 +39,13 @@
  * extraClrSchemeLst), cs fonts, the required layout→master relationship,
  * <p:txStyles> on the master and <p:clrMapOvr> on the layout.
  *
+ * v3.58 (round-17): connectors attach at the FLOW ANCHOR (the upstream
+ * class whose count feeds the next stage) with elbow routes when the
+ * anchor and the entry x differ, and the column wrap switched from the
+ * bbox-midpoint bentConnector3 (which crossed thumbnails + stats boxes)
+ * to an explicit below-content lane → inter-column-gutter route. See
+ * the connectors section for the full story.
+ *
  * Map thumbnails keep the `name="CryoSmartImage:<uid>/<group>"` marker on
  * <p:cNvPr> (same contract as the A4 picture-flow PPTX) so the desktop
  * ChimeraX helpers remain interchangeable.
@@ -547,30 +554,47 @@ export function buildWorkflowPptx(
     });
   });
 
-  /* connectors: same-column stages chain downward; a column wrap rides a
-   * bent connector up to the next column's first stage.
+  /* connectors: same-column stages chain downward; a column wrap rides an
+   * explicit segment route below the column and up the inter-column gutter.
    *
-   * v3.55 (round-14 VLM catch): the same-column chain used to drop at the
-   * NEXT row's first-thumbnail centre unconditionally — when the previous
-   * row is NARROWER (the simplified deck's single-map J448 over the wide
-   * 5-class J494), that x lies OUTSIDE the previous row's span and the
-   * line's TOP hangs in empty space ("起点悬空"). The drop x is now chosen
-   * so both ends attach: the next row's first-thumb centre when it lies
-   * within the previous row's span (the verified existing look), else the
-   * previous row's last-thumb centre when it lies within the next row's
-   * span, else the span overlap's centre — and a 3-segment elbow (down →
-   * across → down, only the final segment arrowed, same style as the
-   * header band's elbow) when the spans do not overlap at all. */
-  const rowSpanX = (row: PlacedRow): { min: number; max: number } => {
-    let min = Infinity;
-    let max = -Infinity;
+   * v3.58 (round-17 “连线还是会出现错位”): the chain now attaches at the
+   * FLOW ANCHOR — the upstream thumbnail whose particle count matches the
+   * next stage's input (P96: J34's class-0 box is what feeds the
+   * non-uniform stage, so the line must leave from under THAT class, not
+   * from under the middle class the old span-overlap heuristic picked;
+   * deck (6)'s J34→J35 and J39→J40 both hung from the wrong box). When
+   * the anchor x and the next row's entry x coincide → the classic single
+   * vertical drop; otherwise a 3-segment elbow (down → across → down, the
+   * arrow only on the final segment) inside the inter-row gap, which is
+   * empty by construction. The column wrap is 4 explicit segments: down
+   * below the column's content, across a clear lane, UP the inter-column
+   * gutter, and a short arrow into the next column's first thumbnail — the
+   * old bentConnector3 hung its vertical run at the bbox midpoint, which
+   * crossed the previous column's thumbnails and the side stats box. */
+  const slotCountOf = (item: FlowFigureItem, slotIndex: number): number | null => {
+    if (item.classes?.length) {
+      const c = item.classes[Math.min(slotIndex, item.classes.length - 1)];
+      return c?.particleCount ?? null;
+    }
+    return item.particleTotal ?? null;
+  };
+  const rowRepresentativeCount = (row: PlacedRow): number | null => {
+    const cs = row.items
+      .map((it) => it.item.particleTotal ?? null)
+      .filter((v): v is number => v != null && v > 0);
+    return cs.length ? Math.max(...cs) : null;
+  };
+  /** The upstream thumbnail whose slot count equals the next row's
+   * representative count — the FLOW anchor; null when no slot matches
+   * (falls back to the row's last thumbnail, the previous convention). */
+  const anchorThumbOf = (row: PlacedRow, nextCount: number | null): Box | null => {
+    if (nextCount == null) return null;
     for (const it of row.items) {
-      for (const s of it.slots) {
-        min = Math.min(min, s.thumb.x);
-        max = Math.max(max, s.thumb.x + s.thumb.w);
+      for (let jj = 0; jj < it.slots.length; jj++) {
+        if (slotCountOf(it.item, jj) === nextCount) return it.slots[jj].thumb;
       }
     }
-    return { min: Number.isFinite(min) ? min : 0, max: Number.isFinite(max) ? max : 0 };
+    return null;
   };
   for (let i = 0; i + 1 < rows.length; i++) {
     const a = rows[i];
@@ -578,38 +602,32 @@ export function buildWorkflowPptx(
     const aLast = thumbOf(a, false);
     const bFirst = thumbOf(b, true);
     const sameCol = Math.floor(i / rowsPerCol) === Math.floor((i + 1) / rowsPerCol);
+    const anchor = anchorThumbOf(a, rowRepresentativeCount(b)) ?? aLast;
+    const anchorCx = anchor.x + anchor.w / 2;
     if (sameCol) {
-      const bFirstCx = bFirst.x + bFirst.w / 2;
-      const aLastCx = aLast.x + aLast.w / 2;
-      const spanA = rowSpanX(a);
-      const spanB = rowSpanX(b);
-      let x: number | null = null;
-      if (bFirstCx >= spanA.min - 0.02 && bFirstCx <= spanA.max + 0.02) {
-        x = bFirstCx; // the classic look: enter the next row at its first item
-      } else if (aLastCx >= spanB.min - 0.02 && aLastCx <= spanB.max + 0.02) {
-        x = aLastCx; // exit the previous row at its last item
+      const entryCx = bFirst.x + bFirst.w / 2;
+      const yTop = a.bottom + 0.02;
+      const yBottom = b.top - 0.03;
+      if (Math.abs(anchorCx - entryCx) <= 0.02) {
+        ops.push({ kind: "conn", x1: anchorCx, y1: yTop, x2: anchorCx, y2: yBottom });
       } else {
-        const oL = Math.max(spanA.min, spanB.min);
-        const oR = Math.min(spanA.max, spanB.max);
-        x = oR >= oL ? (oL + oR) / 2 : null;
-      }
-      if (x != null) {
-        ops.push({ kind: "conn", x1: x, y1: a.bottom + 0.02, x2: x, y2: b.top - 0.03 });
-      } else {
-        const midY = a.bottom + 0.02 + Math.max(0.05, (b.top - 0.03 - (a.bottom + 0.02)) * 0.45);
-        ops.push({ kind: "conn", x1: aLastCx, y1: a.bottom + 0.02, x2: aLastCx, y2: midY, arrow: false });
-        ops.push({ kind: "conn", x1: aLastCx, y1: midY, x2: bFirstCx, y2: midY, arrow: false });
-        ops.push({ kind: "conn", x1: bFirstCx, y1: midY, x2: bFirstCx, y2: b.top - 0.03 });
+        const midY = yTop + Math.max(0.05, (yBottom - yTop) * 0.45);
+        ops.push({ kind: "conn", x1: anchorCx, y1: yTop, x2: anchorCx, y2: midY, arrow: false });
+        ops.push({ kind: "conn", x1: anchorCx, y1: midY, x2: entryCx, y2: midY, arrow: false });
+        ops.push({ kind: "conn", x1: entryCx, y1: midY, x2: entryCx, y2: yBottom });
       }
     } else {
-      ops.push({
-        kind: "conn",
-        x1: aLast.x + aLast.w + 0.03,
-        y1: aLast.y + aLast.h / 2,
-        x2: bFirst.x - 0.03,
-        y2: b.top - 0.03,
-        bent: true,
-      });
+      /* wrap into the next column: below-content lane → inter-column
+       * gutter → up → arrow into the first thumbnail's left edge. */
+      const nextCol = Math.floor((i + 1) / rowsPerCol);
+      const gutterX = MARGIN_X + nextCol * (colW + COL_GAP) - COL_GAP / 2;
+      const laneY = Math.max(Math.min(a.bottom + 0.14, SLIDE_H_IN - 0.4), a.bottom + 0.06);
+      const entryY = bFirst.y + bFirst.h / 2;
+      const entryX = bFirst.x - 0.03;
+      ops.push({ kind: "conn", x1: anchorCx, y1: a.bottom + 0.02, x2: anchorCx, y2: laneY, arrow: false });
+      ops.push({ kind: "conn", x1: anchorCx, y1: laneY, x2: gutterX, y2: laneY, arrow: false });
+      ops.push({ kind: "conn", x1: gutterX, y1: laneY, x2: gutterX, y2: entryY, arrow: false });
+      ops.push({ kind: "conn", x1: gutterX, y1: entryY, x2: entryX, y2: entryY });
     }
   }
 
