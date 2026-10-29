@@ -84,6 +84,15 @@
  * classes 4-7 are pale magenta / pale salmon / pale green / tan per the
  * user's pasted Chimera classic 16-bit list, cycling past class 7. The
  * transport / alignment / save pipeline here is unchanged.
+ *
+ * v3.55 (round-14 “开始截图之前要先关闭掉过去已打开的 map”): renderFigureMaps
+ * now (0) closes every ALREADY-OPEN volume model before the reference map
+ * loads — precisely via the relay's new GET /volumes (volume models only),
+ * falling back to `close all` on relays that predate the endpoint — and
+ * (5) closes every model the run itself opened once the screenshots are
+ * exported. Previous runs used to leave their aligned models open, and the
+ * screenshot loop's hide-all step only covered the CURRENT run's ids, so
+ * the last run's maps swept into every screenshot.
  */
 
 import { chimeraClassColor } from "./chimera-colors";
@@ -300,6 +309,36 @@ export async function bridgeNextModelId(t: FlowTransport): Promise<number | null
     if (!res.ok) return null;
     const data = (await res.json()) as { next?: number };
     return typeof data.next === "number" ? data.next : null;
+  } catch {
+    return null;
+  }
+}
+
+/** v3.55 (round-14): one currently-open volume model in ChimeraX. */
+export interface BridgeVolumeRef {
+  /** ChimeraX id_string ("1", "2.1"…) — for `close #<id>`. */
+  id: string;
+  /** Model name (its map filename / URL) — for the run log. */
+  name: string;
+}
+
+/** Relay-only v3.55 (round-14 “开始截图之前要先关闭掉过去已打开的 map”):
+ *  list every currently-open VOLUME model. Returns `null` when the
+ *  transport is not a relay or the relay predates the /volumes endpoint
+ *  (HTTP 404 / unexpected payload) — callers then fall back to `close all`.
+ *  This is the precise half of the leftover-cleanup: only volume maps are
+ *  closed, so an atomic model the user is looking at stays untouched. */
+export async function bridgeVolumeIds(
+  t: FlowTransport,
+  timeoutMs = 30_000,
+): Promise<BridgeVolumeRef[] | null> {
+  if (t.kind !== "relay") return null;
+  try {
+    const res = await fetchWithTimeout(`${t.base}/volumes`, { method: "GET" }, timeoutMs);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { ok?: boolean; volumes?: BridgeVolumeRef[] };
+    if (!data?.ok || !Array.isArray(data.volumes)) return null;
+    return data.volumes.filter((v) => typeof v?.id === "string" && !!v.id);
   } catch {
     return null;
   }
@@ -729,6 +768,30 @@ export async function renderFigureMaps(
   const progress = (phase: string, pct?: number) => opts.onProgress?.({ phase, pct });
   const openIds = new Set<number>();
 
+  /* ---- 0. v3.55 (round-14 “开始截图之前要先关闭掉过去已打开的 map”) ----
+   * Every earlier run left its aligned models open in ChimeraX, and this
+   * run's hide-all step only covered ITS OWN openIds — so the previous
+   * run's maps swept into every screenshot. Close what is open NOW, BEFORE
+   * the reference map loads: precisely over the relay's /volumes (volume
+   * models only — anything else the user has open stays), falling back to
+   * `close all` when the relay predates /volumes (or on the official REST
+   * transport, which can run commands but has no file listing). */
+  progress("清理 ChimeraX 已打开的地图", 2);
+  const leftoverVols = await bridgeVolumeIds(t);
+  if (leftoverVols != null) {
+    if (leftoverVols.length) {
+      for (const v of leftoverVols) {
+        await exec(t, `close #${v.id}`, opts, true);
+      }
+      log(`已关闭 ChimeraX 中残留的 ${leftoverVols.length} 个地图（上次运行/手动打开: ${leftoverVols.map((v) => `#${v.id}`).join(" ")}) — 本次截图不再混入旧图`);
+    } else {
+      log("ChimeraX 中无残留地图 — 截图环境干净");
+    }
+  } else {
+    await exec(t, "close all", opts, true);
+    log("已执行 close all 关闭既有模型（旧版桥脚本无 /volumes 精确清单 — 建议在 ChimeraX 重新运行一次 relay.py 获取精确清理），本次截图不再混入旧图");
+  }
+
   /* ---- 1. reference ---- */
   progress("打开参考地图", 4);
   let refLevel: number | null = null;
@@ -1047,6 +1110,19 @@ export async function renderFigureMaps(
     }
   } else {
     for (const r of renders) r.png = null;
+  }
+
+  /* ---- 5. v3.55 (round-14): cleanup — close every model THIS run opened.
+   * The screenshots are already exported, and the aligned in-memory models
+   * are of no further use — leaving them open was exactly how the NEXT
+   * run's screenshots got polluted (step 0 above now guards against the
+   * already-open leftovers; this step keeps ChimeraX clean after every
+   * run so both halves of the problem are covered). */
+  if (openIds.size) {
+    for (const id of openIds) {
+      await exec(t, `close #${id}`, opts, true);
+    }
+    log(`运行结束: 已关闭本次打开的 ${openIds.size} 个模型 — ChimeraX 保持干净，下次运行不会混入旧图`);
   }
 
   progress("ChimeraX 渲染完成", 88);

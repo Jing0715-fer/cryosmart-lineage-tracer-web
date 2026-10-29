@@ -1,5 +1,5 @@
 /**
- * v3.51→v3.54 figure-model + layout drill.
+ * v3.51→v3.55 figure-model + layout drill.
  *
  * Crafts a P96/J41-like LineageSummary (10 stage groups; 6 of them class
  * splits with 2-3 classes each) and runs the REAL model builder + REAL
@@ -9,12 +9,24 @@
  * SIMPLIFIED figure (small-subset bootstrap drops + 多→少 funnel) plus a
  * default-12 Å ab-initio-final case.
  *
+ * v3.55 (round-14): (1) the chain now carries the REAL picking family
+ * (J9 blob_picker 164,291 on the 217-photo subset / J25 topaz_extract
+ * 1,634,842 over all photos / J26 extract 1,588,675) — the header's pick
+ * count must read the MAINLINE 1635K, not the earliest subset pick;
+ * (2) J33 carries an explicit default-12 Å Maximum resolution → the
+ * simplified figure omits it entirely (hetero J31 → hetero J34 directly);
+ * (3) J39 carries a NON-default 6 Å → the simplified figure KEEPS it;
+ * (4) PPTX labels must carry the job id (name + gray 7 pt " · uid" run);
+ * (5) abinitMaxResolutionFromJob unit checks ({value} wrapper / raw /
+ * absent / non-abinit).
+ *
  * Run: cd /home/z/my-project && bun .harness/v351-figure-test.ts
  */
 import { buildFlowFigureModel, figureMapSources } from "../src/lib/cryosmart/workflow-figure";
 import { chimeraClassColor } from "../src/lib/cryosmart/chimera-colors";
 import { buildWorkflowPptx } from "../src/lib/cryosmart/workflow-pptx";
-import { deflateSync } from "node:zlib";
+import { abinitMaxResolutionFromJob, jobNode } from "../src/lib/cryosmart/lineage";
+import { deflateSync, inflateRawSync } from "node:zlib";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -188,8 +200,16 @@ const mkNode = (
 });
 
 const J1 = mkNode("J1", "import_micrographs", { micrograph_count: 6060 });
+/* v3.55 (round-14): the REAL P96 picking family — J9's 164,291 blob picks
+ * came from only the 217-photo subset (the OLD header printed this number
+ * and read absurdly low against the 766K-particle stages downstream);
+ * J25 topaz_extract picked 1,634,842 over all 5,843 photos (mainline);
+ * J26 extracted 1,588,675 of them. */
+const J9 = mkNode("J9", "blob_picker_gpu", { particle_count: 164291, micrograph_count: 217 });
+const J25 = mkNode("J25", "topaz_extract", { particle_count: 1634842, micrograph_count: 5843 });
+const J26 = mkNode("J26", "extract_micrographs_multi", { particle_count: 1588675, micrograph_count: 5827 });
 const J12 = mkNode("J12", "select_2D", {
-  particle_count: 164291,
+  particle_count: 126228,
   select_2d: { particles_selected: 12259, classes_selected: 6 },
   images: [
     {
@@ -203,6 +223,8 @@ const J12 = mkNode("J12", "select_2D", {
 });
 const J27 = mkNode("J27", "homo_abinit", {
   particle_count: 58048,
+  // v3.55: NO Maximum-resolution parameter — absent = the cryoSPARC
+  // default 12 Å → the simplified figure must drop it by the new rule.
   maps: [mkMapAsset("J27", "volume_class_0"), mkMapAsset("J27", "volume_class_1")],
   classes: mkClasses("J27", [
     [0, 50.0, 29024],
@@ -220,6 +242,11 @@ const J31 = mkNode("J31", "hetero_refine", {
 });
 const J33 = mkNode("J33", "homo_abinit", {
   particle_count: 590421,
+  // v3.55 (round-14): EXPLICIT default 12 Å — a mainline ab-initio whose
+  // successor (J34) only SHRINKS (the count rule would keep it), but the
+  // default-12 Å rule must omit the stage entirely (hetero J31 → hetero
+  // J34 directly — the user's "直接显示 heterorefine" case).
+  abinit_max_resolution_A: 12,
   maps: [mkMapAsset("J33", "volume_class_0"), mkMapAsset("J33", "volume_class_1")],
   classes: mkClasses("J33", [
     [0, 47, 277498],
@@ -244,6 +271,11 @@ const J37 = mkNode("J37", "nonuniform_refine_new", {
 });
 const J39 = mkNode("J39", "homo_abinit", {
   particle_count: 378677,
+  // v3.55 (round-14): a deliberately NON-default 6 Å Maximum resolution —
+  // the user refined the initial-model generation, so the simplified
+  // figure KEEPS this ab-initio (only the count rule could drop it, and
+  // its successor only shrinks: 378,677 → J40's 209,127).
+  abinit_max_resolution_A: 6,
   maps: [mkMapAsset("J39", "volume_class_0"), mkMapAsset("J39", "volume_class_1")],
   classes: mkClasses("J39", [
     [0, 4.2, 15904],
@@ -264,7 +296,7 @@ const J41 = mkNode("J41", "new_local_refine", {
   maps: [mkMapAsset("J41", "volume")],
 });
 
-const chain = [J1, J12, J27, J31, J33, J34, J35, J37, J39, J40, J41];
+const chain = [J1, J9, J25, J26, J12, J27, J31, J33, J34, J35, J37, J39, J40, J41];
 const nodes = chain;
 const edges = chain.slice(1).map((n, i) => ({
   source: chain[i].uid,
@@ -337,7 +369,9 @@ if (!j12?.imageUrl) fail.push("J12 montage imageUrl missing");
 if (model.referenceKey !== "J41/volume") fail.push(`referenceKey got ${model.referenceKey}`);
 if (srcs.size !== 16) fail.push(`figureMapSources expected 16 got ${srcs.size}`);
 if (model.headerStats.micrographs !== "6,060 Micrographs") fail.push(`header micrographs got ${model.headerStats.micrographs}`);
-if (model.headerStats.particles !== "164,291 particles") fail.push(`header particles got ${model.headerStats.particles}`);
+/* v3.55 (round-14): the MAINLINE pick — J25 topaz_extract's 1,634,842
+ * ("1635K"), NOT the earliest subset pick J9's 164,291 (the old rule). */
+if (model.headerStats.particles !== "1635K particles") fail.push(`header particles got ${model.headerStats.particles}`);
 if (model.finalStats !== "3.20 Å") fail.push(`finalStats got ${model.finalStats}`);
 
 /* synthesized thumbnails: one class-colored disc per map source */
@@ -371,12 +405,17 @@ for (const g of model2.groups) {
 console.log("== simplified warnings ==", JSON.stringify(model2.warnings, null, 1));
 
 const sUids = new Set(model2.groups.flat().map((i) => i.uid));
-if (model2.groups.length !== 8) fail.push(`simplified groups expected 8 (J12+J27 dropped) got ${model2.groups.length}`);
+/* v3.55: J12 (subset), J27 (absent param = default 12) and J33 (explicit
+ * default 12) drop; J39 (non-default 6 Å) stays → 10 - 3 = 7 groups. */
+if (model2.groups.length !== 7)
+  fail.push(`simplified groups expected 7 (J12+J27+J33 dropped) got ${model2.groups.length}`);
 if (sUids.has("J12")) fail.push("simplified should drop the small-subset select_2D montage J12");
-if (sUids.has("J27")) fail.push("simplified should drop the small-subset ab-initio J27");
-if (!sUids.has("J39")) fail.push("simplified must KEEP the mainline ab-initio J39 (its successor only shrinks)");
+if (sUids.has("J27")) fail.push("simplified should drop the default-12 Å (absent param) ab-initio J27");
+if (sUids.has("J33")) fail.push("simplified should drop the explicit default-12 Å ab-initio J33 (hetero J31 → hetero J34 directly)");
+if (!sUids.has("J39")) fail.push("simplified must KEEP the deliberately non-default 6 Å ab-initio J39");
 if (!model2.warnings.some((w) => w.includes("已省略少量数据步骤 J12") && w.includes("12,259"))) fail.push("missing J12 drop warning");
-if (!model2.warnings.some((w) => w.includes("已省略少量数据步骤 J27") && w.includes("58,048"))) fail.push("missing J27 drop warning");
+if (!model2.warnings.some((w) => w.includes("已省略 ab-initio 步骤 J27") && w.includes("12"))) fail.push("missing J27 default-12 drop warning");
+if (!model2.warnings.some((w) => w.includes("已省略 ab-initio 步骤 J33") && w.includes("12.0"))) fail.push("missing J33 default-12 drop warning");
 if (model2.warnings.some((w) => w.includes("从多到少"))) fail.push("funnel hiding should NOT fire on the monotone P96 chain");
 
 /* funnel: every kept stage's displayed count must be ≤ its predecessor's */
@@ -398,11 +437,12 @@ if (model2.warnings.some((w) => w.includes("从多到少"))) fail.push("funnel h
   if (j31s?.classes?.[0]?.stats.join("|") !== "77%|590,411 particles") fail.push(`simplified J31 c0 stats got ${j31s?.classes?.[0]?.stats.join("|")}`);
 }
 
-/* map sources shrink with the dropped stages (16 → 14) */
+/* map sources shrink with the dropped stages (16 → 12: J27 2 + J33 2 gone) */
 const srcs2 = figureMapSources(model2);
 console.log("== simplified figureMapSources ==", srcs2.size);
-if (srcs2.size !== 14) fail.push(`simplified figureMapSources expected 14 got ${srcs2.size}`);
+if (srcs2.size !== 12) fail.push(`simplified figureMapSources expected 12 got ${srcs2.size}`);
 if (srcs2.has("J27/volume_class_0")) fail.push("J27 maps must be gone from the simplified render set");
+if (srcs2.has("J33/volume_class_0")) fail.push("J33 maps must be gone from the simplified render set");
 
 const images2 = new Map<string, Uint8Array>();
 for (const [key, src] of srcs2) {
@@ -447,6 +487,68 @@ if (simplified50.finalStats !== null) fail.push(`ab-initio-final simplified fina
 if (!simplified50.warnings.some((w) => w.includes("已忽略") && w.includes("12.0 Å"))) fail.push("missing default-12 Å ignore warning");
 if (!simplified50.groups.flat().some((i) => i.uid === "J50")) fail.push("the FINAL ab-initio must never be dropped");
 console.log("== 12Å case ==", JSON.stringify({ full: full50.finalStats, simplified: simplified50.finalStats }));
+
+/* ------------------------------------------------------------------ */
+/* v3.55: job-id labels inside the emitted PPTX slide XML              */
+/* ------------------------------------------------------------------ */
+
+/* unzip the two decks and inspect the slide's label runs */
+function slide1Xml(pptxPath: string): string {
+  const buf = fs.readFileSync(pptxPath);
+  // minimal stored/deflate zip scan: find "ppt/slides/slide1.xml" entry
+  let off = 0;
+  while (off < buf.length - 4) {
+    if (buf.readUInt32LE(off) === 0x04034b50) {
+      const nameLen = buf.readUInt16LE(off + 26);
+      const extraLen = buf.readUInt16LE(off + 28);
+      const compSize = buf.readUInt32LE(off + 18);
+      const method = buf.readUInt16LE(off + 8);
+      const nameStart = off + 30;
+      const dataStart = nameStart + nameLen + extraLen;
+      const name = buf.toString("utf8", nameStart, nameStart + nameLen);
+      if (name === "ppt/slides/slide1.xml") {
+        const raw = buf.subarray(dataStart, dataStart + compSize);
+        if (method === 0) return raw.toString("utf8");
+        return inflateRawSync(raw).toString("utf8");
+      }
+      off = dataStart + compSize - 1;
+    }
+    off += 1;
+  }
+  throw new Error("slide1.xml not found in " + pptxPath);
+}
+const xmlFull = slide1Xml(OUT);
+const xmlSimplified = slide1Xml(OUT_SIMPLIFIED);
+console.log("== slide xml uid-run checks ==");
+if (!xmlFull.includes(" · J31") || !xmlFull.includes(" · J41"))
+  fail.push("full deck labels missing the gray job-id runs (· J31 / · J41)");
+if (!xmlFull.includes('sz="700"') || !xmlFull.includes('val="808080"'))
+  fail.push("full deck job-id runs missing the 7 pt gray styling");
+if (!xmlSimplified.includes(" · J39")) fail.push("simplified deck missing the kept J39 label id");
+if (xmlSimplified.includes(" · J33") || xmlSimplified.includes(" · J27"))
+  fail.push("simplified deck must NOT label the dropped J27/J33 stages");
+
+/* ------------------------------------------------------------------ */
+/* v3.55 unit: abinitMaxResolutionFromJob params_spec extraction        */
+/* ------------------------------------------------------------------ */
+{
+  const mkJob = (job_type: string, params_spec?: Record<string, unknown>) =>
+    ({ uid: "J900", job_type, params_spec }) as never;
+  if (abinitMaxResolutionFromJob(mkJob("homo_abinit", { maximum_resolution_A: { value: 12 } })) !== 12)
+    fail.push("abinitMaxResolutionFromJob: {value:12} wrapper not unwrapped");
+  if (abinitMaxResolutionFromJob(mkJob("homo_abinit", { max_resolution: 6 })) !== 6)
+    fail.push("abinitMaxResolutionFromJob: raw max_resolution 6 not read");
+  if (abinitMaxResolutionFromJob(mkJob("homo_abinit")) !== null)
+    fail.push("abinitMaxResolutionFromJob: absent param should be null");
+  if (abinitMaxResolutionFromJob(mkJob("homo_abinit", { maximum_resolution_A: { value: 0.02 } })) !== null)
+    fail.push("abinitMaxResolutionFromJob: implausible 0.02 should read as unknown");
+  if (abinitMaxResolutionFromJob(mkJob("hetero_refine", { maximum_resolution_A: { value: 12 } })) !== null)
+    fail.push("abinitMaxResolutionFromJob: non-abinit job must stay null");
+  const node = jobNode(mkJob("homo_abinit", { abinit_max_resolution_A: { value: 9 } }) as never);
+  if (node.abinit_max_resolution_A !== 9)
+    fail.push(`jobNode.abinit_max_resolution_A expected 9 got ${node.abinit_max_resolution_A}`);
+  console.log("== abinitMaxResolutionFromJob unit checks done ==");
+}
 
 if (fail.length) {
   console.error("ASSERT FAILURES:\n" + fail.map((f) => " - " + f).join("\n"));

@@ -89,8 +89,11 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const [includeFsc, setIncludeFsc] = useState(false);
   // v3.54 (round-13): 简化模式 — omit small-subset 2D / initial-model
   // bootstrap steps, funnel the displayed particle counts 多→少, and ignore
-  // a default-12 Å ab-initio final's resolution info (BuildModelOptions.
-  // simplified). Default OFF: the full-fidelity figure stays the default.
+  // a default-12 Å ab-initio final's resolution info
+  // (BuildModelOptions.simplified). v3.55 (round-14): default-12 Å
+  // ab-initio stages are omitted ENTIRELY (the flow connects straight to
+  // the following refinement stage). Default OFF: the full-fidelity figure
+  // stays the default.
   const [simplified, setSimplified] = useState(false);
   // v3.45: default "10" — the widest numeric value (folding off for every
   // lineage with ≤10 stages, which covers the real P208 8-stage model that
@@ -292,11 +295,11 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         });
       }
       if (mode !== "demo" && simplified) {
-        // v3.54: self-diagnosing run log — the simplified pipeline's three
+        // v3.55: self-diagnosing run log — the simplified pipeline's four
         // guarantees, named up front (the per-stage omissions/hidings then
         // arrive as ⚠ model warnings below).
         pushLog(
-          "简化模式: 已开启 — 少量数据的 2D / 初始模型步骤将省略 · 颗粒数按「从多到少」显示 · 默认 12 Å 的 ab-initio 分辨率忽略",
+          "简化模式: 已开启 — 少量数据的 2D 步骤将省略 · Maximum resolution 为默认 12 Å 的 ab-initio 阶段将整体省略（直接衔接后续精修） · 颗粒数按「从多到少」显示",
         );
       }
       const multiClassGroups = model.groups.filter((g) => g.some((i) => (i.classes?.length ?? 0) > 1));
@@ -749,7 +752,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             </button>
           ))}
           <div className="ml-auto flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-2" title="省略少量数据的 2D / 初始模型步骤；隐藏破坏「从多到少」的计数；忽略默认 12 Å 的 ab-initio 分辨率">
+            <div className="flex items-center gap-2" title="省略少量数据的 2D 步骤；省略 Maximum resolution 为默认 12 Å 的 ab-initio 阶段（直接显示后续精修，如 hetero refine）；隐藏破坏「从多到少」的计数">
               <Switch
                 id="flow-simplified"
                 checked={simplified}

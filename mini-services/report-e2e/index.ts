@@ -712,7 +712,7 @@ const relayState = {
   /** v3.53: model id → RGB from `volume #<id> color <hex>` — drives the
    *  colored-disc save PNGs (mockRenderPng). */
   modelColors: new Map<number, [number, number, number]>(),
-  /** v3.53: the model currently on screen (last `show #N models`), used to
+  /** v3.55: the model currently on screen (last `show #N models`), used to
    *  pick the disc color at save time. */
   shownModel: null as number | null,
   /** v3.53: saves that passed transparentBackground true / false. */
@@ -721,6 +721,12 @@ const relayState = {
   /** v3.53: `set bgColor` commands received — v3.53+ sends NONE (the E2E
    *  asserts 0; any nonzero means a stale page or a regression). */
   setBgColorCommands: 0,
+  /** v3.55 (round-14): `close #N` / `close all` model ids actually closed
+   *  (the page's pre-run leftover cleanup + post-run own-model cleanup) and
+   *  the close-all count — the browser E2E asserts the run closed the staged
+   *  leftover BEFORE the first open and its own models at the end. */
+  closedIds: [] as number[],
+  closeAllCommands: 0,
 };
 
 function resetRelayState() {
@@ -746,6 +752,8 @@ function resetRelayState() {
   relayState.saveTransparentBg = 0;
   relayState.saveOpaqueBg = 0;
   relayState.setBgColorCommands = 0;
+  relayState.closedIds = [];
+  relayState.closeAllCommands = 0;
 }
 
 function relayNextModelId(): number {
@@ -784,6 +792,10 @@ function relayStats() {
     save_transparent_bg: relayState.saveTransparentBg,
     save_opaque_bg: relayState.saveOpaqueBg,
     set_bgcolor_commands: relayState.setBgColorCommands,
+    // v3.55: leftover/own-model cleanup observability.
+    close_ids_closed: [...relayState.closedIds],
+    close_all_commands: relayState.closeAllCommands,
+    models_open: relayState.models.size,
   };
 }
 function u_hasAsset(u: string): boolean {
@@ -912,8 +924,22 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
     }
   }
 
+  if (/^close\s+all\b/i.test(command)) {
+    // v3.55: the page's fallback cleanup on relays predating /volumes.
+    relayState.closeAllCommands += 1;
+    for (const id of [...relayState.models.keys()]) {
+      relayState.closedIds.push(id);
+      relayState.models.delete(id);
+    }
+    return { text: "", error: null };
+  }
+
   if (/^close\s+#\d+/i.test(command)) {
-    for (const m of command.matchAll(/#(\d+)/g)) relayState.models.delete(parseInt(m[1], 10));
+    for (const m of command.matchAll(/#(\d+)/g)) {
+      const id = parseInt(m[1], 10);
+      if (relayState.models.has(id)) relayState.closedIds.push(id);
+      relayState.models.delete(id);
+    }
     return { text: "", error: null };
   }
 
@@ -1051,6 +1077,17 @@ const relayServer = Bun.serve({
         return reply(200, { ok: true, path, name: safe, size: bytes.byteLength });
       }
       if (u.pathname === "/nextid") return reply(200, { next: relayNextModelId() });
+      if (u.pathname === "/volumes") {
+        // v3.55: mirrors relay.py's /volumes — the page closes these ids
+        // (and ONLY these) before opening the reference map.
+        return reply(200, {
+          ok: true,
+          volumes: [...relayState.models.entries()].map(([id, m]) => ({
+            id: String(id),
+            name: m.url,
+          })),
+        });
+      }
       if (u.pathname === "/volstats") {
         const id = Number(u.searchParams.get("id"));
         if (!relayState.models.has(id)) return reply(404, { error: `model #${id} not found` });
@@ -1129,7 +1166,8 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
     job_type: string,
     parents: string[],
     isg: unknown[],
-    outputs: unknown[]
+    outputs: unknown[],
+    extra: Record<string, unknown> = {},
   ) => ({
     uid,
     uid_num: n,
@@ -1143,6 +1181,7 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
     children: [],
     input_slot_groups: isg,
     output_result_groups: outputs,
+    ...extra,
   });
   const jobs = [
     mk("J498", 498, "deep_emhancer", ["J497"], [FV("J497")], [VOUT("volume")]),
@@ -1186,7 +1225,14 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
       PCLASS(0, 80000),
       PCLASS(1, 40000),
       PALL(120000),
-    ]),
+    ], {
+      // v3.55 (round-14 简化模式 E2E): an EXPLICIT default 12 Å Maximum
+      // resolution — the job survives the v3.54 subset rule (120,000 ≥
+      // 0.5 × 180,000) but the simplified figure must now omit it BY THE
+      // DEFAULT-12 Å RULE (the browser E2E asserts the warning + its
+      // absence from the stage rows), mirroring P96's J33.
+      params_spec: { maximum_resolution_A: { value: 12 } },
+    }),
     // v3.54 (round-13 简化模式 E2E): a SMALL-SUBSET bootstrap ab-initio —
     // 20,000 of the lineage's max 180,000 particles (< SIMPLIFIED_SUBSET_
     // FRACTION × max) feeds J494 as an extra volume parent. Normal mode
@@ -1199,7 +1245,13 @@ function flowE2eCaptureDoc(): Record<string, unknown> {
       PCLASS(0, 12000),
       PCLASS(1, 8000),
       PALL(20000),
-    ]),
+    ], {
+      // v3.55: J455 carries a NON-default resolution (6 Å) so the E2E
+      // proves the subset rule — not the resolution rule — is what drops
+      // it (a default-12 value here would make both rules fire and the
+      // distinguishing case invisible).
+      params_spec: { maximum_resolution_A: { value: 6 } },
+    }),
     mk("J385", 385, "class_2d", ["J382"], [FP("J382")], []),
     mk("J382", 382, "extract_micrographs", ["J379"], [FP("J379")], []),
     mk("J379", 379, "picker", ["J376"], [FM("J376")], []),

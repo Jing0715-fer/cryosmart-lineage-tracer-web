@@ -47,5 +47,18 @@
  * default-12 Å ab-initio final's resolution info is ignored. Old pages
  * would keep the stale violet/tan palette and cannot produce simplified
  * figures at all.
+ *
+ * v3.55 bump reason (round-14): four behavior changes at once — (1) the
+ * header's "Auto pick → N particles" count is the MAINLINE pick (largest
+ * pick/extract-family ancestor count) instead of the earliest pick job's
+ * count (P96 printed the 217-photo subset pick 164,291 while every later
+ * stage read 766,560+); (2) renderFigureMaps closes ALREADY-OPEN volume
+ * models before screenshotting (relay /volumes; `close all` fallback on
+ * old relays) and closes its own models afterwards, so a previous run's
+ * maps can no longer sweep into the screenshots; (3) every stage label in
+ * the PPTX carries its job id ("Hetero refinement · J31"); (4) simplified
+ * mode omits an ab-initio STAGE entirely when its Maximum-resolution
+ * parameter is the default 12 Å (or absent). Old pages would keep all four
+ * behaviors invisibly.
  */
-export const FLOW_ENGINE_VERSION = "3.54";
+export const FLOW_ENGINE_VERSION = "3.55";

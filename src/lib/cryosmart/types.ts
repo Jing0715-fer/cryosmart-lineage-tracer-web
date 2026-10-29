@@ -354,6 +354,14 @@ export interface LineageNode {
   volume_count: number | null;
   class_count: number | null;
   resolution_A: number | null;
+  /** v3.55 (round-14): ab-initio jobs only — the job's own `Maximum
+   *  resolution (Å)` INPUT parameter from `params_spec` (cryoSPARC's
+   *  default is 12). `resolution_A` above is deliberately null for
+   *  ab-initio (resolutionFromJob gates to refine-family jobs), so this
+   *  field is the only way the simplified figure can tell an UNREFINED
+   *  default-12 Å initial model (→ omit the stage entirely) from one the
+   *  user deliberately generated at a higher resolution (→ keep it). */
+  abinit_max_resolution_A?: number | null;
   extraction_params: ExtractionParams;
   output_groups: OutputGroupIndex;
   images: ImageAsset[];

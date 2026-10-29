@@ -17,6 +17,14 @@
  *     partial wrap (its last two stages sit side by side).
  *   - 8 pt Arial text runs (East-Asian font 微软雅黑), black on white
  *
+ * v3.55 (round-14): every stage label now carries its JOB ID ("Non-uniform
+ * refinement · J35") — single-item rows render name + gray 7 pt id on one
+ * right-aligned line (box widened leftward, clamped to the column edge);
+ * parallel-branch rows use a compact two-line label (name / id) so siblings
+ * never collide. The final "N Å" sits under the last MAP stage (not under
+ * an appended FSC panel), and per-class stats boxes are tall enough for
+ * their two 8 pt lines.
+ *
  * Map thumbnails keep the `name="CryoSmartImage:<uid>/<group>"` marker on
  * <p:cNvPr> (same contract as the A4 picture-flow PPTX) so the desktop
  * ChimeraX helpers remain interchangeable.
@@ -48,13 +56,31 @@ const EA_FONT = "微软雅黑";
 
 type Align = "l" | "ctr" | "r";
 
+/** v3.55 (round-14): one styled text run inside a paragraph. The op-level
+ *  `sz`/`color` remain the paragraph defaults; a run may override either
+ *  (the stage label's job-id run is smaller + gray next to the black
+ *  stage name). */
+interface TextRun {
+  t: string;
+  sz?: number;
+  color?: string;
+}
+
+/** One paragraph: either the legacy single-string shape (all existing
+ *  call sites) or explicit runs. */
+interface TextLine {
+  t?: string;
+  runs?: TextRun[];
+  align: Align;
+}
+
 interface TextOp {
   kind: "text";
   x: number;
   y: number;
   w: number;
   h: number;
-  lines: Array<{ t: string; align: Align }>;
+  lines: TextLine[];
   sz?: number; // centi-points (800 = 8 pt)
   color?: string;
 }
@@ -122,7 +148,13 @@ function rPr(op: { sz?: number; color?: string }): string {
 
 function textXml(id: number, op: TextOp): string {
   const paragraphs = op.lines
-    .map((line) => `<a:p><a:pPr algn="${line.align}"/><a:r>${rPr(op)}<a:t>${esc(line.t)}</a:t></a:r><a:endParaRPr lang="zh-CN" altLang="en-US" sz="${op.sz ?? 800}"><a:latin typeface="${FONT}"/><a:ea typeface="${EA_FONT}"/></a:endParaRPr></a:p>`)
+    .map((line) => {
+      const runs = (line.runs ?? [{ t: line.t ?? "" }]).map(
+        (r) =>
+          `<a:r>${rPr({ sz: r.sz ?? op.sz, color: r.color ?? op.color })}<a:t>${esc(r.t)}</a:t></a:r>`,
+      );
+      return `<a:p><a:pPr algn="${line.align}"/>${runs.join("")}<a:endParaRPr lang="zh-CN" altLang="en-US" sz="${op.sz ?? 800}"><a:latin typeface="${FONT}"/><a:ea typeface="${EA_FONT}"/></a:endParaRPr></a:p>`;
+    })
     .join("");
   return `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="文本框 ${id}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${IN(op.x)}" y="${IN(op.y)}"/><a:ext cx="${IN(op.w)}" cy="${IN(op.h)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr wrap="square" lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></a:bodyPr><a:lstStyle/>${paragraphs}</p:txBody></p:sp>`;
 }
@@ -266,6 +298,28 @@ export function buildWorkflowPptx(
   const rowsPerCol = Math.ceil(n / cols);
   const pitch = pitchFor(cols);
 
+  /* ---- v3.55 (round-14 “最好把 job 的 id 也标记到图中”) ----
+   * Every stage label now carries its job id. Single-item rows: one
+   * right-aligned line — stage name (8 pt black) + " · " + id (7 pt
+   * gray) — in a box widened LEFTWARD from the item's right edge (the
+   * reference's right-aligned-above-thumbnail look; the extension rides
+   * the column's empty left margin, clamped to the column edge). Parallel
+   * rows: a compact TWO-line label per item (name 7 pt / id 6 pt gray) so
+   * siblings can never collide horizontally. The synthetic FSC item
+   * (uid == label) and uid-less items render the name only. */
+  const UID_COLOR = "808080";
+  const labelShowsUid = (item: FlowFigureItem) =>
+    !!item.uid && item.uid !== item.label && !/^FSC$/i.test(item.uid);
+  const estimateRunsWidth = (runs: TextRun[]): number =>
+    runs.reduce((s, r) => s + Math.max(0.08, r.t.length * 0.058 * ((r.sz ?? 800) / 800) + 0.04), 0) + 0.08;
+  const labelRunsOf = (item: FlowFigureItem): TextRun[] =>
+    labelShowsUid(item)
+      ? [
+          { t: item.label },
+          { t: ` · ${item.uid}`, sz: 700, color: UID_COLOR },
+        ]
+      : [{ t: item.label }];
+
   interface PlacedSlot {
     thumb: Box;
     stats: Box | null;
@@ -282,6 +336,11 @@ export function buildWorkflowPptx(
     items: PlacedItem[];
     top: number;
     bottom: number;
+    /** v3.55: the row's left edge (column interior) — clamps the leftward
+     *  label-box extension of single-item rows. */
+    rowLeft: number;
+    /** v3.55: >1 ⇒ a parallel row — labels take the compact two-line form. */
+    parallel: boolean;
   }
 
   const rows: PlacedRow[] = [];
@@ -311,7 +370,9 @@ export function buildWorkflowPptx(
         if (statsLines.length) {
           stats = side
             ? { x: x0 + imgW + STATS_GAP, y: thumb.y + imgH / 2 - 0.21, w: STATS_W, h: 0.42 }
-            : { x: tx, y: thumb.y + imgH + 0.04, w: imgW, h: UNDER_H - 0.08 };
+            // v3.55: 0.26-high under-thumb box — two 8 pt lines (~0.27" on
+            // the slide) no longer clip into the next row's label band.
+            : { x: tx, y: thumb.y + imgH + 0.03, w: imgW, h: 0.26 };
         }
         placed.push({
           thumb,
@@ -324,7 +385,7 @@ export function buildWorkflowPptx(
       items.push({ item, label, slots: placed });
       x += itemW + ITEM_GAP;
     });
-    rows.push({ items, top, bottom: top + rowH });
+    rows.push({ items, top, bottom: top + rowH, rowLeft: x0, parallel: group.length > 1 });
   });
 
   /* thumbnail accessor shared by the header band + connectors (v3.53:
@@ -402,10 +463,37 @@ export function buildWorkflowPptx(
   /* emit per-row shapes */
   rows.forEach((row, ri) => {
     row.items.forEach((p) => {
+      /* v3.55 (round-14): stage label + job id. Single-item row → one line,
+       * right-aligned, box widened leftward (clamped to the column edge) so
+       * the name+id never wraps above the thumbnail. Parallel row → a
+       * compact TWO-line label (name 7 pt / id 6 pt gray, both
+       * right-aligned) inside the item's own width — siblings can never
+       * collide horizontally. */
+      const right = p.label.x + p.label.w;
+      let labelLines: TextLine[];
+      let labelX = p.label.x;
+      let labelW = p.label.w;
+      if (row.parallel) {
+        labelLines = labelShowsUid(p.item)
+          ? [
+              { align: "r", runs: [{ t: p.item.label, sz: 700 }] },
+              { align: "r", runs: [{ t: p.item.uid, sz: 600, color: UID_COLOR }] },
+            ]
+          : [{ align: "r", runs: [{ t: p.item.label, sz: 700 }] }];
+      } else {
+        const runs = labelRunsOf(p.item);
+        const estW = estimateRunsWidth(runs);
+        labelX = Math.max(row.rowLeft, right - estW);
+        labelW = Math.max(0.4, right - labelX);
+        labelLines = [{ align: "r", runs }];
+      }
       ops.push({
         kind: "text",
-        ...p.label,
-        lines: [{ t: p.item.label, align: "r" }],
+        x: labelX,
+        y: p.label.y,
+        w: labelW,
+        h: p.label.h,
+        lines: labelLines,
       } as TextOp);
       p.slots.forEach((s, si) => {
         // Thumbnail or placeholder frame.
@@ -438,7 +526,30 @@ export function buildWorkflowPptx(
   });
 
   /* connectors: same-column stages chain downward; a column wrap rides a
-   * bent connector up to the next column's first stage. */
+   * bent connector up to the next column's first stage.
+   *
+   * v3.55 (round-14 VLM catch): the same-column chain used to drop at the
+   * NEXT row's first-thumbnail centre unconditionally — when the previous
+   * row is NARROWER (the simplified deck's single-map J448 over the wide
+   * 5-class J494), that x lies OUTSIDE the previous row's span and the
+   * line's TOP hangs in empty space ("起点悬空"). The drop x is now chosen
+   * so both ends attach: the next row's first-thumb centre when it lies
+   * within the previous row's span (the verified existing look), else the
+   * previous row's last-thumb centre when it lies within the next row's
+   * span, else the span overlap's centre — and a 3-segment elbow (down →
+   * across → down, only the final segment arrowed, same style as the
+   * header band's elbow) when the spans do not overlap at all. */
+  const rowSpanX = (row: PlacedRow): { min: number; max: number } => {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const it of row.items) {
+      for (const s of it.slots) {
+        min = Math.min(min, s.thumb.x);
+        max = Math.max(max, s.thumb.x + s.thumb.w);
+      }
+    }
+    return { min: Number.isFinite(min) ? min : 0, max: Number.isFinite(max) ? max : 0 };
+  };
   for (let i = 0; i + 1 < rows.length; i++) {
     const a = rows[i];
     const b = rows[i + 1];
@@ -446,8 +557,28 @@ export function buildWorkflowPptx(
     const bFirst = thumbOf(b, true);
     const sameCol = Math.floor(i / rowsPerCol) === Math.floor((i + 1) / rowsPerCol);
     if (sameCol) {
-      const x = bFirst.x + bFirst.w / 2;
-      ops.push({ kind: "conn", x1: x, y1: a.bottom + 0.02, x2: x, y2: b.top - 0.03 });
+      const bFirstCx = bFirst.x + bFirst.w / 2;
+      const aLastCx = aLast.x + aLast.w / 2;
+      const spanA = rowSpanX(a);
+      const spanB = rowSpanX(b);
+      let x: number | null = null;
+      if (bFirstCx >= spanA.min - 0.02 && bFirstCx <= spanA.max + 0.02) {
+        x = bFirstCx; // the classic look: enter the next row at its first item
+      } else if (aLastCx >= spanB.min - 0.02 && aLastCx <= spanB.max + 0.02) {
+        x = aLastCx; // exit the previous row at its last item
+      } else {
+        const oL = Math.max(spanA.min, spanB.min);
+        const oR = Math.min(spanA.max, spanB.max);
+        x = oR >= oL ? (oL + oR) / 2 : null;
+      }
+      if (x != null) {
+        ops.push({ kind: "conn", x1: x, y1: a.bottom + 0.02, x2: x, y2: b.top - 0.03 });
+      } else {
+        const midY = a.bottom + 0.02 + Math.max(0.05, (b.top - 0.03 - (a.bottom + 0.02)) * 0.45);
+        ops.push({ kind: "conn", x1: aLastCx, y1: a.bottom + 0.02, x2: aLastCx, y2: midY, arrow: false });
+        ops.push({ kind: "conn", x1: aLastCx, y1: midY, x2: bFirstCx, y2: midY, arrow: false });
+        ops.push({ kind: "conn", x1: bFirstCx, y1: midY, x2: bFirstCx, y2: b.top - 0.03 });
+      }
     } else {
       ops.push({
         kind: "conn",
@@ -460,18 +591,28 @@ export function buildWorkflowPptx(
     }
   }
 
-  /* final stats ("3.46 Å") under the last stage */
+  /* final stats ("3.46 Å") — v3.55: under the last MAP-BEARING stage (an
+   * appended FSC montage is a diagnostic panel, not the final map — the
+   * resolution belongs under the final refinement stage). */
   if (fig.finalStats && rows.length) {
-    const lastRow = rows[rows.length - 1];
-    const lastThumb = thumbOf(lastRow, false);
-    ops.push({
-      kind: "text",
-      x: Math.max(MARGIN_X, lastThumb.x + lastThumb.w / 2 - 0.7),
-      y: Math.min(lastRow.bottom + 0.06, SLIDE_H_IN - 0.58),
-      w: 1.4,
-      h: 0.24,
-      lines: [{ t: fig.finalStats, align: "ctr" }],
-    });
+    let statsRow: PlacedRow | null = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].items.some((it) => it.item.mapKey)) {
+        statsRow = rows[i];
+        break;
+      }
+    }
+    if (statsRow) {
+      const lastThumb = thumbOf(statsRow, false);
+      ops.push({
+        kind: "text",
+        x: Math.max(MARGIN_X, lastThumb.x + lastThumb.w / 2 - 0.7),
+        y: Math.min(statsRow.bottom + 0.06, SLIDE_H_IN - 0.58),
+        w: 1.4,
+        h: 0.24,
+        lines: [{ t: fig.finalStats, align: "ctr" }],
+      });
+    }
   }
 
   /* footnote */

@@ -377,6 +377,36 @@ export function resolutionFromObject(
   return null;
 }
 
+/**
+ * v3.55 (round-14): an ab-initio job's own `Maximum resolution (Å)` INPUT
+ * parameter out of `params_spec` — cryoSPARC's homo_abinit default is 12 Å,
+ * and the simplified workflow figure omits default-12 initial-model stages
+ * entirely (the user's round-14 rule). Candidate keys cover the spellings
+ * CryoSmart / cryoSPARC exports have been seen to use; a `{ value: … }`
+ * wrapper is unwrapped by `paramSpecNumber`. `null` when the parameter is
+ * absent — callers treat that as the DEFAULT (12 Å).
+ */
+export function abinitMaxResolutionFromJob(job: JobMetadata | null | undefined): number | null {
+  if (!/abinit/i.test((job && job.job_type) || "")) return null;
+  const value = paramSpecNumber(job, [
+    "maximum_resolution_A",
+    "maximum_resolution",
+    "maximum_resolution_angstrom",
+    "max_resolution_A",
+    "max_resolution",
+    "abinit_max_resolution_A",
+    "abinit_max_resolution",
+    "abinit_max_res_A",
+    "abinit_max_res",
+    "init_max_res_A",
+    "initial_max_resolution_A",
+    "initial_resolution_A",
+  ]);
+  // Plausibility: a resolution in Å. Anything outside [0.5, 100] is more
+  // likely a different unit / mislabeled field — treat as unknown.
+  return value != null && value >= 0.5 && value <= 100 ? value : null;
+}
+
 /** Resolve the final resolution (Å) for a job, or `null` if N/A. */
 export function resolutionFromJob(job: JobMetadata | null | undefined): number | null {
   if (
@@ -1604,6 +1634,9 @@ export function jobNode(
     volume_count: maxGroupNumItems(job, "volume"),
     class_count: classes.length || null,
     resolution_A: resolutionFromJob(job),
+    // v3.55 (round-14): ab-initio Maximum-resolution input param (null for
+    // every other job type) — the simplified figure's default-12 Å rule.
+    abinit_max_resolution_A: abinitMaxResolutionFromJob(job),
     extraction_params: extractionParams(job),
     output_groups: baseUrl ? outputGroupIndex(job) : {},
     images,

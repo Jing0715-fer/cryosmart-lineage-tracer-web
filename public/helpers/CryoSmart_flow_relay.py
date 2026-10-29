@@ -33,10 +33,15 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
       GET  /file?name=  取回 /ping 工作目录里 ChimeraX 保存的 PNG
       GET  /volstats?id= 体数据统计（max/mean/sd，用于统一等值面水平）
       GET  /nextid      下一个空闲 model id（volume flip 需要）
+      GET  /volumes    当前已打开的 volume 模型清单（id + 名称）。
+                        v3.55：流程图网页在截图前先经此清单精确关闭
+                        “过去已打开的 map”（仅关 volume，不动其他模型），
+                        旧版桥无此端点时网页会退化为 close all。
 
   升级提示：若你的 ChimeraX 里还在运行旧版桥（/ping 不含 "stage":
   true），请在 ChimeraX Command Line 重新运行一次本命令即可更新
-  （无需重启 ChimeraX）。
+  （无需重启 ChimeraX）。v3.55 起重新 open 会先关掉旧桥再接管同一
+  端口（旧版桥重 open 会叠到下一个端口，网页仍探到旧桥）。
 
 运行环境：ChimeraX 1.12+（GUI）。保持 ChimeraX 打开即可；关闭 ChimeraX
 时桥随之消失，下次重新 open 一次。
@@ -88,6 +93,22 @@ def _num_list(text):
 
 
 def main(session):
+    # v3.55: 重新 open 本脚本时，先关闭旧桥再接管同一端口。旧版逻辑直接
+    # 再 bind——旧桥仍占着 8927，新桥只能叠到 8928，而网页按顺序探测
+    # 8927 会一直找到旧桥，升级流程从未真正生效。
+    prev_server = getattr(session, "_cryoflow_bridge_server", None)
+    if prev_server is not None:
+        try:
+            prev_server.shutdown()
+            prev_server.server_close()
+            session.logger.info("CryoSmart Flow Bridge: 旧桥已关闭，新桥将接管端口。")
+        except Exception:
+            pass
+        try:
+            session._cryoflow_bridge_server = None
+        except Exception:
+            pass
+
     workdir = tempfile.mkdtemp(prefix="cryoflow_")
     staging_dir = os.path.join(workdir, STAGING_DIR_NAME)
     state = {"session": session, "workdir": workdir}
@@ -153,6 +174,21 @@ def main(session):
         def f():
             ids = [m.id[0] for m in session.models.list() if getattr(m, "id", None)]
             return (max(ids) + 1) if ids else 1
+        return ui_run(f)
+
+    def volume_list():
+        """v3.55: 当前已打开的 volume 模型清单（流程图网页截图前的精确
+        清理用它——只关 volume，不动用户手边打开的其他模型）。"""
+        def f():
+            out = []
+            for m in session.models.list():
+                if m.__class__.__name__ != "Volume":
+                    continue
+                out.append({
+                    "id": str(getattr(m, "id_string", "")),
+                    "name": str(getattr(m, "name", "")),
+                })
+            return out
         return ui_run(f)
 
     def stage_file(data, name):
@@ -284,6 +320,13 @@ def main(session):
                 if r.path == "/nextid":
                     self._reply(200, {"next": next_model_id()})
                     return
+                if r.path == "/volumes":
+                    # v3.55: 网页在截图前按此清单逐个 close 残留 volume。
+                    try:
+                        self._reply(200, {"ok": True, "volumes": volume_list()})
+                    except Exception as exc:  # noqa: BLE001
+                        self._reply(500, {"ok": False, "error": str(exc)})
+                    return
                 if r.path == "/exec":
                     command = (q.get("command") or [""])[0]
                     if not command:
@@ -389,6 +432,12 @@ def main(session):
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+
+    # v3.55: 记在 session 上，重 open 时才能关掉旧桥接管同端口。
+    try:
+        session._cryoflow_bridge_server = server
+    except Exception:
+        pass
 
     session.logger.info("=" * 60)
     session.logger.info("CryoSmart Flow Bridge 已启动 (监听全部网卡):")

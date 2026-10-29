@@ -19,6 +19,15 @@
  * bootstrap steps are omitted, count lines that would break the
  * non-increasing flow are hidden, and a default-12 Å ab-initio final's
  * resolution info is ignored (see simplifiedFunnelPass + dropBootstrap).
+ *
+ * v3.55 (round-14): the header's "Auto pick → N particles" count is now the
+ * MAINLINE pick (largest pick/extract-family ancestor count — P96's J25
+ * topaz_extract 1,634,842, not the 217-photo subset pick J9's 164,291), and
+ * the simplified figure omits an ab-initio STAGE entirely when its own
+ * Maximum-resolution parameter is the cryoSPARC default 12 Å (or absent) —
+ * the flow connects straight to the following refinement stage. Every
+ * stage also carries its job id for the PPTX layer to label (round-14
+ * "最好把 job 的 id 也标记到图中").
  */
 
 import type {
@@ -29,7 +38,7 @@ import type {
   MapAsset,
 } from "./types";
 import { normalMapAssets } from "./lineage";
-import { PICKING_JOB_TYPES } from "./constants";
+import { PARTICLE_AUX_JOB_TYPES, PICKING_JOB_TYPES } from "./constants";
 import type { CryoSmartSession } from "./proxy-client";
 import { cryoSmartBytes } from "./proxy-client";
 import { parseFscText, type FscCurve } from "./fsc-parser";
@@ -173,9 +182,13 @@ export interface BuildModelOptions {
    *      particles than the lineage's funnel top),
    *  (b) guarantee the DISPLAYED particle counts read 多→少 (count
    *      lines that would break the non-increasing flow are hidden),
-   *  (c) IGNORE the final ab-initio's resolution info when it is the
-   *      cryoSPARC-default 12 Å (an unrefined ab-initio map's nominal
-   *      resolution carries no information). */
+   *  (c) v3.55 (round-14): an ab-initio stage whose own `Maximum
+   *      resolution` parameter is the cryoSPARC default 12 Å (or is
+   *      absent — i.e. the default) is omitted ENTIRELY, so the flow
+   *      shows the following refinement stage (hetero refine …)
+   *      directly; only an ab-initio the user deliberately ran at a
+   *      NON-default resolution stays. A default-12 Å ab-initio
+   *      FINAL's resolution info is ignored as well. */
   simplified?: boolean;
 }
 
@@ -553,13 +566,30 @@ export function buildFlowFigureModel(
         : null;
   const pickNode = ancestors.filter((n) => PICKING_JOB_TYPES.has(n.job_type)).sort(byDepthAsc)[0];
   const pickLabel = pickNode ? (pickNode.job_type.includes("manual") ? "Manual pick" : "Auto pick") : "Auto pick";
+  /* v3.55 (round-14 "autopick 的数字还是不对，远少于后面的颗粒数"): the
+   * header's pick count is the MAINLINE pick — the LARGEST count among the
+   * pick/extract-family ancestors (the funnel top), NOT the earliest
+   * ancestor's count. P96's earliest pick-bearing job was J9 blob_picker_gpu
+   * with 164,291 picks — but that ran on only the 217-photo subset; the real
+   * pick over all 6,060 micrographs was J25 topaz_extract with 1,634,842
+   * (later extract/dedup steps only SHRINK: 1,588,675 → 769,822 → 766,560),
+   * so the old "earliest" rule printed a pick count far BELOW every later
+   * stage. Falls back to the legacy earliest-count rule only when no
+   * pick-family ancestor carries a count (e.g. imported-particle lineages). */
   const earliestParticles = ancestors
     .filter((n) => n.particle_count != null && n.particle_count > 0)
     .sort(byDepthAsc)[0];
+  const pickFamilyCounts = ancestors
+    .filter(
+      (n) =>
+        PICKING_JOB_TYPES.has(n.job_type) || PARTICLE_AUX_JOB_TYPES.has(n.job_type),
+    )
+    .map((n) => n.particle_count ?? null)
+    .filter((v): v is number => v != null && v > 0);
+  const mainPickCount = pickFamilyCounts.length ? Math.max(...pickFamilyCounts) : null;
+  const pickCountForHeader = mainPickCount ?? earliestParticles?.particle_count ?? null;
   const particles =
-    earliestParticles?.particle_count != null
-      ? `${fmtParticles(earliestParticles.particle_count)} particles`
-      : null;
+    pickCountForHeader != null ? `${fmtParticles(pickCountForHeader)} particles` : null;
 
   /* Final job + group accumulators. */
   const finalNode: LineageNode | null = summary.start_job ?? graph.byUid.get(summary.start_uid) ?? null;
@@ -686,15 +716,24 @@ export function buildFlowFigureModel(
   const res = summary.final_resolution_A ?? finalNode?.resolution_A ?? null;
   // v3.54 (round-13 “简化模式”): an ab-initio final reporting the default
   // 12 Å has never been refined — its nominal resolution carries no
-  // information, so the simplified figure ignores it.
+  // information, so the simplified figure ignores it. v3.55 (round-14): the
+  // verdict also reads the job's own Maximum-resolution PARAMETER (the
+  // node-level isDefaultResolutionAbinit) — an ab-initio final whose
+  // parameter is default-12 (or absent = default) is unrefined even when no
+  // nominal resolution number was captured.
   const finalIsAbinit = finalNode ? /abinit/i.test(finalNode.job_type || "") : false;
   const finalResIsDefaultAbinit =
-    res != null &&
     finalIsAbinit &&
-    Math.abs(res - ABINIT_DEFAULT_RESOLUTION_A) <= ABINIT_DEFAULT_RESOLUTION_TOL_A;
-  if (simplified && finalResIsDefaultAbinit) {
+    (isDefaultResolutionAbinit(finalNode) ||
+      (res != null &&
+        Math.abs(res - ABINIT_DEFAULT_RESOLUTION_A) <= ABINIT_DEFAULT_RESOLUTION_TOL_A));
+  if (simplified && finalResIsDefaultAbinit && res != null) {
     warnings.push(
       `简化模式: 最终 ab-initio 的分辨率为默认 ${res.toFixed(1)} Å，已忽略（未精修的初始模型不携带分辨率信息）。`,
+    );
+  } else if (simplified && finalResIsDefaultAbinit) {
+    warnings.push(
+      "简化模式: 最终 ab-initio 的 Maximum resolution 为默认 12 Å，分辨率信息已忽略（未精修的初始模型）。",
     );
   } else if (res != null && res > 0) {
     finalStats = `${res >= 10 ? res.toFixed(1) : res.toFixed(2)} Å`;
@@ -761,13 +800,36 @@ function trimFlowGroups(
   return kept;
 }
 
+/** v3.55 (round-14): does this node read as an UNREFINED default-12 Å
+ * ab-initio? True when the job's own `Maximum resolution (Å)` parameter is
+ * within ±0.5 Å of cryoSPARC's default 12 — OR the parameter is absent
+ * (absent = the default). False for every other job type, and for an
+ * ab-initio the user deliberately ran at a non-default resolution. */
+function isDefaultResolutionAbinit(node: LineageNode | undefined | null): boolean {
+  if (!node || !/abinit/i.test(node.job_type || "")) return false;
+  const max = node.abinit_max_resolution_A ?? null;
+  return (
+    max == null ||
+    Math.abs(max - ABINIT_DEFAULT_RESOLUTION_A) <= ABINIT_DEFAULT_RESOLUTION_TOL_A
+  );
+}
+
 /** v3.54 (round-13 “简化模式”): OMIT small-subset bootstrap steps from the
  *  built stage groups. A 2D-classification / 2D-selection / ab-initio item
  *  whose particle count is < SIMPLIFIED_SUBSET_FRACTION × its successor
  *  group's count is removed (an empty group disappears with it; a shrunken
  *  parallel group keeps its remaining items). The final stage never drops;
  *  items without a usable count stay (can't be judged); every drop is named
- *  in the warnings so the run log explains the simplified figure. */
+ *  in the warnings so the run log explains the simplified figure.
+ *
+ *  v3.55 (round-14 “当 ab initio 的 Maximum resolution 是默认的 12 时，
+ *  忽略掉这些步骤，直接显示 heterorefine”): an ab-initio stage whose own
+ *  Maximum-resolution parameter is the default 12 Å (or absent = the
+ *  default) now drops REGARDLESS of its count — an unrefined initial model
+ *  is a bootstrap step by definition, so the figure connects its
+ *  predecessor straight to the following refinement stage. Only a
+ *  deliberately NON-default ab-initio (e.g. a 6 Å one) survives, and then
+ *  only via the count rule. */
 function dropSimplifiedBootstrap(
   groups: FlowFigureItem[][],
   startUid: string,
@@ -793,11 +855,27 @@ function dropSimplifiedBootstrap(
         break;
       }
     }
-    if (successorCount == null) continue;
+    // NOTE v3.55: successorCount may be null here (no later group carries a
+    // count) — the default-12 ab-initio rule below does not need one; the
+    // count rule simply skips such groups as before.
     for (const item of groups[gi]) {
       if (item.uid === startUid) continue; // the final stage never drops
       const node = byUid.get(item.uid);
       if (!node || !isBootstrapJobType(node.job_type)) continue;
+      if (!dropped.has(item.uid) && isDefaultResolutionAbinit(node)) {
+        // v3.55: the default-12 Å rule fires FIRST and regardless of count —
+        // the stage is an unrefined initial model; the flow shows its
+        // successor (hetero refinement …) directly.
+        dropped.add(item.uid);
+        const max = node.abinit_max_resolution_A ?? null;
+        warnings.push(
+          `简化模式: 已省略 ab-initio 步骤 ${item.uid}（Maximum resolution 为默认 ${
+            max != null ? max.toFixed(1) : "12"
+          } Å 的未精修初始模型 — 图中直接衔接其后续精修阶段）。`,
+        );
+        continue;
+      }
+      if (successorCount == null) continue;
       const count = item.particleTotal;
       if (count == null || count <= 0) continue;
       if (count >= successorCount * SIMPLIFIED_SUBSET_FRACTION) continue;
