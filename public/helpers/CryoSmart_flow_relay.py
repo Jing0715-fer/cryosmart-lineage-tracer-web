@@ -30,6 +30,12 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         （v3.47：ChimeraX 不支持 http+mrc，也无法无后缀
                         嗅探——网页先下载再经此接口暂存到 ChimeraX 同机，
                         之后 open 本地文件，全程零弹窗）
+      GET  /staged       v3.56 地图本地缓存查询：?name= 返回该缓存文件
+                        是否存在（+ 本地绝对路径/大小/mtime）；不带 ?name=
+                        返回整个缓存目录清单。缓存目录在系统 temp 下固定
+                        位置（cryoflow_map_cache），跨 ChimeraX 重启 / 桥
+                        重 open 持久保留——网页生成流程图前先查它，命中
+                        即直接 open 本地文件，不再重复下载 map。
       GET  /file?name=  取回 /ping 工作目录里 ChimeraX 保存的 PNG
       GET  /volstats?id= 体数据统计（max/mean/sd，用于统一等值面水平）
       GET  /nextid      下一个空闲 model id（volume flip 需要）
@@ -39,8 +45,8 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         旧版桥无此端点时网页会退化为 close all。
 
   升级提示：若你的 ChimeraX 里还在运行旧版桥（/ping 不含 "stage":
-  true），请在 ChimeraX Command Line 重新运行一次本命令即可更新
-  （无需重启 ChimeraX）。v3.55 起重新 open 会先关掉旧桥再接管同一
+  true，或不含 "cache": true），请在 ChimeraX Command Line 重新运行
+  一次本命令即可更新（无需重启 ChimeraX）。v3.55 起重新 open 会先关掉旧桥再接管同一
   端口（旧版桥重 open 会叠到下一个端口，网页仍探到旧桥）。
 
 运行环境：ChimeraX 1.12+（GUI）。保持 ChimeraX 打开即可；关闭 ChimeraX
@@ -52,6 +58,7 @@ import os
 import socket
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Queue
 
@@ -64,9 +71,22 @@ PORT_PREFERENCE = [8927, 8928, 8929]
 # v3.47 /stage limits: one MRC map is 8–300 MB; several full runs must not
 # fill the ChimeraX machine's temp disk. Oldest staged files are removed
 # first whenever the staging dir would exceed STAGING_TOTAL_CAP.
+#
+# v3.56: the staging dir is now a PERSISTENT MAP CACHE in the system temp
+# ("cryoflow_map_cache") — it survives ChimeraX restarts and relay re-opens,
+# so the page can skip re-downloading maps it staged before
+# (GET /staged?name=…). Two consequences:
+#   - the cap is raised to 2 GB (a cache that evicts itself between every
+#     run is useless);
+#   - eviction NEVER touches files written within STAGING_FRESH_WINDOW_S
+#     (10 min) first — a single huge workflow must not evict its own
+#     just-staged reference map mid-run. Only when that is still not enough
+#     does the oldest file overall go (last resort).
 STAGING_DIR_NAME = "staged"
+MAP_CACHE_DIR_NAME = "cryoflow_map_cache"
 STAGE_SINGLE_CAP = 400 * 1024 * 1024   # 400 MB per upload
-STAGING_TOTAL_CAP = 1536 * 1024 * 1024  # 1.5 GB total
+STAGING_TOTAL_CAP = 2 * 1024 * 1024 * 1024  # 2 GB total (v3.56 cache)
+STAGING_FRESH_WINDOW_S = 600  # never evict files younger than 10 min first
 
 
 def _read_exact(rfile, n):
@@ -110,7 +130,19 @@ def main(session):
             pass
 
     workdir = tempfile.mkdtemp(prefix="cryoflow_")
-    staging_dir = os.path.join(workdir, STAGING_DIR_NAME)
+    # v3.56: the map cache lives at a FIXED system-temp path so it survives
+    # relay re-opens AND ChimeraX restarts (the v3.47 per-run mkdtemp staging
+    # dir died with the process — every run re-downloaded every map). Only
+    # when the fixed path cannot be created do we fall back into this run's
+    # workdir (cache then lasts until ChimeraX closes — still better than
+    # per-map re-downloads within a session).
+    try:
+        cache_dir = os.path.join(tempfile.gettempdir(), MAP_CACHE_DIR_NAME)
+        os.makedirs(cache_dir, exist_ok=True)
+    except Exception:
+        cache_dir = os.path.join(workdir, STAGING_DIR_NAME)
+        os.makedirs(cache_dir, exist_ok=True)
+    staging_dir = cache_dir
     state = {"session": session, "workdir": workdir}
 
     try:
@@ -191,40 +223,105 @@ def main(session):
             return out
         return ui_run(f)
 
+    def _cache_entries():
+        """v3.56: (mtime, path, size) for every finished cache file — .part
+        uploads in flight are skipped (not openable maps yet)."""
+        entries = []
+        try:
+            for fn in os.listdir(staging_dir):
+                if fn.endswith(".part"):
+                    continue
+                p = os.path.join(staging_dir, fn)
+                if os.path.isfile(p):
+                    try:
+                        entries.append((os.path.getmtime(p), p, os.path.getsize(p)))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return entries
+
+    def cache_lookup(name):
+        """v3.56: does the cache already hold this map? Returns the openable
+        local path + size + mtime (exists=False when missing / unreadable)."""
+        safe = os.path.basename(name or "")
+        if not safe:
+            return {"ok": True, "exists": False}
+        path = os.path.join(staging_dir, safe)
+        try:
+            return {
+                "ok": True,
+                "exists": True,
+                "path": path,
+                "size": os.path.getsize(path),
+                "mtime": os.path.getmtime(path),
+            }
+        except OSError:
+            return {"ok": True, "exists": False}
+
     def stage_file(data, name):
         """v3.47: write uploaded bytes into the ChimeraX-side staging dir and
         return the local absolute path. ChimeraX cannot open http MRC URLs
         (format mrc unsupported for the http database; suffix-less plain
         opens pop a save dialog and block the UI thread), so the page
         downloads each map with its login session and hands the bytes to
-        the bridge; ChimeraX then opens the LOCAL file. Oldest staged
-        files are evicted first when the size cap would be exceeded."""
+        the bridge; ChimeraX then opens the LOCAL file.
+
+        v3.56: the staging dir is the PERSISTENT map cache, so (a) the write
+        is ATOMIC (".part" + os.replace — an interrupted upload can never
+        leave a half map in the cache for a later run to open), (b) eviction
+        prefers files NOT touched within the fresh window so a single big
+        run can never evict its own just-staged maps, and (c) re-staging
+        refreshes the mtime so the LRU order tracks actual use."""
         os.makedirs(staging_dir, exist_ok=True)
         safe = os.path.basename(name or "") or "map.mrc"
         safe = "".join(c for c in safe if c.isalnum() or c in "._- ") or "map.mrc"
-        entries = []
-        total = 0
+        entries = _cache_entries()
+        total = sum(sz for _, _, sz in entries)
+        need = len(data) - (STAGING_TOTAL_CAP - total)
+        if need > 0:
+            now = time.time()
+            stale = [(mt, p, sz) for mt, p, sz in entries
+                     if now - mt >= STAGING_FRESH_WINDOW_S]
+            fresh = [(mt, p, sz) for mt, p, sz in entries
+                     if now - mt < STAGING_FRESH_WINDOW_S]
+            # Prefer evicting stale (older than the fresh window) files,
+            # oldest first; touch nothing from the current run.
+            for _, p, sz in sorted(stale):
+                if need <= 0:
+                    break
+                try:
+                    os.remove(p)
+                    need -= sz
+                except OSError:
+                    pass
+            # Last resort: still short — evict the oldest fresh file too
+            # (better than rejecting the upload outright).
+            if need > 0:
+                for _, p, sz in sorted(fresh):
+                    if need <= 0:
+                        break
+                    try:
+                        os.remove(p)
+                        need -= sz
+                    except OSError:
+                        pass
+        path = os.path.join(staging_dir, safe)
+        part = "%s.%d.part" % (path, threading.get_ident())
         try:
-            for fn in os.listdir(staging_dir):
-                p = os.path.join(staging_dir, fn)
-                if os.path.isfile(p):
-                    sz = os.path.getsize(p)
-                    mt = os.path.getmtime(p)
-                    entries.append((mt, p, sz))
-                    total += sz
-        except OSError:
-            entries, total = [], 0
-        for _, p, sz in sorted(entries):
-            if total + len(data) - STAGING_TOTAL_CAP <= 0:
-                break
+            with open(part, "wb") as f:
+                f.write(data)
+            os.replace(part, path)
+        finally:
             try:
-                os.remove(p)
-                total -= sz
+                if os.path.exists(part):
+                    os.remove(part)
             except OSError:
                 pass
-        path = os.path.join(staging_dir, safe)
-        with open(path, "wb") as f:
-            f.write(data)
+        try:
+            os.utime(path, None)  # re-staged → back to the top of the LRU
+        except OSError:
+            pass
         return path, len(data)
 
     class Handler(BaseHTTPRequestHandler):
@@ -292,9 +389,34 @@ def main(session):
                         # v3.47: the page checks this to know /stage exists —
                         # older in-ChimeraX bridge copies don't send it.
                         "stage": True,
+                        # v3.56: the page checks this to know the persistent
+                        # map cache (/staged lookup) exists — older copies
+                        # don't send it and the page skips the cache check.
+                        "cache": True,
+                        "cacheDir": staging_dir,
+                        "cached": sum(1 for _ in _cache_entries()),
                         "volumes": sum(1 for m in ui_run(lambda: list(session.models.list()))
                                        if m.__class__.__name__ == "Volume"),
                     })
+                    return
+                if r.path == "/staged":
+                    # v3.56: map-cache lookup. ?name= → single-file probe the
+                    # page runs per map BEFORE downloading anything; no name
+                    # → full listing (run log / diagnostics).
+                    name = (q.get("name") or [""])[0]
+                    if name:
+                        self._reply(200, cache_lookup(name))
+                    else:
+                        files = [
+                            {"name": os.path.basename(p), "size": sz, "mtime": mt}
+                            for mt, p, sz in sorted(_cache_entries())
+                        ]
+                        self._reply(200, {
+                            "ok": True,
+                            "dir": staging_dir,
+                            "files": files,
+                            "total": sum(f["size"] for f in files),
+                        })
                     return
                 if r.path == "/file":
                     name = os.path.basename((q.get("name") or [""])[0])
@@ -445,7 +567,7 @@ def main(session):
     for ip in _lan_ips():
         session.logger.info("  局域网:    http://%s:%d  (ChimeraX 与浏览器不同机时用这个)" % (ip, bound_port))
     session.logger.info("允许的网页来源: %s" % ", ".join(ALLOWED_ORIGINS))
-    session.logger.info("暂存目录 (v3.47 /stage): %s" % staging_dir)
+    session.logger.info("地图缓存 (v3.56 /stage 上传 + /staged 查询): %s" % staging_dir)
     session.logger.info("保持 ChimeraX 打开；在网页端点击 \"生成流程图\" 即可全自动完成对齐/手性检查/截图。")
     session.logger.info("=" * 60)
 

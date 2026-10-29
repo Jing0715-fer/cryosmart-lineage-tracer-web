@@ -248,7 +248,13 @@ export function buildWorkflowPptx(
   const MIN_IMG_W = 1.45; // readability floor before wrapping columns
 
   /** v3.51: expand an item into its thumbnail slots (classes, or the single
-   *  mapKey/imageUrl slot for demo/FSC/montage/legacy items). */
+   *  mapKey/imageUrl slot for demo/FSC/montage/legacy items).
+   *  v3.56: the slot key must match where the BYTES live — real map stages
+   *  (item.map != null) render under their mapKey (ChimeraX renders / session
+   *  previews are keyed that way), while demo/FSC/montage items carry their
+   *  bytes under item.imageUrl. The old `mapKey ?? imageUrl` preferred the
+   *  demo items' mapKey ("J68/volume") whose bytes were never there, so every
+   *  demo thumbnail rendered as an empty placeholder frame. */
   const itemSlotsOf = (
     item: FlowFigureItem,
   ): Array<{ key: string | null; stats: string[]; groupTag?: string }> => {
@@ -260,7 +266,9 @@ export function buildWorkflowPptx(
         groupTag: multi ? c.group : undefined,
       }));
     }
-    return [{ key: item.mapKey ?? item.imageUrl, stats: item.stats }];
+    return [
+      { key: item.map ? (item.mapKey ?? item.imageUrl) : (item.imageUrl ?? item.mapKey), stats: item.stats },
+    ];
   };
   const rowThumbTotal = (g: FlowFigureItem[]) =>
     g.reduce((s, it) => s + Math.max(1, itemSlotsOf(it).length), 0);

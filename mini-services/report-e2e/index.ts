@@ -1061,7 +1061,46 @@ const relayServer = Bun.serve({
           // v3.47: the card's page-relay rung requires POST /stage — this
           // flag mirrors the real relay.py's /ping field.
           stage: true,
+          // v3.56: mirrors relay.py's persistent map cache — the card skips
+          // the /staged cache check (and keeps re-downloading maps) when
+          // the ping carries no `cache` flag.
+          cache: true,
+          cacheDir: "/tmp/cryoflow-mock/staged",
+          cached: relayState.staged.size,
           volumes: relayState.models.size,
+        });
+      }
+      if (u.pathname === "/staged") {
+        // v3.56: mirrors relay.py's /staged — ?name= single-file cache
+        // probe (the page runs it per map BEFORE downloading anything);
+        // no name → full listing. The mock's staged bytes live in the
+        // in-memory relayState.staged map (keyed by path).
+        const name = u.searchParams.get("name") || "";
+        const stagedPath = (n: string) => `/tmp/cryoflow-mock/staged/${n}`;
+        if (name) {
+          const entry = relayState.staged.get(stagedPath(name));
+          if (entry) {
+            return reply(200, {
+              ok: true,
+              exists: true,
+              path: stagedPath(name),
+              size: entry.bytes.byteLength,
+              mtime: Date.now() / 1000,
+            });
+          }
+          return reply(200, { ok: true, exists: false });
+        }
+        const files = [...relayState.staged.entries()].map(([path, e]) => ({
+          name: e.name,
+          size: e.bytes.byteLength,
+          mtime: Date.now() / 1000,
+          path,
+        }));
+        return reply(200, {
+          ok: true,
+          dir: "/tmp/cryoflow-mock/staged",
+          files,
+          total: files.reduce((s, f) => s + f.size, 0),
         });
       }
       if (req.method === "POST" && u.pathname === "/stage") {

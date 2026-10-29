@@ -60,5 +60,16 @@
  * mode omits an ab-initio STAGE entirely when its Maximum-resolution
  * parameter is the default 12 Å (or absent). Old pages would keep all four
  * behaviors invisibly.
+ *
+ * v3.56 bump reason (round-15 “已有 map 直接从本地打开，不重复下载”): the
+ * relay's staging dir became a PERSISTENT map cache (fixed system-temp
+ * path "cryoflow_map_cache" — survives ChimeraX restarts and relay
+ * re-opens), the relay gained GET /staged (per-name cache lookup +
+ * listing), /stage writes are ATOMIC, and the card now checks the cache
+ * per map BEFORE any download ladder rung — a hit opens the LOCAL path
+ * directly and only the misses walk direct → proxy → page relay (whose
+ * uploads land in the cache under the same canonical name, so every later
+ * run of the same workflow downloads nothing). Old pages have no cache
+ * check and would keep re-downloading every map on every run.
  */
-export const FLOW_ENGINE_VERSION = "3.55";
+export const FLOW_ENGINE_VERSION = "3.56";

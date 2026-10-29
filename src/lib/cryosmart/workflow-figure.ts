@@ -1033,7 +1033,21 @@ export async function fetchFigureImages(
   let done = 0;
   for (const url of urls) {
     try {
-      const bytes = await cryoSmartBytes(session, url);
+      /* v3.56: session-less same-origin URLs (the demo model's
+       * /demo/workflow/*.png statics, data: URLs, and staged-session
+       * image routes whose tokens live in the URL itself) need no
+       * CryoSmart credentials — cryoSmartBytes(null, …) threw for EVERY
+       * demo image, so a demo run shipped a PPTX of empty placeholder
+       * frames. Plain same-origin fetch instead; anything absolute /
+       * credential-bearing still goes through cryoSmartBytes. */
+      let bytes: Uint8Array;
+      if (!session && /^(?:\/|data:)/i.test(url)) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+        bytes = new Uint8Array(await res.arrayBuffer());
+      } else {
+        bytes = await cryoSmartBytes(session, url);
+      }
       out.set(url, bytes);
     } catch {
       // Individual image failures are non-fatal — a placeholder frame is

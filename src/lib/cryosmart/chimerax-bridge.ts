@@ -93,6 +93,13 @@
  * exported. Previous runs used to leave their aligned models open, and the
  * screenshot loop's hide-all step only covered the CURRENT run's ids, so
  * the last run's maps swept into every screenshot.
+ *
+ * v3.56 (round-15 “已有 map 直接从本地打开，不重复下载”): the relay's
+ * staging dir is now a PERSISTENT map cache at a fixed system-temp path —
+ * it survives ChimeraX restarts and relay re-opens. The card checks it per
+ * map (stagedMapFilename + bridgeStagedLookup) BEFORE any download ladder
+ * rung; a hit yields a LOCAL path ChimeraX opens directly (zero network).
+ * The bridge transports advertise it via ping's `cache` flag (canCache).
  */
 
 import { chimeraClassColor } from "./chimera-colors";
@@ -116,6 +123,13 @@ export interface FlowTransport {
    *  path ChimeraX can `open`). Without it, the page-relay map fallback
    *  cannot run and the user must re-open the updated relay.py once. */
   canStage?: boolean;
+  /** v3.56: relay-only — the bridge script advertises the PERSISTENT map
+   *  cache (GET /staged lookup at a fixed system-temp path that survives
+   * ChimeraX restarts / relay re-opens). Without it the card skips the
+   *  cache check and every run re-downloads its maps as before. */
+  canCache?: boolean;
+  /** v3.56: the bridge's persistent map-cache dir (log/diagnostics). */
+  cacheDir?: string;
   /** v3.50: which save rung last produced a /file-fetchable PNG — cached
    *  per transport so later saves go straight to the working shape. */
   saveMode?: SaveMode;
@@ -185,11 +199,23 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
           logs.push(`relay ${host}:${port} → HTTP ${res.status}`);
           continue;
         }
-        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean };
+        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string };
         if (data?.ok) {
-          logs.push(`relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""})`);
+          logs.push(
+            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""})`,
+          );
           return {
-            transport: { kind: "relay", host, port, base, workdir: data.workdir, canFetchFiles: true, canStage: !!data.stage },
+            transport: {
+              kind: "relay",
+              host,
+              port,
+              base,
+              workdir: data.workdir,
+              canFetchFiles: true,
+              canStage: !!data.stage,
+              canCache: !!data.cache,
+              cacheDir: data.cacheDir,
+            },
             logs,
           };
         }
@@ -320,6 +346,71 @@ export interface BridgeVolumeRef {
   id: string;
   /** Model name (its map filename / URL) — for the run log. */
   name: string;
+}
+
+/** v3.56: a map's cache filename on the ChimeraX machine — the page and
+ *  the relay agree on this shape for BOTH the /staged lookup and the
+ *  /stage upload, so a map staged once is found on every later run.
+ *
+ *  The 8-hex suffix is a djb2 fingerprint of the map's download URL: a
+ *  re-run CryoSmart job produces new URLs, so its maps can NEVER be
+ *  confused with the previous run's cached copies (a stale-content hit
+ *  is impossible by construction), while the same URL across runs is
+ *  recognized as the same map and skipped outright. */
+export function stagedMapFilename(key: string, url: string): string {
+  const base = String(key || "map")
+    .replace(/[^A-Za-z0-9._-]+/g, ".")
+    .replace(/^\.+|\.+$/g, "") || "map";
+  let h = 5381;
+  const u = String(url || "");
+  for (let i = 0; i < u.length; i++) {
+    h = ((h * 33) ^ u.charCodeAt(i)) >>> 0;
+  }
+  return `${base}.${h.toString(16).padStart(8, "0").slice(-8)}.mrc`;
+}
+
+/** v3.56: a relay map-cache hit — the ChimeraX-openable LOCAL path. */
+export interface BridgeStagedHit {
+  path: string;
+  size: number;
+  mtime: number;
+}
+
+/** v3.56 (round-15 “已有 map 直接从本地打开，不重复下载”): is this map
+ *  already in the relay's PERSISTENT map cache? Returns the local path the
+ *  bridge can `open` directly, or null when: not a relay, the relay predates
+ *  the /staged endpoint (HTTP 404 → unknown route), the map is absent, or
+ *  the probe failed transiently. Callers fall back to the existing
+ *  download ladder (direct → proxy → page relay) on null — and a page-relay
+ *  /stage upload re-populates the cache under the SAME filename so the NEXT
+ *  run hits it. */
+export async function bridgeStagedLookup(
+  t: FlowTransport,
+  name: string,
+  timeoutMs = 15_000,
+): Promise<BridgeStagedHit | null> {
+  if (t.kind !== "relay" || !t.canCache) return null;
+  try {
+    const res = await fetchWithTimeout(
+      `${t.base}/staged?name=${encodeURIComponent(name)}`,
+      { method: "GET" },
+      timeoutMs,
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      ok?: boolean;
+      exists?: boolean;
+      path?: string;
+      size?: number;
+      mtime?: number;
+    };
+    if (!data?.ok || !data.exists || typeof data.path !== "string" || typeof data.size !== "number") {
+      return null;
+    }
+    return { path: data.path, size: data.size, mtime: typeof data.mtime === "number" ? data.mtime : 0 };
+  } catch {
+    return null;
+  }
 }
 
 /** Relay-only v3.55 (round-14 “开始截图之前要先关闭掉过去已打开的 map”):
