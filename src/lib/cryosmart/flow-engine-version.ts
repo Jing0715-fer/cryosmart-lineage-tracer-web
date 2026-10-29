@@ -96,23 +96,17 @@
  * a below-content lane + inter-column gutter instead of the crossing
  * bentConnector3. Old pages keep all three behaviors.
  *
- * v3.59 bump reason (round-18 “极简模式 + 竖向排版 + 固定箭头 + 手动模式”):
- * the deck layout was REBUILT after the user's new reference
- * upload/workflow.pptx — (1) the canvas is now PORTRAIT 7.5 in wide with
- * a DYNAMIC height (min 10 in, grows with the content — “可以根据需要
- * 改变画布大小”); (2) the flow is a single straight SPINE at the slide
- * centre: every connector is a straightConnector1 of FIXED 0.39 in
- * length / 1 pt / triangle head — the entire bent/elbow/wrap machinery of
- * rounds 12–17 is deleted, so the 连线错位 class of bugs is structurally
- * impossible; (3) a NEW 极简版式 (BuildPptxOptions.style="minimal"):
- * bare stage names (no job ids), the reference's selection rectangles
- * around the class whose particle count feeds the next stage, retention
- * labels (“37.2% / 590,421 particles”) beside each arrow, final Å centred
- * under the last map, no footnote; (4) a NEW 手动模式
- * (applyManualSelection): the card's checklist drops unchecked jobs
- * before any image work, re-anchoring the alignment reference and the
- * finalStats to whatever still ends the figure. Old pages produce the
- * old 16:9 multi-column layout with elbow connectors and have neither
- * switch.
+ * v3.60 bump reason (round-19 “手动/标准/简化/极简合并为一个下拉框 +
+ * 勾选框溢出重叠修复 + 极简最多 5 行”): (1) the four figure modes
+ * (手动/标准/简化/极简) now live in ONE 模式 dropdown — the old separate
+ * 版式 select + 手动勾选 switch + 简化模式 switch are gone, and 极简
+ * now ALSO caps the deck at 5 image rows (简化 merging underneath, 阶段数
+ * selector clamped to 4/5, “全部” falls back to 5); (2) the 手动
+ * checklist no longer escapes its panel — the old shadcn ScrollArea
+ * max-h-48 did not constrain the list (Radix Root has no overflow clip
+ * and the viewport's height:100% resolves to auto), so a long job list
+ * overlapped the content below; the list is now a native max-h-64
+ * overflow-y-auto box. Old pages keep the three scattered controls and
+ * the overflowing checklist.
  */
-export const FLOW_ENGINE_VERSION = "3.59";
+export const FLOW_ENGINE_VERSION = "3.60";

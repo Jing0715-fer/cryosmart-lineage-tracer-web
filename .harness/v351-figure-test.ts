@@ -40,6 +40,18 @@
  * deck carries retention percentages (48.3%/77.0%/64.1%/55.2% on the P96
  * chain) and exactly 5 selection frames; manual drops re-anchor the
  * reference and drop the final Å with the final job.
+ *
+ * v3.60 (round-19): the four modes (手动/标准/简化/极简) collapse into
+ * ONE card dropdown, and 极简 now ALSO caps the deck at 5 image rows
+ * (simplified merging underneath, 阶段数 clamped 4/5, “全部”→5). This
+ * section builds the EXACT model the 极简 UI produces —
+ * buildFlowFigureModel({maxGroups: 5, simplified: true}) — and asserts
+ * the fold ([J28, J34, J37, J39, J41]; the 3-class J31 is a single-ITEM
+ * group, so only parallel groups survive the fold), the funnel still
+ * reads 多→少, and the minimal deck on it carries the J28→J34 retention
+ * label 37.2% (590,421 / 1,588,675 — the reference deck's own number),
+ * 2 selection frames (J34 + J39, the only multi-slot rows with a next
+ * rep), and the final Å.
  */
 import { buildFlowFigureModel, figureMapSources, applyManualSelection } from "../src/lib/cryosmart/workflow-figure";
 import { chimeraClassColor } from "../src/lib/cryosmart/chimera-colors";
@@ -646,6 +658,43 @@ const buf3 = Buffer.from(await blob3.arrayBuffer());
 fs.writeFileSync(OUT_MINIMAL, buf3);
 console.log("== minimal pptx ==", OUT_MINIMAL, buf3.length, "bytes");
 
+/* ------------------------------------------------------------------
+ * v3.60 (round-19): 极简模式 — 简化合并 + 最多 5 行图片.
+ * The card's 极简 mode passes simplified:true with maxGroups clamped to
+ * the 5-row cap (阶段数 4/5, “全部”→5). On the P96 chain the simplified
+ * pass leaves 6 groups [J28, J31, J34, J37, J39, J41]; the 5-row fold
+ * keeps first+last and fills from the END → [J28, J34, J37, J39, J41].
+ * ------------------------------------------------------------------ */
+const OUT_MINIMAL5 = path.join(OUT_DIR, "out-minimal5.pptx");
+const modelMini = buildFlowFigureModel(summary, { maxGroups: 5, simplified: true });
+console.log("== 极简 groups ==", modelMini.groups.length);
+for (const g of modelMini.groups) {
+  console.log(
+    " m-group:",
+    g.map((i) => `${i.uid}[${i.classes ? i.classes.map((c) => c.mapKey.split("/")[1]).join("+") : i.imageUrl ? "img" : "-"}]`).join(" + "),
+  );
+}
+if (modelMini.groups.length !== 5) fail.push(`极简 groups expected 5 got ${modelMini.groups.length}`);
+const miniUids = modelMini.groups.flat().map((i) => i.uid).join(">");
+if (miniUids !== "J28>J34>J37>J39>J41")
+  fail.push(`极简 fold expected J28>J34>J37>J39>J41 got ${miniUids}`);
+/* the 5-row fold must not break the 多→少 funnel either */
+{
+  const totals = modelMini.groups.map((g) => Math.max(...g.map((it) => it.particleTotal ?? 0)));
+  for (let i = 1; i < totals.length; i++) {
+    if (totals[i] > totals[i - 1]) fail.push(`极简 funnel broke at group ${i}: ${totals[i]} > ${totals[i - 1]}`);
+  }
+}
+const srcsMini = figureMapSources(modelMini);
+const imagesMini = new Map<string, Uint8Array>();
+for (const [key, src] of srcsMini) {
+  imagesMini.set(key, discPng(hexToRgb(chimeraClassColor(src.classIndex))));
+}
+const blobMini = buildWorkflowPptx(modelMini, { images: imagesMini, style: "minimal" });
+const bufMini = Buffer.from(await blobMini.arrayBuffer());
+fs.writeFileSync(OUT_MINIMAL5, bufMini);
+console.log("== 极简 pptx ==", OUT_MINIMAL5, bufMini.length, "bytes");
+
 /* ------------------------------------------------------------------ */
 /* v3.54 default-12 Å ab-initio final: resolution info ignored         */
 /* ------------------------------------------------------------------ */
@@ -713,6 +762,7 @@ function slide1Xml(pptxPath: string): string {
 const xmlFull = slide1Xml(OUT);
 const xmlSimplified = slide1Xml(OUT_SIMPLIFIED);
 const xmlMinimal = slide1Xml(OUT_MINIMAL);
+const xmlMini = slide1Xml(OUT_MINIMAL5);
 const EMU = 914400;
 console.log("== slide xml uid-run checks ==");
 if (!xmlFull.includes(" · J31") || !xmlFull.includes(" · J41"))
@@ -735,6 +785,7 @@ for (const [deckPath, deckXml, deck] of [
   [OUT, xmlFull, "full deck"],
   [OUT_SIMPLIFIED, xmlSimplified, "simplified deck"],
   [OUT_MINIMAL, xmlMinimal, "minimal deck"],
+  [OUT_MINIMAL5, xmlMini, "极简 capped deck"],
 ] as Array<[string, string, string]>) {
   const presXml = zipPartText(deckPath, "ppt/presentation.xml");
   const sz = /<p:sldSz cx="(\d+)" cy="(\d+)"/.exec(presXml);
@@ -783,6 +834,7 @@ for (const [deckPath, deckXml, deck] of [
 for (const [deckXml, deck] of [
   [xmlFull, "full deck"],
   [xmlMinimal, "minimal deck"],
+  [xmlMini, "极简 capped deck"],
 ] as Array<[string, string]>) {
   const texts = [...deckXml.matchAll(/<p:sp>.*?<\/p:sp>/gs)]
     .map((m) => {
@@ -830,6 +882,26 @@ if (xmlMinimal.includes("CryoSmart Workflow Figure")) fail.push("minimal deck mu
    * per-class stats under thumbs (the 2:1 minimal rows carry only labels +
    * pics + frames + retention + Å text). */
   if (xmlMinimal.includes("77%")) fail.push("minimal deck must not render per-class stats lines");
+}
+
+/* 极简 capped deck specifics: ≤5 image rows, the folded-chain retention
+ * labels (J28→J34 reads the reference deck's own 37.2%), exactly 2
+ * selection frames (J34 + J39 — the only multi-slot rows with a next
+ * rep after J31 folded away), no job ids/footnote, final Å kept. */
+if (xmlMini.includes(" · J")) fail.push("极简 capped deck must NOT carry job-id label runs");
+if (xmlMini.includes("CryoSmart Workflow Figure")) fail.push("极简 capped deck must NOT carry the footnote");
+if (!xmlMini.includes("37.2%")) fail.push("极简 capped deck must carry the J28→J34 retention label 37.2%");
+if (!xmlMini.includes("590,421 particles")) fail.push("极简 capped deck missing the 590,421 retention count");
+if (!xmlMini.includes("64.1%") || !xmlMini.includes("55.2%")) fail.push("极简 capped deck missing the 64.1%/55.2% retention labels");
+if (xmlMini.includes("48.3%") || xmlMini.includes("77.0%"))
+  fail.push("极简 capped deck must NOT carry the folded-away J31 labels (48.3%/77.0%)");
+if (xmlMini.includes("100.0%")) fail.push("极简 capped deck must not print a 100% retention line");
+if (!xmlMini.includes("3.20 Å")) fail.push("极简 capped deck missing the final resolution under the last map");
+{
+  const framesMini = (xmlMini.match(/name="矩形 /g) || []).length;
+  if (framesMini !== 2) fail.push(`极简 capped deck expected exactly 2 selection frames (J34 + J39), got ${framesMini}`);
+  const picsMini = (xmlMini.match(/<p:pic>/g) || []).length;
+  if (picsMini !== 9) fail.push(`极简 capped deck expected 9 thumbnails (1+3+1+3+1 over 5 rows), got ${picsMini}`);
 }
 
 /* ------------------------------------------------------------------
@@ -901,6 +973,7 @@ console.log("== connector no-crossing checks ==");
 assertNoConnectorCrossing(xmlFull, "full deck");
 assertNoConnectorCrossing(xmlSimplified, "simplified deck");
 assertNoConnectorCrossing(xmlMinimal, "minimal deck");
+assertNoConnectorCrossing(xmlMini, "极简 capped deck");
 
 /* ------------------------------------------------------------------ */
 /* v3.55 unit: abinitMaxResolutionFromJob params_spec extraction        */

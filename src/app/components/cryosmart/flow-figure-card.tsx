@@ -58,6 +58,43 @@ type FigureMode = "chimerax" | "preview" | "demo";
  * upload/workflow.pptx reference look). */
 type FigureStyle = "standard" | "minimal";
 
+/** v3.60 (round-19): the figure MODE — ONE dropdown replacing the old
+ * separate 版式 select + 手动勾选 + 简化模式 switches
+ * (“手动、标准、简化、极简这4个应该放在一个下拉框中”):
+ *   standard   完整谱系，标准版式（job id 标注 + 每 class 统计）
+ *   simplified 简化合并（少量数据 2D / 默认 12 Å ab-initio 省略，
+ *              相邻同颗粒数 non-uniform 合并，颗粒数从多到少）
+ *   minimal    极简 — 在简化合并基础上最多只保留 MINIMAL_ROW_CAP 行
+ *              图片 + workflow.pptx 版式（选中 class 细框 + 留存颗粒数标注）
+ *   manual     手动勾选要体现的 job（标准版式） */
+type FlowModeOption = "standard" | "simplified" | "minimal" | "manual";
+/** round-19 “极简（合并部分步骤，最多只保留5行图片）”。 */
+const MINIMAL_ROW_CAP = 5;
+const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
+  standard: {
+    label: "标准",
+    hint: "完整谱系 — 所有阶段全部展示，job id 标注 + 每 class 统计",
+  },
+  simplified: {
+    label: "简化",
+    hint: "合并/省略可省的步骤：少量数据的 2D 与默认 12 Å ab-initio 整体省略，相邻同颗粒数的 non-uniform 合并，颗粒数按「从多到少」显示",
+  },
+  minimal: {
+    label: `极简（最多 ${MINIMAL_ROW_CAP} 行）`,
+    hint: `在简化合并的基础上最多只保留 ${MINIMAL_ROW_CAP} 行图片；workflow.pptx 版式：选中 class 细框 + 箭头旁留存颗粒数标注，无 job id/页脚`,
+  },
+  manual: {
+    label: "手动",
+    hint: "自行勾选要体现在流程图中的 job — 未勾选的阶段不渲染、不下载（标准版式）",
+  },
+};
+
+/** v3.60: the 阶段数 options per mode — 极简 only offers values ≤ the 5-row
+ * cap (4/5), every other mode keeps the full ladder + “全部”. */
+function stageOptionsFor(mode: FlowModeOption): string[] {
+  return mode === "minimal" ? ["4", "5"] : ["4", "5", "6", "7", "8", "9", "10", "0"];
+}
+
 interface StepState {
   busy: boolean;
   phase: string;
@@ -94,25 +131,47 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const [bridgeTried, setBridgeTried] = useState(false);
   const [step, setStep] = useState<StepState>(IDLE);
   const [includeFsc, setIncludeFsc] = useState(false);
-  // v3.54 (round-13): 简化模式 — omit small-subset 2D / initial-model
-  // bootstrap steps, funnel the displayed particle counts 多→少, and ignore
-  // a default-12 Å ab-initio final's resolution info
-  // (BuildModelOptions.simplified). v3.55 (round-14): default-12 Å
-  // ab-initio stages are omitted ENTIRELY (the flow connects straight to
-  // the following refinement stage). Default OFF: the full-fidelity figure
-  // stays the default.
-  const [simplified, setSimplified] = useState(false);
-  // v3.59 (round-18): 版式 — 标准 or 极简 (BuildPptxOptions.style).
-  const [figStyle, setFigStyle] = useState<FigureStyle>("standard");
+  // v3.60 (round-19): the figure MODE — ONE dropdown (手动/标准/简化/极简)
+  // replacing the old separate 简化模式 switch + 版式 select + 手动勾选
+  // switch. All three legacy settings derive from it below.
+  const [flowMode, setFlowMode] = useState<FlowModeOption>("standard");
   // v3.59 (round-18 手动模式): checkbox list of which jobs' images to
   // include. `manualSel` is keyed by job uid; absent = checked.
-  const [manual, setManual] = useState(false);
   const [manualSel, setManualSel] = useState<Record<string, boolean>>({});
   // v3.45: default "10" — the widest numeric value (folding off for every
   // lineage with ≤10 stages, which covers the real P208 8-stage model that
   // used to ship with 2 collapsed stages). "0" = the “全部” selector entry
   // (never fold, even beyond 10).
   const [maxGroups, setMaxGroups] = useState("10");
+
+  /* ---- v3.60 (round-19): mode derivations — pure functions of
+   * flowMode/maxGroups, so every consumer (catalog memo, generate,
+   * buildWorkflowPptx) reads ONE source of truth. ---- */
+  const manual = flowMode === "manual";
+  const figStyle: FigureStyle = flowMode === "minimal" ? "minimal" : "standard";
+  const simplified = flowMode === "simplified" || flowMode === "minimal";
+  const parsedMaxGroups = Number(maxGroups);
+  const rawMaxGroups = Number.isFinite(parsedMaxGroups) ? parsedMaxGroups : 10;
+  /** 极简 caps the deck at 5 image rows (round-19). "全部" maps to the cap;
+   * an explicit smaller 阶段数 (4) stays smaller. */
+  const effectiveMaxGroups =
+    flowMode === "minimal"
+      ? rawMaxGroups <= 0
+        ? MINIMAL_ROW_CAP
+        : Math.min(rawMaxGroups, MINIMAL_ROW_CAP)
+      : rawMaxGroups;
+
+  /** v3.60: switching into 极简 clamps the 阶段数 selector to 4/5 so the
+   * control never promises more rows than the mode renders (选“全部”时
+   * 自动回落到 5). */
+  const onFlowModeChange = useCallback(
+    (v: string) => {
+      const next = v as FlowModeOption;
+      setFlowMode(next);
+      if (next === "minimal" && !stageOptionsFor(next).includes(maxGroups)) setMaxGroups(String(MINIMAL_ROW_CAP));
+    },
+    [maxGroups],
+  );
   const [result, setResult] = useState<{
     url: string;
     /** v3.50: fallback in-page blob link (kept for contexts where the
@@ -230,23 +289,24 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   /* ---------------------------------------------------------------- */
 
   /** The candidate catalog — the figure model as it WOULD be built with
-   * the current 阶段数/简化设置. Only computed while 手动勾选 is on (the
-   * build is pure and cheap, but pointless when the toggle is off). The
+   * the current 阶段数. Only computed while 手动 is on (the build is pure
+   * and cheap, but pointless when the mode is off). v3.60: the catalog is
+   * the FULL (un-simplified) model — trimming is the user's job here; a
+   * simplified catalog would hide jobs the user may want back. The
    * checklist then lets the user trim it job by job. */
   const manualCatalog = useMemo<FlowFigureModel | null>(() => {
     if (!manual) return null;
     if (mode === "demo") return buildDemoFigureModel();
     if (!summary) return null;
     try {
-      const parsed = Number(maxGroups);
       return buildFlowFigureModel(summary, {
-        maxGroups: Number.isFinite(parsed) ? parsed : 10,
-        simplified,
+        maxGroups: rawMaxGroups,
+        simplified: false,
       });
     } catch {
       return null;
     }
-  }, [manual, mode, summary, maxGroups, simplified]);
+  }, [manual, mode, summary, rawMaxGroups]);
 
   const catalogItems = useMemo(() => {
     const out: Array<{ uid: string; label: string; thumbs: number }> = [];
@@ -357,9 +417,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         if (!summary) throw new Error("尚未载入谱系数据 — 请先完成 Smart Capture 与 Trace Lineage。");
         // v3.45: "0" (the “全部” option) → 0, which buildFlowFigureModel maps
         // to Infinity (never fold). Anything unparseable falls back to 10.
-        const parsedGroups = Number(maxGroups);
+        // v3.60: 极简 caps the effective value at 5 image rows
+        // (effectiveMaxGroups); 简化/极简 share simplified=true.
         model = buildFlowFigureModel(summary, {
-          maxGroups: Number.isFinite(parsedGroups) ? parsedGroups : 10,
+          maxGroups: effectiveMaxGroups,
           simplified,
         });
       }
@@ -368,26 +429,27 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
        * reference/finalStats fixups live in applyManualSelection. */
       if (manual) {
         if (!catalogItems.length) {
-          throw new Error("手动勾选: 当前设置下没有可勾选的阶段 — 请先调整阶段数/简化模式或载入谱系数据");
+          throw new Error("手动模式: 当前设置下没有可勾选的阶段 — 请先载入谱系数据，或调整阶段数");
         }
         model = applyManualSelection(model, (uid) => manualSel[uid] !== false);
         if (!model.groups.length) {
-          throw new Error("手动勾选: 至少需要勾选一个 job 才能生成流程图");
+          throw new Error("手动模式: 至少需要勾选一个 job 才能生成流程图");
         }
-        pushLog(`手动勾选: 保留 ${model.groups.length}/${catalogItems.length} 个阶段（${checkedCount} 个 job）`);
+        pushLog(`手动模式: 保留 ${model.groups.length}/${catalogItems.length} 个阶段（${checkedCount} 个 job） · 标准版式（job id 标注 + 每 class 统计）`);
       }
-      if (figStyle === "minimal") {
-        pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头 · 选中 class 细框 · 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
-      } else {
-        pushLog("标准版式: 竖向单列 · 固定长度直箭头 · job id 标注 · 每 class 统计");
-      }
-      if (mode !== "demo" && simplified) {
-        // v3.55: self-diagnosing run log — the simplified pipeline's four
-        // guarantees, named up front (the per-stage omissions/hidings then
-        // arrive as ⚠ model warnings below).
+      /* v3.60: the mode banner — one line per flowMode (the 极简 line
+       * carries the merge rules too: simplified=true runs under it). */
+      if (flowMode === "minimal") {
         pushLog(
-          "简化模式: 已开启 — 少量数据的 2D 步骤将省略 · Maximum resolution 为默认 12 Å 的 ab-initio 阶段将整体省略（直接衔接后续精修） · 颗粒数按「从多到少」显示",
+          `极简模式: 在简化规则之上（少量数据 2D 与默认 12 Å ab-initio 省略 · 相邻同颗粒数 non-uniform 合并 · 颗粒数从多到少），最多只保留 ${MINIMAL_ROW_CAP} 行图片`,
         );
+        pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头 · 选中 class 细框 · 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
+      } else if (flowMode === "simplified") {
+        pushLog(
+          "简化模式: 少量数据的 2D 步骤将省略 · 默认 12 Å ab-initio 阶段整体省略（直接衔接后续精修） · 相邻同颗粒数 non-uniform 合并 · 颗粒数按「从多到少」显示",
+        );
+      } else if (!manual) {
+        pushLog("标准模式: 完整谱系 · job id 标注 · 每 class 统计");
       }
       const multiClassGroups = model.groups.filter((g) => g.some((i) => (i.classes?.length ?? 0) > 1));
       const mapTotal = model.groups.flat().reduce(
@@ -839,7 +901,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       setStep((s) => ({ ...s, busy: false, error: message }));
       toast.error(`流程图生成失败: ${message}`);
     }
-  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, pushLog, maxGroups, includeFsc, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh]);
+  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, pushLog, maxGroups, includeFsc, flowMode, effectiveMaxGroups, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh]);
 
   const canGenerate = !step.busy && (mode === "demo" || !!summary);
   const bridgeBadge = useMemo(() => {
@@ -864,7 +926,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-teal-700 dark:text-teal-300">引擎 v{FLOW_ENGINE_VERSION}</Badge>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          竖向单列排版，箭头固定尺寸、直线连接；所有 map 由 ChimeraX 渲染并统一朝向与手性。可选「极简版式」（参考 workflow.pptx：选中 class 细框 + 箭头旁留存颗粒数标注）与「手动勾选」需要展示的 job。
+          竖向单列排版，箭头固定尺寸、直线连接；所有 map 由 ChimeraX 渲染并统一朝向与手性。用「模式」选择 标准 / 简化 / 极简（合并部分步骤，最多 5 行图片）/ 手动勾选。
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -895,65 +957,70 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             </button>
           ))}
           <div className="ml-auto flex flex-wrap items-center gap-4">
-            {/* v3.59: 版式 selector — 标准 vs 极简 (BuildPptxOptions.style). */}
-            <div className="flex items-center gap-2" title="极简版式参考 workflow.pptx：无 job id/页脚，选中 class 加细框，箭头旁标注留存颗粒数与百分比；标准版式保留 job id 与每 class 统计">
-              <Label className="text-[11.5px] text-slate-600 dark:text-slate-300">版式</Label>
-              <Select value={figStyle} onValueChange={(v) => setFigStyle(v as FigureStyle)}>
-                <SelectTrigger className="h-8 w-[82px] text-[12px]">
+            {/* v3.60 (round-19): 模式 — ONE dropdown carrying the four
+             * figure modes (手动/标准/简化/极简), replacing the old separate
+             * 版式 select + 手动勾选 switch + 简化模式 switch.
+             * “简化” is disabled in 演示样例 mode: the demo model is
+             * hand-crafted and ignores the simplify options, so the option
+             * would be a silent no-op there. */}
+            <div className="flex items-center gap-2" title={MODE_META[flowMode].hint}>
+              <Label className="text-[11.5px] text-slate-600 dark:text-slate-300">模式</Label>
+              <Select value={flowMode} onValueChange={onFlowModeChange}>
+                <SelectTrigger className="h-8 w-[168px] text-[12px]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="standard">标准</SelectItem>
-                  <SelectItem value="minimal">极简</SelectItem>
+                  {(Object.keys(MODE_META) as FlowModeOption[]).map((k) => (
+                    <SelectItem key={k} value={k} disabled={mode === "demo" && k === "simplified"}>
+                      {MODE_META[k].label}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
-            </div>
-            {/* v3.59: 手动模式 — check which jobs' images appear. */}
-            <div className="flex items-center gap-2" title="开启后可在下方勾选需要体现在流程图里的 job（未勾选的阶段不渲染、不下载）">
-              <Switch id="flow-manual" checked={manual} onCheckedChange={setManual} />
-              <Label htmlFor="flow-manual" className="text-[11.5px] text-slate-600 dark:text-slate-300">
-                手动勾选
-              </Label>
-            </div>
-            <div className="flex items-center gap-2" title="省略少量数据的 2D 步骤；省略 Maximum resolution 为默认 12 Å 的 ab-initio 阶段（直接显示后续精修，如 hetero refine）；合并相邻同颗粒数的 non-uniform；隐藏破坏「从多到少」的计数">
-              <Switch
-                id="flow-simplified"
-                checked={simplified}
-                onCheckedChange={setSimplified}
-                disabled={mode === "demo"}
-              />
-              <Label
-                htmlFor="flow-simplified"
-                className={`text-[11.5px] ${mode === "demo" ? "text-slate-400 dark:text-slate-500" : "text-slate-600 dark:text-slate-300"}`}
-              >
-                简化模式
-              </Label>
             </div>
             <div className="flex items-center gap-2">
               <Switch id="flow-fsc" checked={includeFsc} onCheckedChange={setIncludeFsc} />
               <Label htmlFor="flow-fsc" className="text-[11.5px] text-slate-600 dark:text-slate-300">附 FSC 曲线</Label>
             </div>
-            <div className="flex items-center gap-2">
+            <div
+              className="flex items-center gap-2"
+              title={
+                flowMode === "minimal"
+                  ? `极简模式最多保留 ${MINIMAL_ROW_CAP} 行图片 — 阶段数已联动为不超过 ${MINIMAL_ROW_CAP}`
+                  : "超过阶段数时折叠最早的单图阶段；“全部”即不折叠"
+              }
+            >
               <Label className="text-[11.5px] text-slate-600 dark:text-slate-300">阶段数</Label>
               <Select value={maxGroups} onValueChange={setMaxGroups}>
                 <SelectTrigger className="h-8 w-[70px] text-[12px]">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {["4", "5", "6", "7", "8", "9", "10"].map((v) => (
-                    <SelectItem key={v} value={v}>{v}</SelectItem>
-                  ))}
-                  {/* v3.45: “全部” — never fold, even beyond 10 stages. */}
-                  <SelectItem value="0">全部</SelectItem>
+                  {stageOptionsFor(flowMode)
+                    .filter((v) => v !== "0")
+                    .map((v) => (
+                      <SelectItem key={v} value={v}>{v}</SelectItem>
+                    ))}
+                  {/* v3.45: “全部” — never fold, even beyond 10 stages.
+                   *  v3.60: hidden in 极简 mode (capped at 5 anyway). */}
+                  {flowMode !== "minimal" && <SelectItem value="0">全部</SelectItem>}
                 </SelectContent>
               </Select>
             </div>
           </div>
         </div>
 
+        {/* v3.60: one-line hint of the CURRENT 模式 — doubles as the
+         * in-place doc for the four options. */}
+        <p className="-mt-2 text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+          {MODE_META[flowMode].hint}
+          {flowMode === "minimal" && effectiveMaxGroups < MINIMAL_ROW_CAP ? `（当前阶段数 ${effectiveMaxGroups}）` : ""}
+        </p>
+
         {/* v3.59 手动模式: the job checklist. Each row = one job in the
-         * figure model built with the CURRENT 阶段数/简化 settings;
-         * unchecked jobs are dropped before any image work. */}
+         * figure model built with the CURRENT 阶段数 (v3.60: the catalog is
+         * always the FULL un-simplified model — trimming is the user's
+         * job); unchecked jobs are dropped before any image work. */}
         {manual && (
           <div className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 dark:border-teal-800 dark:bg-teal-950/20">
             <div className="flex flex-wrap items-center gap-2">
@@ -990,10 +1057,23 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             </div>
             {catalogItems.length === 0 ? (
               <p className="mt-2 text-[11.5px] text-slate-500 dark:text-slate-400">
-                {mode === "demo" ? "演示样例没有可勾选的阶段。" : "当前设置下没有可勾选的阶段 — 请先载入谱系数据，或调整阶段数/简化模式。"}
+                {mode === "demo" ? "演示样例没有可勾选的阶段。" : "当前设置下没有可勾选的阶段 — 请先载入谱系数据，或调整阶段数。"}
               </p>
             ) : (
-              <ScrollArea className="mt-2 max-h-48 rounded-md border border-teal-100 bg-white dark:border-teal-900 dark:bg-slate-900">
+              /* v3.60 (round-19 “勾选框溢出框体、和后面的内容重叠”): the old
+               * shadcn <ScrollArea className="max-h-48"> did NOT constrain
+               * the list — Radix's Root only carries position:relative (no
+               * overflow clip) while the viewport's height:100% resolves to
+               * auto against the auto-height root, so a long checklist
+               * escaped the panel and overlapped the content below. A plain
+               * native max-h + overflow-y-auto box clips and scrolls
+               * reliably; the slim webkit scrollbar keeps the look. */
+              <div
+                className={
+                  "mt-2 max-h-64 overflow-y-auto rounded-md border border-teal-100 bg-white dark:border-teal-900 dark:bg-slate-900 " +
+                  "[&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300 dark:[&::-webkit-scrollbar-thumb]:bg-slate-600"
+                }
+              >
                 <div className="divide-y divide-slate-100 dark:divide-slate-800">
                   {catalogItems.map((it) => (
                     <label
@@ -1014,7 +1094,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     </label>
                   ))}
                 </div>
-              </ScrollArea>
+              </div>
             )}
             {checkedCount === 0 && catalogItems.length > 0 && (
               <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-400">至少需要勾选一个 job 才能生成流程图。</p>
@@ -1211,8 +1291,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
           <Boxes className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
           <span>
-            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）；每张 map 先在 ChimeraX 里做 5 候选拟合（original / x·y·z 180° 旋转 / z-flip），按 <code className="font-mono">fit search 15</code> 相关性选最优 ——
-            z-flip 胜出即手性相反、已自动翻正；参考地图做 90° 视角白区评分后统一应用到所有地图，保证朝向与比例一致。极简版式另会在「喂给下一阶段」的 class 周围画细框，并在箭头旁标注留存颗粒数与百分比。图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
+            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（在简化基础上最多只保留 5 行图片；选中 class 细框 + 箭头旁留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先在 ChimeraX 里做 5 候选拟合（original / x·y·z 180° 旋转 / z-flip），按 <code className="font-mono">fit search 15</code> 相关性选最优 ——
+            z-flip 胜出即手性相反、已自动翻正；参考地图做 90° 视角白区评分后统一应用到所有地图，保证朝向与比例一致。图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
           </span>
         </div>
       </CardContent>
