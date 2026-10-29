@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
 import {
@@ -38,6 +39,7 @@ import {
 import {
   buildFlowFigureModel,
   buildDemoFigureModel,
+  applyManualSelection,
   fetchFigureImages,
   fetchFscXmlText,
   fscPng,
@@ -52,6 +54,9 @@ import { cryoSmartBytes, buildProxyAbsoluteUrl, probeCryosmartReachable } from "
 import { FLOW_ENGINE_VERSION } from "@/lib/cryosmart/flow-engine-version";
 
 type FigureMode = "chimerax" | "preview" | "demo";
+/** v3.59 (round-18): the deck layout style — 标准 (rich) vs 极简 (the
+ * upload/workflow.pptx reference look). */
+type FigureStyle = "standard" | "minimal";
 
 interface StepState {
   busy: boolean;
@@ -97,6 +102,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   // the following refinement stage). Default OFF: the full-fidelity figure
   // stays the default.
   const [simplified, setSimplified] = useState(false);
+  // v3.59 (round-18): 版式 — 标准 or 极简 (BuildPptxOptions.style).
+  const [figStyle, setFigStyle] = useState<FigureStyle>("standard");
+  // v3.59 (round-18 手动模式): checkbox list of which jobs' images to
+  // include. `manualSel` is keyed by job uid; absent = checked.
+  const [manual, setManual] = useState(false);
+  const [manualSel, setManualSel] = useState<Record<string, boolean>>({});
   // v3.45: default "10" — the widest numeric value (folding off for every
   // lineage with ≤10 stages, which covers the real P208 8-stage model that
   // used to ship with 2 collapsed stages). "0" = the “全部” selector entry
@@ -215,6 +226,57 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   }, [relayCommand]);
 
   /* ---------------------------------------------------------------- */
+  /* v3.59 手动模式: the stage checklist                               */
+  /* ---------------------------------------------------------------- */
+
+  /** The candidate catalog — the figure model as it WOULD be built with
+   * the current 阶段数/简化设置. Only computed while 手动勾选 is on (the
+   * build is pure and cheap, but pointless when the toggle is off). The
+   * checklist then lets the user trim it job by job. */
+  const manualCatalog = useMemo<FlowFigureModel | null>(() => {
+    if (!manual) return null;
+    if (mode === "demo") return buildDemoFigureModel();
+    if (!summary) return null;
+    try {
+      const parsed = Number(maxGroups);
+      return buildFlowFigureModel(summary, {
+        maxGroups: Number.isFinite(parsed) ? parsed : 10,
+        simplified,
+      });
+    } catch {
+      return null;
+    }
+  }, [manual, mode, summary, maxGroups, simplified]);
+
+  const catalogItems = useMemo(() => {
+    const out: Array<{ uid: string; label: string; thumbs: number }> = [];
+    if (!manualCatalog) return out;
+    for (const g of manualCatalog.groups) {
+      for (const it of g) {
+        out.push({
+          uid: it.uid,
+          label: it.label,
+          thumbs: it.classes?.length ?? (it.mapKey || it.imageUrl ? 1 : 0),
+        });
+      }
+    }
+    return out;
+  }, [manualCatalog]);
+
+  /** New catalog entries default to CHECKED (手动勾选 starts as a superset
+   * the user trims); entries the user already decided keep their value. */
+  useEffect(() => {
+    if (!manual) return;
+    setManualSel((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const it of catalogItems) next[it.uid] = prev[it.uid] ?? true;
+      return next;
+    });
+  }, [manual, catalogItems]);
+
+  const checkedCount = catalogItems.filter((it) => manualSel[it.uid] !== false).length;
+
+  /* ---------------------------------------------------------------- */
   /* Generate                                                          */
   /* ---------------------------------------------------------------- */
 
@@ -300,6 +362,24 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           maxGroups: Number.isFinite(parsedGroups) ? parsedGroups : 10,
           simplified,
         });
+      }
+      /* v3.59 手动模式: trim the model to the checked jobs BEFORE any
+       * image work — unchecked stages neither render nor download. The
+       * reference/finalStats fixups live in applyManualSelection. */
+      if (manual) {
+        if (!catalogItems.length) {
+          throw new Error("手动勾选: 当前设置下没有可勾选的阶段 — 请先调整阶段数/简化模式或载入谱系数据");
+        }
+        model = applyManualSelection(model, (uid) => manualSel[uid] !== false);
+        if (!model.groups.length) {
+          throw new Error("手动勾选: 至少需要勾选一个 job 才能生成流程图");
+        }
+        pushLog(`手动勾选: 保留 ${model.groups.length}/${catalogItems.length} 个阶段（${checkedCount} 个 job）`);
+      }
+      if (figStyle === "minimal") {
+        pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头 · 选中 class 细框 · 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
+      } else {
+        pushLog("标准版式: 竖向单列 · 固定长度直箭头 · job id 标注 · 每 class 统计");
       }
       if (mode !== "demo" && simplified) {
         // v3.55: self-diagnosing run log — the simplified pipeline's four
@@ -686,7 +766,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       }
 
       /* 3. assemble pptx */
-      setStep((s) => ({ ...s, phase: "组装 16:9 流程图 PPTX", pct: 94 }));
+      setStep((s) => ({ ...s, phase: "组装竖版流程图 PPTX", pct: 94 }));
       const footnote =
         mode === "demo"
           ? "CryoSmart Workflow Figure (demo) · 参考 Workflow.pptx 版式"
@@ -699,7 +779,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               view: chiralityMeta.view || null,
               mode: mode === "chimerax" ? "ChimeraX aligned" : "session previews",
             });
-      const blob = buildWorkflowPptx(model, { images, footnote });
+      const blob = buildWorkflowPptx(model, { images, footnote, style: figStyle });
       const project = mode === "demo" ? "Demo" : `${summary?.project_uid ?? "P"}_${summary?.start_uid ?? "J"}`;
       const filename = `CryoSmart_${project}_workflow.pptx`;
       const blobUrl = URL.createObjectURL(blob);
@@ -759,7 +839,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       setStep((s) => ({ ...s, busy: false, error: message }));
       toast.error(`流程图生成失败: ${message}`);
     }
-  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, pushLog, maxGroups, includeFsc, simplified, bridgeHosts, checkEngineFresh]);
+  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, pushLog, maxGroups, includeFsc, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh]);
 
   const canGenerate = !step.busy && (mode === "demo" || !!summary);
   const bridgeBadge = useMemo(() => {
@@ -777,14 +857,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             <Workflow className="h-4 w-4" />
           </span>
           <CardTitle className="text-lg">Workflow Figure · 一键流程图</CardTitle>
-          <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-slate-500 dark:text-slate-400">16:9 PPTX</Badge>
+          <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-slate-500 dark:text-slate-400">竖版 PPTX</Badge>
           {/* v3.50: engine version — printed in every run log, so a pasted log
            * names its own bundle version (a log without the 流程图引擎 line is
            * a pre-3.50 stale page by definition). */}
           <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-teal-700 dark:text-teal-300">引擎 v{FLOW_ENGINE_VERSION}</Badge>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          按参考 Workflow.pptx 版式一键生成流程图：所有 map 由 ChimeraX 渲染，先拟合到参考地图保证朝向一致，再做 90° 视角统一，手性（z-flip）逐图检查并翻正；输出 16:9 PPTX。
+          竖向单列排版，箭头固定尺寸、直线连接；所有 map 由 ChimeraX 渲染并统一朝向与手性。可选「极简版式」（参考 workflow.pptx：选中 class 细框 + 箭头旁留存颗粒数标注）与「手动勾选」需要展示的 job。
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -815,7 +895,27 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             </button>
           ))}
           <div className="ml-auto flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-2" title="省略少量数据的 2D 步骤；省略 Maximum resolution 为默认 12 Å 的 ab-initio 阶段（直接显示后续精修，如 hetero refine）；隐藏破坏「从多到少」的计数">
+            {/* v3.59: 版式 selector — 标准 vs 极简 (BuildPptxOptions.style). */}
+            <div className="flex items-center gap-2" title="极简版式参考 workflow.pptx：无 job id/页脚，选中 class 加细框，箭头旁标注留存颗粒数与百分比；标准版式保留 job id 与每 class 统计">
+              <Label className="text-[11.5px] text-slate-600 dark:text-slate-300">版式</Label>
+              <Select value={figStyle} onValueChange={(v) => setFigStyle(v as FigureStyle)}>
+                <SelectTrigger className="h-8 w-[82px] text-[12px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="standard">标准</SelectItem>
+                  <SelectItem value="minimal">极简</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {/* v3.59: 手动模式 — check which jobs' images appear. */}
+            <div className="flex items-center gap-2" title="开启后可在下方勾选需要体现在流程图里的 job（未勾选的阶段不渲染、不下载）">
+              <Switch id="flow-manual" checked={manual} onCheckedChange={setManual} />
+              <Label htmlFor="flow-manual" className="text-[11.5px] text-slate-600 dark:text-slate-300">
+                手动勾选
+              </Label>
+            </div>
+            <div className="flex items-center gap-2" title="省略少量数据的 2D 步骤；省略 Maximum resolution 为默认 12 Å 的 ab-initio 阶段（直接显示后续精修，如 hetero refine）；合并相邻同颗粒数的 non-uniform；隐藏破坏「从多到少」的计数">
               <Switch
                 id="flow-simplified"
                 checked={simplified}
@@ -850,6 +950,77 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             </div>
           </div>
         </div>
+
+        {/* v3.59 手动模式: the job checklist. Each row = one job in the
+         * figure model built with the CURRENT 阶段数/简化 settings;
+         * unchecked jobs are dropped before any image work. */}
+        {manual && (
+          <div className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 dark:border-teal-800 dark:bg-teal-950/20">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[12.5px] font-semibold text-slate-700 dark:text-slate-200">勾选需要体现的 job</span>
+              <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-teal-700 dark:text-teal-300">
+                {checkedCount}/{catalogItems.length}
+              </Badge>
+              <div className="ml-auto flex items-center gap-1.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-[11px]"
+                  onClick={() => {
+                    const next: Record<string, boolean> = {};
+                    for (const it of catalogItems) next[it.uid] = true;
+                    setManualSel(next);
+                  }}
+                >
+                  全选
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-[11px]"
+                  onClick={() => {
+                    const next: Record<string, boolean> = {};
+                    for (const it of catalogItems) next[it.uid] = false;
+                    setManualSel(next);
+                  }}
+                >
+                  清空
+                </Button>
+              </div>
+            </div>
+            {catalogItems.length === 0 ? (
+              <p className="mt-2 text-[11.5px] text-slate-500 dark:text-slate-400">
+                {mode === "demo" ? "演示样例没有可勾选的阶段。" : "当前设置下没有可勾选的阶段 — 请先载入谱系数据，或调整阶段数/简化模式。"}
+              </p>
+            ) : (
+              <ScrollArea className="mt-2 max-h-48 rounded-md border border-teal-100 bg-white dark:border-teal-900 dark:bg-slate-900">
+                <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {catalogItems.map((it) => (
+                    <label
+                      key={it.uid}
+                      className="flex cursor-pointer items-center gap-2.5 px-2.5 py-1.5 transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                    >
+                      <Checkbox
+                        checked={manualSel[it.uid] !== false}
+                        onCheckedChange={(v) => setManualSel((prev) => ({ ...prev, [it.uid]: !!v }))}
+                      />
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10.5px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                        {it.uid}
+                      </span>
+                      <span className="flex-1 truncate text-[12px] text-slate-700 dark:text-slate-200">{it.label}</span>
+                      <span className="text-[10.5px] text-slate-400 dark:text-slate-500">
+                        {it.thumbs > 1 ? `${it.thumbs} 张图` : it.thumbs === 1 ? "1 张图" : "无图"}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </ScrollArea>
+            )}
+            {checkedCount === 0 && catalogItems.length > 0 && (
+              <p className="mt-1.5 text-[11px] text-amber-600 dark:text-amber-400">至少需要勾选一个 job 才能生成流程图。</p>
+            )}
+          </div>
+        )}
 
         {/* ChimeraX bridge panel */}
         {mode === "chimerax" && (
@@ -1040,8 +1211,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
           <Boxes className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
           <span>
-            流程图中的每张 map 先在 ChimeraX 里做 5 候选拟合（original / x·y·z 180° 旋转 / z-flip），按 <code className="font-mono">fit search 15</code> 相关性选最优 ——
-            z-flip 胜出即手性相反、已自动翻正；参考地图做 90° 视角白区评分后统一应用到所有地图，保证朝向与比例一致。图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
+            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）；每张 map 先在 ChimeraX 里做 5 候选拟合（original / x·y·z 180° 旋转 / z-flip），按 <code className="font-mono">fit search 15</code> 相关性选最优 ——
+            z-flip 胜出即手性相反、已自动翻正；参考地图做 90° 视角白区评分后统一应用到所有地图，保证朝向与比例一致。极简版式另会在「喂给下一阶段」的 class 周围画细框，并在箭头旁标注留存颗粒数与百分比。图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
           </span>
         </div>
       </CardContent>

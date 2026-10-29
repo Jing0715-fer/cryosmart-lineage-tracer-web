@@ -30,8 +30,18 @@
  * count) and omits the reconstruct-only J40; connector invariants —
  * axis-aligned segments only, no bentConnector, and NO segment may cross
  * a thumbnail or stats/label box (deck (6)'s wrap-crossing bug class).
+ *
+ * v3.59 (round-18): the layout was rebuilt after upload/workflow.pptx —
+ * portrait 7.5-in canvas with DYNAMIC height, one straight spine of
+ * FIXED 0.39 in arrows, a 极简 style (selection frames + retention
+ * labels, no job ids/footnote), and the 手动模式 filter
+ * (applyManualSelection). Asserts: every connector is a vertical
+ * straightConnector1 of the fixed length on the spine x=3.75; the minimal
+ * deck carries retention percentages (48.3%/77.0%/64.1%/55.2% on the P96
+ * chain) and exactly 5 selection frames; manual drops re-anchor the
+ * reference and drop the final Å with the final job.
  */
-import { buildFlowFigureModel, figureMapSources } from "../src/lib/cryosmart/workflow-figure";
+import { buildFlowFigureModel, figureMapSources, applyManualSelection } from "../src/lib/cryosmart/workflow-figure";
 import { chimeraClassColor } from "../src/lib/cryosmart/chimera-colors";
 import { buildWorkflowPptx } from "../src/lib/cryosmart/workflow-pptx";
 import { abinitMaxResolutionFromJob, jobNode } from "../src/lib/cryosmart/lineage";
@@ -42,6 +52,7 @@ import * as path from "node:path";
 const OUT_DIR = "/tmp/figtest";
 const OUT = path.join(OUT_DIR, "out.pptx");
 const OUT_SIMPLIFIED = path.join(OUT_DIR, "out-simplified.pptx");
+const OUT_MINIMAL = path.join(OUT_DIR, "out-minimal.pptx");
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
 /* ------------------------------------------------------------------ */
@@ -566,6 +577,75 @@ const buf2 = Buffer.from(await blob2.arrayBuffer());
 fs.writeFileSync(OUT_SIMPLIFIED, buf2);
 console.log("== simplified pptx ==", OUT_SIMPLIFIED, buf2.length, "bytes");
 
+/* ------------------------------------------------------------------
+ * v3.59 (round-18): 手动模式 unit — applyManualSelection               */
+/* ------------------------------------------------------------------ */
+
+/* drop two middle stages: groups 11 → 9, J41 stays final → finalStats
+ * and the J41/volume reference survive; the dropped stages' maps leave
+ * the render set (18 → 14). */
+const manualMid = applyManualSelection(model, (uid) => uid !== "J27" && uid !== "J33");
+if (manualMid.groups.length !== 9)
+  fail.push(`manual mid-drop groups expected 9 got ${manualMid.groups.length}`);
+if (manualMid.finalStats !== "3.20 Å")
+  fail.push(`manual mid-drop must KEEP the final Å (J41 kept), got ${manualMid.finalStats}`);
+if (manualMid.referenceKey !== "J41/volume")
+  fail.push(`manual mid-drop reference must stay J41/volume, got ${manualMid.referenceKey}`);
+{
+  const flat = manualMid.groups.flat().map((i) => i.uid);
+  if (flat.includes("J27") || flat.includes("J33")) fail.push("manual mid-drop still carries a dropped uid");
+  const srcsM = figureMapSources(manualMid);
+  if (srcsM.size !== 14) fail.push(`manual mid-drop render set expected 14 got ${srcsM.size}`);
+  if (srcsM.has("J27/volume_class_0") || srcsM.has("J33/volume_class_0"))
+    fail.push("manual mid-drop render set still carries a dropped stage's map");
+}
+if (!manualMid.warnings.some((w) => w.includes("手动勾选") && w.includes("2 个阶段")))
+  fail.push("manual mid-drop warning missing");
+
+/* drop the FINAL job: the Å belongs to J41 and must go with it; the
+ * reference re-anchors to the new last map-bearing stage J40; the render
+ * set loses exactly J41/volume (18 → 17). */
+const manualTail = applyManualSelection(model, (uid) => uid !== "J41");
+if (manualTail.groups.length !== 10) fail.push(`manual tail-drop groups expected 10 got ${manualTail.groups.length}`);
+if (manualTail.finalStats !== null) fail.push(`manual tail-drop must drop the J41 final Å, got ${manualTail.finalStats}`);
+if (manualTail.referenceKey !== "J40/volume")
+  fail.push(`manual tail-drop reference must re-anchor to J40/volume, got ${manualTail.referenceKey}`);
+if (manualTail.referenceItem?.uid !== "J40") fail.push("manual tail-drop referenceItem must be J40's item");
+if (!manualTail.warnings.some((w) => w.includes("最终阶段被取消勾选"))) fail.push("manual tail-drop warning missing");
+if (figureMapSources(manualTail).size !== 17)
+  fail.push(`manual tail-drop render set expected 17 got ${figureMapSources(manualTail).size}`);
+
+/* keep NONE: empty groups + warning, nothing dangles. */
+const manualNone = applyManualSelection(model, () => false);
+if (manualNone.groups.length !== 0) fail.push("manual none-drop groups must be empty");
+if (manualNone.referenceKey !== null || manualNone.finalStats !== null)
+  fail.push("manual none-drop must null the reference and finalStats");
+
+/* keep ALL: identity — no warning, no churn. */
+const manualAll = applyManualSelection(model, () => true);
+if (manualAll.groups.length !== model.groups.length)
+  fail.push("manual keep-all must be an identity pass-through");
+if (manualAll.warnings.length !== model.warnings.length)
+  fail.push("manual keep-all must not add warnings");
+console.log("== 手动模式 unit checks done ==");
+
+/* ------------------------------------------------------------------
+ * v3.59: 极简版式 deck — selection frames + retention labels
+ * ------------------------------------------------------------------ */
+
+/* The minimal deck builds from the FULL model (简化 off) so the whole
+ * 11-stage chain renders small: every row is 2:1 at the reference's own
+ * 1.58 in (only 3-class rows constrain the strip, and they still fit).
+ * Retention labels after each row read the NEXT row's input:
+ *   J12 12,259 → J27 58,048 (grew: count-only) → J28 1,588,675 (count-only)
+ *   → J31 766,560 (48.3%) → J33 590,421 (77.0%) → J34 590,421 (100%:
+ *   count-only) → J35 378,677 (64.1%) → J37 (count-only) → J39
+ *   (count-only) → J40 209,127 (55.2%) → J41 (count-only). */
+const blob3 = buildWorkflowPptx(model, { images, style: "minimal" });
+const buf3 = Buffer.from(await blob3.arrayBuffer());
+fs.writeFileSync(OUT_MINIMAL, buf3);
+console.log("== minimal pptx ==", OUT_MINIMAL, buf3.length, "bytes");
+
 /* ------------------------------------------------------------------ */
 /* v3.54 default-12 Å ab-initio final: resolution info ignored         */
 /* ------------------------------------------------------------------ */
@@ -602,10 +682,10 @@ console.log("== 12Å case ==", JSON.stringify({ full: full50.finalStats, simplif
 /* v3.55: job-id labels inside the emitted PPTX slide XML              */
 /* ------------------------------------------------------------------ */
 
-/* unzip the two decks and inspect the slide's label runs */
-function slide1Xml(pptxPath: string): string {
+/* unzip the decks and inspect the slide's label runs */
+function zipPartText(pptxPath: string, partName: string): string {
   const buf = fs.readFileSync(pptxPath);
-  // minimal stored/deflate zip scan: find "ppt/slides/slide1.xml" entry
+  // minimal stored/deflate zip scan: find the wanted entry
   let off = 0;
   while (off < buf.length - 4) {
     if (buf.readUInt32LE(off) === 0x04034b50) {
@@ -616,7 +696,7 @@ function slide1Xml(pptxPath: string): string {
       const nameStart = off + 30;
       const dataStart = nameStart + nameLen + extraLen;
       const name = buf.toString("utf8", nameStart, nameStart + nameLen);
-      if (name === "ppt/slides/slide1.xml") {
+      if (name === partName) {
         const raw = buf.subarray(dataStart, dataStart + compSize);
         if (method === 0) return raw.toString("utf8");
         return inflateRawSync(raw).toString("utf8");
@@ -625,10 +705,15 @@ function slide1Xml(pptxPath: string): string {
     }
     off += 1;
   }
-  throw new Error("slide1.xml not found in " + pptxPath);
+  throw new Error(partName + " not found in " + pptxPath);
+}
+function slide1Xml(pptxPath: string): string {
+  return zipPartText(pptxPath, "ppt/slides/slide1.xml");
 }
 const xmlFull = slide1Xml(OUT);
 const xmlSimplified = slide1Xml(OUT_SIMPLIFIED);
+const xmlMinimal = slide1Xml(OUT_MINIMAL);
+const EMU = 914400;
 console.log("== slide xml uid-run checks ==");
 if (!xmlFull.includes(" · J31") || !xmlFull.includes(" · J41"))
   fail.push("full deck labels missing the gray job-id runs (· J31 / · J41)");
@@ -641,6 +726,111 @@ if (xmlSimplified.includes(" · J33") || xmlSimplified.includes(" · J27"))
   fail.push("simplified deck must NOT label the dropped J27/J33 stages");
 if (xmlSimplified.includes(" · J35")) fail.push("simplified deck must NOT label the merged-away non-uniform J35");
 if (xmlSimplified.includes(" · J40")) fail.push("simplified deck must NOT label the dropped reconstruct-only J40");
+
+/* ------------------------------------------------------------------
+ * v3.59 (round-18): portrait spine layout invariants.                  */
+/* ------------------------------------------------------------------ */
+console.log("== v3.59 portrait / fixed-arrow / spine checks ==");
+for (const [deckPath, deckXml, deck] of [
+  [OUT, xmlFull, "full deck"],
+  [OUT_SIMPLIFIED, xmlSimplified, "simplified deck"],
+  [OUT_MINIMAL, xmlMinimal, "minimal deck"],
+] as Array<[string, string, string]>) {
+  const presXml = zipPartText(deckPath, "ppt/presentation.xml");
+  const sz = /<p:sldSz cx="(\d+)" cy="(\d+)"/.exec(presXml);
+  if (!sz) {
+    fail.push(`${deck}: presentation.xml carries no sldSz`);
+    continue;
+  }
+  const wIn = +sz[1] / EMU;
+  const hIn = +sz[2] / EMU;
+  if (+sz[1] !== 6858000) fail.push(`${deck}: portrait width must be 7.5 in, got ${wIn}`);
+  if (hIn < 10) fail.push(`${deck}: slide height must be ≥ 10 in, got ${hIn}`);
+  /* every shape must sit inside the canvas (the grown height covers all
+   * content; nothing may fall off the bottom edge). */
+  {
+    let maxBottom = 0;
+    for (const m of deckXml.matchAll(/<a:off x="(-?\d+)" y="(-?\d+)"\/><a:ext cx="(\d+)" cy="(\d+)"/g)) {
+      maxBottom = Math.max(maxBottom, (+m[2] + +m[4]) / EMU);
+    }
+    if (maxBottom > hIn + 0.01) fail.push(`${deck}: content bottom ${maxBottom.toFixed(2)} in exceeds the ${hIn.toFixed(2)} in canvas`);
+  }
+  /* connectors: ONLY vertical straightConnector1 arrows, fixed 0.39 in
+   * length, 1 pt weight, triangle head, all on the spine x = 3.75. */
+  const ARROW_EMU = 0.39 * EMU;
+  const conns = [...deckXml.matchAll(/<p:cxnSp>.*?<\/p:cxnSp>/gs)].map((m) => m[0]);
+  if (!conns.length) fail.push(`${deck}: no connectors emitted`);
+  const expectedConns = (deckXml.match(/直接箭头连接符/g) || []).length;
+  for (const cn of conns) {
+    const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(cn);
+    const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(cn);
+    if (!off || !ext) continue;
+    if (+ext[1] !== 0) fail.push(`${deck}: connector must be vertical, got cx=${ext[1]}`);
+    else if (Math.abs(+ext[2] - ARROW_EMU) > 400)
+      fail.push(`${deck}: connector length must be the fixed 0.39 in (±0.0004), got ${+ext[2] / EMU}`);
+    if (+off[1] !== Math.round(3.75 * EMU))
+      fail.push(`${deck}: connector must sit on the spine x=3.75, got ${+off[1] / EMU}`);
+    if (!/prst="straightConnector1"/.test(cn)) fail.push(`${deck}: connector is not a straightConnector1`);
+    if (!/<a:ln w="12700">/.test(cn)) fail.push(`${deck}: connector line must be the fixed 1 pt (w=12700)`);
+    if (!/<a:tailEnd type="triangle"\/>/.test(cn)) fail.push(`${deck}: connector must carry the triangle head`);
+    if (/flipH="1"|flipV="1"/.test(cn)) fail.push(`${deck}: a downward spine arrow must not need flips`);
+  }
+  if (conns.length !== expectedConns)
+    fail.push(`${deck}: ${expectedConns - conns.length} connectors are not 直接箭头连接符-named`);
+}
+/* header: the three texts, NO inter-item arrows in the band (the reference
+ * dropped them); "Auto pick" raised between the two counts. */
+for (const [deckXml, deck] of [
+  [xmlFull, "full deck"],
+  [xmlMinimal, "minimal deck"],
+] as Array<[string, string]>) {
+  const texts = [...deckXml.matchAll(/<p:sp>.*?<\/p:sp>/gs)]
+    .map((m) => {
+      const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(m[0]);
+      const t = [...m[0].matchAll(/<a:t>([^<]*)<\/a:t>/g)].map((r) => r[1]).join("|");
+      return { y: off ? +off[2] / EMU : -1, t };
+    })
+    .filter((s) => s.y < 0.9 && s.y >= 0.3);
+  const byT = (frag: string) => texts.find((s) => s.t.includes(frag));
+  const pick = byT("Auto pick");
+  const micro = byT("Micrographs");
+  const parts = byT("particles");
+  if (!micro || !parts) fail.push(`${deck}: header band missing the counts`);
+  if (pick && micro && micro.y - pick.y < 0.1)
+    fail.push(`${deck}: header counts must sit BELOW the raised "Auto pick"`);
+  if (pick && parts && parts.y - pick.y < 0.1)
+    fail.push(`${deck}: header "N particles" must sit BELOW the raised "Auto pick"`);
+  /* no connector inside the header band (y < 0.9): all connectors start
+   * at/after the band's bottom. */
+  for (const m of deckXml.matchAll(/<p:cxnSp>.*?<\/p:cxnSp>/gs)) {
+    const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(m[0]);
+    if (off && +off[2] / EMU < 0.8) fail.push(`${deck}: header band must carry no arrows`);
+  }
+}
+
+/* minimal deck specifics: bare stage names (NO job-id runs), NO footnote,
+ * the 5 selection frames (J27 c0 / J31 c0 / J33 c0 / J34 c0 / J39 c2),
+ * the retention labels with the P96 percentages, and the final Å. */
+if (xmlMinimal.includes(" · J")) fail.push("minimal deck must NOT carry job-id label runs");
+if (xmlMinimal.includes("CryoSmart Workflow Figure")) fail.push("minimal deck must NOT carry the footnote");
+{
+  /* selection frames are the 矩形-named rects (text boxes are 文本框);
+   * every synthesized image exists, so there are NO placeholder frames. */
+  const frames = (xmlMinimal.match(/name="矩形 /g) || []).length;
+  if (frames !== 5) fail.push(`minimal deck expected exactly 5 selection frames, got ${frames}`);
+  for (const pct of ["48.3%", "77.0%", "64.1%", "55.2%"]) {
+    if (!xmlMinimal.includes(pct)) fail.push(`minimal deck missing the retention label ${pct}`);
+  }
+  if (!xmlMinimal.includes("378,677 particles")) fail.push("minimal deck missing the 378,677 retention count");
+  if (!xmlMinimal.includes("1,588,675 particles")) fail.push("minimal deck missing the 1,588,675 retention count");
+  /* 100% transitions must print the count WITHOUT a percentage line. */
+  if (xmlMinimal.includes("100.0%")) fail.push("minimal deck must not print a 100% retention line");
+  if (!xmlMinimal.includes("3.20 Å")) fail.push("minimal deck missing the final resolution under the last map");
+  /* the standard-only trimmings must be absent: no side stats boxes, no
+   * per-class stats under thumbs (the 2:1 minimal rows carry only labels +
+   * pics + frames + retention + Å text). */
+  if (xmlMinimal.includes("77%")) fail.push("minimal deck must not render per-class stats lines");
+}
 
 /* ------------------------------------------------------------------
  * v3.58 (round-17 “连线还是会出现错位”): connector geometry invariants.
@@ -710,6 +900,7 @@ function assertNoConnectorCrossing(xml: string, deck: string) {
 console.log("== connector no-crossing checks ==");
 assertNoConnectorCrossing(xmlFull, "full deck");
 assertNoConnectorCrossing(xmlSimplified, "simplified deck");
+assertNoConnectorCrossing(xmlMinimal, "minimal deck");
 
 /* ------------------------------------------------------------------ */
 /* v3.55 unit: abinitMaxResolutionFromJob params_spec extraction        */

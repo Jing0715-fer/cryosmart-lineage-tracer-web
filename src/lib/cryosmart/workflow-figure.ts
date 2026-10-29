@@ -810,6 +810,65 @@ export function buildFlowFigureModel(
   };
 }
 
+/** v3.59 (round-18 手动模式 “自己勾选需要体现哪些 job 的图片”): filter the
+ *  figure model down to the stages whose uid passes `keep`. Handles the
+ *  two dangling references a trim can leave behind:
+ *  - referenceKey/referenceItem would still point at the ORIGINAL final
+ *    job's map — figureMapSources pushes referenceItem into its walk, so
+ *    a dropped stage's map would sweep back into the render pipeline.
+ *    Re-anchored to the LAST kept map-bearing stage (the same fallback
+ *    buildFlowFigureModel itself uses).
+ *  - finalStats ("3.46 Å") belongs to the original final JOB — dropped
+ *    with it when that job is unchecked (whatever now ends the figure
+ *    must not inherit another stage's resolution). */
+export function applyManualSelection(
+  model: FlowFigureModel,
+  keep: (uid: string) => boolean,
+): FlowFigureModel {
+  const finalGroup = model.groups[model.groups.length - 1];
+  const finalUid = finalGroup?.[finalGroup.length - 1]?.uid ?? null;
+  const groups = model.groups
+    .map((g) => g.filter((it) => keep(it.uid)))
+    .filter((g) => g.length > 0);
+  if (groups.length === model.groups.length) return model; // nothing dropped
+  const dropped = model.groups.length - groups.length;
+  if (!groups.length) {
+    return {
+      ...model,
+      groups,
+      referenceKey: null,
+      referenceItem: null,
+      finalStats: null,
+      warnings: [...model.warnings, "手动勾选: 未保留任何阶段 — 请至少勾选一个 job"],
+    };
+  }
+  let referenceKey: string | null = null;
+  let referenceItem: FlowFigureItem | null = null;
+  for (let i = groups.length - 1; i >= 0 && !referenceKey; i--) {
+    for (let j = groups[i].length - 1; j >= 0; j--) {
+      const it = groups[i][j];
+      if (it.mapKey) {
+        referenceKey = it.mapKey;
+        referenceItem = it;
+        break;
+      }
+    }
+  }
+  const droppedFinal = finalUid != null && !keep(finalUid);
+  return {
+    ...model,
+    groups,
+    referenceKey,
+    referenceItem,
+    finalStats: droppedFinal ? null : model.finalStats,
+    warnings: [
+      ...model.warnings,
+      `手动勾选: 已省略未勾选的 ${dropped} 个阶段` +
+        (droppedFinal ? "（最终阶段被取消勾选 — 其分辨率标注一并省略）" : ""),
+    ],
+  };
+}
+
 /** v3.45: selector semantics — a value <= 0 (the “全部” option) means
  * Infinity: never fold, every stage renders. Infinity passes through as-is. */
 function rawGroupsEffective(raw: number): number {

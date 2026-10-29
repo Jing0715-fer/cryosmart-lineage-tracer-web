@@ -1,50 +1,39 @@
 /**
- * 16:9 workflow-figure PPTX builder (v3.41; layout rebuilt in v3.49).
+ * Portrait workflow-figure PPTX builder (v3.59; layout rebuilt for round-18).
  *
- * Format modelled after the user's reference `upload/Workflow.pptx`
- * (WPS-authored, single 12192000 × 6858000 EMU slide) — a VERTICAL
- * stage flow, verified against the reference's own geometry:
- *   - header band top: "N Micrographs" → "Auto pick" → "N particles"
+ * Format modelled after the user's NEW reference `upload/workflow.pptx`
+ * (7.5 × 10 in PORTRAIT slide, verified against its own geometry):
+ *   - header band top: "N Micrographs" + "Auto pick" (raised between) +
+ *     "N particles" — the band ENDS at the spine, no inter-item arrows
+ *   - ONE straight vertical SPINE (slide centre x = 3.75) carries the whole
+ *     flow: every stage row is centred on it, every connector is a
+ *     straightConnector1 of FIXED length 0.39 in / 1 pt / triangle head
+ *     exactly like the reference's 直接箭头连接符 (round-18: “不要用之前的
+ *     折线了，尽量固定箭头的大小和尺寸” — NO elbows, NO bentConnector3,
+ *     NO column wrap; the misalignment class of rounds 12–17 is structurally
+ *     impossible now)
  *   - each stage one ROW top→bottom: right-aligned 8 pt Arial label above
- *     a wide 2:1 thumbnail (reference 3.12 × 1.56 in), 2-line stats box
- *     beside single-map stages / under each map of a parallel branch
- *   - thin black straightConnector1 arrows chaining the stages downward
- *   - final resolution text centered under the last stage ("3.46 Å")
+ *     the thumbnails, ending just LEFT of the spine (the reference's
+ *     “2*Hetero refinement” box ends at 3.62 vs spine 3.69), so the arrow
+ *     passing through the label band never touches the text
+ *   - 极简 style additionally draws the reference's selection rectangles
+ *     (thin black frame around the class whose particle count feeds the
+ *     next stage — 矩形 26/28/43) and the arrow retention labels
+ *     (“37.2% / 590,421 particles”) centred on the spine in the inter-row
+ *     gap, and puts the final resolution (“C1, 2.70 Å”) under the last map
+ *   - 标准 style keeps the richer v3.55 conventions (job-id label runs,
+ *     per-class stats under each thumbnail / side stats for single-map
+ *     rows, footnote) — now on the same spine layout
+ *   - the canvas is allowed to GROW (round-18: “可以根据需要改变画布
+ *     大小”): width stays the reference's 7.5 in, height = max(10 in,
+ *     content) rounded up to ¼ in — the slide is a figure strip, not a
+ *     projector deck
  *   - a thin-black-border empty frame when a thumbnail is unavailable
- *   - many stages: one column would shrink thumbnails below readability,
- *     so the flow wraps into 2 (at most 3) columns, continuing at the next
- *     column's top via a bent connector — the reference itself does a
- *     partial wrap (its last two stages sit side by side).
- *   - 8 pt Arial text runs (East-Asian font 微软雅黑), black on white
  *
- * v3.55 (round-14): every stage label now carries its JOB ID ("Non-uniform
- * refinement · J35") — single-item rows render name + gray 7 pt id on one
- * right-aligned line (box widened leftward, clamped to the column edge);
- * parallel-branch rows use a compact two-line label (name / id) so siblings
- * never collide. The final "N Å" sits under the last MAP stage (not under
- * an appended FSC panel), and per-class stats boxes are tall enough for
- * their two 8 pt lines.
- *
- * v3.57 (round-16, Windows-openability): the exported deck opened on Mac
- * PowerPoint but Windows reported it as corrupt, and a Mac re-save made it
- * Windows-readable. Root cause is strict-vs-lenient schema validation:
- *   (1) theme1.xml's fmtScheme carried ONE-entry fillStyleLst / lnStyleLst /
- *       effectStyleLst / bgFillStyleLst — CT_StyleMatrix requires EXACTLY
- *       three of each — and majorFont/minorFont lacked the required <a:cs>;
- *       a Mac re-save rewrites a fully legal theme, which is exactly the
- *       observed "re-saved file works" behavior.
- *   (2) slideLayout1.xml.rels was EMPTY — every slide layout MUST declare an
- *       explicit relationship to its slide master (ECMA-376 §13.3.3).
- * Fixed: canonical Office style matrix in the theme (+ objectDefaults /
- * extraClrSchemeLst), cs fonts, the required layout→master relationship,
- * <p:txStyles> on the master and <p:clrMapOvr> on the layout.
- *
- * v3.58 (round-17): connectors attach at the FLOW ANCHOR (the upstream
- * class whose count feeds the next stage) with elbow routes when the
- * anchor and the entry x differ, and the column wrap switched from the
- * bbox-midpoint bentConnector3 (which crossed thumbnails + stats boxes)
- * to an explicit below-content lane → inter-column-gutter route. See
- * the connectors section for the full story.
+ * v3.57 (round-16, Windows-openability, kept): canonical Office style
+ * matrix in the theme (exactly 3 fillStyleLst / lnStyleLst /
+ * effectStyleLst / bgFillStyleLst entries), cs fonts, the required
+ * slideLayout→slideMaster relationship, master txStyles, layout clrMapOvr.
  *
  * Map thumbnails keep the `name="CryoSmartImage:<uid>/<group>"` marker on
  * <p:cNvPr> (same contract as the A4 picture-flow PPTX) so the desktop
@@ -62,10 +51,10 @@ import { imageDims, type FlowFigureModel, type FlowFigureItem } from "./workflow
 /* ------------------------------------------------------------------ */
 
 const EMU = 914400;
-const SLIDE_W_EMU = 12192000;
-const SLIDE_H_EMU = 6858000;
-const SLIDE_W_IN = SLIDE_W_EMU / EMU; // 13.333…
-const SLIDE_H_IN = SLIDE_H_EMU / EMU; // 7.5
+/** v3.59: portrait reference width (upload/workflow.pptx sldSz cx). */
+const PAGE_W_IN = 7.5;
+/** Minimum slide height — the reference deck itself is 7.5 × 10. */
+const MIN_SLIDE_H_IN = 10;
 
 const IN = (v: number) => Math.round(v * EMU);
 const FONT = "Arial";
@@ -77,18 +66,15 @@ const EA_FONT = "微软雅黑";
 
 type Align = "l" | "ctr" | "r";
 
-/** v3.55 (round-14): one styled text run inside a paragraph. The op-level
- *  `sz`/`color` remain the paragraph defaults; a run may override either
- *  (the stage label's job-id run is smaller + gray next to the black
- *  stage name). */
+/** One styled text run inside a paragraph (v3.55: the stage label's
+ *  job-id run is smaller + gray next to the black stage name). */
 interface TextRun {
   t: string;
   sz?: number;
   color?: string;
 }
 
-/** One paragraph: either the legacy single-string shape (all existing
- *  call sites) or explicit runs. */
+/** One paragraph: either the legacy single-string shape or explicit runs. */
 interface TextLine {
   t?: string;
   runs?: TextRun[];
@@ -114,17 +100,15 @@ interface FrameOp {
   h: number;
 }
 
+/** v3.59: a connector is ALWAYS a straight arrow — fixed length, fixed
+ *  weight (1 pt), triangle head, exactly like the reference. The old
+ *  bent/elbow/plain-segment machinery is deleted. */
 interface ConnOp {
   kind: "conn";
   x1: number;
   y1: number;
   x2: number;
   y2: number;
-  bent?: boolean;
-  /** v3.53: false = a plain line segment (no arrowhead) — the header→first
-   *  stage elbow route is drawn as explicit segments and only the LAST one
-   *  carries the arrow. */
-  arrow?: boolean;
 }
 
 interface PicOp {
@@ -184,6 +168,9 @@ function frameXml(id: number, op: FrameOp): string {
   return `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="矩形 ${id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${IN(op.x)}" y="${IN(op.y)}"/><a:ext cx="${IN(op.w)}" cy="${IN(op.h)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:endParaRPr lang="zh-CN" altLang="en-US"/></a:p></p:txBody></p:sp>`;
 }
 
+/** v3.59: fixed-weight (1 pt) straight connector with a triangle head —
+ *  the reference deck's 直接箭头连接符. Only straight lines are emitted
+ *  anywhere in the deck. */
 function connXml(id: number, op: ConnOp): string {
   const offX = Math.min(op.x1, op.x2);
   const offY = Math.min(op.y1, op.y2);
@@ -191,9 +178,7 @@ function connXml(id: number, op: ConnOp): string {
   const extY = Math.abs(op.y2 - op.y1);
   const flipH = op.x2 < op.x1 ? ' flipH="1"' : "";
   const flipV = op.y2 < op.y1 ? ' flipV="1"' : "";
-  const prst = op.bent ? "bentConnector3" : "straightConnector1";
-  const tail = op.arrow === false ? "" : op.bent ? '<a:tailEnd type="arrow"/>' : '<a:tailEnd type="triangle"/>';
-  return `<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="${id}" name="连接符 ${id}"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr><a:xfrm${flipH}${flipV}><a:off x="${IN(offX)}" y="${IN(offY)}"/><a:ext cx="${IN(extX)}" cy="${IN(extY)}"/></a:xfrm><a:prstGeom prst="${prst}"><a:avLst/></a:prstGeom><a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>${tail}</a:ln></p:spPr></p:cxnSp>`;
+  return `<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="${id}" name="直接箭头连接符 ${id}"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr><a:xfrm${flipH}${flipV}><a:off x="${IN(offX)}" y="${IN(offY)}"/><a:ext cx="${IN(extX)}" cy="${IN(extY)}"/></a:xfrm><a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom><a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:tailEnd type="triangle"/></a:ln></p:spPr></p:cxnSp>`;
 }
 
 function picXml(id: number, op: PicOp, relId: string): string {
@@ -205,10 +190,16 @@ function picXml(id: number, op: PicOp, relId: string): string {
 /* ------------------------------------------------------------------ */
 
 export interface BuildPptxOptions {
-  /** Bottom-left footnote (alignment / handedness summary). */
+  /** Bottom-left footnote (alignment / handedness summary). 标准 style
+   *  only — the 极简 reference carries none. */
   footnote?: string | null;
   /** Thumbnail image bytes keyed by `item.mapKey` OR `item.imageUrl`. */
   images: Map<string, Uint8Array>;
+  /** v3.59 (round-18 极简模式): "minimal" = the upload/workflow.pptx
+   *  reference look (no job ids, selection rectangles around the flow
+   *  anchor class, arrow retention labels, final Å under the last map);
+   *  "standard" (default) = the richer v3.55 conventions. */
+  style?: "standard" | "minimal";
 }
 
 function estimateTextWidth(text: string): number {
@@ -229,66 +220,64 @@ export function buildWorkflowPptx(
   fig: FlowFigureModel,
   options: BuildPptxOptions,
 ): Blob {
+  const minimal = options.style === "minimal";
   const ops: Op[] = [];
   const pics: PicOp[] = [];
   const MARGIN_X = 0.45;
-  const contentW = SLIDE_W_IN - 2 * MARGIN_X;
+  const contentW = PAGE_W_IN - 2 * MARGIN_X;
+  /** v3.59: the single flow spine — slide centre, like the reference. */
+  const SPINE = PAGE_W_IN / 2;
+  /** v3.59: FIXED arrow geometry (reference: 0.39 in, 1 pt, triangle). */
+  const ARROW_LEN = 0.39;
 
-  /* ---- header band data: "N Micrographs" → "Auto pick" → "N particles".
-   * v3.53 (round-12 “2d 前面的部分”): the band LAYOUT moved below the stage
-   * rows — it must anchor to the first stage's position (see the comment
-   * on the emission block). */
+  /* ---- header band data: "N Micrographs" + "Auto pick" + "N particles".
+   * v3.59: the reference's own header — the three texts on one line with
+   * "Auto pick" RAISED between the two counts, the band ending at the
+   * spine, and NO inter-item arrows (the old band chained horizontal
+   * arrows; the new reference drops them). */
   const headerItems = [
     fig.headerStats.micrographs,
     fig.headerStats.pick,
     fig.headerStats.particles,
   ].filter((t): t is string => !!t);
 
-  /* ---- v3.51 stage groups: reference-faithful VERTICAL flow ----
-   * Stages stack top→bottom exactly like the reference; one ROW per stage.
-   * v3.51 (round-10 request — “每个 job 的多个 class 并列成一排”): a
-   * class-split job (ab-initio / hetero / 3D-class) now renders EVERY class
-   * volume side by side INSIDE its stage row — ONE job label above the whole
-   * class span, per-class stats under each thumbnail. Parallel branches keep
-   * their own labels. A single column is preferred (the reference's look);
-   * it wraps into 2 (at most 3) columns only when thumbnails would fall
-   * below the readability floor. */
+  /* ---- stage groups ---- */
   const groups = fig.groups.filter((g) => g.length > 0);
-  const n = Math.max(1, groups.length);
-  const FLOW_TOP = 1.18;
-  const FLOW_BOTTOM = SLIDE_H_IN - 0.44; // keep the footnote strip clear
-  const availH = Math.max(2.4, FLOW_BOTTOM - FLOW_TOP);
-  const LABEL_H = 0.22;
-  const ROW_GAP = 0.16;
+  const LABEL_H = 0.26;
+  /** parallel rows' label band (two lines) + the arrow standoff above it */
+  const PLABEL_H = minimal ? 0.32 : 0.48;
   const ITEM_GAP = 0.16;
+  /** 标准 style: per-class stats box height under each thumbnail. */
+  const UNDER_H = 0.32;
+  /** 标准 style: side stats box for single-map rows. */
   const STATS_W = 0.95;
-  const STATS_GAP = 0.1;
-  const UNDER_H = 0.3;
-  const COL_GAP = 0.7;
-  const REF_IMG_W = 3.12; // the reference's own thumbnail width (2:1)
-  const MIN_IMG_W = 1.45; // readability floor before wrapping columns
+  /** 极简 style: retention label height in the inter-row gap. */
+  const RETAIN_H = 0.37;
+  const REF_IMG_W = minimal ? 1.58 : 3.12;
 
-  /** v3.51: expand an item into its thumbnail slots (classes, or the single
-   *  mapKey/imageUrl slot for demo/FSC/montage/legacy items).
-   *  v3.56: the slot key must match where the BYTES live — real map stages
-   *  (item.map != null) render under their mapKey (ChimeraX renders / session
-   *  previews are keyed that way), while demo/FSC/montage items carry their
-   *  bytes under item.imageUrl. The old `mapKey ?? imageUrl` preferred the
-   *  demo items' mapKey ("J68/volume") whose bytes were never there, so every
-   *  demo thumbnail rendered as an empty placeholder frame. */
+  /** v3.56: expand an item into its thumbnail slots (classes, or the
+   *  single mapKey/imageUrl slot for demo/FSC/montage/legacy items).
+   *  The slot key must match where the BYTES live — real map stages
+   *  (item.map != null) render under their mapKey, while demo/FSC/
+   *  montage items carry their bytes under item.imageUrl. */
   const itemSlotsOf = (
     item: FlowFigureItem,
-  ): Array<{ key: string | null; stats: string[]; groupTag?: string }> => {
+  ): Array<{ key: string | null; stats: string[]; groupTag?: string; count: number | null }> => {
     if (item.classes?.length) {
       const multi = item.classes.length > 1;
       return item.classes.map((c) => ({
         key: c.mapKey,
         stats: multi ? c.stats : item.stats.length ? item.stats : c.stats,
         groupTag: multi ? c.group : undefined,
+        count: c.particleCount ?? null,
       }));
     }
     return [
-      { key: item.map ? (item.mapKey ?? item.imageUrl) : (item.imageUrl ?? item.mapKey), stats: item.stats },
+      {
+        key: item.map ? (item.mapKey ?? item.imageUrl) : (item.imageUrl ?? item.mapKey),
+        stats: item.stats,
+        count: item.particleTotal ?? null,
+      },
     ];
   };
   const rowThumbTotal = (g: FlowFigureItem[]) =>
@@ -296,58 +285,39 @@ export function buildWorkflowPptx(
   const rowGapUnits = (g: FlowFigureItem[]) =>
     g.reduce((s, it) => s + Math.max(0, itemSlotsOf(it).length - 1), 0) + Math.max(0, g.length - 1);
 
-  const colWFor = (c: number) => (contentW - (c - 1) * COL_GAP) / c;
-  const pitchFor = (c: number) => availH / Math.max(1, Math.ceil(n / c));
-  const anyMultiThumb = groups.some((g) => rowThumbTotal(g) > 1);
-  const rowHExtra = anyMultiThumb ? UNDER_H : 0;
-  const imgWFor = (c: number) => 2 * (pitchFor(c) - LABEL_H - ROW_GAP - rowHExtra);
-  /** Widest thumbnail every stage row fits at column count c, capped by the
-   *  reference's 3.12 in and by each row's share of the column width
-   *  (v3.51: a row's share now counts EVERY class thumbnail in it). */
-  const effectiveImgW = (c: number) => {
-    let w = Math.min(REF_IMG_W, imgWFor(c));
-    const cw = colWFor(c);
-    for (const g of groups) {
-      const k = Math.max(1, rowThumbTotal(g));
-      const slots0 = itemSlotsOf(g[0]);
-      const extras =
-        rowGapUnits(g) * ITEM_GAP +
-        (k === 1 && slots0[0]?.stats.length ? STATS_W + STATS_GAP : 0);
-      w = Math.min(w, (cw - extras) / k);
-    }
-    return w;
+  /** v3.59: SINGLE COLUMN — one row spans the slide width, thumbnails all
+   *  the same size, capped by the reference width and by the widest row's
+   *  share of the content width (a row counts EVERY class thumbnail plus,
+   *  in 标准 style, the side stats of single-map rows). No column solver,
+   *  no readability floor: the canvas GROWS downward instead. */
+  const sideStatsOfRow = (g: FlowFigureItem[]): number => {
+    if (minimal || rowThumbTotal(g) !== 1) return 0;
+    return itemSlotsOf(g[0])[0]?.stats.length ? ITEM_GAP + STATS_W : 0;
   };
-  let cols = 1;
-  while (cols < 3 && effectiveImgW(cols) < MIN_IMG_W && effectiveImgW(cols + 1) > effectiveImgW(cols) + 0.01) {
-    cols += 1;
-  }
-  const imgW = Math.max(1.0, effectiveImgW(cols));
+  const imgW = Math.min(
+    REF_IMG_W,
+    ...groups.map(
+      (g) =>
+        (contentW - rowGapUnits(g) * ITEM_GAP - sideStatsOfRow(g)) /
+        Math.max(1, rowThumbTotal(g)),
+    ),
+  );
   const imgH = imgW / 2;
-  const colW = colWFor(cols);
-  const rowsPerCol = Math.ceil(n / cols);
-  const pitch = pitchFor(cols);
 
-  /* ---- v3.55 (round-14 “最好把 job 的 id 也标记到图中”) ----
-   * Every stage label now carries its job id. Single-item rows: one
-   * right-aligned line — stage name (8 pt black) + " · " + id (7 pt
-   * gray) — in a box widened LEFTWARD from the item's right edge (the
-   * reference's right-aligned-above-thumbnail look; the extension rides
-   * the column's empty left margin, clamped to the column edge). Parallel
-   * rows: a compact TWO-line label per item (name 7 pt / id 6 pt gray) so
-   * siblings can never collide horizontally. The synthetic FSC item
-   * (uid == label) and uid-less items render the name only. */
+  /* ---- v3.55 label runs: the 标准 style carries the job id; 极简 keeps
+   *  the reference's bare stage name. */
   const UID_COLOR = "808080";
   const labelShowsUid = (item: FlowFigureItem) =>
     !!item.uid && item.uid !== item.label && !/^FSC$/i.test(item.uid);
   const estimateRunsWidth = (runs: TextRun[]): number =>
     runs.reduce((s, r) => s + Math.max(0.08, r.t.length * 0.058 * ((r.sz ?? 800) / 800) + 0.04), 0) + 0.08;
   const labelRunsOf = (item: FlowFigureItem): TextRun[] =>
-    labelShowsUid(item)
-      ? [
+    minimal || !labelShowsUid(item)
+      ? [{ t: item.label }]
+      : [
           { t: item.label },
           { t: ` · ${item.uid}`, sz: 700, color: UID_COLOR },
-        ]
-      : [{ t: item.label }];
+        ];
 
   interface PlacedSlot {
     thumb: Box;
@@ -355,177 +325,273 @@ export function buildWorkflowPptx(
     statsLines: string[];
     key: string | null;
     descr: string;
+    /** v3.59: the numeric particle count behind this slot (flow-anchor
+     *  selection + retention labels read it). */
+    count: number | null;
   }
   interface PlacedItem {
     item: FlowFigureItem;
-    label: Box;
+    /** the item's share of the strip (parallel labels use its right edge) */
+    left: number;
+    width: number;
     slots: PlacedSlot[];
   }
   interface PlacedRow {
     items: PlacedItem[];
+    /** image strip top */
     top: number;
+    /** bottom incl. 标准 under-thumb stats */
     bottom: number;
-    /** v3.55: the row's left edge (column interior) — clamps the leftward
-     *  label-box extension of single-item rows. */
-    rowLeft: number;
-    /** v3.55: >1 ⇒ a parallel row — labels take the compact two-line form. */
     parallel: boolean;
+    /** 极简: the class slot whose count feeds the next stage — gets the
+     *  reference's selection rectangle. */
+    anchor: PlacedSlot | null;
   }
 
+  /** representative particle count of a row (max of its items' totals) */
+  const rowRepresentativeCount = (g: FlowFigureItem[]): number | null => {
+    const cs = g
+      .map((it) => it.particleTotal ?? null)
+      .filter((v): v is number => v != null && v > 0);
+    return cs.length ? Math.max(...cs) : null;
+  };
+  const repCounts = groups.map(rowRepresentativeCount);
+
+  /* ---- 极简: flow-anchor precomputation (data-only, before placement) ----
+   * The anchor = the class slot whose particle count feeds the next stage
+   * (fallback: the largest-count slot). Computed per row UP FRONT because
+   * the next row's ENTRY GAP depends on it: when the anchor's selection
+   * rectangle would sit under the spine (the middle class of an odd strip),
+   * the incoming arrow must stop at the frame's top edge instead of the
+   * image top — the tip would otherwise poke through the frame. */
+  interface AnchorInfo {
+    item: number;
+    slot: number;
+    onSpine: boolean;
+  }
+  const anchorInfoOf = (g: FlowFigureItem[], nextRep: number | null): AnchorInfo | null => {
+    if (!minimal || nextRep == null || rowThumbTotal(g) <= 1) return null;
+    const flat: Array<{ item: number; slot: number; count: number | null }> = [];
+    g.forEach((it, ii) =>
+      itemSlotsOf(it).forEach((s, jj) => flat.push({ item: ii, slot: jj, count: s.count })),
+    );
+    const counted = flat.filter((f) => f.count != null);
+    if (counted.length <= 1) return null;
+    /* the anchor: the class whose count equals the next stage's input;
+     * fallback = the largest-count class (best guess), null when no
+     * counted class exists at all. */
+    const maxCountSlot = ():
+      | { item: number; slot: number; count: number | null }
+      | null => {
+      let best = -1;
+      let out: { item: number; slot: number; count: number | null } | null = null;
+      for (const f of counted) {
+        if ((f.count as number) > best) {
+          best = f.count as number;
+          out = f;
+        }
+      }
+      return best > 0 ? out : null;
+    };
+    const hit = counted.find((f) => f.count === nextRep) ?? maxCountSlot();
+    if (!hit) return null;
+    /* deterministic thumb x of that slot (strip is centred on the spine) */
+    const stripW = rowThumbTotal(g) * imgW + rowGapUnits(g) * ITEM_GAP;
+    let x = SPINE - stripW / 2;
+    let anchorX = 0;
+    g.forEach((it, ii) => {
+      const n = Math.max(1, itemSlotsOf(it).length);
+      if (ii === hit.item) {
+        anchorX = x + hit.slot * (imgW + ITEM_GAP);
+      }
+      x += n * imgW + (n - 1) * ITEM_GAP + ITEM_GAP;
+    });
+    return { item: hit.item, slot: hit.slot, onSpine: anchorX - 0.05 <= SPINE && SPINE <= anchorX + imgW + 0.05 };
+  };
+  const anchorInfos = groups.map((g, i) => anchorInfoOf(g, i + 1 < groups.length ? repCounts[i + 1] : null));
+
+  /* ---- vertical placement: one cursor down the spine ---- */
   const rows: PlacedRow[] = [];
+  /** distance from an arrow tip to the NEXT row's image top: single rows
+   * put their label band in the arrow's shadow (text ends left of the
+   * spine, reference-faithful) — except when the row's own selection frame
+   * sits under the spine, where the arrow stops at the frame's top edge;
+   * parallel rows need the arrow to stop ABOVE their per-item label band
+   * (a right item's label may reach the spine, so the band must not share
+   * y with the arrow). */
+  const entryGap = (i: number): number => {
+    const g = groups[i];
+    if (!g) return 0.01;
+    if (g.length > 1) return PLABEL_H + 0.02;
+    return anchorInfos[i]?.onSpine ? 0.07 : 0.01;
+  };
+
+  let headerBottom = 0;
+  if (headerItems.length) {
+    const widths = headerItems.map(estimateTextWidth);
+    const SPACING = 0.18;
+    const total = widths.reduce((a, b) => a + b, 0) + SPACING * (headerItems.length - 1);
+    /* last item CENTRED on the spine (the reference's "1,588,675
+     * particles" box centres at 3.66 vs spine 3.69), clamped at margin. */
+    let bx = Math.max(MARGIN_X, SPINE + widths[widths.length - 1] / 2 - total);
+    headerItems.forEach((text, i) => {
+      const isPick = i === 1 && headerItems.length === 3;
+      ops.push({
+        kind: "text",
+        x: bx,
+        y: isPick ? 0.37 : 0.55,
+        w: widths[i],
+        h: 0.26,
+        lines: [{ t: text, align: "ctr" }],
+      });
+      bx += widths[i] + SPACING;
+    });
+    headerBottom = 0.55 + 0.26;
+  }
+
+  let cursor = 0.6;
+  if (groups.length && headerItems.length) {
+    const arrowStart = headerBottom + 0.02;
+    ops.push({ kind: "conn", x1: SPINE, y1: arrowStart, x2: SPINE, y2: arrowStart + ARROW_LEN });
+    cursor = arrowStart + ARROW_LEN + entryGap(0);
+  }
+
   groups.forEach((group, i) => {
+    const parallel = group.length > 1;
     const thumbsTotal = rowThumbTotal(group);
-    const side = thumbsTotal === 1;
-    const firstSlots = itemSlotsOf(group[0]);
-    const sideStats = side && firstSlots[0]?.stats.length ? STATS_W + STATS_GAP : 0;
-    const rowW = thumbsTotal * imgW + rowGapUnits(group) * ITEM_GAP + sideStats;
-    const col = Math.floor(i / rowsPerCol);
-    const x0 = MARGIN_X + col * (colW + COL_GAP) + (colW - rowW) / 2;
-    const rowH = LABEL_H + imgH + (side ? 0 : UNDER_H);
-    const top = FLOW_TOP + (i % rowsPerCol) * pitch + Math.max(0, (pitch - rowH) / 2);
+    const hasUnderStats = !minimal && thumbsTotal > 1;
+    const stripW = thumbsTotal * imgW + rowGapUnits(group) * ITEM_GAP;
+    const x0 = SPINE - stripW / 2;
+
+    const top = cursor;
+    const imgBottom = top + imgH;
+    const bottom = imgBottom + (hasUnderStats ? UNDER_H : 0);
+
     const items: PlacedItem[] = [];
     let x = x0;
-    group.forEach((item) => {
+    group.forEach((item, ii) => {
       const slots = itemSlotsOf(item);
-      const multi = slots.length > 1;
       const itemW = slots.length * imgW + (slots.length - 1) * ITEM_GAP;
-      const label: Box = { x, y: top, w: itemW, h: LABEL_H };
       const placed: PlacedSlot[] = [];
       slots.forEach((s, jj) => {
         const tx = x + jj * (imgW + ITEM_GAP);
-        const thumb: Box = { x: tx, y: top + LABEL_H, w: imgW, h: imgH };
-        const statsLines = s.stats;
+        const thumb: Box = { x: tx, y: top, w: imgW, h: imgH };
         let stats: Box | null = null;
-        if (statsLines.length) {
-          stats = side
-            ? { x: x0 + imgW + STATS_GAP, y: thumb.y + imgH / 2 - 0.21, w: STATS_W, h: 0.42 }
-            // v3.55: 0.26-high under-thumb box — two 8 pt lines (~0.27" on
-            // the slide) no longer clip into the next row's label band.
-            : { x: tx, y: thumb.y + imgH + 0.03, w: imgW, h: 0.26 };
+        if (!minimal && s.stats.length) {
+          stats =
+            thumbsTotal === 1
+              ? /* single-map row: the THUMB stays centred on the spine and
+                 * the stats hang to its RIGHT (v3.59 — centring the pair
+                 * would push the thumb off the spine, and the spine arrow
+                 * must land on the thumb, not the stats box). */
+                { x: x0 + imgW + ITEM_GAP, y: top + imgH / 2 - 0.21, w: STATS_W, h: 0.42 }
+              : { x: tx, y: imgBottom + 0.03, w: imgW, h: 0.26 };
         }
         placed.push({
           thumb,
           stats,
-          statsLines,
+          statsLines: s.stats,
           key: s.key,
-          descr: multi && s.groupTag ? `image-${item.uid}_${s.groupTag}` : `image-${item.uid}`,
+          descr:
+            slots.length > 1 && s.groupTag ? `image-${item.uid}_${s.groupTag}` : `image-${item.uid}`,
+          count: s.count,
         });
       });
-      items.push({ item, label, slots: placed });
+      items.push({ item, left: x, width: itemW, slots: placed });
       x += itemW + ITEM_GAP;
     });
-    rows.push({ items, top, bottom: top + rowH, rowLeft: x0, parallel: group.length > 1 });
-  });
 
-  /* thumbnail accessor shared by the header band + connectors (v3.53:
-   * moved above the header band — const arrow functions are TDZ'd, so it
-   * must be declared before first use). */
-  const thumbOf = (row: PlacedRow, first: boolean): Box => {
-    const item = first ? row.items[0] : row.items[row.items.length - 1];
-    const slot = first ? item.slots[0] : item.slots[item.slots.length - 1];
-    return slot.thumb;
-  };
+    /* 极简: resolve the precomputed anchor to its placed slot. */
+    const ai = anchorInfos[i];
+    const anchor =
+      minimal && ai
+        ? items[ai.item]?.slots[ai.slot] ?? null
+        : null;
 
-  /* ---- header band LAYOUT (v3.53, round-12 “2d 前面的部分有些问题”) ----
-   * The band used to sit centered at the slide top while the first stage
-   * lived in the LEFT column of a wrapped flow — the entry connector then
-   * hung from empty space (deck (2): band x≈4.6-8.7, 2D stage x≈1.2,
-   * connector dangling at x≈1.76 attached to nothing). Now the band is
-   * ANCHORED to the first stage: its LAST item lands above the first
-   * stage's thumbnail centre whenever the margins allow (the reference
-   * deck's own geometry — straight drop into the stage), otherwise it
-   * left-aligns at the margin and a 3-segment elbow route carries the flow
-   * down and into the first stage's label. */
-  if (headerItems.length) {
-    const widths = headerItems.map(estimateTextWidth);
-    const ARROW = 0.36;
-    const total = widths.reduce((a, b) => a + b, 0) + ARROW * (headerItems.length - 1);
-    const firstThumb = rows.length ? thumbOf(rows[0], true) : null;
-    const firstCx = firstThumb ? firstThumb.x + firstThumb.w / 2 : null;
-    // Try to end the band directly above the first stage (last item's
-    // centre on the stage's centre); clamp within the slide margins.
-    let hx =
-      firstCx == null
-        ? (SLIDE_W_IN - total) / 2
-        : firstCx - total + widths[widths.length - 1] / 2;
-    hx = Math.max(MARGIN_X, Math.min(SLIDE_W_IN - MARGIN_X - total, hx));
-    const lastCx = hx + total - widths[widths.length - 1] / 2;
-    const aligns: Align[] = ["ctr", "r", "ctr"];
-    let bx = hx;
-    headerItems.forEach((text, i) => {
-      ops.push({
-        kind: "text",
-        x: bx,
-        y: 0.52,
-        w: widths[i],
-        h: 0.26,
-        lines: [{ t: text, align: aligns[i] ?? "ctr" }],
-      });
-      bx += widths[i];
-      if (i < headerItems.length - 1) {
+    rows.push({ items, top, bottom, parallel, anchor });
+
+    /* connector + 极简 retention label into the next row */
+    if (i + 1 < groups.length) {
+      const nextRep = repCounts[i + 1];
+      const gap = minimal ? (nextRep != null ? RETAIN_H + 0.02 : 0.1) : 0.12;
+      const arrowStart = bottom + gap;
+      ops.push({ kind: "conn", x1: SPINE, y1: arrowStart, x2: SPINE, y2: arrowStart + ARROW_LEN });
+      cursor = arrowStart + ARROW_LEN + entryGap(i + 1);
+
+      if (minimal && nextRep != null) {
+        /* v3.59: the reference's arrow label — the retention percentage
+         * and the particle count that continue down the funnel
+         * ("37.2%" / "590,421 particles"), centred on the spine in the
+         * gap. The percentage line is dropped when the flow did not
+         * actually shrink (a single-map pass-through would read 100% —
+         * noise, the reference never prints one). */
+        const lines: TextLine[] = [];
+        const repCur = repCounts[i];
+        const pct = repCur && repCur > 0 ? nextRep / repCur : null;
+        if (pct != null && pct < 0.995) {
+          lines.push({ t: `${(pct * 100).toFixed(1)}%`, align: "ctr" });
+        }
+        lines.push({ t: `${nextRep.toLocaleString("en-US")} particles`, align: "ctr" });
+        const textW = Math.max(...lines.map((l) => estimateTextWidth(l.t ?? "")));
+        const w = Math.max(1.05, textW + 0.06);
         ops.push({
-          kind: "conn",
-          x1: bx + 0.02,
-          y1: 0.65,
-          x2: bx + ARROW - 0.02,
-          y2: 0.65,
+          kind: "text",
+          x: Math.max(MARGIN_X, SPINE - w / 2),
+          y: bottom + 0.01,
+          w,
+          h: RETAIN_H,
+          lines,
         });
-        bx += ARROW;
-      }
-    });
-    /* band → first stage: straight drop when the band's last item ended
-     * above the stage (reference-faithful); explicit elbow segments
-     * otherwise — only the final segment carries the arrowhead. */
-    if (firstCx != null) {
-      const yEnd = rows[0].top - 0.03;
-      if (Math.abs(lastCx - firstCx) <= 0.03) {
-        ops.push({ kind: "conn", x1: firstCx, y1: 0.8, x2: firstCx, y2: yEnd });
-      } else {
-        const elbowY = 0.8 + (yEnd - 0.8) / 2;
-        ops.push({ kind: "conn", x1: lastCx, y1: 0.8, x2: lastCx, y2: elbowY, arrow: false });
-        ops.push({ kind: "conn", x1: lastCx, y1: elbowY, x2: firstCx, y2: elbowY, arrow: false });
-        ops.push({ kind: "conn", x1: firstCx, y1: elbowY, x2: firstCx, y2: yEnd });
       }
     }
-  }
+  });
 
-  /* emit per-row shapes */
-  rows.forEach((row, ri) => {
+  /* ---- emit per-row shapes ---- */
+  rows.forEach((row) => {
     row.items.forEach((p) => {
-      /* v3.55 (round-14): stage label + job id. Single-item row → one line,
-       * right-aligned, box widened leftward (clamped to the column edge) so
-       * the name+id never wraps above the thumbnail. Parallel row → a
-       * compact TWO-line label (name 7 pt / id 6 pt gray, both
-       * right-aligned) inside the item's own width — siblings can never
-       * collide horizontally. */
-      const right = p.label.x + p.label.w;
-      let labelLines: TextLine[];
-      let labelX = p.label.x;
-      let labelW = p.label.w;
       if (row.parallel) {
-        labelLines = labelShowsUid(p.item)
-          ? [
-              { align: "r", runs: [{ t: p.item.label, sz: 700 }] },
-              { align: "r", runs: [{ t: p.item.uid, sz: 600, color: UID_COLOR }] },
-            ]
-          : [{ align: "r", runs: [{ t: p.item.label, sz: 700 }] }];
+        /* v3.55: parallel rows label each item right-aligned at its own
+         * right edge; 标准 uses the compact two-line form (name / id) so
+         * siblings never collide; 极简 prints the bare name. The arrow
+         * stops ABOVE this band (entryGap), so the text may cross the
+         * spine freely. */
+        const labelLines: TextLine[] = minimal
+          ? [{ align: "r", runs: [{ t: p.item.label, sz: 800 }] }]
+          : labelShowsUid(p.item)
+            ? [
+                { align: "r", runs: [{ t: p.item.label, sz: 700 }] },
+                { align: "r", runs: [{ t: p.item.uid, sz: 600, color: UID_COLOR }] },
+              ]
+            : [{ align: "r", runs: [{ t: p.item.label, sz: 700 }] }];
+        ops.push({
+          kind: "text",
+          x: p.left,
+          y: row.top - PLABEL_H,
+          w: p.width,
+          h: PLABEL_H - 0.04,
+          lines: labelLines,
+        } as TextOp);
       } else {
+        /* single-item row: one right-aligned line ENDING just left of the
+         * spine (the reference's “2*Hetero refinement” box ends at 3.62 vs
+         * spine 3.69) — the spine arrow passes through the band without
+         * ever touching the text. The box widens leftward, clamped to the
+         * margin. */
         const runs = labelRunsOf(p.item);
         const estW = estimateRunsWidth(runs);
-        labelX = Math.max(row.rowLeft, right - estW);
-        labelW = Math.max(0.4, right - labelX);
-        labelLines = [{ align: "r", runs }];
+        const right = SPINE - 0.07;
+        const lx = Math.max(MARGIN_X, right - estW - 0.06);
+        ops.push({
+          kind: "text",
+          x: lx,
+          y: row.top - 0.3,
+          w: Math.max(0.4, right - lx),
+          h: LABEL_H,
+          lines: [{ align: "r", runs }],
+        } as TextOp);
       }
-      ops.push({
-        kind: "text",
-        x: labelX,
-        y: p.label.y,
-        w: labelW,
-        h: p.label.h,
-        lines: labelLines,
-      } as TextOp);
       p.slots.forEach((s, si) => {
-        // Thumbnail or placeholder frame.
+        /* thumbnail or placeholder frame */
         const bytes = (s.key && options.images.get(s.key)) || null;
         if (bytes) {
           const dims = imageDims(bytes);
@@ -536,7 +602,7 @@ export function buildWorkflowPptx(
             y: placed.y,
             w: placed.w,
             h: placed.h,
-            mediaKey: s.key || `img-${ri}-${si}`,
+            mediaKey: s.key || `img-${si}`,
             descr: s.descr,
             bytes,
           });
@@ -552,88 +618,18 @@ export function buildWorkflowPptx(
         }
       });
     });
+    /* 极简: the selection rectangle around the flow-anchor class. */
+    if (minimal && row.anchor) {
+      const t = row.anchor.thumb;
+      ops.push({ kind: "frame", x: t.x - 0.04, y: t.y - 0.04, w: t.w + 0.08, h: t.h + 0.08 });
+    }
   });
 
-  /* connectors: same-column stages chain downward; a column wrap rides an
-   * explicit segment route below the column and up the inter-column gutter.
-   *
-   * v3.58 (round-17 “连线还是会出现错位”): the chain now attaches at the
-   * FLOW ANCHOR — the upstream thumbnail whose particle count matches the
-   * next stage's input (P96: J34's class-0 box is what feeds the
-   * non-uniform stage, so the line must leave from under THAT class, not
-   * from under the middle class the old span-overlap heuristic picked;
-   * deck (6)'s J34→J35 and J39→J40 both hung from the wrong box). When
-   * the anchor x and the next row's entry x coincide → the classic single
-   * vertical drop; otherwise a 3-segment elbow (down → across → down, the
-   * arrow only on the final segment) inside the inter-row gap, which is
-   * empty by construction. The column wrap is 4 explicit segments: down
-   * below the column's content, across a clear lane, UP the inter-column
-   * gutter, and a short arrow into the next column's first thumbnail — the
-   * old bentConnector3 hung its vertical run at the bbox midpoint, which
-   * crossed the previous column's thumbnails and the side stats box. */
-  const slotCountOf = (item: FlowFigureItem, slotIndex: number): number | null => {
-    if (item.classes?.length) {
-      const c = item.classes[Math.min(slotIndex, item.classes.length - 1)];
-      return c?.particleCount ?? null;
-    }
-    return item.particleTotal ?? null;
-  };
-  const rowRepresentativeCount = (row: PlacedRow): number | null => {
-    const cs = row.items
-      .map((it) => it.item.particleTotal ?? null)
-      .filter((v): v is number => v != null && v > 0);
-    return cs.length ? Math.max(...cs) : null;
-  };
-  /** The upstream thumbnail whose slot count equals the next row's
-   * representative count — the FLOW anchor; null when no slot matches
-   * (falls back to the row's last thumbnail, the previous convention). */
-  const anchorThumbOf = (row: PlacedRow, nextCount: number | null): Box | null => {
-    if (nextCount == null) return null;
-    for (const it of row.items) {
-      for (let jj = 0; jj < it.slots.length; jj++) {
-        if (slotCountOf(it.item, jj) === nextCount) return it.slots[jj].thumb;
-      }
-    }
-    return null;
-  };
-  for (let i = 0; i + 1 < rows.length; i++) {
-    const a = rows[i];
-    const b = rows[i + 1];
-    const aLast = thumbOf(a, false);
-    const bFirst = thumbOf(b, true);
-    const sameCol = Math.floor(i / rowsPerCol) === Math.floor((i + 1) / rowsPerCol);
-    const anchor = anchorThumbOf(a, rowRepresentativeCount(b)) ?? aLast;
-    const anchorCx = anchor.x + anchor.w / 2;
-    if (sameCol) {
-      const entryCx = bFirst.x + bFirst.w / 2;
-      const yTop = a.bottom + 0.02;
-      const yBottom = b.top - 0.03;
-      if (Math.abs(anchorCx - entryCx) <= 0.02) {
-        ops.push({ kind: "conn", x1: anchorCx, y1: yTop, x2: anchorCx, y2: yBottom });
-      } else {
-        const midY = yTop + Math.max(0.05, (yBottom - yTop) * 0.45);
-        ops.push({ kind: "conn", x1: anchorCx, y1: yTop, x2: anchorCx, y2: midY, arrow: false });
-        ops.push({ kind: "conn", x1: anchorCx, y1: midY, x2: entryCx, y2: midY, arrow: false });
-        ops.push({ kind: "conn", x1: entryCx, y1: midY, x2: entryCx, y2: yBottom });
-      }
-    } else {
-      /* wrap into the next column: below-content lane → inter-column
-       * gutter → up → arrow into the first thumbnail's left edge. */
-      const nextCol = Math.floor((i + 1) / rowsPerCol);
-      const gutterX = MARGIN_X + nextCol * (colW + COL_GAP) - COL_GAP / 2;
-      const laneY = Math.max(Math.min(a.bottom + 0.14, SLIDE_H_IN - 0.4), a.bottom + 0.06);
-      const entryY = bFirst.y + bFirst.h / 2;
-      const entryX = bFirst.x - 0.03;
-      ops.push({ kind: "conn", x1: anchorCx, y1: a.bottom + 0.02, x2: anchorCx, y2: laneY, arrow: false });
-      ops.push({ kind: "conn", x1: anchorCx, y1: laneY, x2: gutterX, y2: laneY, arrow: false });
-      ops.push({ kind: "conn", x1: gutterX, y1: laneY, x2: gutterX, y2: entryY, arrow: false });
-      ops.push({ kind: "conn", x1: gutterX, y1: entryY, x2: entryX, y2: entryY });
-    }
-  }
-
-  /* final stats ("3.46 Å") — v3.55: under the last MAP-BEARING stage (an
-   * appended FSC montage is a diagnostic panel, not the final map — the
-   * resolution belongs under the final refinement stage). */
+  /* ---- final stats ("C1, 3.46 Å") — under the last MAP-BEARING stage
+   * (v3.55 rule: an appended FSC montage is a diagnostic panel, not the
+   * final map). 极简 centres it on the spine (reference); 标准 keeps the
+   * last thumbnail's centre. */
+  let contentBottom = rows.length ? Math.max(...rows.map((r) => r.bottom)) : headerBottom;
   if (fig.finalStats && rows.length) {
     let statsRow: PlacedRow | null = null;
     for (let i = rows.length - 1; i >= 0; i--) {
@@ -643,24 +639,45 @@ export function buildWorkflowPptx(
       }
     }
     if (statsRow) {
-      const lastThumb = thumbOf(statsRow, false);
-      ops.push({
-        kind: "text",
-        x: Math.max(MARGIN_X, lastThumb.x + lastThumb.w / 2 - 0.7),
-        y: Math.min(statsRow.bottom + 0.06, SLIDE_H_IN - 0.58),
-        w: 1.4,
-        h: 0.24,
-        lines: [{ t: fig.finalStats, align: "ctr" }],
-      });
+      if (minimal) {
+        const w = 1.8;
+        ops.push({
+          kind: "text",
+          x: SPINE - w / 2,
+          y: statsRow.bottom + 0.1,
+          w,
+          h: 0.24,
+          lines: [{ t: fig.finalStats, align: "ctr" }],
+        });
+        contentBottom = Math.max(contentBottom, statsRow.bottom + 0.34);
+      } else {
+        const lastItem = statsRow.items[statsRow.items.length - 1];
+        const last = lastItem.slots[lastItem.slots.length - 1].thumb;
+        ops.push({
+          kind: "text",
+          x: Math.max(MARGIN_X, last.x + last.w / 2 - 0.7),
+          y: statsRow.bottom + 0.06,
+          w: 1.4,
+          h: 0.24,
+          lines: [{ t: fig.finalStats, align: "ctr" }],
+        });
+        contentBottom = Math.max(contentBottom, statsRow.bottom + 0.3);
+      }
     }
   }
 
-  /* footnote */
-  if (options.footnote) {
+  /* ---- canvas: width fixed at the reference's 7.5 in; height grows with
+   * the content (round-18 “可以根据需要改变画布大小”), min 10 in, rounded
+   * up to ¼ in. */
+  const tail = minimal ? 0.4 : options.footnote ? 0.62 : 0.45;
+  const slideH = Math.max(MIN_SLIDE_H_IN, Math.ceil((contentBottom + tail) * 4) / 4);
+
+  /* footnote — 标准 style only (the 极简 reference carries none). */
+  if (options.footnote && !minimal) {
     ops.push({
       kind: "text",
       x: MARGIN_X,
-      y: SLIDE_H_IN - 0.34,
+      y: slideH - 0.34,
       w: contentW,
       h: 0.2,
       sz: 750,
@@ -669,14 +686,14 @@ export function buildWorkflowPptx(
     });
   }
 
-  return assemble(ops, pics, fig);
+  return assemble(ops, pics, fig, slideH);
 }
 
 /* ------------------------------------------------------------------ */
 /* Package assembly                                                    */
 /* ------------------------------------------------------------------ */
 
-function assemble(ops: Op[], pics: PicOp[], fig: FlowFigureModel): Blob {
+function assemble(ops: Op[], pics: PicOp[], fig: FlowFigureModel, slideHIn: number): Blob {
   // Dedup media by marker key.
   const mediaByKey = new Map<string, Uint8Array>();
   for (const pic of pics) {
@@ -728,11 +745,15 @@ function assemble(ops: Op[], pics: PicOp[], fig: FlowFigureModel): Blob {
     },
     {
       name: "docProps/app.xml",
-      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>CryoSmart Lineage Tracer</Application><PresentationFormat>Widescreen</PresentationFormat><Slides>1</Slides></Properties>`,
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>CryoSmart Lineage Tracer</Application><PresentationFormat>Custom</PresentationFormat><Slides>1</Slides></Properties>`,
     },
     {
+      /* v3.59: PORTRAIT canvas — width locked to the reference's 7.5 in,
+       * height dynamic (buildWorkflowPptx). The `type` attribute is
+       * OPTIONAL per CT_SlideSize and is omitted (no stock type matches a
+       * grown canvas; the reference itself tags 7.5×10 as screen4x3). */
       name: "ppt/presentation.xml",
-      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst><p:sldSz cx="${SLIDE_W_EMU}" cy="${SLIDE_H_EMU}" type="screen16x9"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`,
+      data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId1"/></p:sldMasterIdLst><p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst><p:sldSz cx="${IN(PAGE_W_IN)}" cy="${IN(slideHIn)}"/><p:notesSz cx="6858000" cy="9144000"/></p:presentation>`,
     },
     {
       name: "ppt/_rels/presentation.xml.rels",

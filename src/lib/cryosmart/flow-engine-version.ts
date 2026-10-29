@@ -95,5 +95,24 @@
  * with elbow routes when anchor/entry x differ, and the column wrap rides
  * a below-content lane + inter-column gutter instead of the crossing
  * bentConnector3. Old pages keep all three behaviors.
+ *
+ * v3.59 bump reason (round-18 “极简模式 + 竖向排版 + 固定箭头 + 手动模式”):
+ * the deck layout was REBUILT after the user's new reference
+ * upload/workflow.pptx — (1) the canvas is now PORTRAIT 7.5 in wide with
+ * a DYNAMIC height (min 10 in, grows with the content — “可以根据需要
+ * 改变画布大小”); (2) the flow is a single straight SPINE at the slide
+ * centre: every connector is a straightConnector1 of FIXED 0.39 in
+ * length / 1 pt / triangle head — the entire bent/elbow/wrap machinery of
+ * rounds 12–17 is deleted, so the 连线错位 class of bugs is structurally
+ * impossible; (3) a NEW 极简版式 (BuildPptxOptions.style="minimal"):
+ * bare stage names (no job ids), the reference's selection rectangles
+ * around the class whose particle count feeds the next stage, retention
+ * labels (“37.2% / 590,421 particles”) beside each arrow, final Å centred
+ * under the last map, no footnote; (4) a NEW 手动模式
+ * (applyManualSelection): the card's checklist drops unchecked jobs
+ * before any image work, re-anchoring the alignment reference and the
+ * finalStats to whatever still ends the figure. Old pages produce the
+ * old 16:9 multi-column layout with elbow connectors and have neither
+ * switch.
  */
-export const FLOW_ENGINE_VERSION = "3.58";
+export const FLOW_ENGINE_VERSION = "3.59";
