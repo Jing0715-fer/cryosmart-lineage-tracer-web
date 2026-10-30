@@ -28,6 +28,15 @@
  *     its un-rotated pose, which is exactly where mis-alignments survived)
  *   - scoring: `measure correlation` → `fit #v in #ref` → `fit #v in #ref
  *     search 15`; score = fit_search ?? fit ?? measure
+ *   - v3.64 (round-23 “可以先lowpass一下再找角度，找到后应用到原map上
+ *     是不是会更好”): the pose SEARCH runs on vgaussian lowpassed clones
+ *     (sigma 2 voxels) of the candidate AND the reference — the ladder
+ *     runs smooth-vs-smooth, where high-frequency noise no longer drags
+ *     the fit into wrong local optima; the found pose is then applied
+ *     back onto the ORIGINAL map via matrixget/matrixset (workdir file)
+ *     and verified with a full-resolution correlation (the candidate
+ *     row's `post`). Any vgaussian/matrix failure degrades to the
+ *     previous full-resolution direct fit — bit-for-bit the old ladder.
  *   - chirality verdict from the best flip-family candidate vs. the best
  *     rigid one
  *   - one-time 90° view optimisation on the reference map by thumbnail
@@ -771,6 +780,12 @@ const LEVEL_RATIO = 0.25;
 const STEP = 1;
 const FIT_SEARCH = 15;
 const CHIRALITY_EPSILON = 0.01;
+/** v3.64 (round-23 “可以先lowpass一下再找角度，找到后应用到原map上”):
+ * the vgaussian smoothing width for the pose search — VOXEL units (a
+ * ~1 Å/voxel map gets ≈6–8 Å of lowpass), strong enough to wash out
+ * high-frequency noise that dragged the full-resolution fit into wrong
+ * local optima, gentle enough to keep the gross shape the search needs. */
+const LOWPASS_SIGMA = 2;
 const THUMB_SIZE = 220;
 const SNAPSHOT_W = 1600;
 const SNAPSHOT_H = 1200;
@@ -803,6 +818,11 @@ export interface CandidateRow {
   fit2: number | null;
   ok: boolean;
   note?: string;
+  /** v3.64: FULL-RESOLUTION correlation measured on the ORIGINAL map
+   * AFTER the lowpass-found pose was applied to it (null when the lowpass
+   * path was not used) — proves the transferred angle works at the
+   * resolution that actually gets screenshotted. */
+  post?: number | null;
 }
 
 export interface MapRender {
@@ -855,6 +875,30 @@ async function exec(t: FlowTransport, command: string, opts: RenderMapsOptions, 
  * Full pipeline: open reference → standardise the 90° view → per-map
  * 5-candidate alignment + handedness check → per-map screenshot.
  */
+
+/** v3.64: make a vgaussian (lowpass) copy of an open volume model and
+ * return the NEW model's id — null when the command is unavailable on
+ * this ChimeraX (the caller degrades to the full-resolution direct fit).
+ * `vgaussian` convolves with a Gaussian on the SAME grid and origin, so a
+ * pose found on the smoothed pair applies to the originals unchanged.
+ * Tries `modelId <next>` first (relay /nextid) and falls back to plain
+ * auto-id + log parsing. */
+async function gaussianSmooth(
+  t: FlowTransport,
+  id: number,
+  opts: RenderMapsOptions,
+): Promise<number | null> {
+  const next = await bridgeNextModelId(t);
+  let res = next != null
+    ? await exec(t, `vgaussian #${id} sigma ${LOWPASS_SIGMA} modelId ${next}`, opts, true)
+    : null;
+  if (res?.error) {
+    res = await exec(t, `vgaussian #${id} sigma ${LOWPASS_SIGMA}`, opts, true);
+  }
+  if (!res || res.error) return null;
+  return parseOpenModelId(res.text) ?? next;
+}
+
 export async function renderFigureMaps(
   t: FlowTransport,
   opts: RenderMapsOptions,
@@ -986,6 +1030,32 @@ export async function renderFigureMaps(
     log("当前传输不支持文件回传 — 使用基准视角（对齐/手性诊断仍有效）");
   }
 
+  /* ---- 2.5 v3.64 (round-23 “可以先lowpass一下再找角度”): the LOWPASSED
+   * reference for the pose search — created AFTER the view scoring so the
+   * coverage thumbnails never render it. Every candidate below fits
+   * smooth-vs-smooth (vgaussian clones of both — same grid, same origin),
+ * where high-frequency noise no longer drags the fit into wrong local
+   * optima; the found pose then transfers back onto the ORIGINAL map via
+   * matrixget/matrixset (needs the relay workdir for the matrix file +
+   * /nextid for model ids). ANY failure here degrades the whole run to
+   * the previous full-resolution direct fit — zero-regression fallback. */
+  const lowpass = t.kind === "relay" && !!t.workdir;
+  let refSmoothId: number | null = null;
+  if (lowpass) {
+    refSmoothId = await gaussianSmooth(t, refId, opts);
+    if (refSmoothId != null) {
+      const sStats = await bridgeVolStats(t, refSmoothId);
+      if (sStats) {
+        await exec(t, `volume #${refSmoothId} level ${(sStats.max * LEVEL_RATIO).toFixed(4)} step ${STEP}`, opts, true);
+      }
+      log(
+        `低通参考已生成（#${refSmoothId}，vgaussian sigma ${LOWPASS_SIGMA}）— 各候选在低通副本上搜索角度，找到后经 matrixget/matrixset 应用回原 map，再以全分辨率复核`,
+      );
+    } else {
+      log("⚠ 无法生成低通参考（vgaussian 不可用或未返回 model id）— 本次退回全分辨率直接对齐");
+    }
+  }
+
   /* ---- 3. per-map 5-candidate alignment ---- */
   const renders: MapRender[] = [];
   const all = [opts.reference, ...opts.maps];
@@ -1010,7 +1080,7 @@ export async function renderFigureMaps(
       openIds.add(refId);
       continue;
     }
-    progress(`对齐 ${req.key}（8 候选 × 相关性评分）`, pct);
+    progress(`对齐 ${req.key}（8 候选 × ${lowpass && refSmoothId != null ? "低通角度搜索" : "相关性评分"}）`, pct);
     pct += perMapPct * 0.75;
 
     const rows: CandidateRow[] = [];
@@ -1096,22 +1166,74 @@ export async function renderFigureMaps(
           await exec(t, "wait 1", opts, true);
         }
 
-        const preRes = await exec(t, `measure correlation #${activeId} inMap #${refId}`, opts, true);
+        /* v3.64 (round-23 “可以先lowpass一下再找角度，找到后应用到原map上”):
+         * a vgaussian clone of this (already flipped/rotated) candidate —
+         * the correlation/fit ladder runs smooth-vs-smooth, where
+         * high-frequency noise no longer drags the search into wrong
+         * local optima. fitId/fitRefId point at the SMOOTHED pair when the
+         * clone exists and stay on the ORIGINALS otherwise (the previous
+         * full-resolution protocol, bit-for-bit). */
+        let fitId = activeId;
+        let fitRefId = refId;
+        let smoothId: number | null = null;
+        if (lowpass && refSmoothId != null && activeId != null) {
+          smoothId = await gaussianSmooth(t, activeId, opts);
+          if (smoothId != null) {
+            const sStats = await bridgeVolStats(t, smoothId);
+            const sLevel = sStats ? sStats.max * LEVEL_RATIO : refLevel;
+            if (sLevel != null) {
+              await exec(t, `volume #${smoothId} level ${sLevel.toFixed(4)} step ${STEP}`, opts, true);
+            }
+            await exec(t, `volume #${smoothId} color ${mapColor}`, opts, true);
+            fitId = smoothId;
+            fitRefId = refSmoothId;
+          }
+        }
+
+        const preRes = await exec(t, `measure correlation #${fitId} inMap #${fitRefId}`, opts, true);
         const pre = parseCorrelation(preRes.text) ?? parseCorrelation(preRes.error);
-        const fit1Res = await exec(t, `fit #${activeId} in #${refId}`, opts, true);
+        const fit1Res = await exec(t, `fit #${fitId} in #${fitRefId}`, opts, true);
         let fit1 = parseCorrelation(fit1Res.text);
-        const fit2Res = await exec(t, `fit #${activeId} in #${refId} search ${FIT_SEARCH}`, opts, true);
+        const fit2Res = await exec(t, `fit #${fitId} in #${fitRefId} search ${FIT_SEARCH}`, opts, true);
         let fit2 = parseCorrelation(fit2Res.text);
         if (fit2 == null) fit2 = parseCorrelation(fit2Res.error);
         if (fit1 == null && fit2 == null) {
-          const reMeasure = await exec(t, `measure correlation #${activeId} inMap #${refId}`, opts, true);
+          const reMeasure = await exec(t, `measure correlation #${fitId} inMap #${fitRefId}`, opts, true);
           fit1 = parseCorrelation(reMeasure.text);
         }
+        /* v3.64: transfer the smooth-found pose back onto the ORIGINAL map
+         * (matrixget writes the smoothed model's coordinate frame into the
+         * relay workdir; matrixset applies it to the original), then verify
+         * at FULL resolution — the screenshot renders the original at the
+         * lowpass-found angle. A transfer failure re-runs the direct ladder
+         * on the original so the kept model still carries a real pose. */
+        let post: number | null = null;
+        if (smoothId != null && activeId != null) {
+          const xf = `${t.workdir ?? "."}/xf_${safeKeyPart(req.key.replace(/\//g, "__"))}_${spec.name}.txt`;
+          const mg = await exec(t, `matrixget "${xf}" models #${smoothId}`, opts, true);
+          const ms = mg.error ? null : await exec(t, `matrixset "${xf}" models #${activeId}`, opts, true);
+          if (!mg.error && ms && !ms.error) {
+            const postRes = await exec(t, `measure correlation #${activeId} inMap #${refId}`, opts, true);
+            post = parseCorrelation(postRes.text) ?? parseCorrelation(postRes.error);
+          } else {
+            note = "低通角度转换失败 — 已退回全分辨率直接对齐";
+            const d1 = await exec(t, `fit #${activeId} in #${refId}`, opts, true);
+            fit1 = parseCorrelation(d1.text);
+            const d2 = await exec(t, `fit #${activeId} in #${refId} search ${FIT_SEARCH}`, opts, true);
+            fit2 = parseCorrelation(d2.text) ?? parseCorrelation(d2.error);
+          }
+          await exec(t, `close #${smoothId}`, opts, true);
+          smoothId = null;
+        }
         const score = fit2 ?? fit1 ?? pre;
-        const row: CandidateRow = { candidate: spec.name, score, pre, fit1, fit2, ok: score != null, note };
+        const row: CandidateRow = { candidate: spec.name, score, pre, fit1, fit2, ok: score != null, note, post };
         rows.push(row);
         if (activeId != null) openedByCandidate.set(spec.name, activeId);
-        log(`  ${req.key} · ${spec.name}: score=${score ?? "—"} (pre=${pre ?? "—"}, fit=${fit1 ?? "—"}, fit15=${fit2 ?? "—"})`);
+        log(
+          `  ${req.key} · ${spec.name}: score=${score ?? "—"} (pre=${pre ?? "—"}, fit=${fit1 ?? "—"}, fit15=${fit2 ?? "—"}${
+            post != null ? `, 应用后全分辨率=${post}` : ""
+          })${note ? ` — ${note}` : ""}`,
+        );
       } catch (err) {
         rows.push({ candidate: spec.name, score: null, pre: null, fit1: null, fit2: null, ok: false, note: String(err).slice(0, 160) });
         log(`  ${req.key} · ${spec.name}: 失败 — ${String(err).slice(0, 120)}`);
@@ -1176,6 +1298,15 @@ export async function renderFigureMaps(
         modelId: null,
       });
     }
+  }
+
+  /* ---- 3.5 v3.64: close the lowpassed reference clone — the pose search
+   * is done and the screenshots below must render ONLY the full-resolution
+   * originals (the smoothed copy was never in openIds, so the hide-all
+   * loop would have missed it). */
+  if (refSmoothId != null) {
+    await exec(t, `close #${refSmoothId}`, opts, true);
+    refSmoothId = null;
   }
 
   /* ---- 4. screenshots ---- */

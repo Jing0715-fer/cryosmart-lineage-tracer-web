@@ -788,6 +788,27 @@ export function buildFlowFigureModel(
      * all) when the curated walk surfaced nothing beyond them. */
     const fallbackStages = spineMapOrder.filter((n) => !isImportSeed(n));
     const stages = curatedStages.length ? curatedStages : fallbackStages.length ? fallbackStages : spineMapOrder;
+    /* v3.64 (round-23 “最终不应该用deepEMhancer，而是deepemhancer前一步的
+     * map也需要展示”): post-processing jobs (DeepEMhancer / sharpen /
+     * density_mod) never enter the 极简 deck — they are not classification
+     * rows (isClassificationJobType), so their only way in was the
+     * mandatory FINAL row, which showed the SHARPENED postprocess map
+     * instead of the refinement that produced it. The funnel now STOPS at
+     * the last refinement: the final row renders the pre-DeepEMhancer map
+     * and the spine carries THAT job's resolution (the reference map
+     * switches with it — see the reference/finalStats overrides below).
+     * The un-filtered `stages` snapshot stays the omission-notes mainline
+     * so a MID-chain postprocess stage still gets named in the per-gap
+     * “omitted: N×” notes; only trailing ones (the usual case) fall off
+     * the end and live in the warning below. */
+    const postStages = stages.filter((n) => isPostProcessType(n.job_type || ""));
+    const nonPostStages = stages.filter((n) => !isPostProcessType(n.job_type || ""));
+    const renderStages = nonPostStages.length ? nonPostStages : stages;
+    if (postStages.length && nonPostStages.length) {
+      warnings.push(
+        `极简模式: ${postStages.map((n) => `${jobTypeLabel(n.job_type)}(${n.uid})`).join("、")} 等后处理阶段不进入极简流程图 — 末行改为展示其前一步 ${renderStages[renderStages.length - 1].uid} 的 map，并显示该步的分辨率。`,
+      );
+    }
     /* v3.63: detect parallel CLASSIFICATION merges — for every mainline
      * stage, the map-bearing classification jobs that feed it PARTICLES
      * (a non-volume incoming edge — a parent connected by BOTH particle
@@ -819,6 +840,10 @@ export function buildFlowFigureModel(
       return false;
     };
     const parallelByStage = new Map<string, string[]>();
+    /* v3.64: detection runs over ALL mainline stages INCLUDING the
+     * postprocess ones — a pair of parallel classification jobs reuniting
+     * AT a DeepEMhancer merge still renders as ONE summed parallel row
+     * even though the merge target itself never enters the deck. */
     for (const S of stages) {
       const ps = particleClassificationParentsOf(S.uid);
       if (ps.length >= 2) parallelByStage.set(S.uid, ps);
@@ -826,7 +851,7 @@ export function buildFlowFigureModel(
     const parallelMembers = new Set([...parallelByStage.values()].flat());
     const renderedGroups = new Set<string>();
     const emittedInGroups = new Set<string>();
-    for (const S of stages) {
+    for (const S of renderStages) {
       if (parallelMembers.has(S.uid)) {
         const members = [...parallelByStage.values()].find((ps) => ps.includes(S.uid))!;
         const key = members.join("+");
@@ -870,7 +895,7 @@ export function buildFlowFigureModel(
     minimalMainline = stages.map((n) => ({ uid: n.uid, label: jobTypeLabel(n.job_type) }));
     const excludedImports = spineMapOrder.filter((n) => isImportSeed(n) && !stages.includes(n)).length;
     warnings.push(
-      `极简模式: 已精选颗粒主线上的 ${stages.length} 个阶段 — 关键 job 逐个成行、按上下游顺序排列（连续同类型阶段将合并为一行「N×」标注；省略的步骤在图上以「N×」注明）` +
+      `极简模式: 已精选颗粒主线上的 ${renderStages.length} 个阶段 — 关键 job 逐个成行、按上下游顺序排列（连续同类型阶段将合并为一行「N×」标注；省略的步骤在图上以「N×」注明）` +
         (excludedImports
           ? `；另排除 ${excludedImports} 个导入/种子阶段（参考体积等输入不作为流程阶段展示）`
           : "") +
@@ -1014,7 +1039,11 @@ export function buildFlowFigureModel(
   if (simplified && folded.length) simplifiedFunnelPass(folded, warnings);
 
   // Reference = the FINAL job's map when it has one.
-  if (finalNode && normalMapAssets(finalNode).length > 0) {
+  // v3.64 (round-23): 极简 never anchors to the final JOB's map — the
+  // postprocess stages never entered its deck, so the reference falls to
+  // the last DISPLAYED map-bearing row below (the pre-DeepEMhancer
+  // refinement every other map aligns to).
+  if (finalNode && !minimal && normalMapAssets(finalNode).length > 0) {
     const ref = itemFromNode(summary, finalNode, { isFinal: true, warnings });
     referenceItem = ref;
     referenceKey = ref.mapKey;
@@ -1056,6 +1085,36 @@ export function buildFlowFigureModel(
     );
   } else if (res != null && res > 0) {
     finalStats = `${res >= 10 ? res.toFixed(1) : res.toFixed(2)} Å`;
+  }
+
+  /* v3.64 (round-23 “最终不应该用deepEMhancer…并且需要显示分辨率”): in
+   * the 极简 deck the funnel ends at the last DISPLAYED stage — post-
+   * processing never entered it (filtered in the minimal walk above), so
+   * the spine's resolution belongs to the pre-DeepEMhancer refinement, not
+   * to the DeepEMhancer job that merely copies its input's number. Read it
+   * from the last displayed row's own node; keep the default-12 Å
+   * unrefined-abinit guard the simplified mode uses. The REFERENCE map
+   * for 极简 was already re-anchored to this row by the `!minimal` branch
+   * above (last map-bearing folded row). */
+  if (minimal && folded.length) {
+    const lastRow = folded[folded.length - 1];
+    const lastItem = [...lastRow].reverse().find((it) => it.mapKey) ?? null;
+    const lastNode = lastItem ? graph.byUid.get(lastItem.uid) ?? null : null;
+    const lastRes = lastNode?.resolution_A ?? null;
+    const lastIsAbinit = lastNode ? /abinit/i.test(lastNode.job_type || "") : false;
+    const lastResIsDefaultAbinit =
+      lastIsAbinit &&
+      (isDefaultResolutionAbinit(lastNode) ||
+        (lastRes != null && Math.abs(lastRes - ABINIT_DEFAULT_RESOLUTION_A) <= ABINIT_DEFAULT_RESOLUTION_TOL_A));
+    if (lastRes != null && lastRes > 0 && !lastResIsDefaultAbinit) {
+      finalStats = `${lastRes >= 10 ? lastRes.toFixed(1) : lastRes.toFixed(2)} Å`;
+    } else if (lastItem) {
+      warnings.push(
+        `极简模式: 末行 ${lastItem.uid} 无可用分辨率（${
+          lastResIsDefaultAbinit ? "未精修 ab-initio 默认 12 Å，已忽略" : "谱系未捕获该步的 FSC 分辨率"
+        }）— 脊柱末端不显示分辨率标注。`,
+      );
+    }
   }
 
   /* FSC XML */
@@ -1183,12 +1242,12 @@ function trimFlowGroups(
 
 /** v3.61 (round-20 “应该是精选出几个job展示，上下游关系还是不能混乱”):
  *  the 极简 row cap. The curated mainline is all-single rows, so there are
- *  no parallel groups to protect — the FIRST stage (the funnel entry) and
- *  the FINAL stage (the resolution story) are mandatory, and the remaining
- *  budget fills from the END: the stages closest to the final map are the
- *  most refined ones, so earlier middle steps drop first. The dropped
- *  stages' upstream→downstream ORDER among the survivors is untouched —
- *  curation only REMOVES rungs, it never re-levels them.
+ *  no parallel groups to protect — the FINAL stage (the resolution story)
+ *  is mandatory, and the remaining budget fills from the END: the stages
+ *  closest to the final map are the most refined ones, so earlier middle
+ *  steps drop first. The dropped stages' upstream→downstream ORDER among
+ *  the survivors is untouched — curation only REMOVES rungs, it never
+ *  re-levels them.
  *  v3.62 (round-21): runs on the POST-MERGE sequence (mergeMinimalRuns
  *  folds same-type runs first), and the warning points the reader at
  *  the per-gap “omitted: N×” notes the deck carries for the drops.
@@ -1198,7 +1257,16 @@ function trimFlowGroups(
  *  classification — isClassificationJobType). A non-classification
  *  middle (non-uniform / local / homo refinement, post-processing) is
  *  never selected as a showcase row even when the cap has room to
- *  spare — it reads in the “omitted: N× …” gap note instead. */
+ *  spare — it reads in the “omitted: N× …” gap note instead.
+ *  v3.64 (round-23 “应该找到颗粒最多一个分类任务作为第一行”): the FIRST
+ *  row is no longer simply the earliest mainline stage — it is the
+ *  CLASSIFICATION task carrying the MOST particles (a parallel merge
+ *  row reads the SUM of its jobs' counts; a merged “N×” row its FIRST
+ *  member's entry — the funnel's true head). Everything upstream of it
+ *  is left out of the deck (the header band already carries the entry
+ *  counts); the last row is never a first-row candidate (it must stay
+ *  the funnel's end), and the earliest stage remains the fallback when
+ *  no classification row carries a count. */
 function curateMinimalFlow(
   groups: FlowFigureItem[][],
   maxGroups: number,
@@ -1206,13 +1274,39 @@ function curateMinimalFlow(
 ): FlowFigureItem[][] {
   const isClassRow = (g: FlowFigureItem[]) =>
     g.length > 0 && g.every((it) => isClassificationJobType(it.jobType));
+  /* v3.63 rowEntryCount semantics (workflow-pptx.ts mirrors this): a
+   * merged “N×” row reads its FIRST member's entry (entryParticleCount)
+   * and a parallel row reads the SUM of its jobs' counts. */
+  const entryOf = (g: FlowFigureItem[]): number | null => {
+    const one = (it: FlowFigureItem): number | null => {
+      const v = it.entryParticleCount ?? it.particleTotal ?? null;
+      return v != null && v > 0 ? v : null;
+    };
+    if (!g.length) return null;
+    if (g.length > 1) {
+      const cs = g.map(one).filter((v): v is number => v != null);
+      return cs.length ? cs.reduce((a, b) => a + b, 0) : null;
+    }
+    return one(g[0]);
+  };
   if (groups.length <= 2) return groups;
+  const lastIdx = groups.length - 1;
+  let firstIdx = 0;
+  let bestCount = -1;
+  for (let i = 0; i < lastIdx; i++) {
+    if (!isClassRow(groups[i])) continue;
+    const c = entryOf(groups[i]);
+    if (c != null && c > bestCount) {
+      bestCount = c;
+      firstIdx = i;
+    }
+  }
   const chosen = new Set<number>();
-  chosen.add(0);
-  chosen.add(groups.length - 1);
+  chosen.add(firstIdx);
+  chosen.add(lastIdx);
   let classMiddles = 0;
   let nonClassMiddles = 0;
-  for (let i = groups.length - 2; i > 0; i--) {
+  for (let i = lastIdx - 1; i > firstIdx; i--) {
     if (isClassRow(groups[i])) {
       classMiddles += 1;
       if (chosen.size < maxGroups) chosen.add(i);
@@ -1223,13 +1317,17 @@ function curateMinimalFlow(
   if (chosen.size === groups.length) return groups;
   const kept = groups.filter((_, i) => chosen.has(i));
   const capDropped = classMiddles - Math.max(0, Math.min(classMiddles, maxGroups - 2));
+  if (firstIdx > 0)
+    warnings.push(
+      `极简模式: 首行取颗粒数最多的分类任务「${groups[firstIdx][0].label} · ${entryOf(groups[firstIdx])?.toLocaleString("en-US") ?? "—"} particles」— 其上游 ${firstIdx} 个阶段未展示（首行之前的颗粒数已计入顶部总数带）。`,
+    );
   if (nonClassMiddles > 0)
     warnings.push(
       `极简模式: 中间行仅精选分类结果 — 已略过 ${nonClassMiddles} 个非分类中间阶段（Non-uniform / Local refinement 等精修步骤，在图上以「omitted: N× 类型」注明）。`,
     );
   if (capDropped > 0 || kept.length < groups.length)
     warnings.push(
-      `极简模式: 合并同类型后主线共 ${groups.length} 行，已精选 ${kept.length} 行（首尾必留，其余自后向前仅保留分类结果 — 未选阶段在图上以「N×」省略标注，上下游顺序保持不变）。`,
+      `极简模式: 合并同类型后主线共 ${groups.length} 行，已精选 ${kept.length} 行（首行为颗粒数最多的分类任务、末行必留，其余自后向前仅保留分类结果 — 未选阶段在图上以「N×」省略标注，上下游顺序保持不变）。`,
     );
   return kept;
 }

@@ -167,5 +167,34 @@
  * 180°-rotated pose class the 5-candidate ladder mis-aligned. Old pages
  * keep the non-classification middles, the wrong retention denominators,
  * the arrowless header band and the 5-candidate search.
+ *
+ * v3.64 bump reason (round-23 “目前还是会每次重复下载和保存map文件 +
+ * map的对齐还是存在问题，可以先lowpass一下再找角度，找到后应用到原map上 +
+ * 极简流程方面应该找到颗粒最多一个分类任务作为第一行 + 最终不应该用
+ * deepEMhancer，而是deepemhancer前一步的map也需要展示，并且需要显示分辨率 +
+ * 分类后指向deepemhancer这之间缺少颗粒数和比例”): (1) the direct and
+ * proxy rungs of the map-source ladder now CONVERGE ON THE PERSISTENT
+ * CACHE — each still-missed map is downloaded by ChimeraX ONCE and saved
+ * into the cache via `save <cacheDir>/<canonical>.mrc models #id`
+ * (verified through /staged), so the 8-candidate alignment reads LOCAL
+ * files and every later run of the same workflow downloads nothing
+ * (previously these rungs never touched the cache and ChimeraX
+ * re-fetched every map on every run — up to 8 fetches per map per run);
+ * (2) the ChimeraX pose search runs on vgaussian LOWPASSED clones
+ * (sigma 2 voxels) of the candidate AND the reference — the fit ladder
+ * runs smooth-vs-smooth (robust against the high-frequency noise that
+ * dragged full-resolution fits into wrong local optima), and the found
+ * pose is applied back onto the ORIGINAL map via matrixget/matrixset,
+ * verified with a full-resolution correlation (the candidate row's new
+ * `post`); any vgaussian/matrix failure degrades to the previous direct
+ * fit; (3) the 极简 deck's FIRST row is the classification task carrying
+ * the MOST particles (a parallel merge row reads the SUM, a merged N×
+ * row its first member's entry) — everything upstream of it is left out;
+ * (4) post-processing (DeepEMhancer / sharpen / density_mod) never enters
+ * the 极简 deck: the final row shows the PRE-DeepEMhancer job's map and
+ * the spine carries THAT job's resolution (the reference map switches to
+ * it too); (5) a row that reports no count of its own inherits the
+ * previous row's entry, so the gap between the last classification and
+ * the final row never loses its particle count / ratio lines again.
  */
-export const FLOW_ENGINE_VERSION = "3.63";
+export const FLOW_ENGINE_VERSION = "3.64";

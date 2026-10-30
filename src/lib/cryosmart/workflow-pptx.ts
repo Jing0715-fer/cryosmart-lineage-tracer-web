@@ -394,7 +394,21 @@ export function buildWorkflowPptx(
     }
     return g.length ? entryOf(g[0]) : null;
   };
-  const repCounts = groups.map(rowEntryCount);
+  /* v3.64 (round-23 “分类后指向deepemhancer这之间缺少颗粒数和比例”): a row
+   * that reports NO count of its own INHERS the previous row's entry — a
+   * stage that does not report particles passes them through unchanged, so
+   * the gap into it still carries the count line (its percentage reads
+   * 100% and stays suppressed). Without the forward-fill, a count-less
+   * downstream row dropped BOTH lines and the funnel read as if the
+   * particles vanished. */
+  const repCounts: Array<number | null> = [];
+  {
+    let lastCount: number | null = null;
+    for (const raw of groups.map(rowEntryCount)) {
+      if (raw != null) lastCount = raw;
+      repCounts.push(raw ?? lastCount);
+    }
+  }
 
   /* ---- 极简: flow-anchor precomputation (data-only, before placement) ----
    * The anchor = the class slot whose particle count feeds the next stage

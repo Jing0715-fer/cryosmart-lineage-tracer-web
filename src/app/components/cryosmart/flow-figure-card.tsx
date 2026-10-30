@@ -30,6 +30,7 @@ import {
   probeFlowBridge,
   renderFigureMaps,
   bridgeOpenProbe,
+  bridgeOpenModel,
   bridgeExec,
   bridgeStagedLookup,
   stagedMapFilename,
@@ -395,6 +396,67 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
     [relayCommand],
   );
 
+  /** v3.64 (round-23 “目前还是会每次重复下载和保存map文件”): after the
+   *  direct / proxy probes succeed, each still-uncached map is downloaded
+   *  by CHIMERAX once and immediately SAVED into the relay's persistent
+   *  map cache (`save "<cacheDir>/<canonical>.mrc" models #id`, verified
+   *  via /staged) — the alignment ladder then opens the LOCAL path (the 8
+   *  candidate opens read disk, not network) and every LATER run of the
+   *  same workflow hits the cache outright. These two rungs previously
+   *  never touched the cache, so ChimeraX re-downloaded every map on
+   *  EVERY run. Returns the local path, or null when staging is
+   *  impossible (old relay / save error) — the caller then falls back to
+   *  the plain URL source. `openModelId` (the probe's still-open model)
+   *  is reused for its own map and closed on every path. */
+  const stageViaChimeraSave = useCallback(
+    async (
+      transport: FlowTransport,
+      key: string,
+      item: { downloadUrl: string },
+      url: string,
+      openModelId: number | null,
+      onLog?: (s: string) => void,
+    ): Promise<string | null> => {
+      const close = async (id: number | null) => {
+        if (id != null) await bridgeExec(transport, `close #${id}`);
+      };
+      if (transport.kind !== "relay" || !transport.canCache || !transport.cacheDir) {
+        await close(openModelId);
+        return null;
+      }
+      const name = stagedMapFilename(key, item.downloadUrl);
+      const path = `${transport.cacheDir.replace(/[\\/]+$/, "")}/${name}`;
+      let modelId = openModelId;
+      try {
+        if (modelId == null) {
+          const openRes = await bridgeOpenModel(transport, url);
+          modelId = openRes.modelId;
+          if (modelId == null) {
+            onLog?.(`⚠ 地图 ${key} 缓存写入跳过 — 打开失败（${openRes.error ?? "no model id"}），本次仍走直读`);
+            return null;
+          }
+        }
+        const saveRes = await bridgeExec(transport, `save "${path}" models #${modelId}`);
+        if (saveRes.error) {
+          onLog?.(`⚠ 地图 ${key} 缓存写入失败 — ChimeraX save 报错（${saveRes.error.slice(0, 160)}），本次仍走直读`);
+          return null;
+        }
+        const hit = await bridgeStagedLookup(transport, name);
+        if (!hit) {
+          onLog?.(`⚠ 地图 ${key} 缓存校验未命中（${name}）— 本次仍走直读`);
+          return null;
+        }
+        onLog?.(
+          `✓ 地图 ${key} 已由 ChimeraX 下载一次并写入本地缓存（${fmtSize(hit.size)}）— 本次 8 候选对齐及以后每次运行均直接读本地文件，零重复下载`,
+        );
+        return hit.path;
+      } finally {
+        await close(modelId);
+      }
+    },
+    [],
+  );
+
   const generate = useCallback(async () => {
     if (step.busy) return;
     /* v3.50: stale-bundle gate — a page older than the live server refuses
@@ -634,11 +696,33 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           setStep((s) => ({ ...s, phase: "探测 ChimeraX 直接读取 CryoSmart", pct: 10 }));
           const probe = await bridgeOpenProbe(transport, probeUrl);
           if (probe.ok && probe.modelId != null) {
-            await bridgeExec(transport, `close #${probe.modelId}`);
-            for (const key of missedKeys) sourceFor.set(key, uniqueMaps.get(key)!.downloadUrl);
+            /* v3.64: the direct rung now CONVERGES ON THE CACHE — every
+             * still-missed map downloads ONCE and is saved by ChimeraX
+             * into the persistent cache (stageViaChimeraSave), so the
+             * alignment ladder reads LOCAL files and every later run is
+             * zero-download. The probe model is REUSED for its own map
+             * (no second download) and closed by the helper. */
             pushLog(
-              `ChimeraX 可直接读取内网地图 — 直连模式（仅 ${missedKeys.length} 张未缓存地图走直连${sourceFor.size > missedKeys.length ? "；已缓存的直接打开本地文件" : ""}）`,
+              `ChimeraX 可直接读取内网地图 — 直连模式（${missedKeys.length} 张未缓存地图各下载一次并由 ChimeraX 写入本地缓存${
+                sourceFor.size > 0 ? "；已缓存的直接打开本地文件" : ""
+              }）`,
             );
+            let cached = 0;
+            for (const key of missedKeys) {
+              const item = uniqueMaps.get(key)!;
+              const reuse = key === probeKey ? probe.modelId : null;
+              setStep((s) => ({
+                ...s,
+                phase: `直连下载并缓存地图 ${cached + 1}/${missedKeys.length}`,
+                pct: 10 + ((cached + 1) / Math.max(1, missedKeys.length)) * 25,
+              }));
+              const local = await stageViaChimeraSave(transport, key, item, item.downloadUrl, reuse, pushLog);
+              if (local) cached += 1;
+              sourceFor.set(key, local ?? item.downloadUrl);
+            }
+            if (cached > 0 && cached < missedKeys.length) {
+              pushLog(`⚠ ${missedKeys.length - cached} 张地图未能写入本地缓存，本次仍走直读（下次运行重试入缓存）`);
+            }
           } else {
             // v3.45 (user report — “ChimeraX 直接读取失败(HTTP 401) → 改走应用
             // 中转”之后再无下文): direct reads 401 whenever CryoSmart sits
@@ -682,16 +766,36 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 setStep((s) => ({ ...s, phase: "探测 ChimeraX 经应用代理读取", pct: 12 }));
                 const probe2 = await bridgeOpenProbe(transport, proxyRefUrl);
                 if (probe2.ok && probe2.modelId != null) {
-                  await bridgeExec(transport, `close #${probe2.modelId}`);
+                  /* v3.64: same cache convergence as the direct rung — the
+                   * maps ChimeraX reads through the app proxy are saved
+                   * into the persistent cache on FIRST download; later
+                   * runs open them locally (no proxy traffic at all). */
+                  pushLog(
+                    `ChimeraX 可经应用代理直读地图 — 代理直连模式（${missedKeys.length} 张未缓存地图各下载一次并由 ChimeraX 写入本地缓存，无需浏览器下载/中转大文件）`,
+                  );
+                  let cached2 = 0;
                   for (const key of missedKeys) {
-                    const pu = proxyUrlFor(uniqueMaps.get(key)!.downloadUrl);
-                    if (pu) sourceFor.set(key, pu);
-                    else pushLog(`⚠ 地图 ${key} 无法构建代理 URL，将跳过`);
+                    const item = uniqueMaps.get(key)!;
+                    const pu = proxyUrlFor(item.downloadUrl);
+                    if (!pu) {
+                      if (key === probeKey) await bridgeExec(transport, `close #${probe2.modelId}`);
+                      pushLog(`⚠ 地图 ${key} 无法构建代理 URL，将跳过`);
+                      continue;
+                    }
+                    const reuse = key === probeKey ? probe2.modelId : null;
+                    setStep((s) => ({
+                      ...s,
+                      phase: `代理下载并缓存地图 ${cached2 + 1}/${missedKeys.length}`,
+                      pct: 12 + ((cached2 + 1) / Math.max(1, missedKeys.length)) * 23,
+                    }));
+                    const local = await stageViaChimeraSave(transport, key, item, pu, reuse, pushLog);
+                    if (local) cached2 += 1;
+                    sourceFor.set(key, local ?? pu);
+                  }
+                  if (cached2 > 0 && cached2 < missedKeys.length) {
+                    pushLog(`⚠ ${missedKeys.length - cached2} 张地图未能写入本地缓存，本次仍走代理直读（下次运行重试入缓存）`);
                   }
                   proxyMode = true;
-                  pushLog(
-                    `ChimeraX 可经应用代理直读地图 — 代理直连模式（${missedKeys.length} 张未缓存地图，无需浏览器下载/中转大文件）`,
-                  );
                 } else {
                   pushLog(`⚠ 应用代理直读失败(${probe2.error ?? "no model"})`);
                 }
