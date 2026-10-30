@@ -173,28 +173,43 @@
  * 极简流程方面应该找到颗粒最多一个分类任务作为第一行 + 最终不应该用
  * deepEMhancer，而是deepemhancer前一步的map也需要展示，并且需要显示分辨率 +
  * 分类后指向deepemhancer这之间缺少颗粒数和比例”): (1) the direct and
- * proxy rungs of the map-source ladder now CONVERGE ON THE PERSISTENT
- * CACHE — each still-missed map is downloaded by ChimeraX ONCE and saved
- * into the cache via `save <cacheDir>/<canonical>.mrc models #id`
- * (verified through /staged), so the 8-candidate alignment reads LOCAL
- * files and every later run of the same workflow downloads nothing
- * (previously these rungs never touched the cache and ChimeraX
- * re-fetched every map on every run — up to 8 fetches per map per run);
- * (2) the ChimeraX pose search runs on vgaussian LOWPASSED clones
- * (sigma 2 voxels) of the candidate AND the reference — the fit ladder
- * runs smooth-vs-smooth (robust against the high-frequency noise that
- * dragged full-resolution fits into wrong local optima), and the found
- * pose is applied back onto the ORIGINAL map via matrixget/matrixset,
- * verified with a full-resolution correlation (the candidate row's new
- * `post`); any vgaussian/matrix failure degrades to the previous direct
- * fit; (3) the 极简 deck's FIRST row is the classification task carrying
- * the MOST particles (a parallel merge row reads the SUM, a merged N×
- * row its first member's entry) — everything upstream of it is left out;
- * (4) post-processing (DeepEMhancer / sharpen / density_mod) never enters
- * the 极简 deck: the final row shows the PRE-DeepEMhancer job's map and
- * the spine carries THAT job's resolution (the reference map switches to
- * it too); (5) a row that reports no count of its own inherits the
- * previous row's entry, so the gap between the last classification and
- * the final row never loses its particle count / ratio lines again.
+ * proxy rungs of the map-source ladder attempted to CONVERGE ON THE
+ * PERSISTENT CACHE by having CHIMERAX open each URL once and `save` the
+ * model into the cache — the 8-candidate alignment read LOCAL files on a
+ * successful save; (2) the ChimeraX pose search runs on vgaussian
+ * LOWPASSED clones (sigma 2 voxels) of the candidate AND the reference —
+ * the fit ladder runs smooth-vs-smooth (robust against the
+ * high-frequency noise that dragged full-resolution fits into wrong
+ * local optima), and the found pose is applied back onto the ORIGINAL
+ * map via matrixget/matrixset, verified with a full-resolution
+ * correlation (the candidate row's `post`); any vgaussian/matrix failure
+ * degrades to the previous direct fit; (3) the 极简 deck's FIRST row is
+ * the classification task carrying the MOST particles (a parallel merge
+ * row reads the SUM, a merged N× row its first member's entry) —
+ * everything upstream of it is left out; (4) post-processing
+ * (DeepEMhancer / sharpen / density_mod) never enters the 极简 deck: the
+ * final row shows the PRE-DeepEMhancer job's map and the spine carries
+ * THAT job's resolution (the reference map switches to it too); (5) a
+ * row that reports no count of its own inherits the previous row's
+ * entry, so the gap between the last classification and the final row
+ * never loses its particle count / ratio lines again.
+ *
+ * v3.65 bump reason (round-24 “目前还是会重新下载map，增加设置一个本地目录
+ * 先下载map，再让chimera从指定目录中打开map进行对齐截图，如果目录中已有
+ * 所需文件就跳过下载”): the download rung INVERTED — v3.64's
+ * ChimeraX-open-then-save convergence still re-downloaded whenever the
+ * save rung failed silently on the real machine. The RELAY itself (the
+ * ChimeraX machine's own Python — no ChimeraX command, no ChimeraX
+ * fetcher quirks) now downloads each still-uncached map ONCE into its
+ * persistent local cache dir (new POST /fetch; a file already in the dir
+ * skips the download outright and just returns its path) and hands
+ * ChimeraX the LOCAL path — the 8-candidate alignment and every
+ * screenshot afterwards read DISK, never network. The direct rung
+ * /fetch's the map's own URL; the proxy rung /fetch's the app-proxy URL
+ * (credentials attached server-side, browser untouched); the
+ * page-mediated /stage stays the last resort, and old relays without
+ * /fetch keep the v3.56–63 URL-direct ladder with an upgrade hint.
+ * /ping gained a "fetch": true flag (canFetchMaps), and the bridge panel
+ * now surfaces the local map dir itself (下载一次、以后免下载).
  */
-export const FLOW_ENGINE_VERSION = "3.64";
+export const FLOW_ENGINE_VERSION = "3.65";

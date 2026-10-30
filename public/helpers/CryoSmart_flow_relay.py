@@ -12,8 +12,10 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
 作用：
   在本机启动一个微型 HTTP 桥（默认端口 8927，冲突时自动尝试 8928/8929，
   监听所有网卡），之后 CryoSmart Lineage Tracer Web 页面即可直接
-  驱动 ChimeraX 完成：地图打开 → 5 候选对齐（含 z 翻转手性检查）→
-  90° 视角评分 → 高清截图回传 → 网页端组装 16:9 流程图 PPTX。
+  驱动 ChimeraX 完成：地图先由本桥下载进固定本地缓存目录（目录里已有
+  的文件跳过下载）→ ChimeraX 从本地目录打开地图 → 8 候选低通对齐
+  （含 z 翻转手性检查）→ 90° 视角评分 → 高清截图回传 → 网页端组装
+  16:9 流程图 PPTX。
 
   ChimeraX 与浏览器可以在不同机器上（例如 ChimeraX 装在 CryoSmart
   服务器上、页面开在工作电脑上）——网页会同时探测 127.0.0.1 与
@@ -30,6 +32,12 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         （v3.47：ChimeraX 不支持 http+mrc，也无法无后缀
                         嗅探——网页先下载再经此接口暂存到 ChimeraX 同机，
                         之后 open 本地文件，全程零弹窗）
+      POST /fetch       v3.65 本地目录下载：由本桥（ChimeraX 所在机器的
+                        Python，与 ChimeraX 命令无关）把地图 URL 直接下载
+                        进固定本地缓存目录，返回本地绝对路径 — ChimeraX
+                        之后只 open 本地文件做对齐/截图（8 候选全读本地
+                        盘，零重复下载）。目录里已有该文件时跳过下载，
+                        直接返回路径。body: {"url": ..., "name": 规范名}。
       GET  /staged       v3.56 地图本地缓存查询：?name= 返回该缓存文件
                         是否存在（+ 本地绝对路径/大小/mtime）；不带 ?name=
                         返回整个缓存目录清单。缓存目录在系统 temp 下固定
@@ -45,9 +53,11 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         旧版桥无此端点时网页会退化为 close all。
 
   升级提示：若你的 ChimeraX 里还在运行旧版桥（/ping 不含 "stage":
-  true，或不含 "cache": true），请在 ChimeraX Command Line 重新运行
-  一次本命令即可更新（无需重启 ChimeraX）。v3.55 起重新 open 会先关掉旧桥再接管同一
-  端口（旧版桥重 open 会叠到下一个端口，网页仍探到旧桥）。
+  true、"cache": true 或 "fetch": true），请在 ChimeraX Command Line
+  重新运行一次本命令即可更新（无需重启 ChimeraX）。v3.55 起重新 open
+  会先关掉旧桥再接管同一端口（旧版桥重 open 会叠到下一个端口，网页仍
+  探到旧桥）。无 /fetch 的旧桥无法「先下载到本地目录再打开」，网页会
+  退回旧的 直连/代理/中转 阶梯并提示升级。
 
 运行环境：ChimeraX 1.12+（GUI）。保持 ChimeraX 打开即可；关闭 ChimeraX
 时桥随之消失，下次重新 open 一次。
@@ -59,6 +69,7 @@ import socket
 import tempfile
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Queue
 
@@ -259,6 +270,114 @@ def main(session):
         except OSError:
             return {"ok": True, "exists": False}
 
+    def _evict_for(incoming):
+        """v3.65: make room for `incoming` bytes in the persistent cache —
+        the SAME LRU policy /stage used inline (files written within the
+        fresh window are protected; only when that is not enough does the
+        oldest file overall go), now shared by /stage uploads AND /fetch
+        downloads. A cache that still cannot free enough keeps going over
+        cap rather than dropping the map it is evicting FOR (mirrors the
+        old /stage last resort)."""
+        entries = _cache_entries()
+        total = sum(sz for _, _, sz in entries)
+        need = incoming - (STAGING_TOTAL_CAP - total)
+        if need <= 0:
+            return
+        now = time.time()
+        stale = [(mt, p, sz) for mt, p, sz in entries
+                 if now - mt >= STAGING_FRESH_WINDOW_S]
+        fresh = [(mt, p, sz) for mt, p, sz in entries
+                 if now - mt < STAGING_FRESH_WINDOW_S]
+        for _, p, sz in sorted(stale):
+            if need <= 0:
+                break
+            try:
+                os.remove(p)
+                need -= sz
+            except OSError:
+                pass
+        if need > 0:
+            for _, p, sz in sorted(fresh):
+                if need <= 0:
+                    break
+                try:
+                    os.remove(p)
+                    need -= sz
+                except OSError:
+                    pass
+
+    def fetch_map(url, name):
+        """v3.65 (round-24 “增加设置一个本地目录先下载map，再让chimera从
+        指定目录中打开map进行对齐截图，如果目录中已有所需文件就跳过下载”):
+        download `url` into the PERSISTENT local cache dir under the page's
+        canonical `name` and return the LOCAL path ChimeraX opens. The
+        download runs in THIS process (plain urllib — no ChimeraX command,
+        no ChimeraX fetcher quirks), streams to a .part file and renames
+        atomically, so an interrupted download can never leave a half map
+        for a later run to open. A file already in the dir skips the
+        download ENTIRELY ("status": "hit"; its mtime is refreshed so the
+        LRU tracks real use). Runs on the plain HTTP handler thread — it
+        never touches the ChimeraX session, so no ui_run hop is needed."""
+        safe = os.path.basename(name or "") or "map.mrc"
+        safe = "".join(c for c in safe if c.isalnum() or c in "._- ") or "map.mrc"
+        os.makedirs(staging_dir, exist_ok=True)
+        path = os.path.join(staging_dir, safe)
+        try:
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                try:
+                    os.utime(path, None)  # hit → back to the top of the LRU
+                except OSError:
+                    pass
+                return {"ok": True, "status": "hit", "path": path,
+                        "size": os.path.getsize(path)}
+        except OSError:
+            pass
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "CryoSmart-Flow-Relay/3.65"})
+        part = "%s.%d.part" % (path, threading.get_ident())
+        total = 0
+        try:
+            try:
+                resp = urllib.request.urlopen(req, timeout=60)
+            except Exception:
+                # A machine-wide http_proxy/https_proxy that cannot reach the
+                # intranet CryoSmart is the classic intranet failure — retry
+                # once with ALL proxies disabled (only when one is set).
+                proxy_env = [k for k in ("http_proxy", "https_proxy",
+                                         "HTTP_PROXY", "HTTPS_PROXY",
+                                         "all_proxy", "ALL_PROXY")
+                             if os.environ.get(k)]
+                if not proxy_env:
+                    raise
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({}))
+                resp = opener.open(req, timeout=60)
+            with resp, open(part, "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > STAGE_SINGLE_CAP:
+                        raise RuntimeError(
+                            "map exceeds the %d MB single-file cap"
+                            % (STAGE_SINGLE_CAP // (1024 * 1024)))
+                    f.write(chunk)
+            if total <= 0:
+                raise RuntimeError("empty download (0 bytes)")
+            _evict_for(total)
+            os.replace(part, path)
+            return {"ok": True, "status": "downloaded", "path": path,
+                    "size": total}
+        except Exception as exc:  # noqa: BLE001 - surfaced to the page
+            try:
+                if os.path.exists(part):
+                    os.remove(part)
+            except OSError:
+                pass
+            return {"ok": False,
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+
     def stage_file(data, name):
         """v3.47: write uploaded bytes into the ChimeraX-side staging dir and
         return the local absolute path. ChimeraX cannot open http MRC URLs
@@ -276,36 +395,7 @@ def main(session):
         os.makedirs(staging_dir, exist_ok=True)
         safe = os.path.basename(name or "") or "map.mrc"
         safe = "".join(c for c in safe if c.isalnum() or c in "._- ") or "map.mrc"
-        entries = _cache_entries()
-        total = sum(sz for _, _, sz in entries)
-        need = len(data) - (STAGING_TOTAL_CAP - total)
-        if need > 0:
-            now = time.time()
-            stale = [(mt, p, sz) for mt, p, sz in entries
-                     if now - mt >= STAGING_FRESH_WINDOW_S]
-            fresh = [(mt, p, sz) for mt, p, sz in entries
-                     if now - mt < STAGING_FRESH_WINDOW_S]
-            # Prefer evicting stale (older than the fresh window) files,
-            # oldest first; touch nothing from the current run.
-            for _, p, sz in sorted(stale):
-                if need <= 0:
-                    break
-                try:
-                    os.remove(p)
-                    need -= sz
-                except OSError:
-                    pass
-            # Last resort: still short — evict the oldest fresh file too
-            # (better than rejecting the upload outright).
-            if need > 0:
-                for _, p, sz in sorted(fresh):
-                    if need <= 0:
-                        break
-                    try:
-                        os.remove(p)
-                        need -= sz
-                    except OSError:
-                        pass
+        _evict_for(len(data))
         path = os.path.join(staging_dir, safe)
         part = "%s.%d.part" % (path, threading.get_ident())
         try:
@@ -393,6 +483,12 @@ def main(session):
                         # map cache (/staged lookup) exists — older copies
                         # don't send it and the page skips the cache check.
                         "cache": True,
+                        # v3.65: the page checks this to know POST /fetch
+                        # (relay-side download into the persistent local
+                        # cache dir; ChimeraX then opens only LOCAL files)
+                        # exists — older copies don't send it and the page
+                        # falls back to the legacy URL-direct ladder.
+                        "fetch": True,
                         "cacheDir": staging_dir,
                         "cached": sum(1 for _ in _cache_entries()),
                         "volumes": sum(1 for m in ui_run(lambda: list(session.models.list()))
@@ -469,6 +565,29 @@ def main(session):
             from urllib.parse import urlparse, parse_qs
             r = urlparse(self.path)
             try:
+                if r.path == "/fetch":
+                    # v3.65 (round-24 “先下载到本地目录，ChimeraX 从指定目录
+                    # 打开，已有文件跳过下载”): body {"url": ...,
+                    # "name": <canonical>.mrc} — THIS relay downloads the map
+                    # into the persistent local cache dir and returns the
+                    # LOCAL path; ChimeraX afterwards opens only local files
+                    # (the 8-candidate alignment + screenshots read disk, not
+                    # network). "status": "hit" when the file was already in
+                    # the dir and the download was skipped outright. Runs on
+                    # the handler thread — no ChimeraX command is involved.
+                    length = int(self.headers.get("Content-Length") or 0)
+                    body = self.rfile.read(length) if length else b"{}"
+                    try:
+                        payload = json.loads(body.decode("utf-8") or "{}")
+                    except Exception:
+                        payload = {}
+                    url = str(payload.get("url") or "")
+                    name = str(payload.get("name") or "")
+                    if not url or not name:
+                        self._reply(400, {"ok": False, "error": "missing url/name"})
+                        return
+                    self._reply(200, fetch_map(url, name))
+                    return
                 if r.path == "/stage":
                     # v3.47: body = raw bytes; name = X-Filename header or
                     # ?name= query. Returns the ChimeraX-openable local path.
@@ -567,7 +686,7 @@ def main(session):
     for ip in _lan_ips():
         session.logger.info("  局域网:    http://%s:%d  (ChimeraX 与浏览器不同机时用这个)" % (ip, bound_port))
     session.logger.info("允许的网页来源: %s" % ", ".join(ALLOWED_ORIGINS))
-    session.logger.info("地图缓存 (v3.56 /stage 上传 + /staged 查询): %s" % staging_dir)
+    session.logger.info("地图本地缓存目录（v3.65 /fetch 先下载到这里再由 ChimeraX 打开；已有文件跳过下载；/stage 上传、/staged 查询）: %s" % staging_dir)
     session.logger.info("保持 ChimeraX 打开；在网页端点击 \"生成流程图\" 即可全自动完成对齐/手性检查/截图。")
     session.logger.info("=" * 60)
 

@@ -117,6 +117,18 @@
  * map (stagedMapFilename + bridgeStagedLookup) BEFORE any download ladder
  * rung; a hit yields a LOCAL path ChimeraX opens directly (zero network).
  * The bridge transports advertise it via ping's `cache` flag (canCache).
+ *
+ * v3.65 (round-24 “增加设置一个本地目录先下载map，再让chimera从指定目录
+ * 中打开map进行对齐截图，如果目录中已有所需文件就跳过下载”): the
+ * acquisition ladder INVERTED — the relay ITSELF (the ChimeraX machine's
+ * own Python, no ChimeraX command involved) downloads each still-uncached
+ * map URL ONCE into the persistent cache dir (POST /fetch; a file already
+ * in the dir skips the download outright) and hands ChimeraX the LOCAL
+ * path, so this module's 8 candidate opens read DISK, never network —
+ * regardless of ChimeraX's own web-fetcher quirks (v3.64's converge-via-
+ * ChimeraX-save still re-downloaded whenever a save rung failed
+ * silently). Transports advertise it via ping's `fetch` flag
+ * (canFetchMaps); relays without it keep the v3.56–63 URL-direct ladder.
  */
 
 import { chimeraClassColor } from "./chimera-colors";
@@ -147,6 +159,13 @@ export interface FlowTransport {
   canCache?: boolean;
   /** v3.56: the bridge's persistent map-cache dir (log/diagnostics). */
   cacheDir?: string;
+  /** v3.65: relay-only — the bridge script advertises POST /fetch: the
+   *  relay ITSELF downloads a map URL into the persistent local cache dir
+   *  (skip when the file is already there) and returns the LOCAL path, so
+   *  ChimeraX opens only LOCAL files for the 8-candidate alignment +
+   *  screenshots. Relays without it fall back to the legacy URL-direct
+   *  ladder (with an upgrade hint in the run log). */
+  canFetchMaps?: boolean;
   /** v3.50: which save rung last produced a /file-fetchable PNG — cached
    *  per transport so later saves go straight to the working shape. */
   saveMode?: SaveMode;
@@ -216,10 +235,10 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
           logs.push(`relay ${host}:${port} → HTTP ${res.status}`);
           continue;
         }
-        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string };
+        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean };
         if (data?.ok) {
           logs.push(
-            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""})`,
+            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""})`,
           );
           return {
             transport: {
@@ -232,6 +251,7 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
               canStage: !!data.stage,
               canCache: !!data.cache,
               cacheDir: data.cacheDir,
+              canFetchMaps: !!data.fetch,
             },
             logs,
           };
@@ -427,6 +447,58 @@ export async function bridgeStagedLookup(
     return { path: data.path, size: data.size, mtime: typeof data.mtime === "number" ? data.mtime : 0 };
   } catch {
     return null;
+  }
+}
+
+/** v3.65: the outcome of a relay POST /fetch — the ChimeraX-openable
+ *  LOCAL path of the map inside the relay's persistent cache dir
+ *  (status "hit" = the file was already there and the download was
+ *  skipped outright). */
+export interface BridgeFetchResult {
+  ok: boolean;
+  status?: "hit" | "downloaded";
+  path?: string;
+  size?: number;
+  error?: string;
+}
+
+/** v3.65 (round-24 “增加设置一个本地目录先下载map，再让chimera从指定目录
+ *  中打开map进行对齐截图，如果目录中已有所需文件就跳过下载”): have the
+ *  RELAY (the ChimeraX machine's own Python — no ChimeraX command involved)
+ *  download a map URL ONCE into its persistent local map-cache dir and
+ *  return the LOCAL path. ChimeraX afterwards opens ONLY that local file
+ *  for the 8-candidate alignment ladder and the screenshots, so no
+ *  candidate open can ever re-fetch over the network; a file already in
+ *  the dir skips the download entirely. The canonical `name` comes from
+ *  stagedMapFilename() — the SAME name rung 0's /staged probe and the
+ *  /stage upload use — so every rung and every later run converge on the
+ *  same cached file. Never throws; failures come back as { ok: false,
+ *  error } so the caller can walk its ladder. */
+export async function bridgeFetchMap(
+  t: FlowTransport,
+  url: string,
+  name: string,
+  timeoutMs = 600_000,
+): Promise<BridgeFetchResult> {
+  if (t.kind !== "relay") return { ok: false, error: "not a relay transport" };
+  try {
+    const res = await fetchWithTimeout(
+      `${t.base}/fetch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, name }),
+      },
+      timeoutMs,
+    );
+    if (!res.ok) return { ok: false, error: `relay /fetch HTTP ${res.status}` };
+    const data = (await res.json()) as BridgeFetchResult;
+    if (!data?.ok || typeof data.path !== "string" || !data.path) {
+      return { ok: false, error: data?.error || "relay /fetch 未返回本地路径" };
+    }
+    return data;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
