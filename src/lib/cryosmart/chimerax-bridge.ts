@@ -15,30 +15,24 @@
  *      PNGs cannot be fetched back over this transport (alignment +
  *      chirality diagnostics still work).
  *
- * The alignment / handedness protocol is a faithful port of the proven
- * `CryoSmart_auto_align_export_ppt.py` desktop helper:
- *   - 8 candidate hypotheses per map (v3.63, round-22 “每个手性可能需要
- *     转180度再多搜索一次，目前还是存在对齐不准确的问题” — EACH hand
- *     now gets the full 180°-rotation search): original, rot_x_180,
- *     rot_y_180, rot_z_180, flip_z (`volume flip #N axis z modelId <next>`)
- *     PLUS the flipped hand rotated 180° about x / y / z
- *     (flip_z_rot_x_180 / flip_z_rot_y_180 / flip_z_rot_z_180 — the
- *     original-hand rotations already search the mirror-image start
- *     positions, but the flipped hand previously only ever searched from
- *     its un-rotated pose, which is exactly where mis-alignments survived)
- *   - scoring: `measure correlation` → `fit #v in #ref` → `fit #v in #ref
- *     search 15`; score = fit_search ?? fit ?? measure
- *   - v3.64 (round-23 “可以先lowpass一下再找角度，找到后应用到原map上
- *     是不是会更好”): the pose SEARCH runs on vgaussian lowpassed clones
- *     (sigma 2 voxels) of the candidate AND the reference — the ladder
- *     runs smooth-vs-smooth, where high-frequency noise no longer drags
- *     the fit into wrong local optima; the found pose is then applied
- *     back onto the ORIGINAL map via matrixget/matrixset (workdir file)
- *     and verified with a full-resolution correlation (the candidate
- *     row's `post`). Any vgaussian/matrix failure degrades to the
- *     previous full-resolution direct fit — bit-for-bit the old ladder.
- *   - chirality verdict from the best flip-family candidate vs. the best
- *     rigid one
+ * The alignment / handedness protocol (v3.66 — see the version history
+ * below for how it evolved from the desktop helper's 8-candidate
+ * ladder):
+ *   - runtime command probe: the first fit call discovers which fitting
+ *     shape this ChimeraX runs (fitmap/inMap documented → … → fit/in)
+ *     and `measure correlation` does the same (inMap → positional) — a
+ *     hard-coded spelling can never silently kill the fit again
+ *   - TWO HANDS per map: the pristine original + ONE `volume flip` z
+ *     mirror (created before any fitting) — every rotation is reached
+ *     by the global search, not by pre-turned re-opens
+ *   - TWO TRACKS per hand on a σ4→σ2 vgaussian pyramid: 局部细化 (local
+ *     fitmap from the incoming pose, coarse→fine) and 全局搜索 (fitmap
+ *     search 30 random placements at σ4, refined at σ2); the winner by
+ *     σ2 correlation is applied to the FULL-RESOLUTION map via
+ *     matrixget/matrixset (round-trip probed on the reference first),
+ *     polished with one full-res local fit and scored with a full-res
+ *     `measure correlation` — the honest ranking number for both hands
+ *   - chirality verdict from the flip hand vs. the original hand
  *   - one-time 90° view optimisation on the reference map by thumbnail
  *     coverage scoring, applied to every map
  *   - per-map export at 1600×1200 supersample 3 on a TRANSPARENT background
@@ -124,11 +118,51 @@
  * own Python, no ChimeraX command involved) downloads each still-uncached
  * map URL ONCE into the persistent cache dir (POST /fetch; a file already
  * in the dir skips the download outright) and hands ChimeraX the LOCAL
- * path, so this module's 8 candidate opens read DISK, never network —
+ * path, so this module's candidate opens read DISK, never network —
  * regardless of ChimeraX's own web-fetcher quirks (v3.64's converge-via-
  * ChimeraX-save still re-downloaded whenever a save rung failed
  * silently). Transports advertise it via ping's `fetch` flag
  * (canFetchMaps); relays without it keep the v3.56–63 URL-direct ladder.
+ *
+ * v3.66 (round-25 “map的对齐还是存在问题，需要继续优化对齐的算法”): the
+ * pose search was REBUILT around the real ChimeraX fitting command. The
+ * v3.56–65 ladder sent `fit #v in #ref [search 15]` — `fit` is NOT a
+ * stock ChimeraX command (`fitmap #v inMap #ref [search N]` is), so on
+ * every real machine both fit calls errored “unknown command”, the
+ * soft flag swallowed the error, and `score = fit2 ?? fit1 ?? pre`
+ * silently degraded to the STATIC pose correlation — the alignment
+ * NEVER moved a map; only the 8 fixed pre-rotations ever changed a pose
+ * (exactly the maps that looked right) while anything needing real
+ * optimisation stayed mis-aligned. The new engine:
+ *   - RUNTIME COMMAND PROBE: the first fit call walks
+ *     fitmap/inMap (documented) → fitmap/in → fit/inMap → fit/in and
+ *     remembers + logs the first shape this ChimeraX actually runs; no
+ *     hard-coded spelling can break the deck again. `measure correlation`
+ *     gets the same treatment (inMap primary — the form that has parsed
+ *     on the real machine since v3.56 — positional fallback).
+ *   - TWO HANDS instead of 8 pre-turned candidates: the pristine map +
+ *     ONE `volume flip` z-mirror (created before any fitting). Every
+ *     rotation — 90°, arbitrary tilts, anything — is reached by the
+ *     global search instead of by whichever 180° turns happened to be
+ *     in the fixed candidate list.
+ *   - TWO TRACKS per hand on a σ4→σ2 vgaussian pyramid (matrix transfer
+ *     matrixget/matrixset round-trip probed on the reference first):
+ *     局部细化 = local fitmap from the incoming pose (same-pipeline
+ *     maps start near-aligned — the likeliest basin), coarse→fine;
+ *     全局搜索 = `fitmap … search 30` random placements at σ4
+ *     (arbitrary rotations), transferred to σ2 and refined. The better
+ *     track by σ2 correlation is applied to the FULL-RESOLUTION map,
+ *     polished with one full-res local fit and scored with a full-res
+ *     `measure correlation` (the row's `post` — the honest ranking
+ *     number for both hands).
+ *   - SAFETY: after every hand the relay's /volumes is swept so a
+ *     fitmap-search stray copy can never leak into the screenshots
+ *     (round-14 disease); a search timeout/hiccup disables the search
+ *     for the rest of the run instead of stalling every hand.
+ *   - DEGRADATIONS (each still ≥ the v3.65 static ladder): no fitmap →
+ *     static scoring with a loud log; no search → local-only; no matrix
+ *     round-trip → no clones, full-res ladder local-only; no vgaussian →
+ *     full-res ladder with bookkeeping; official REST → full-res ladder.
  */
 
 import { chimeraClassColor } from "./chimera-colors";
@@ -850,14 +884,26 @@ async function thumbnailCoverageScore(png: Uint8Array): Promise<number> {
 
 const LEVEL_RATIO = 0.25;
 const STEP = 1;
-const FIT_SEARCH = 15;
 const CHIRALITY_EPSILON = 0.01;
-/** v3.64 (round-23 “可以先lowpass一下再找角度，找到后应用到原map上”):
- * the vgaussian smoothing width for the pose search — VOXEL units (a
- * ~1 Å/voxel map gets ≈6–8 Å of lowpass), strong enough to wash out
- * high-frequency noise that dragged the full-resolution fit into wrong
- * local optima, gentle enough to keep the gross shape the search needs. */
-const LOWPASS_SIGMA = 2;
+/** v3.66 multi-scale lowpass ladder — VOXEL units. The GLOBAL search
+ * runs at σ coarse (a ~1 Å/voxel map gets ≈12–16 Å — the molecular
+ * envelope, wide smooth basins where random placements converge),
+ * refinement and the track decision at σ fine (≈6–8 Å — enough detail
+ * to discriminate poses, still washing the high-frequency noise that
+ * dragged full-resolution fits into wrong local optima). */
+const SIGMA_COARSE = 4;
+const SIGMA_FINE = 2;
+/** v3.66: random placements for the global fitmap search — covers
+ * arbitrary rotations (90°/any tilt), the pose space the fixed
+ * 180°-pre-turn candidates of v3.63 could never reach. */
+const SEARCH_PLACEMENTS = 30;
+/** v3.66: skip the global search when the local track already reached
+ * this correlation — a near-aligned map needs no random search. */
+const SEARCH_SKIP_CORR = 0.85;
+/** v3.66: the global search can legitimately run minutes on big maps —
+ * it gets its own (longer) /exec timeout; a timeout disables the search
+ * for the rest of the run instead of stalling every hand. */
+const FIT_SEARCH_TIMEOUT_MS = 300_000;
 const THUMB_SIZE = 220;
 const SNAPSHOT_W = 1600;
 const SNAPSHOT_H = 1200;
@@ -893,7 +939,8 @@ export interface CandidateRow {
   /** v3.64: FULL-RESOLUTION correlation measured on the ORIGINAL map
    * AFTER the lowpass-found pose was applied to it (null when the lowpass
    * path was not used) — proves the transferred angle works at the
-   * resolution that actually gets screenshotted. */
+   * resolution that actually gets screenshotted. v3.66: this is the
+   * HONEST ranking score — both hands are compared by it. */
   post?: number | null;
 }
 
@@ -935,8 +982,24 @@ function threw(signal?: AbortSignal): boolean {
   return signal?.aborted === true;
 }
 
-async function exec(t: FlowTransport, command: string, opts: RenderMapsOptions, soft = false): Promise<ExecResult> {
-  const r = await bridgeExec(t, command);
+async function exec(
+  t: FlowTransport,
+  command: string,
+  opts: RenderMapsOptions,
+  soft = false,
+  timeoutMs?: number,
+): Promise<ExecResult> {
+  // v3.66: exec never throws — a transient relay hiccup or a timeout on
+  // ONE command (close/level/fit) must not kill a multi-minute render
+  // run; the error rides back as ExecResult.error and every caller
+  // already degrades on it. `timeoutMs` overrides bridgeExec's 180 s
+  // default (the global fitmap search gets 300 s).
+  let r: ExecResult;
+  try {
+    r = await bridgeExec(t, command, timeoutMs);
+  } catch (err) {
+    r = { text: "", error: err instanceof Error ? err.message : String(err) };
+  }
   if (r.error && !soft) {
     opts.onLog?.(`! ${command} → ${r.error}`);
   }
@@ -945,7 +1008,8 @@ async function exec(t: FlowTransport, command: string, opts: RenderMapsOptions, 
 
 /**
  * Full pipeline: open reference → standardise the 90° view → per-map
- * 5-candidate alignment + handedness check → per-map screenshot.
+ * two-hand two-track alignment + handedness check (v3.66) → per-map
+ * screenshot.
  */
 
 /** v3.64: make a vgaussian (lowpass) copy of an open volume model and
@@ -954,18 +1018,20 @@ async function exec(t: FlowTransport, command: string, opts: RenderMapsOptions, 
  * `vgaussian` convolves with a Gaussian on the SAME grid and origin, so a
  * pose found on the smoothed pair applies to the originals unchanged.
  * Tries `modelId <next>` first (relay /nextid) and falls back to plain
- * auto-id + log parsing. */
+ * auto-id + log parsing. v3.66: the sigma is a parameter — the ladder
+ * builds σ coarse (global search) and σ fine (refinement) clones. */
 async function gaussianSmooth(
   t: FlowTransport,
   id: number,
+  sigma: number,
   opts: RenderMapsOptions,
 ): Promise<number | null> {
   const next = await bridgeNextModelId(t);
   let res = next != null
-    ? await exec(t, `vgaussian #${id} sigma ${LOWPASS_SIGMA} modelId ${next}`, opts, true)
+    ? await exec(t, `vgaussian #${id} sigma ${sigma} modelId ${next}`, opts, true)
     : null;
   if (res?.error) {
-    res = await exec(t, `vgaussian #${id} sigma ${LOWPASS_SIGMA}`, opts, true);
+    res = await exec(t, `vgaussian #${id} sigma ${sigma}`, opts, true);
   }
   if (!res || res.error) return null;
   return parseOpenModelId(res.text) ?? next;
@@ -1102,37 +1168,187 @@ export async function renderFigureMaps(
     log("当前传输不支持文件回传 — 使用基准视角（对齐/手性诊断仍有效）");
   }
 
-  /* ---- 2.5 v3.64 (round-23 “可以先lowpass一下再找角度”): the LOWPASSED
-   * reference for the pose search — created AFTER the view scoring so the
-   * coverage thumbnails never render it. Every candidate below fits
-   * smooth-vs-smooth (vgaussian clones of both — same grid, same origin),
- * where high-frequency noise no longer drags the fit into wrong local
-   * optima; the found pose then transfers back onto the ORIGINAL map via
-   * matrixget/matrixset (needs the relay workdir for the matrix file +
-   * /nextid for model ids). ANY failure here degrades the whole run to
-   * the previous full-resolution direct fit — zero-regression fallback. */
+  /* ---- 2.5 v3.66: matrix-transfer probe + the TWO-SCALE lowpassed
+   * reference (σ coarse for the global search, σ fine for refinement
+   * and the track decision). Created AFTER the view scoring so the
+   * coverage thumbnails never render them; closed before the screenshot
+   * phase. The matrixget→matrixset ROUND TRIP is probed on the reference
+   * first (its pose is identity, so applying its own matrix is a no-op):
+   * the whole clone pyramid + two-track pose bookkeeping depends on it,
+   * and a build where it fails degrades cleanly to the full-resolution
+   * ladder instead of losing fitted poses mid-run. On the official REST
+   * transport (no workdir) the probe writes a bare relative filename —
+   * ChimeraX resolves it against its own cwd. */
   const lowpass = t.kind === "relay" && !!t.workdir;
-  let refSmoothId: number | null = null;
-  if (lowpass) {
-    refSmoothId = await gaussianSmooth(t, refId, opts);
-    if (refSmoothId != null) {
-      const sStats = await bridgeVolStats(t, refSmoothId);
-      if (sStats) {
-        await exec(t, `volume #${refSmoothId} level ${(sStats.max * LEVEL_RATIO).toFixed(4)} step ${STEP}`, opts, true);
-      }
+  const xfPath = (name: string) => (t.workdir ? joinWorkdirPathFwd(t.workdir, name) : name);
+  let matrixOk = false;
+  {
+    const probePath = xfPath("xf_probe_ref.txt");
+    const g = await exec(t, `matrixget "${probePath}" models #${refId}`, opts, true);
+    const s = g.error ? null : await exec(t, `matrixset "${probePath}" models #${refId}`, opts, true);
+    matrixOk = !g.error && !!s && !s.error;
+    if (!matrixOk) {
       log(
-        `低通参考已生成（#${refSmoothId}，vgaussian sigma ${LOWPASS_SIGMA}）— 各候选在低通副本上搜索角度，找到后经 matrixget/matrixset 应用回原 map，再以全分辨率复核`,
+        `⚠ 矩阵转移（matrixget/matrixset）不可用 — 低通副本与双轨迹比较停用，退回全分辨率直接拟合（${logSnippet(
+          g.error ?? s?.error ?? "无返回",
+          100,
+        )}）`,
       );
+    }
+  }
+  /** v3.66: save a model's current pose matrix into the bridge file area —
+   * null when the capture failed (the caller keeps the live pose and
+   * notes it). `tag` carries the map key + hand + seed, so names are
+   * unique per pose and a re-run simply overwrites its own files. */
+  const matrixSave = async (id: number, tag: string): Promise<string | null> => {
+    if (!matrixOk) return null;
+    const p = xfPath(`xf_${safeKeyPart(tag)}.txt`);
+    const r = await exec(t, `matrixget "${p}" models #${id}`, opts, true);
+    return r.error ? null : p;
+  };
+  const matrixLoad = async (id: number, path: string): Promise<boolean> => {
+    if (!matrixOk) return false;
+    const r = await exec(t, `matrixset "${path}" models #${id}`, opts, true);
+    return !r.error;
+  };
+  let refSmoothC: number | null = null;
+  let refSmoothF: number | null = null;
+  if (lowpass && matrixOk) {
+    refSmoothC = await gaussianSmooth(t, refId, SIGMA_COARSE, opts);
+    if (refSmoothC != null) {
+      refSmoothF = await gaussianSmooth(t, refId, SIGMA_FINE, opts);
+    }
+    for (const sid of [refSmoothC, refSmoothF]) {
+      if (sid == null) continue;
+      const sStats = await bridgeVolStats(t, sid);
+      if (sStats) {
+        await exec(t, `volume #${sid} level ${(sStats.max * LEVEL_RATIO).toFixed(4)} step ${STEP}`, opts, true);
+      }
+    }
+    if (refSmoothF != null) {
+      log(
+        `低通参考已生成（σ${SIGMA_COARSE} → #${refSmoothC}，σ${SIGMA_FINE} → #${refSmoothF}）— 全局搜索在 σ${SIGMA_COARSE} 上找角度，σ${SIGMA_FINE} 上细化比较，最优姿态经 matrixget/matrixset 应用回原 map 后全分辨率复核`,
+      );
+    } else if (refSmoothC != null) {
+      log(`低通参考仅 σ${SIGMA_COARSE} 可用（#${refSmoothC}）— 搜索与细化都在粗尺度进行`);
     } else {
-      log("⚠ 无法生成低通参考（vgaussian 不可用或未返回 model id）— 本次退回全分辨率直接对齐");
+      log("⚠ 无法生成低通参考（vgaussian 不可用或未返回 model id）— 退回全分辨率直接拟合");
     }
   }
 
-  /* ---- 3. per-map 5-candidate alignment ---- */
+  /* ---- 3. per-map alignment (v3.66: fitmap probe + 双手性 × 双轨迹) ---- */
   const renders: MapRender[] = [];
   const all = [opts.reference, ...opts.maps];
   const perMapPct = 45 / Math.max(1, all.length);
   let pct = 15;
+
+  /* v3.66 run-scoped engine state. `fitShape` is the fitting command
+   * shape THIS ChimeraX actually runs — probed lazily by the first fit
+   * call through [fitmap/inMap (the documented form) → fitmap/in →
+   * fit/inMap → fit/in]; every later fit reuses the winner. The
+   * v3.56–65 ladder hard-coded `fit #v in #ref [search 15]` — NOT a
+   * stock ChimeraX command — so on real machines both fit calls errored
+   * “unknown command”, the soft flag swallowed it, and score = fit2 ??
+   * fit1 ?? pre silently degraded to the STATIC pose correlation: the
+   * alignment never moved a map (the persistent 对齐不准确). The probe
+   * works on any build and logs the winning shape so a pasted log is
+   * self-diagnosing. */
+  const FIT_SHAPES = [
+    { cmd: "fitmap", kw: "inMap" },
+    { cmd: "fitmap", kw: "in" },
+    { cmd: "fit", kw: "inMap" },
+    { cmd: "fit", kw: "in" },
+  ];
+  let fitShape: { cmd: string; kw: string } | null | undefined;
+  let searchOk: boolean | undefined;
+  let measureShape: "inMap" | "pos" | undefined;
+
+  const fitText = (cand: number, ref: number, search?: number) =>
+    `${fitShape?.cmd} #${cand} ${fitShape?.kw} #${ref}${search ? ` search ${search}` : ""}`;
+
+  /** v3.66: `measure correlation` with the same runtime-shape care — the
+   * inMap form is what has parsed on the real machine since v3.56; the
+   * positional form keeps other builds alive. */
+  const measureCorr = async (a: number, b: number): Promise<number | null> => {
+    const shapes: Array<"inMap" | "pos"> = measureShape ? [measureShape] : ["inMap", "pos"];
+    for (const s of shapes) {
+      const cmd = s === "inMap" ? `measure correlation #${a} inMap #${b}` : `measure correlation #${a} #${b}`;
+      const r = await exec(t, cmd, opts, true);
+      const v = parseCorrelation(r.text) ?? parseCorrelation(r.error);
+      if (v != null) {
+        measureShape = s;
+        return v;
+      }
+    }
+    return null;
+  };
+
+  /** One fitting call (LOCAL optimisation when `search` is omitted — a
+   * successful fit MOVES the fitted model to its optimum). Probes the
+   * command shape on first use; returns null when no shape runs on this
+   * ChimeraX (the caller degrades to static scoring). */
+  const runFit = async (cand: number, ref: number, search?: number): Promise<ExecResult | null> => {
+    if (fitShape === null) return null;
+    if (fitShape) {
+      return await exec(t, fitText(cand, ref, search), opts, true, search ? FIT_SEARCH_TIMEOUT_MS : undefined);
+    }
+    const fails: string[] = [];
+    for (const s of FIT_SHAPES) {
+      const cmd = `${s.cmd} #${cand} ${s.kw} #${ref}`;
+      const r = await exec(t, cmd, opts, true);
+      if (!r.error) {
+        fitShape = s;
+        log(`拟合命令: ${s.cmd} #N ${s.kw} #N ✓ — 本 ChimeraX 以该形态做位姿搜索`);
+        return r;
+      }
+      fails.push(`${s.cmd} ${s.kw}: ${logSnippet(r.error, 80)}`);
+    }
+    log(`⚠ 拟合命令（fitmap/fit）全部不可用 — 本次退化为静止姿态评分（不移动地图）。探测详情: ${fails.join("；")}`);
+    fitShape = null;
+    return null;
+  };
+
+  /** v3.66: the global random-placement search — arbitrary rotations and
+   * translations, each locally optimised by ChimeraX, the best pose left
+   * on the model. Covers the 90°/arbitrary-tilt poses the fixed
+   * 180°-pre-turn candidates of v3.63 could never reach. A FIRST failure
+   * (unsupported keyword / timeout) disables the search for the whole
+   * run; a mid-run failure after an earlier success just degrades the
+   * current hand. */
+  const runSearch = async (cand: number, ref: number): Promise<ExecResult | null> => {
+    if (searchOk === false || fitShape == null) return null;
+    const r = await runFit(cand, ref, SEARCH_PLACEMENTS);
+    if (r && !r.error) {
+      if (searchOk === undefined) {
+        searchOk = true;
+        log(`全局搜索可用（${fitShape.cmd} … search ${SEARCH_PLACEMENTS} 随机放置）`);
+      }
+      return r;
+    }
+    if (searchOk === true) return r;
+    searchOk = false;
+    log(`⚠ 全局搜索不可用（${logSnippet(r?.error ?? "无返回", 120)}）— 本次仅做局部拟合`);
+    return null;
+  };
+
+  /** v3.66 SAFETY NET: close any volume model that appeared outside the
+   * engine's bookkeeping (e.g. a stray fitmap-search copy) — a stray
+   * would ride the screenshot phase (the round-14 disease). Relay only
+   * (needs /volumes). `extra` lists ids legitimately open besides
+   * openIds right now (the reference's smooth clones). */
+  const sweepStrayVolumes = async (extra: Array<number | null>): Promise<void> => {
+    if (t.kind !== "relay") return;
+    const vols = await bridgeVolumeIds(t);
+    if (vols == null) return;
+    const legit = new Set<string>([...openIds].map((id) => String(id)));
+    for (const id of extra) if (id != null) legit.add(String(id));
+    for (const v of vols) {
+      if (!legit.has(v.id)) {
+        await exec(t, `close #${v.id}`, opts, true);
+        log(`  已关闭多余地图模型 #${v.id}（${logSnippet(v.name, 60)}）— 拟合产生的副本不会进入截图`);
+      }
+    }
+  };
 
   for (const req of all) {
     if (threw(opts.signal)) throw new Error("aborted");
@@ -1152,199 +1368,258 @@ export async function renderFigureMaps(
       openIds.add(refId);
       continue;
     }
-    progress(`对齐 ${req.key}（8 候选 × ${lowpass && refSmoothId != null ? "低通角度搜索" : "相关性评分"}）`, pct);
+    progress(`对齐 ${req.key}（双手性 × 局部细化 + 全局搜索）`, pct);
     pct += perMapPct * 0.75;
 
     const rows: CandidateRow[] = [];
-    // v3.52: this map's Chimera default open-color (class position) — every
-    // candidate (incl. the flipped copy) renders in it, so the screenshot
+    // v3.52: this map's Chimera default open-color (class position) — both
+    // hands (incl. the flipped copy) render in it, so the screenshot
     // matches the class maps opened together in Chimera. v3.53: applied via
     // `volume #<id> color` — the volume command's color option; `color #<id>`
     // never touched volume surfaces on the real machine.
     const mapColor = requestColor(req);
-    const openedByCandidate = new Map<string, number>();
-    let chosen: { row: CandidateRow; modelId: number } | null = null;
+    const fileStem = safeKeyPart(req.key.replace(/\//g, "__"));
 
-    /* v3.63 (round-22 “每个手性可能需要转180度再多搜索一次”): the flipped
-     * hand now gets the SAME 180°-rotation search the original hand always
-     * had — flip_z_rot_{x,y,z}_180 apply `turn <axis> 180` to the flipped
-     * copy before the fit ladder, so a map whose best alignment is a
-     * mirrored + 180°-rotated pose no longer loses to a wrong-handed
-     * un-rotated fit (the surviving mis-alignment class). */
-    for (const spec of [
-      { name: "original", kind: "original" as const },
-      { name: "rot_x_180", kind: "rotate" as const, axis: "x" },
-      { name: "rot_y_180", kind: "rotate" as const, axis: "y" },
-      { name: "rot_z_180", kind: "rotate" as const, axis: "z" },
-      { name: "flip_z", kind: "flip" as const, axis: "z" },
-      { name: "flip_z_rot_x_180", kind: "flip_rotate" as const, axis: "x" },
-      { name: "flip_z_rot_y_180", kind: "flip_rotate" as const, axis: "y" },
-      { name: "flip_z_rot_z_180", kind: "flip_rotate" as const, axis: "z" },
-    ]) {
-      if (threw(opts.signal)) throw new Error("aborted");
-      let activeId: number | null = null;
-      let note: string | undefined;
+    /* v3.66: the map opens ONCE (the v3.63–65 ladder re-opened it for
+     * each of the 8 candidates) and the z-flip hand is created from the
+     * PRISTINE model before any fitting — `volume flip` bakes mirrored
+     * DATA, so it must not inherit a fitted pose. */
+    const hands: Array<{ name: "original" | "flip_z"; modelId: number }> = [];
+    {
+      let origId: number | null = null;
       try {
         const openRes = await bridgeOpenModel(t, req.sourceUrl);
-        activeId = openRes.modelId;
-        if (activeId == null) {
+        origId = openRes.modelId;
+        if (origId == null) {
           throw new Error(openRes.error || logSnippet(openRes.text) || "open produced no model");
         }
-        openIds.add(activeId);
-
-        const stats = await bridgeVolStats(t, activeId);
+        openIds.add(origId);
+        const stats = await bridgeVolStats(t, origId);
         const level = stats ? stats.max * LEVEL_RATIO : refLevel;
         if (level != null) {
-          await exec(t, `volume #${activeId} level ${level.toFixed(4)} step ${STEP}`, opts, true);
+          await exec(t, `volume #${origId} level ${level.toFixed(4)} step ${STEP}`, opts, true);
         } else {
-          const sdTry = await exec(t, `volume #${activeId} level 2 sd step ${STEP} style surface`, opts, true);
-          if (sdTry.error) await exec(t, `volume #${activeId} step ${STEP} style surface`, opts, true);
+          const sdTry = await exec(t, `volume #${origId} level 2 sd step ${STEP} style surface`, opts, true);
+          if (sdTry.error) await exec(t, `volume #${origId} step ${STEP} style surface`, opts, true);
         }
-        await exec(t, `volume #${activeId} color ${mapColor}`, opts, true);
+        await exec(t, `volume #${origId} color ${mapColor}`, opts, true);
+        hands.push({ name: "original", modelId: origId });
+      } catch (err) {
+        log(`  ${req.key}: 打开地图失败 — ${String(err).slice(0, 160)}`);
+        rows.push({
+          candidate: "original",
+          score: null,
+          pre: null,
+          fit1: null,
+          fit2: null,
+          ok: false,
+          note: String(err).slice(0, 160),
+        });
+      }
 
-        /* v3.63: the flip family applies the mirror FIRST (a fresh model),
-         *  then flip_rotate additionally turns the copy 180° about the
-         *  candidate axis — each hand gets its own full 180° search. */
-        if (spec.kind === "flip" || spec.kind === "flip_rotate") {
-          const flipAxis = "z";
+      /* the flipped hand — v3.63's `volume flip` with v3.66 hardening: a
+       * command ERROR no longer yields a phantom id (v3.63 trusted
+       * /nextid blindly; a failed flip then addressed a non-existent
+       * model for the rest of that candidate's ladder). */
+      if (origId != null) {
+        try {
+          let flipId: number | null = null;
           const next = await bridgeNextModelId(t);
-          if (next != null) {
-            const flipRes = await exec(t, `volume flip #${activeId} axis ${flipAxis} modelId ${next}`, opts, true);
-            const flipped = parseOpenModelId(flipRes.text) ?? next;
-            openIds.delete(activeId);
-            await exec(t, `close #${activeId}`, opts, true);
-            activeId = flipped;
-            openIds.add(flipped);
+          let flipRes = next != null
+            ? await exec(t, `volume flip #${origId} axis z modelId ${next}`, opts, true)
+            : null;
+          if (flipRes && !flipRes.error) {
+            flipId = parseOpenModelId(flipRes.text) ?? next;
           } else {
-            // Official-REST transport: no nextid endpoint — let ChimeraX pick.
-            const flipRes = await exec(t, `volume flip #${activeId} axis ${flipAxis}`, opts, true);
-            const ids = Array.from(flipRes.text.matchAll(/#(\d+(?:\.\d+)?)/g)).map((m) => parseInt(m[1], 10));
-            const fresh = ids.find((id) => id !== activeId && !openIds.has(id));
-            if (fresh == null) throw new Error(flipRes.error || "flip model id not detected");
-            openIds.delete(activeId);
-            await exec(t, `close #${activeId}`, opts, true);
-            activeId = fresh;
-            openIds.add(fresh);
+            flipRes = await exec(t, `volume flip #${origId} axis z`, opts, true);
+            if (flipRes && !flipRes.error) {
+              const ids = Array.from(flipRes.text.matchAll(/#(\d+(?:\.\d+)?)/g)).map((m) => parseInt(m[1], 10));
+              flipId = ids.find((id) => id !== origId && !openIds.has(id)) ?? null;
+            }
           }
-          const stats2 = await bridgeVolStats(t, activeId);
+          if (flipId == null) throw new Error("flip produced no model");
+          openIds.add(flipId);
+          const stats2 = await bridgeVolStats(t, flipId);
           const level2 = stats2 ? stats2.max * LEVEL_RATIO : refLevel;
           if (level2 != null) {
-            await exec(t, `volume #${activeId} level ${level2.toFixed(4)} step ${STEP}`, opts, true);
+            await exec(t, `volume #${flipId} level ${level2.toFixed(4)} step ${STEP}`, opts, true);
           }
-          await exec(t, `volume #${activeId} color ${mapColor}`, opts, true);
-        }
-        if (spec.kind === "rotate" || spec.kind === "flip_rotate") {
-          await exec(t, `turn ${spec.axis} 180 models #${activeId} center #${activeId}`, opts, true);
-          await exec(t, "wait 1", opts, true);
-        }
-
-        /* v3.64 (round-23 “可以先lowpass一下再找角度，找到后应用到原map上”):
-         * a vgaussian clone of this (already flipped/rotated) candidate —
-         * the correlation/fit ladder runs smooth-vs-smooth, where
-         * high-frequency noise no longer drags the search into wrong
-         * local optima. fitId/fitRefId point at the SMOOTHED pair when the
-         * clone exists and stay on the ORIGINALS otherwise (the previous
-         * full-resolution protocol, bit-for-bit). */
-        let fitId = activeId;
-        let fitRefId = refId;
-        let smoothId: number | null = null;
-        if (lowpass && refSmoothId != null && activeId != null) {
-          smoothId = await gaussianSmooth(t, activeId, opts);
-          if (smoothId != null) {
-            const sStats = await bridgeVolStats(t, smoothId);
-            const sLevel = sStats ? sStats.max * LEVEL_RATIO : refLevel;
-            if (sLevel != null) {
-              await exec(t, `volume #${smoothId} level ${sLevel.toFixed(4)} step ${STEP}`, opts, true);
-            }
-            await exec(t, `volume #${smoothId} color ${mapColor}`, opts, true);
-            fitId = smoothId;
-            fitRefId = refSmoothId;
-          }
-        }
-
-        const preRes = await exec(t, `measure correlation #${fitId} inMap #${fitRefId}`, opts, true);
-        const pre = parseCorrelation(preRes.text) ?? parseCorrelation(preRes.error);
-        const fit1Res = await exec(t, `fit #${fitId} in #${fitRefId}`, opts, true);
-        let fit1 = parseCorrelation(fit1Res.text);
-        const fit2Res = await exec(t, `fit #${fitId} in #${fitRefId} search ${FIT_SEARCH}`, opts, true);
-        let fit2 = parseCorrelation(fit2Res.text);
-        if (fit2 == null) fit2 = parseCorrelation(fit2Res.error);
-        if (fit1 == null && fit2 == null) {
-          const reMeasure = await exec(t, `measure correlation #${fitId} inMap #${fitRefId}`, opts, true);
-          fit1 = parseCorrelation(reMeasure.text);
-        }
-        /* v3.64: transfer the smooth-found pose back onto the ORIGINAL map
-         * (matrixget writes the smoothed model's coordinate frame into the
-         * relay workdir; matrixset applies it to the original), then verify
-         * at FULL resolution — the screenshot renders the original at the
-         * lowpass-found angle. A transfer failure re-runs the direct ladder
-         * on the original so the kept model still carries a real pose. */
-        let post: number | null = null;
-        if (smoothId != null && activeId != null) {
-          const xf = `${t.workdir ?? "."}/xf_${safeKeyPart(req.key.replace(/\//g, "__"))}_${spec.name}.txt`;
-          const mg = await exec(t, `matrixget "${xf}" models #${smoothId}`, opts, true);
-          const ms = mg.error ? null : await exec(t, `matrixset "${xf}" models #${activeId}`, opts, true);
-          if (!mg.error && ms && !ms.error) {
-            const postRes = await exec(t, `measure correlation #${activeId} inMap #${refId}`, opts, true);
-            post = parseCorrelation(postRes.text) ?? parseCorrelation(postRes.error);
-          } else {
-            note = "低通角度转换失败 — 已退回全分辨率直接对齐";
-            const d1 = await exec(t, `fit #${activeId} in #${refId}`, opts, true);
-            fit1 = parseCorrelation(d1.text);
-            const d2 = await exec(t, `fit #${activeId} in #${refId} search ${FIT_SEARCH}`, opts, true);
-            fit2 = parseCorrelation(d2.text) ?? parseCorrelation(d2.error);
-          }
-          await exec(t, `close #${smoothId}`, opts, true);
-          smoothId = null;
-        }
-        const score = fit2 ?? fit1 ?? pre;
-        const row: CandidateRow = { candidate: spec.name, score, pre, fit1, fit2, ok: score != null, note, post };
-        rows.push(row);
-        if (activeId != null) openedByCandidate.set(spec.name, activeId);
-        log(
-          `  ${req.key} · ${spec.name}: score=${score ?? "—"} (pre=${pre ?? "—"}, fit=${fit1 ?? "—"}, fit15=${fit2 ?? "—"}${
-            post != null ? `, 应用后全分辨率=${post}` : ""
-          })${note ? ` — ${note}` : ""}`,
-        );
-      } catch (err) {
-        rows.push({ candidate: spec.name, score: null, pre: null, fit1: null, fit2: null, ok: false, note: String(err).slice(0, 160) });
-        log(`  ${req.key} · ${spec.name}: 失败 — ${String(err).slice(0, 120)}`);
-        if (activeId != null) {
-          await exec(t, `close #${activeId}`, opts, true);
-          openIds.delete(activeId);
+          await exec(t, `volume #${flipId} color ${mapColor}`, opts, true);
+          hands.push({ name: "flip_z", modelId: flipId });
+        } catch (err) {
+          log(`  ${req.key}: 生成 z 翻转副本失败（手性检查仅剩原手）— ${String(err).slice(0, 140)}`);
+          rows.push({
+            candidate: "flip_z",
+            score: null,
+            pre: null,
+            fit1: null,
+            fit2: null,
+            ok: false,
+            note: String(err).slice(0, 140),
+          });
         }
       }
     }
 
-    const valid = rows.filter((r) => r.ok && r.score != null && openedByCandidate.has(r.candidate));
+    /* v3.66: the TWO-TRACK pose ladder per hand. Working pair = the σ
+     * pyramid clones when the reference clones + matrix transfer are
+     * healthy, else the full-resolution models. Track 局部细化 fits
+     * locally from the incoming pose (same-pipeline maps start
+     * near-aligned — the likeliest basin), coarse→fine; track 全局搜索
+     * runs the random-placement search at the coarsest available scale,
+     * then refines at the finest. The better track (by correlation at
+     * the finest scale) is applied to the FULL-RESOLUTION hand via
+     * matrixget/matrixset, polished with one full-res local fit and
+     * verified with a full-res measure correlation (the row's `post` —
+     * the honest ranking number for BOTH hands). The full-res hand model
+     * is the screenshot target either way. */
+    for (const hand of hands) {
+      if (threw(opts.signal)) throw new Error("aborted");
+      const handId = hand.modelId;
+      let smoothC: number | null = null;
+      let smoothF: number | null = null;
+      let pre: number | null = null;
+      let corr1: number | null = null;
+      let corr2: number | null = null;
+      let post: number | null = null;
+      let track = "静止";
+      let note: string | undefined;
+      try {
+        if (lowpass && matrixOk && refSmoothC != null) {
+          smoothC = await gaussianSmooth(t, handId, SIGMA_COARSE, opts);
+          if (smoothC != null) {
+            smoothF = await gaussianSmooth(t, handId, SIGMA_FINE, opts);
+          }
+          for (const sid of [smoothC, smoothF]) {
+            if (sid == null) continue;
+            const sStats = await bridgeVolStats(t, sid);
+            if (sStats) {
+              await exec(t, `volume #${sid} level ${(sStats.max * LEVEL_RATIO).toFixed(4)} step ${STEP}`, opts, true);
+            }
+            await exec(t, `volume #${sid} color ${mapColor}`, opts, true);
+          }
+        }
+        const pairC = smoothC != null && refSmoothC != null ? { a: smoothC, b: refSmoothC } : null;
+        const pairF = smoothF != null && refSmoothF != null ? { a: smoothF, b: refSmoothF } : null;
+        const pairFull = { a: handId, b: refId };
+        const workPair = pairF ?? pairC ?? pairFull;
+
+        pre = await measureCorr(workPair.a, workPair.b);
+
+        /* ---- 轨迹 1 · 局部细化 ---- */
+        let xf1: string | null = null;
+        if (fitShape !== null) {
+          if (pairC && pairF) {
+            await runFit(pairC.a, pairC.b);
+            const xfc = await matrixSave(pairC.a, `${fileStem}_${hand.name}_s1c`);
+            if (xfc) await matrixLoad(pairF.a, xfc);
+          }
+          const target = pairF ?? pairC ?? pairFull;
+          const r1 = await runFit(target.a, target.b);
+          if (r1) {
+            corr1 = await measureCorr(target.a, target.b);
+            xf1 = await matrixSave(target.a, `${fileStem}_${hand.name}_s1`);
+            track = "局部细化";
+          }
+        }
+
+        /* ---- 轨迹 2 · 全局搜索（任意旋转角）----
+         * Skipped when track 1 is already confident — a near-aligned map
+         * needs no random search (this saves minutes per map). */
+        let xf2: string | null = null;
+        if (fitShape !== null && searchOk !== false && !(corr1 != null && corr1 >= SEARCH_SKIP_CORR)) {
+          const searchPair = pairC ?? pairF ?? pairFull;
+          const r2 = await runSearch(searchPair.a, searchPair.b);
+          if (r2) {
+            if (pairC && pairF) {
+              const xfc = await matrixSave(pairC.a, `${fileStem}_${hand.name}_s2c`);
+              if (xfc) await matrixLoad(pairF.a, xfc);
+            }
+            const target = pairF ?? pairC ?? pairFull;
+            await runFit(target.a, target.b);
+            corr2 = await measureCorr(target.a, target.b);
+            xf2 = await matrixSave(target.a, `${fileStem}_${hand.name}_s2`);
+          }
+        }
+
+        /* ---- 胜出轨迹 → 应用回全分辨率 map ---- */
+        let corr = corr1;
+        let xf = xf1;
+        if (corr2 != null && (corr1 == null || corr2 > corr1 + 1e-6)) {
+          corr = corr2;
+          xf = xf2;
+          track = "全局搜索";
+        }
+        if (xf) {
+          const applied = await matrixLoad(handId, xf);
+          if (!applied) note = "最优姿态矩阵应用失败 — 保持当前姿态继续细化";
+        } else if ((pairF || pairC) && fitShape !== null) {
+          note = "低通姿态捕获失败 — 全分辨率地图按原姿态继续细化";
+        }
+        /* full-resolution polish + the honest score */
+        if (fitShape !== null) {
+          await runFit(handId, refId);
+        }
+        post = await measureCorr(handId, refId);
+        const score = post ?? corr ?? pre;
+        if (fitShape == null) note = "拟合命令不可用 — 静止姿态评分";
+        rows.push({
+          candidate: hand.name,
+          score,
+          pre,
+          fit1: corr1,
+          fit2: corr2,
+          ok: score != null,
+          note,
+          post,
+        });
+        log(
+          `  ${req.key} · ${hand.name}: score=${score ?? "—"} (静止=${pre ?? "—"}, 局部=${corr1 ?? "—"}, 全局=${corr2 ?? "—"}, 全分辨率=${post ?? "—"}, 轨迹=${track})${note ? ` — ${note}` : ""}`,
+        );
+      } catch (err) {
+        rows.push({
+          candidate: hand.name,
+          score: null,
+          pre: null,
+          fit1: null,
+          fit2: null,
+          ok: false,
+          note: String(err).slice(0, 160),
+        });
+        log(`  ${req.key} · ${hand.name}: 失败 — ${String(err).slice(0, 140)}`);
+      } finally {
+        if (smoothC != null) await exec(t, `close #${smoothC}`, opts, true);
+        if (smoothF != null) await exec(t, `close #${smoothF}`, opts, true);
+        await sweepStrayVolumes([refSmoothC, refSmoothF]);
+      }
+    }
+
+    const handById = new Map<string, number>(hands.map((h) => [h.name as string, h.modelId]));
+    const valid = rows.filter((r) => r.ok && r.score != null && handById.has(r.candidate));
     const bestRow = valid.sort((a, b) => (b.score as number) - (a.score as number))[0] ?? null;
     if (bestRow) {
-      const bestId = openedByCandidate.get(bestRow.candidate) as number;
-      // Close the losing candidates.
-      for (const [name, id] of openedByCandidate) {
+      const bestId = handById.get(bestRow.candidate) as number;
+      // Close the losing hand's model.
+      for (const [name, id] of handById) {
         if (name !== bestRow.candidate) {
           await exec(t, `close #${id}`, opts, true);
           openIds.delete(id);
         }
       }
-      chosen = { row: bestRow, modelId: bestId };
 
-      /* v3.63: the flip FAMILY (flip_z + the three flip_z_rot_*_180) — any
-       *  of its members winning means the map needed the mirror; the
-       *  ambiguity check uses the family's best score. */
-      const flipScores = rows
-        .filter((r) => r.candidate.startsWith("flip_") && r.score != null)
-        .map((r) => r.score as number);
-      const flipScore = flipScores.length ? Math.max(...flipScores) : null;
+      /* v3.66: chirality — the FLIP HAND winning means the map needed
+       * the mirror (已翻正); ε-close scores mean ambiguous (a symmetric
+       * map reads the same in both hands). */
+      const flipRow = rows.find((r) => r.candidate === "flip_z" && r.score != null) ?? null;
       let chirality: ChiralityStatus = "unknown";
-      if (bestRow.candidate.startsWith("flip_")) {
+      if (bestRow.candidate === "flip_z") {
         chirality = "corrected";
-      } else if (flipScore != null && Math.abs((bestRow.score as number) - flipScore) <= CHIRALITY_EPSILON) {
+      } else if (flipRow && Math.abs((bestRow.score as number) - (flipRow.score as number)) <= CHIRALITY_EPSILON) {
         chirality = "ambiguous";
       } else {
         chirality = "consistent";
       }
-      log(`  → ${req.key} 选中 ${bestRow.candidate} (score=${bestRow.score})，手性: ${chirality}，配色 ${mapColor}`);
+      log(`  → ${req.key} 选中 ${bestRow.candidate}（score=${bestRow.score}），手性: ${chirality}，配色 ${mapColor}`);
       renders.push({
         key: req.key,
         uid: req.uid,
@@ -1354,10 +1629,14 @@ export async function renderFigureMaps(
         chirality,
         rows,
         png: null,
-        modelId: chosen.modelId,
+        modelId: bestId,
       });
     } else {
-      log(`  → ${req.key}: 所有候选失败（无法对齐）`);
+      for (const id of handById.values()) {
+        await exec(t, `close #${id}`, opts, true);
+        openIds.delete(id);
+      }
+      log(`  → ${req.key}: 所有手性候选失败（无法对齐）`);
       renders.push({
         key: req.key,
         uid: req.uid,
@@ -1372,13 +1651,17 @@ export async function renderFigureMaps(
     }
   }
 
-  /* ---- 3.5 v3.64: close the lowpassed reference clone — the pose search
-   * is done and the screenshots below must render ONLY the full-resolution
-   * originals (the smoothed copy was never in openIds, so the hide-all
-   * loop would have missed it). */
-  if (refSmoothId != null) {
-    await exec(t, `close #${refSmoothId}`, opts, true);
-    refSmoothId = null;
+  /* ---- 3.5 v3.64/v3.66: close the lowpassed reference clones — the pose
+   * search is done and the screenshots below must render ONLY the
+   * full-resolution originals (the smoothed copies were never in
+   * openIds, so the hide-all loop would have missed them). */
+  if (refSmoothC != null) {
+    await exec(t, `close #${refSmoothC}`, opts, true);
+    refSmoothC = null;
+  }
+  if (refSmoothF != null) {
+    await exec(t, `close #${refSmoothF}`, opts, true);
+    refSmoothF = null;
   }
 
   /* ---- 4. screenshots ---- */

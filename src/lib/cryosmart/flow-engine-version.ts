@@ -203,7 +203,7 @@
  * fetcher quirks) now downloads each still-uncached map ONCE into its
  * persistent local cache dir (new POST /fetch; a file already in the dir
  * skips the download outright and just returns its path) and hands
- * ChimeraX the LOCAL path — the 8-candidate alignment and every
+ * ChimeraX the LOCAL path — the candidate alignment and every
  * screenshot afterwards read DISK, never network. The direct rung
  * /fetch's the map's own URL; the proxy rung /fetch's the app-proxy URL
  * (credentials attached server-side, browser untouched); the
@@ -211,5 +211,43 @@
  * /fetch keep the v3.56–63 URL-direct ladder with an upgrade hint.
  * /ping gained a "fetch": true flag (canFetchMaps), and the bridge panel
  * now surfaces the local map dir itself (下载一次、以后免下载).
+ *
+ * v3.66 bump reason (round-25 “map的对齐还是存在问题，需要继续优化对齐
+ * 的算法”): the pose search was rebuilt around the REAL ChimeraX
+ * fitting command — v3.56–65 hard-coded `fit #v in #ref [search 15]`,
+ * which is NOT a stock ChimeraX command (`fitmap #v inMap #ref
+ * [search N]` is), so on the real machine BOTH fit calls errored
+ * “unknown command”, the soft flag swallowed the errors, and
+ * score = fit2 ?? fit1 ?? pre silently degraded to the STATIC pose
+ * correlation — the alignment NEVER moved a map; only the 8 fixed
+ * pre-rotations ever changed a pose (why 180°-off maps “fixed
+ * themselves” while everything else stayed mis-aligned). (1) RUNTIME
+ * COMMAND PROBE: the first fit call walks fitmap/inMap (documented) →
+ * fitmap/in → fit/inMap → fit/in, adopts + logs the first shape this
+ * ChimeraX actually runs; `measure correlation` gets the same treatment
+ * (inMap primary — the form that always parsed on the real machine —
+ * positional fallback). (2) TWO HANDS replace the 8 pre-turned
+ * candidates: the map opens ONCE and ONE `volume flip` z-mirror is
+ * created from the pristine model (a flip command error no longer
+ * yields the phantom /nextid). (3) TWO TRACKS per hand on a σ4→σ2
+ * vgaussian pyramid, gated by a matrixget→matrixset round-trip probed
+ * on the reference: 局部细化 = local fitmap from the incoming pose
+ * (same-pipeline maps start near-aligned) coarse→fine; 全局搜索 =
+ * `fitmap … search 30` random placements at σ4 — ARBITRARY rotations
+ * (90°/any tilt), the pose space the fixed pre-turns could never
+ * reach — transferred to σ2 and refined. The better track (by σ2
+ * correlation, both poses captured via matrixget) is applied to the
+ * FULL-RESOLUTION map via matrixset, polished with one full-res local
+ * fit and scored with a full-res `measure correlation` (the row's
+ * `post` — the honest ranking number for both hands; the search is
+ * skipped when the local track already reached 0.85). (4) SAFETY: exec
+ * never throws (one timeout can't kill the run; the global search gets
+ * 300 s and disables itself for the run on failure), and after every
+ * hand the relay's /volumes is swept so a stray fitmap-search copy can
+ * never leak into the screenshots. (5) DEGRADATIONS, each ≥ the old
+ * static ladder: no fitting command → static scoring with a loud log
+ * naming every probe error; no search → local-only; no matrix
+ * round-trip → no clones, full-res local-only; no vgaussian → full-res
+ * ladder with bookkeeping; official REST → full-res ladder.
  */
-export const FLOW_ENGINE_VERSION = "3.65";
+export const FLOW_ENGINE_VERSION = "3.66";

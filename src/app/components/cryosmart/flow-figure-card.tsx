@@ -405,7 +405,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
    *  The file lands under the canonical stagedMapFilename() name, so rung
    *  0's /staged probe hits it on every later run and the download is
    *  skipped outright; ChimeraX afterwards opens ONLY local files for the
-   *  8-candidate alignment and the screenshots — no candidate open can
+   *  alignment and the screenshots — no open can
    *  ever re-fetch over the network (v3.64's ChimeraX-open-then-save
    *  convergence still re-downloaded whenever a save rung failed
    *  silently). `fetchUrl` may differ from the canonical source (the
@@ -679,8 +679,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
            * still-missed map ONCE into its persistent local cache dir
            * (POST /fetch; a file already in the dir skips the download
            * outright), and ChimeraX afterwards opens ONLY the returned
-           * LOCAL paths for the 8-candidate alignment and the screenshots
-           * — no candidate open ever touches the network, whatever
+           * LOCAL paths for the alignment and the screenshots
+           * — no open ever touches the network, whatever
            * ChimeraX's own web fetcher does (v3.64's converge-via-
            * ChimeraX-save still re-downloaded whenever the save rung
            * failed silently). The direct rung /fetch's the map's own URL;
@@ -1310,7 +1310,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                       <code key={h} className="mx-0.5 rounded bg-slate-200 px-1 font-mono text-[10px] dark:bg-slate-800">{h}</code>
                     ))}
                     的上述端口（ChimeraX 装在{cryoSmartHost ? `服务器 ${cryoSmartHost} 上` : "服务器上"}也能找到——relay 监听全部网卡，可跨机访问；仅需放行系统防火墙）。
-                    若桥接机器无法直连 CryoSmart，自动降级为<b>经应用代理下载</b>（桥接 → 本应用 → CryoSmart，凭据由服务端附加，不经浏览器）→ <b>页面中转</b>（页面下载 MRC → 上传进同一本地目录）。生成前每张 map 先查 ChimeraX 机器的固定本地缓存目录（跨 ChimeraX 重启保留）：已在目录中的文件<b>跳过下载</b>；未命中的地图由桥接脚本先下载一次存入该目录，再让 ChimeraX 从指定目录打开地图进行对齐与截图（v3.65 — 8 个候选对齐全部只读本地文件，零重复下载）。ChimeraX 1.12 的 MCP 同样由本地 REST server 支撑，但官方 CORS 仅放行 localhost 网页；此桥用同一内部机制，Origin 校验锁定为本应用。高级：
+                    若桥接机器无法直连 CryoSmart，自动降级为<b>经应用代理下载</b>（桥接 → 本应用 → CryoSmart，凭据由服务端附加，不经浏览器）→ <b>页面中转</b>（页面下载 MRC → 上传进同一本地目录）。生成前每张 map 先查 ChimeraX 机器的固定本地缓存目录（跨 ChimeraX 重启保留）：已在目录中的文件<b>跳过下载</b>；未命中的地图由桥接脚本先下载一次存入该目录，再让 ChimeraX 从指定目录打开地图进行对齐与截图（v3.65 — 对齐与截图全部只读本地文件，零重复下载）。ChimeraX 1.12 的 MCP 同样由本地 REST server 支撑，但官方 CORS 仅放行 localhost 网页；此桥用同一内部机制，Origin 校验锁定为本应用。高级：
                     <a className="underline" href="/helpers/CryoSmart_flow_relay.py" download>下载桥脚本</a>。
                   </span>
                 </div>
@@ -1463,7 +1463,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
           <Boxes className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
           <span>
-            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线上的关键 job — 上下游顺序不乱，导入参考体积等输入分支不进入图；连续同类型阶段合并为一行「N× 类型」，省略的步骤在箭头旁以「N×」注明；阶段数可选 4/5/6；选中 class 恒居脊柱细框 + 留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先下载到桥接机器的本地缓存目录（已有文件跳过下载），ChimeraX 从本地目录打开后在低通（vgaussian 平滑）副本上做 8 候选拟合（original / x·y·z 180° 旋转 / z-flip 及其 180° 旋转组合），按 <code className="font-mono">fit search 15</code> 相关性选最优，找到的角度经 matrixget/matrixset 应用回原 map ——
+            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线上的关键 job — 上下游顺序不乱，导入参考体积等输入分支不进入图；连续同类型阶段合并为一行「N× 类型」，省略的步骤在箭头旁以「N×」注明；阶段数可选 4/5/6；选中 class 恒居脊柱细框 + 留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先下载到桥接机器的本地缓存目录（已有文件跳过下载），ChimeraX 从本地目录打开后做双手性（original / z-flip）双轨迹拟合：<b>局部细化</b>（同流程地图通常已接近对齐，低通 σ4→σ2 副本上逐步收敛）与 <b>全局搜索</b>（<code className="font-mono">fitmap … inMap … search 30</code> 随机放置，覆盖 90°/任意旋转角），按相关性选优，最优角度经 matrixget/matrixset 应用回原 map 并全分辨率复核 ——
             z-flip 胜出即手性相反、已自动翻正；参考地图做 90° 视角白区评分后统一应用到所有地图，保证朝向与比例一致。图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
           </span>
         </div>

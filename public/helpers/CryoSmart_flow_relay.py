@@ -13,8 +13,9 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
   在本机启动一个微型 HTTP 桥（默认端口 8927，冲突时自动尝试 8928/8929，
   监听所有网卡），之后 CryoSmart Lineage Tracer Web 页面即可直接
   驱动 ChimeraX 完成：地图先由本桥下载进固定本地缓存目录（目录里已有
-  的文件跳过下载）→ ChimeraX 从本地目录打开地图 → 8 候选低通对齐
-  （含 z 翻转手性检查）→ 90° 视角评分 → 高清截图回传 → 网页端组装
+  的文件跳过下载）→ ChimeraX 从本地目录打开地图 → 双手性（original/
+  z-flip）双轨迹对齐（fitmap 局部细化 + 全局随机放置搜索，
+  σ4→σ2 低通金字塔，含手性检查）→ 90° 视角评分 → 高清截图回传 → 网页端组装
   16:9 流程图 PPTX。
 
   ChimeraX 与浏览器可以在不同机器上（例如 ChimeraX 装在 CryoSmart
@@ -35,7 +36,7 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
       POST /fetch       v3.65 本地目录下载：由本桥（ChimeraX 所在机器的
                         Python，与 ChimeraX 命令无关）把地图 URL 直接下载
                         进固定本地缓存目录，返回本地绝对路径 — ChimeraX
-                        之后只 open 本地文件做对齐/截图（8 候选全读本地
+                        之后只 open 本地文件做对齐/截图（对齐与截图全读本地
                         盘，零重复下载）。目录里已有该文件时跳过下载，
                         直接返回路径。body: {"url": ..., "name": 规范名}。
       GET  /staged       v3.56 地图本地缓存查询：?name= 返回该缓存文件
@@ -571,7 +572,7 @@ def main(session):
                     # "name": <canonical>.mrc} — THIS relay downloads the map
                     # into the persistent local cache dir and returns the
                     # LOCAL path; ChimeraX afterwards opens only local files
-                    # (the 8-candidate alignment + screenshots read disk, not
+                    # (the alignment + screenshots read disk, not
                     # network). "status": "hit" when the file was already in
                     # the dir and the download was skipped outright. Runs on
                     # the handler thread — no ChimeraX command is involved.
