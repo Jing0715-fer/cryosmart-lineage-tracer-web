@@ -1,5 +1,5 @@
 /**
- * Portrait workflow-figure PPTX builder (v3.59; layout rebuilt for round-18).
+ * Portrait workflow-figure PPTX builder (v3.63; layout rebuilt for round-18).
  *
  * Format modelled after the user's NEW reference `upload/workflow.pptx`
  * (7.5 × 10 in PORTRAIT slide, verified against its own geometry):
@@ -30,6 +30,17 @@
  *     retention label (uniform vertical rhythm), and stages the model
  *     omitted between two rows are named under the gap — “omitted: 2×
  *     Hetero refinement” (model.omissions, 极简 only)
+ *   - v3.63 (round-22 “auto pick的箭头缺失”): the header band carries the
+ *     reference's ONE horizontal pick arrow — “N Micrographs —Auto pick→
+ *     N particles” (直接箭头连接符 12: 0.39 in / 1 pt / triangle, head
+ *     pointing right, centred under the raised pick label at the counts'
+ *     line height; v3.59 had dropped every inter-item arrow).
+ *   - v3.63 (round-22 “每步展示的颗粒数和上一步的比例要重新用这一步
+ *     除以上一步来计算”): the retention labels read ENTRY counts — a
+ *     merged “N×” row divides by its FIRST member's input (the reference's
+ *     own 37.2% = 590,421 ÷ 1,588,675), and a parallel classification
+ *     merge row divides by the SUM of its jobs' counts (“平行合并的分类
+ *     job要将两个job的颗粒数合并”).
  *   - 标准 style keeps the richer v3.55 conventions (job-id label runs,
  *     per-class stats under each thumbnail / side stats for single-map
  *     rows, footnote) — now on the same spine layout
@@ -364,14 +375,26 @@ export function buildWorkflowPptx(
     anchor: PlacedSlot | null;
   }
 
-  /** representative particle count of a row (max of its items' totals) */
-  const rowRepresentativeCount = (g: FlowFigureItem[]): number | null => {
-    const cs = g
-      .map((it) => it.particleTotal ?? null)
-      .filter((v): v is number => v != null && v > 0);
-    return cs.length ? Math.max(...cs) : null;
+  /** v3.63 (round-22 “每步展示的颗粒数和上一步的比例要重新用这一步
+   *  除以上一步来计算”): the count flowing INTO a displayed row — the
+   *  retention labels divide THIS step by the PREVIOUS step, so a
+   *  merged “N×” row reads its FIRST member's particleTotal
+   *  (entryParticleCount) and a parallel classification merge row
+   *  reads the SUM of its jobs' counts (“平行合并的分类job要将两个
+   *  job的颗粒数合并”). Single rows fall back to their own
+   *  particleTotal. */
+  const rowEntryCount = (g: FlowFigureItem[]): number | null => {
+    const entryOf = (it: FlowFigureItem): number | null => {
+      const v = it.entryParticleCount ?? it.particleTotal ?? null;
+      return v != null && v > 0 ? v : null;
+    };
+    if (g.length > 1) {
+      const cs = g.map(entryOf).filter((v): v is number => v != null);
+      return cs.length ? cs.reduce((a, b) => a + b, 0) : null;
+    }
+    return g.length ? entryOf(g[0]) : null;
   };
-  const repCounts = groups.map(rowRepresentativeCount);
+  const repCounts = groups.map(rowEntryCount);
 
   /* ---- 极简: flow-anchor precomputation (data-only, before placement) ----
    * The anchor = the class slot whose particle count feeds the next stage
@@ -402,7 +425,7 @@ export function buildWorkflowPptx(
     onSpine: boolean;
   }
   const anchorInfoOf = (g: FlowFigureItem[], nextRep: number | null): AnchorInfo | null => {
-    if (!minimal || nextRep == null || rowThumbTotal(g) <= 1) return null;
+    if (!minimal || nextRep == null || g.length > 1 || rowThumbTotal(g) <= 1) return null;
     const flat: Array<{ item: number; slot: number; count: number | null }> = [];
     g.forEach((it, ii) =>
       itemSlotsOf(it).forEach((s, jj) => flat.push({ item: ii, slot: jj, count: s.count })),
@@ -465,8 +488,10 @@ export function buildWorkflowPptx(
     /* last item CENTRED on the spine (the reference's "1,588,675
      * particles" box centres at 3.66 vs spine 3.69), clamped at margin. */
     let bx = Math.max(MARGIN_X, SPINE + widths[widths.length - 1] / 2 - total);
+    const headerSlots: Array<{ x: number; w: number }> = [];
     headerItems.forEach((text, i) => {
       const isPick = i === 1 && headerItems.length === 3;
+      headerSlots.push({ x: bx, w: widths[i] });
       ops.push({
         kind: "text",
         x: bx,
@@ -477,6 +502,19 @@ export function buildWorkflowPptx(
       });
       bx += widths[i] + SPACING;
     });
+    /* v3.63 (round-22 “auto pick的箭头缺失”): the reference band carries ONE
+     * horizontal arrow of the SAME fixed geometry (0.39 in / 1 pt /
+     * triangle) under the raised pick label — the reading
+     * “N Micrographs —Auto pick→ N particles” (workflow.pptx's
+     * 直接箭头连接符 12: rot 270°, head pointing right, at the counts'
+     * line height). v3.59 had dropped every inter-item arrow; the pick
+     * arrow is back, centred under the “Auto pick” box. */
+    if (headerItems.length === 3) {
+      const pick = headerSlots[1];
+      const ax = pick.x + pick.w / 2 - ARROW_LEN / 2;
+      const ay = 0.55 + 0.26 / 2;
+      ops.push({ kind: "conn", x1: ax, y1: ay, x2: ax + ARROW_LEN, y2: ay });
+    }
     headerBottom = 0.55 + 0.26;
   }
 
@@ -591,7 +629,16 @@ export function buildWorkflowPptx(
          * ("37.2%" / "590,421 particles"), centred on the spine in the
          * gap. The percentage line is dropped when the flow did not
          * actually shrink (a single-map pass-through would read 100% —
-         * noise, the reference never prints one). */
+         * noise, the reference never prints one).
+         * v3.63 (round-22 “每步展示的颗粒数和上一步的比例要重新用这一步
+         * 除以上一步来计算”): repCounts now carry ENTRY semantics
+         * (rowEntryCount) — the count flowing INTO each row — so a
+         * merged “N×” row divides by its FIRST member's input (the
+         * reference's own 37.2% = 590,421 ÷ the 1,588,675 that entered
+         * the 2*Hetero run, not the montage rep's 766,560), and a
+         * parallel classification row divides by the SUM of its jobs'
+         * counts. nextRep stays the NEXT row's entry — the count that
+         * continues down the funnel. */
         const lines: TextLine[] = [];
         const repCur = repCounts[i];
         const pct = repCur && repCur > 0 && nextRep != null ? nextRep / repCur : null;

@@ -144,5 +144,28 @@
  * formatting (“4,812,000 particles”, not “4812K”). Old pages keep the
  * duplicated-stage rows, silent omissions, the 4/5-only cap, the
  * off-spine frames and the uneven pitch.
+
+ * v3.63 bump reason (round-22 “极简模式中间精选的一定是分类的结果，不要选
+ * non-uniform这种非分类的job，另外每部展示的颗粒数和上一步的比例要重新
+ * 用这一步除以上一步来计算，平行合并的分类job要将两个job的颗粒数合并。
+ * auto pick的箭头缺失，map的对齐还是需要优化，每个手性可能需要转180度
+ * 再多搜索一次”): (1) the 极简 middle rows curate from CLASSIFICATION jobs
+ * ONLY (hetero refinement / ab-initio / 3D classification —
+ * isClassificationJobType); non-uniform / local-refinement middles are
+ * never selected as showcase rows, they read in the “omitted: N×” gap
+ * notes instead; (2) the retention labels now divide THIS step by the
+ * PREVIOUS step's ENTRY count — a merged “N×” row's denominator is its
+ * FIRST member's input (the reference deck's own 37.2% = 590,421 ÷ the
+ * 1,588,675 that entered the 2*Hetero run), and ≥2 parallel
+ * classification jobs reuniting at one merge render as ONE parallel row
+ * whose entry count is the SUM of the two jobs' counts; (3) the header
+ * band regains the reference's horizontal “Auto pick” arrow (0.39 in /
+ * 1 pt / triangle, head pointing right under the raised pick label —
+ * v3.59 had dropped it); (4) the ChimeraX alignment ladder searches 8
+ * candidates instead of 5 — the flipped hand now ALSO gets the 180°
+ * rotation search (flip_z_rot_{x,y,z}_180), closing the mirrored +
+ * 180°-rotated pose class the 5-candidate ladder mis-aligned. Old pages
+ * keep the non-classification middles, the wrong retention denominators,
+ * the arrowless header band and the 5-candidate search.
  */
-export const FLOW_ENGINE_VERSION = "3.62";
+export const FLOW_ENGINE_VERSION = "3.63";

@@ -88,7 +88,7 @@ const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
   },
   minimal: {
     label: `极简（4–6 行）`,
-    hint: `精选颗粒主线上的关键 job — 上下游顺序不乱，连续同类型阶段合并为一行「N× 类型」（参考 workflow.pptx 的 2*Hetero refinement），省略的步骤在箭头旁以「N× 类型」注明；并行输入/导入参考体积分支不进入图；简化合并规则照跑，阶段数可选 4/5/6（最多 ${MINIMAL_ROW_CAP} 行）；选中 class 恒居脊柱细框 + 箭头旁留存颗粒数标注，无 job id/页脚`,
+    hint: `精选颗粒主线上的关键 job — 中间行仅精选分类结果（Hetero refinement / Ab-initio / 3D 分类），Non-uniform 等非分类中间阶段以「omitted: N×」注明；连续同类型阶段合并为一行「N× 类型」，并行分类 job 颗粒数合并；箭头旁留存比例按「本步颗粒数 ÷ 上一步」计算；阶段数可选 4/5/6（最多 ${MINIMAL_ROW_CAP} 行）；选中 class 恒居脊柱细框，无 job id/页脚`,
   },
   manual: {
     label: "手动",
@@ -454,15 +454,18 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         pushLog(`手动模式: 保留 ${model.groups.length}/${catalogItems.length} 个阶段（${checkedCount} 个 job） · 标准版式（job id 标注 + 每 class 统计）`);
       }
       /* v3.60: the mode banner — one line per flowMode (the 极简 line
-       * carries the merge rules too: simplified=true runs under it). */
+       * carries the merge rules too: simplified=true runs under it).
+       * v3.63 (round-22): the 极简 rules add the classification-only
+       * middles, the entry-based retention ratios and the parallel
+       * classification count merge. */
       if (flowMode === "minimal") {
         pushLog(
-          "极简模式: 精选颗粒主线上的关键 job — 上下游顺序不乱（并行输入/导入参考体积分支不进入图）；连续同类型阶段合并为一行「N× 类型」，选中 class 恒居脊柱正中",
+          "极简模式: 精选颗粒主线上的关键 job — 上下游顺序不乱；中间行仅精选分类结果（Hetero refinement / Ab-initio / 3D 分类），Non-uniform 等非分类中间阶段不入选（以「omitted: N×」注明）；并行分类 job 合并为一行、颗粒数相加",
         );
         pushLog(
-          `极简规则: 简化合并照跑（默认 12 Å ab-initio 省略 · 相邻同颗粒数 non-uniform 合并 · 颗粒数从多到少）· 阶段数 4/5/6（最多 ${MINIMAL_ROW_CAP} 行）· 省略的步骤在箭头旁以「N× 类型」注明`,
+          `极简规则: 简化合并照跑（默认 12 Å ab-initio 省略 · 相邻同颗粒数 non-uniform 合并）· 阶段数 4/5/6（最多 ${MINIMAL_ROW_CAP} 行）· 箭头旁留存比例按「本步颗粒数 ÷ 上一步」重新计算`,
         );
-        pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头 · 选中 class 细框（居中）· 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
+        pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头（含 Auto pick 横向箭头）· 选中 class 细框（居中）· 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
       } else if (flowMode === "simplified") {
         pushLog(
           "简化模式: 少量数据的 2D 步骤将省略 · 默认 12 Å ab-initio 阶段整体省略（直接衔接后续精修） · 相邻同颗粒数 non-uniform 合并 · 颗粒数按「从多到少」显示",
@@ -1288,7 +1291,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                         <td className="px-2 py-1.5 text-slate-600 dark:text-slate-300">{r.score != null ? r.score.toFixed(4) : "—"}</td>
                         <td className="px-2 py-1.5">
                           {r.chirality === "corrected" ? (
-                            <Badge className="bg-amber-100 px-1.5 py-0 text-[9.5px] text-amber-700 hover:bg-amber-100 dark:bg-amber-900/40 dark:text-amber-300">已翻正 (flip_z)</Badge>
+                            <Badge className="bg-amber-100 px-1.5 py-0 text-[9.5px] text-amber-700 hover:bg-amber-100 dark:bg-amber-900/40 dark:text-amber-300">已翻正 (flip)</Badge>
                           ) : r.chirality === "consistent" ? (
                             <Badge className="bg-emerald-100 px-1.5 py-0 text-[9.5px] text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/40 dark:text-emerald-300">一致</Badge>
                           ) : r.chirality === "ambiguous" ? (

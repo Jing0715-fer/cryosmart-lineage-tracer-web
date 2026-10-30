@@ -51,6 +51,10 @@ import { parseFscXml, renderFscCurvePng } from "./fsc-xml";
 export interface FlowFigureItem {
   uid: string;
   label: string;
+  /** v3.63: the raw cryoSPARC job_type ("hetero_refine" …) — drives the
+   *  极简 classification-only curation (isClassificationJobType) without
+   *  the PPTX layer having to reverse-engineer the display label. */
+  jobType?: string;
   /** Two lines max — rendered as the 8pt stats box next to the thumbnail. */
   stats: string[];
   /** "uid/group" when this item has a ChimeraX-renderable volume map. */
@@ -73,6 +77,15 @@ export interface FlowFigureItem {
    *  mode's small-subset drop + 从多到少 funnel read it; rendering ignores
    *  it. */
   particleTotal?: number | null;
+  /** v3.63 (round-22 “每步展示的颗粒数和上一步的比例要重新用这一步
+   *  除以上一步来计算”): the count flowing INTO this displayed row —
+   *  for a merged “N×” row this is the FIRST member's particleTotal (the
+   *  row's true upstream entry), while particleTotal keeps the LAST
+   *  member's count. The retention labels divide THIS step by the
+   *  PREVIOUS step, so they read entryParticleCount, not the montage's
+   *  rep count. Undefined for un-merged rows (falls back to
+   *  particleTotal). */
+  entryParticleCount?: number | null;
 }
 
 /** v3.51: one per-class thumbnail slot inside a stage row. */
@@ -217,6 +230,15 @@ export interface BuildModelOptions {
    *  rows is annotated per gap (model.omissions → the PPTX's
    *  “omitted: N× <type>” note) — a curated figure never skips steps
    *  silently (“省略的步骤可能需要写为几*hetero refine或几*abinitio这样”).
+   *  v3.63 (round-22 “极简模式中间精选的一定是分类的结果…每步展示的
+   *  颗粒数和上一步的比例要重新用这一步除以上一步来计算，平行合并的
+   *  分类job要将两个job的颗粒数合并”): the middle rows curate from
+   *  CLASSIFICATION jobs ONLY (isClassificationJobType); a merged “N×”
+   *  row carries entryParticleCount = its FIRST member's count so the
+   *  retention labels divide this step by the previous step's true
+   *  entry; and ≥2 parallel classification jobs reuniting at one merge
+   *  render as ONE parallel row whose entry count is the SUM of the
+   *  two jobs' counts.
    *  Implies nothing about the LAYOUT style; pair with workflow-pptx's
    *  style:"minimal" for the workflow.pptx look. */
   minimal?: boolean;
@@ -294,6 +316,18 @@ export function jobTypeLabel(jobType: string): string {
 
 function isPostProcessType(jobType: string): boolean {
   return /sharpen|deep.*hanc|postprocess|density_mod/i.test(jobType);
+}
+
+/** v3.63 (round-22 “极简模式中间精选的一定是分类的结果，不要选non-uniform
+ *  这种非分类的job”): the job families that SORT particles into classes —
+ *  heterogeneous refinement, ab-initio (multi-class initial model) and 3D
+ *  classification. The 极简 middle rows curate from these ONLY;
+ *  refinements (non-uniform / local / homo) and post-processing
+ *  (DeepEMhancer …) are never selected as showcase middles — they appear
+ *  (if at all) as the first/final rows or in the “omitted: N× …” gap
+ *  notes. */
+export function isClassificationJobType(jobType: string | null | undefined): boolean {
+  return /hetero_refine|homo_abinit|class_3d|3d_classif/i.test(jobType || "");
 }
 
 function classPercentFor(summary: LineageSummary, uid: string, group: string): string | null {
@@ -603,6 +637,7 @@ function itemFromNode(
   return {
     uid: node.uid,
     label: jobTypeLabel(node.job_type),
+    jobType: node.job_type,
     stats,
     mapKey: primary?.mapKey ?? null,
     map: primary
@@ -737,7 +772,13 @@ export function buildFlowFigureModel(
      *  workflow STEPS — excluded unless the chain would be empty (a
      *  lineage traced from an imported map still needs an entry row).
      *  The walk skips import seeds (skipImportSeeds) so a volume-imported
-     *  reference can never steal the stop from the real initial model. */
+     *  reference can never steal the stop from the real initial model.
+     *  v3.63 (round-22 “平行合并的分类job要将两个job的颗粒数合并”): the
+     *  ONE parallel shape now allowed — a stage whose PARTICLE side draws
+     *  from ≥2 parallel CLASSIFICATION jobs (split branches reuniting at
+     *  a merge) renders those branches as ONE parallel row, their
+     *  montages side by side, with the row's entry count = the SUM of
+     *  the two jobs' counts. */
     const isImportSeed = (n: LineageNode) => /^import_/i.test(n.job_type || "");
     const chainCurated = walkParentChain(summary, graph, { skipImportSeeds: true });
     const spineCurated = [...chainCurated].reverse().filter((n) => hasMaps(n.uid));
@@ -747,7 +788,78 @@ export function buildFlowFigureModel(
      * all) when the curated walk surfaced nothing beyond them. */
     const fallbackStages = spineMapOrder.filter((n) => !isImportSeed(n));
     const stages = curatedStages.length ? curatedStages : fallbackStages.length ? fallbackStages : spineMapOrder;
+    /* v3.63: detect parallel CLASSIFICATION merges — for every mainline
+     * stage, the map-bearing classification jobs that feed it PARTICLES
+     * (a non-volume incoming edge — a parent connected by BOTH particle
+     * and reference-map edges still counts as a particle contributor;
+     * volume-only parents are reference inputs and never count). */
+    const particleClassificationParentsOf = (uid: string): string[] => {
+      const out: string[] = [];
+      for (const e of summary.edges || []) {
+        if (e.target !== uid || e.input_type === "volume") continue;
+        const n = graph.byUid.get(e.source);
+        if (!n || !isClassificationJobType(n.job_type)) continue;
+        if (/^import_/i.test(n.job_type || "")) continue;
+        if (normalMapAssets(n).length === 0) continue;
+        if (!out.includes(e.source)) out.push(e.source);
+      }
+      return out;
+    };
+    const isAncestorOf = (a: string, b: string): boolean => {
+      const stack = [b];
+      const seen = new Set<string>();
+      let hops = 0;
+      while (stack.length && hops++ < 96) {
+        const cur = stack.pop()!;
+        if (cur === a) return true;
+        if (seen.has(cur)) continue;
+        seen.add(cur);
+        for (const p of graph.parentsOf.get(cur) || []) if (!seen.has(p)) stack.push(p);
+      }
+      return false;
+    };
+    const parallelByStage = new Map<string, string[]>();
     for (const S of stages) {
+      const ps = particleClassificationParentsOf(S.uid);
+      if (ps.length >= 2) parallelByStage.set(S.uid, ps);
+    }
+    const parallelMembers = new Set([...parallelByStage.values()].flat());
+    const renderedGroups = new Set<string>();
+    const emittedInGroups = new Set<string>();
+    for (const S of stages) {
+      if (parallelMembers.has(S.uid)) {
+        const members = [...parallelByStage.values()].find((ps) => ps.includes(S.uid))!;
+        const key = members.join("+");
+        if (!renderedGroups.has(key)) {
+          renderedGroups.add(key);
+          const sorted = [...members].sort(
+            (a, b) =>
+              (graph.depth.get(a) ?? 0) - (graph.depth.get(b) ?? 0) ||
+              a.localeCompare(b, undefined, { numeric: true }),
+          );
+          /* a member that is another member's ANCESTOR is chained, not
+           *  parallel — drop it from the group (it keeps its own row). */
+          const flat = sorted.filter((m) => !sorted.some((o) => o !== m && isAncestorOf(o, m)));
+          if (flat.length >= 2) {
+            const items = flat
+              .slice(0, 3)
+              .map((p) => itemFromNode(summary, graph.byUid.get(p)!, { warnings }));
+            groups.push(items);
+            items.forEach((it) => {
+              usedUids.add(it.uid);
+              emittedInGroups.add(it.uid);
+            });
+            warnings.push(
+              `极简模式: 检测到 ${items.length} 个并行分类 job（${flat.join(" + ")}）在同一汇合点合并 — 已并列为一行展示，两个 job 的颗粒数合并计算（${items
+                .reduce((s, it) => s + (it.particleTotal ?? 0), 0)
+                .toLocaleString("en-US")} particles）。`,
+            );
+            continue;
+          }
+        }
+        if (emittedInGroups.has(S.uid)) continue; // rendered inside its group
+        // (fall through: S renders its own single row)
+      }
       groups.push([itemFromNode(summary, S, { isFinal: S.uid === summary.start_uid, warnings })]);
       usedUids.add(S.uid);
     }
@@ -758,11 +870,14 @@ export function buildFlowFigureModel(
     minimalMainline = stages.map((n) => ({ uid: n.uid, label: jobTypeLabel(n.job_type) }));
     const excludedImports = spineMapOrder.filter((n) => isImportSeed(n) && !stages.includes(n)).length;
     warnings.push(
-      `极简模式: 已精选颗粒主线上的 ${stages.length} 个阶段 — 关键 job 逐个成行、按上下游顺序排列（连续同类型阶段将合并为一行「N×」标注，省略的步骤在图上注明；并行输入分支不进入极简图）` +
+      `极简模式: 已精选颗粒主线上的 ${stages.length} 个阶段 — 关键 job 逐个成行、按上下游顺序排列（连续同类型阶段将合并为一行「N×」标注；省略的步骤在图上以「N×」注明）` +
         (excludedImports
           ? `；另排除 ${excludedImports} 个导入/种子阶段（参考体积等输入不作为流程阶段展示）`
           : "") +
         "。",
+    );
+    warnings.push(
+      "极简模式: 中间行仅精选分类结果（Hetero refinement / Ab-initio / 3D classification），非分类的中间阶段（Non-uniform、Local refinement 等）不入选 — 以「omitted: N× 类型」注明；箭头旁留存比例按「本步颗粒数 ÷ 上一步」重新计算，并行分类 job 颗粒数合并。",
     );
   } else {
   // 2D selection stage (image montage, no map) — deepest ancestor (closest
@@ -855,12 +970,19 @@ export function buildFlowFigureModel(
    * the reference deck's own “2*Hetero refinement” pattern. Merging
    * first also frees row budget, so the cap drops fewer distinct
    * stages. Runs only on the minimal build: 标准/简化 decks keep the
-   * round-19/20 look the user signed off. */
-  let mergedMemberUids: Set<string> | null = null;
+   * round-19/20 look the user signed off.
+   * v3.63 (round-22): the merged row also carries entryParticleCount =
+   *  the FIRST member's particleTotal — the retention labels divide
+   *  THIS step by the PREVIOUS step, so the merged row's denominator is
+   *  its true upstream entry (the reference deck's own 37.2% = 590,421
+   *  ÷ the 1,588,675 that entered the 2*Hetero run), not the last
+   * member's input. Returns member→rep so the omission pass can tell
+   * “represented by a displayed N× row” apart from “dropped”. */
+  let mergedInto: Map<string, string> | null = null;
   if (minimal && staged.length) {
     const merged = mergeMinimalRuns(staged, warnings);
     staged = merged.groups;
-    mergedMemberUids = merged.mergedUids;
+    mergedInto = merged.mergedInto;
   }
 
   // v3.44 folding: only SINGLE stages fold (earliest first) — parallel
@@ -883,7 +1005,7 @@ export function buildFlowFigureModel(
    * first/last kept row have no gap to live in (the run log names them). */
   const omissions =
     minimal && minimalMainline
-      ? computeMinimalOmissions(folded, minimalMainline, mergedMemberUids)
+      ? computeMinimalOmissions(folded, minimalMainline, mergedInto)
       : undefined;
 
   // v3.54 (round-13 “简化模式”): enforce the 多→少 reading over the
@@ -1068,22 +1190,47 @@ function trimFlowGroups(
  *  stages' upstream→downstream ORDER among the survivors is untouched —
  *  curation only REMOVES rungs, it never re-levels them.
  *  v3.62 (round-21): runs on the POST-MERGE sequence (mergeMinimalRuns
- *  folds same-type runs first), and the warning now points the reader at
- *  the per-gap “omitted: N×” notes the deck carries for the drops. */
+ *  folds same-type runs first), and the warning points the reader at
+ *  the per-gap “omitted: N×” notes the deck carries for the drops.
+ *  v3.63 (round-22 “极简模式中间精选的一定是分类的结果，不要选
+ *  non-uniform这种非分类的job”): the MIDDLE budget spends on
+ *  CLASSIFICATION rows ONLY (hetero refinement / ab-initio / 3D
+ *  classification — isClassificationJobType). A non-classification
+ *  middle (non-uniform / local / homo refinement, post-processing) is
+ *  never selected as a showcase row even when the cap has room to
+ *  spare — it reads in the “omitted: N× …” gap note instead. */
 function curateMinimalFlow(
   groups: FlowFigureItem[][],
   maxGroups: number,
   warnings: string[],
 ): FlowFigureItem[][] {
-  if (groups.length <= maxGroups) return groups;
+  const isClassRow = (g: FlowFigureItem[]) =>
+    g.length > 0 && g.every((it) => isClassificationJobType(it.jobType));
+  if (groups.length <= 2) return groups;
   const chosen = new Set<number>();
   chosen.add(0);
   chosen.add(groups.length - 1);
-  for (let i = groups.length - 2; i > 0 && chosen.size < maxGroups; i--) chosen.add(i);
+  let classMiddles = 0;
+  let nonClassMiddles = 0;
+  for (let i = groups.length - 2; i > 0; i--) {
+    if (isClassRow(groups[i])) {
+      classMiddles += 1;
+      if (chosen.size < maxGroups) chosen.add(i);
+    } else {
+      nonClassMiddles += 1;
+    }
+  }
+  if (chosen.size === groups.length) return groups;
   const kept = groups.filter((_, i) => chosen.has(i));
-  warnings.push(
-    `极简模式: 合并同类型后主线共 ${groups.length} 行，已精选 ${kept.length} 行（首尾必留、其余自后向前保留 — 未选阶段在图上以「N×」省略标注，上下游顺序保持不变）。`,
-  );
+  const capDropped = classMiddles - Math.max(0, Math.min(classMiddles, maxGroups - 2));
+  if (nonClassMiddles > 0)
+    warnings.push(
+      `极简模式: 中间行仅精选分类结果 — 已略过 ${nonClassMiddles} 个非分类中间阶段（Non-uniform / Local refinement 等精修步骤，在图上以「omitted: N× 类型」注明）。`,
+    );
+  if (capDropped > 0 || kept.length < groups.length)
+    warnings.push(
+      `极简模式: 合并同类型后主线共 ${groups.length} 行，已精选 ${kept.length} 行（首尾必留，其余自后向前仅保留分类结果 — 未选阶段在图上以「N×」省略标注，上下游顺序保持不变）。`,
+    );
   return kept;
 }
 
@@ -1093,18 +1240,22 @@ function curateMinimalFlow(
  * deck's own “2*Hetero refinement” row (the uploaded P268 deck instead
  * spent two identical “Ab-initio reconstruction” rows on one run). The
  * merged row keeps the LAST (most downstream) member's classes montage
- * and particle count — the ones feeding the next stage — so the funnel,
- * the anchor selection and the retention labels all read unchanged.
+ * and particle count — the ones feeding the next stage — so the anchor
+ * selection reads unchanged, while entryParticleCount carries the FIRST
+ * member's count (the row's true upstream entry — the retention labels'
+ * “这一步 ÷ 上一步” denominator; v3.63 round-22).
+ * v3.63: members map to their rep (mergedInto) so the omission pass can
+ * tell a member of a DISPLAYED N× row (represented) from one whose row
+ * was dropped (omitted).
  * Only truly CONSECUTIVE rows merge: a different stage type between two
  * heteros disqualifies the pair (the true flow order must never be
- * flattened). Returns the member uids so the omission pass can tell
- * “represented by an N× row” apart from “dropped". */
+ * flattened). */
 function mergeMinimalRuns(
   groups: FlowFigureItem[][],
   warnings: string[],
-): { groups: FlowFigureItem[][]; mergedUids: Set<string> } {
+): { groups: FlowFigureItem[][]; mergedInto: Map<string, string> } {
   const out: FlowFigureItem[][] = [];
-  const mergedUids = new Set<string>();
+  const mergedInto = new Map<string, string>();
   let i = 0;
   while (i < groups.length) {
     const run: FlowFigureItem[][] = [groups[i]];
@@ -1123,13 +1274,22 @@ function mergeMinimalRuns(
       continue;
     }
     const rep = run[run.length - 1][0];
-    for (const g of run) mergedUids.add(g[0].uid);
-    out.push([{ ...rep, label: `${run.length}× ${rep.label}` }]);
+    const first = run[0][0];
+    for (const g of run) mergedInto.set(g[0].uid, rep.uid);
+    out.push([
+      {
+        ...rep,
+        label: `${run.length}× ${rep.label}`,
+        entryParticleCount: first.particleTotal ?? first.entryParticleCount ?? null,
+      },
+    ]);
     warnings.push(
-      `极简模式: 已合并主线上连续 ${run.length} 个同类型阶段 ${run.map((g) => g[0].uid).join(" → ")} 为一行「${run.length}× ${rep.label}」（缩略图与颗粒数取最下游 ${rep.uid}）。`,
+      `极简模式: 已合并主线上连续 ${run.length} 个同类型阶段 ${run.map((g) => g[0].uid).join(" → ")} 为一行「${run.length}× ${rep.label}」（缩略图与颗粒数取最下游 ${rep.uid}，留存比例按合并前行入口 ${
+        first.particleTotal != null ? first.particleTotal.toLocaleString("en-US") : "—"
+      } 重新计算）。`,
     );
   }
-  return { groups: out, mergedUids };
+  return { groups: out, mergedInto };
 }
 
 /** v3.62: the 极简 per-gap omission notes — which ORIGINAL mainline stages
@@ -1143,21 +1303,29 @@ function mergeMinimalRuns(
 function computeMinimalOmissions(
   folded: FlowFigureItem[][],
   mainline: Array<{ uid: string; label: string }>,
-  mergedUids: Set<string> | null,
+  mergedInto: Map<string, string> | null,
 ): FlowOmission[][] {
   const displayed = new Set(folded.flat().map((it) => it.uid));
   const indexOf = new Map(mainline.map((m, i) => [m.uid, i] as const));
+  const bracketUid = (row: FlowFigureItem[], prefer: "first" | "last"): string | null => {
+    if (!row.length) return null;
+    const onMainline = row.filter((it) => indexOf.has(it.uid));
+    const pool = onMainline.length ? onMainline : row;
+    return (prefer === "first" ? pool[0] : pool[pool.length - 1]).uid;
+  };
   const out: FlowOmission[][] = [];
   for (let i = 0; i + 1 < folded.length; i++) {
-    const a = folded[i][folded[i].length - 1]?.uid ?? "";
-    const b = folded[i + 1][folded[i + 1].length - 1]?.uid ?? "";
-    const aIdx = indexOf.get(a);
-    const bIdx = indexOf.get(b);
+    const a = bracketUid(folded[i], "last");
+    const b = bracketUid(folded[i + 1], "first");
+    const aIdx = a != null ? indexOf.get(a) : undefined;
+    const bIdx = b != null ? indexOf.get(b) : undefined;
     const byLabel = new Map<string, number>();
     if (aIdx != null && bIdx != null && bIdx > aIdx) {
       for (let k = aIdx + 1; k < bIdx; k++) {
         const m = mainline[k];
-        if (displayed.has(m.uid) || mergedUids?.has(m.uid)) continue;
+        if (displayed.has(m.uid)) continue;
+        const rep = mergedInto?.get(m.uid);
+        if (rep != null && displayed.has(rep)) continue; // inside a displayed N× row
         byLabel.set(m.label, (byLabel.get(m.label) ?? 0) + 1);
       }
     }

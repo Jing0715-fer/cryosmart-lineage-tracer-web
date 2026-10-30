@@ -17,11 +17,19 @@
  *
  * The alignment / handedness protocol is a faithful port of the proven
  * `CryoSmart_auto_align_export_ppt.py` desktop helper:
- *   - 5 candidate hypotheses per map: original, rot_x_180, rot_y_180,
- *     rot_z_180, flip_z (`volume flip #N axis z modelId <next>`)
+ *   - 8 candidate hypotheses per map (v3.63, round-22 “每个手性可能需要
+ *     转180度再多搜索一次，目前还是存在对齐不准确的问题” — EACH hand
+ *     now gets the full 180°-rotation search): original, rot_x_180,
+ *     rot_y_180, rot_z_180, flip_z (`volume flip #N axis z modelId <next>`)
+ *     PLUS the flipped hand rotated 180° about x / y / z
+ *     (flip_z_rot_x_180 / flip_z_rot_y_180 / flip_z_rot_z_180 — the
+ *     original-hand rotations already search the mirror-image start
+ *     positions, but the flipped hand previously only ever searched from
+ *     its un-rotated pose, which is exactly where mis-alignments survived)
  *   - scoring: `measure correlation` → `fit #v in #ref` → `fit #v in #ref
  *     search 15`; score = fit_search ?? fit ?? measure
- *   - chirality verdict from the flip_z candidate vs. the best rigid one
+ *   - chirality verdict from the best flip-family candidate vs. the best
+ *     rigid one
  *   - one-time 90° view optimisation on the reference map by thumbnail
  *     coverage scoring, applied to every map
  *   - per-map export at 1600×1200 supersample 3 on a TRANSPARENT background
@@ -1002,7 +1010,7 @@ export async function renderFigureMaps(
       openIds.add(refId);
       continue;
     }
-    progress(`对齐 ${req.key}（5 候选 × 相关性评分）`, pct);
+    progress(`对齐 ${req.key}（8 候选 × 相关性评分）`, pct);
     pct += perMapPct * 0.75;
 
     const rows: CandidateRow[] = [];
@@ -1015,12 +1023,21 @@ export async function renderFigureMaps(
     const openedByCandidate = new Map<string, number>();
     let chosen: { row: CandidateRow; modelId: number } | null = null;
 
+    /* v3.63 (round-22 “每个手性可能需要转180度再多搜索一次”): the flipped
+     * hand now gets the SAME 180°-rotation search the original hand always
+     * had — flip_z_rot_{x,y,z}_180 apply `turn <axis> 180` to the flipped
+     * copy before the fit ladder, so a map whose best alignment is a
+     * mirrored + 180°-rotated pose no longer loses to a wrong-handed
+     * un-rotated fit (the surviving mis-alignment class). */
     for (const spec of [
       { name: "original", kind: "original" as const },
       { name: "rot_x_180", kind: "rotate" as const, axis: "x" },
       { name: "rot_y_180", kind: "rotate" as const, axis: "y" },
       { name: "rot_z_180", kind: "rotate" as const, axis: "z" },
       { name: "flip_z", kind: "flip" as const, axis: "z" },
+      { name: "flip_z_rot_x_180", kind: "flip_rotate" as const, axis: "x" },
+      { name: "flip_z_rot_y_180", kind: "flip_rotate" as const, axis: "y" },
+      { name: "flip_z_rot_z_180", kind: "flip_rotate" as const, axis: "z" },
     ]) {
       if (threw(opts.signal)) throw new Error("aborted");
       let activeId: number | null = null;
@@ -1043,13 +1060,14 @@ export async function renderFigureMaps(
         }
         await exec(t, `volume #${activeId} color ${mapColor}`, opts, true);
 
-        if (spec.kind === "rotate") {
-          await exec(t, `turn ${spec.axis} 180 models #${activeId} center #${activeId}`, opts, true);
-          await exec(t, "wait 1", opts, true);
-        } else if (spec.kind === "flip") {
+        /* v3.63: the flip family applies the mirror FIRST (a fresh model),
+         *  then flip_rotate additionally turns the copy 180° about the
+         *  candidate axis — each hand gets its own full 180° search. */
+        if (spec.kind === "flip" || spec.kind === "flip_rotate") {
+          const flipAxis = "z";
           const next = await bridgeNextModelId(t);
           if (next != null) {
-            const flipRes = await exec(t, `volume flip #${activeId} axis ${spec.axis} modelId ${next}`, opts, true);
+            const flipRes = await exec(t, `volume flip #${activeId} axis ${flipAxis} modelId ${next}`, opts, true);
             const flipped = parseOpenModelId(flipRes.text) ?? next;
             openIds.delete(activeId);
             await exec(t, `close #${activeId}`, opts, true);
@@ -1057,7 +1075,7 @@ export async function renderFigureMaps(
             openIds.add(flipped);
           } else {
             // Official-REST transport: no nextid endpoint — let ChimeraX pick.
-            const flipRes = await exec(t, `volume flip #${activeId} axis ${spec.axis}`, opts, true);
+            const flipRes = await exec(t, `volume flip #${activeId} axis ${flipAxis}`, opts, true);
             const ids = Array.from(flipRes.text.matchAll(/#(\d+(?:\.\d+)?)/g)).map((m) => parseInt(m[1], 10));
             const fresh = ids.find((id) => id !== activeId && !openIds.has(id));
             if (fresh == null) throw new Error(flipRes.error || "flip model id not detected");
@@ -1072,6 +1090,10 @@ export async function renderFigureMaps(
             await exec(t, `volume #${activeId} level ${level2.toFixed(4)} step ${STEP}`, opts, true);
           }
           await exec(t, `volume #${activeId} color ${mapColor}`, opts, true);
+        }
+        if (spec.kind === "rotate" || spec.kind === "flip_rotate") {
+          await exec(t, `turn ${spec.axis} 180 models #${activeId} center #${activeId}`, opts, true);
+          await exec(t, "wait 1", opts, true);
         }
 
         const preRes = await exec(t, `measure correlation #${activeId} inMap #${refId}`, opts, true);
@@ -1113,9 +1135,15 @@ export async function renderFigureMaps(
       }
       chosen = { row: bestRow, modelId: bestId };
 
-      const flipScore = rows.find((r) => r.candidate === "flip_z")?.score ?? null;
+      /* v3.63: the flip FAMILY (flip_z + the three flip_z_rot_*_180) — any
+       *  of its members winning means the map needed the mirror; the
+       *  ambiguity check uses the family's best score. */
+      const flipScores = rows
+        .filter((r) => r.candidate.startsWith("flip_") && r.score != null)
+        .map((r) => r.score as number);
+      const flipScore = flipScores.length ? Math.max(...flipScores) : null;
       let chirality: ChiralityStatus = "unknown";
-      if (bestRow.candidate === "flip_z") {
+      if (bestRow.candidate.startsWith("flip_")) {
         chirality = "corrected";
       } else if (flipScore != null && Math.abs((bestRow.score as number) - flipScore) <= CHIRALITY_EPSILON) {
         chirality = "ambiguous";
