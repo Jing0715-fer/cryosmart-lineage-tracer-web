@@ -276,5 +276,32 @@
  * the basin the pyramid had found — and ranked the two hands by
  * whole-box noise). Old pages keep the mis-spelled smoother and the
  * un-masked, overlap-based, all-points fits.
+ *
+ * v3.68 bump reason (round-27 “能设置成如果 correlation 没有达到指定
+ * 目标，则增加搜索轮次吗？”): TARGET-DRIVEN ADAPTIVE SEARCH ROUNDS. The
+ * global search no longer runs exactly once at a fixed `search 30` —
+ * CORR_TARGET (default 0.85, RenderMapsOptions.corrTarget) is now BOTH
+ * the round-1 skip threshold (a local track already at the target skips
+ * the random search; v3.67 skipped at 0.80, letting 0.80–0.85 maps
+ * through unsearched) AND the escalation trigger: while the best
+ * fine-scale correlation (local track vs. best search round) stays
+ * below the target, MORE global-search rounds run — each a FRESH
+ * random-placement sample with an ESCALATING count (30 → 60 → 90 … =
+ * SEARCH_PLACEMENTS × round), capped at SEARCH_MAX_ROUNDS (3,
+ * RenderMapsOptions.searchMaxRounds) per hand; the best round's pose
+ * (by σ-fine masked correlation) is the one transferred to the
+ * full-resolution map, so a map that reaches the target in round 1
+ * pays exactly the v3.67 price while a hard map gets up to 180
+ * placements. The per-search /exec timeout SCALES with the placement
+ * count (300 s → 450 s → 600 s, capped 10 min) so a bigger round can
+ * never be killed by the round-1 timeout. The run log announces the
+ * active target + escalation schedule up front, every appended round
+ * logs WHY it ran and what it found, the winning hand's 轨迹 label
+ * carries its round count (全局搜索×N轮), and a post-ladder line
+ * explains a full-resolution score below target (lowpass already at
+ * target = full-res noise/resolution difference, more rounds cannot
+ * help; lowpass below target too = rounds exhausted, the map is
+ * genuinely hard against this reference). Old pages keep the single
+ * fixed 30-placement search.
  */
-export const FLOW_ENGINE_VERSION = "3.67";
+export const FLOW_ENGINE_VERSION = "3.68";

@@ -246,16 +246,40 @@ const server = Bun.serve({
       // restarting between page runs (new mkdtemp) while a stale page still
       // caches the old one; the card must re-validate before saving.
       if (sp.get("workdir") === "2") relayState.workdir = "/tmp/cryoflow-mock-2";
+      // v3.68 E2E: ?corr=N overrides the mock's `measure correlation`
+      // value — 0.9 exercises the target-reached paths (round-1 success /
+      // search skipped entirely when the local track is already ≥ 0.85).
+      const corrOverride = Number(sp.get("corr"));
+      if (Number.isFinite(corrOverride) && corrOverride > -1 && corrOverride <= 1) {
+        relayState.corrOverride = corrOverride;
+      }
       return Response.json({
         ok: true,
         http_blocked: blockHttp,
         save_rejected: rejectSave,
         file404_abs: relayState.divertAbsSave,
         workdir: relayState.workdir,
+        corr: relayState.corrOverride,
       });
     }
     if (pathname === "/flow-e2e/relay-stats") {
       return new Response(JSON.stringify(relayStats(), null, 2), {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+    /* v3.68 E2E: dump the raw command history (optional ?filter=substring)
+     * — proves the adaptive ladder's escalating fitmap search counts
+     * (30 → 60 → 90) actually reached the relay, not just the UI log. */
+    if (pathname === "/flow-e2e/commands") {
+      const filter = new URL(req.url).searchParams.get("filter") || "";
+      const cmds = filter
+        ? relayState.commands.filter((c) => c.includes(filter))
+        : relayState.commands;
+      return new Response(JSON.stringify({ count: cmds.length, commands: cmds }, null, 2), {
         headers: {
           "content-type": "application/json; charset=utf-8",
           "Access-Control-Allow-Origin": "*",
@@ -727,6 +751,8 @@ const relayState = {
    *  leftover BEFORE the first open and its own models at the end. */
   closedIds: [] as number[],
   closeAllCommands: 0,
+  /** v3.68 E2E: what `measure correlation` reports (reset ?corr=N). */
+  corrOverride: 0.42,
 };
 
 function resetRelayState() {
@@ -754,6 +780,7 @@ function resetRelayState() {
   relayState.setBgColorCommands = 0;
   relayState.closedIds = [];
   relayState.closeAllCommands = 0;
+  relayState.corrOverride = 0.42;
 }
 
 function relayNextModelId(): number {
@@ -952,7 +979,12 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   }
 
   if (/^measure\s+correlation/i.test(command)) {
-    return { text: "  correlation = 0.42", error: null };
+    // v3.68 E2E: the correlation value is configurable (/flow-e2e/reset?
+    // corr=0.9) so the browser E2E can exercise BOTH adaptive paths — the
+    // default 0.42 (below the 0.85 target → all 3 search rounds append)
+    // and an override ≥ 0.85 (target reached in round 1 → later rounds
+    // skip, and a local track already ≥ target skips the search entirely).
+    return { text: `  correlation = ${relayState.corrOverride.toFixed(2)}`, error: null };
   }
   if (/^fit\s+#\d+\s+in\s+#\d+\s+search/i.test(command)) {
     return { text: "Fit map in map, 15 positions tried, correlation = 0.93", error: null };

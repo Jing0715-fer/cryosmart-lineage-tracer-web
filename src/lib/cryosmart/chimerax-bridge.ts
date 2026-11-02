@@ -212,6 +212,35 @@
  *     `measure correlation` already samples envelope-true (the first
  *     map's above-level points) — against the masked reference its
  *     number is a pure signal-agreement score, for honest hand ranking.
+ *
+ * v3.68 (round-27 “能设置成如果 correlation 没有达到指定目标，则增加
+ * 搜索轮次吗？”): TARGET-DRIVEN ADAPTIVE SEARCH ROUNDS — the global
+ *   search escalates until the correlation target is met:
+ *   - CORR_TARGET (default 0.85, overridable per run via
+ *     RenderMapsOptions.corrTarget) is now BOTH the round-1 skip
+ *     threshold (a local track already at the target needs no random
+ *     search — v3.67 skipped at 0.80, letting 0.80–0.85 maps through
+ *     unsearched) AND the ESCALATION TRIGGER: while the best fine-scale
+ *     correlation (local track vs. best search round so far) stays
+ *     below the target, MORE global-search rounds run — each round a
+ *     FRESH random-placement sample of pose space with an ESCALATING
+ *     count (SEARCH_PLACEMENTS × round = 30 → 60 → 90 …), capped at
+ *     SEARCH_MAX_ROUNDS (3, RenderMapsOptions.searchMaxRounds) per
+ *     hand. The best round's pose (by σ-fine masked correlation) is
+ *     the one transferred to the full-resolution map — a map that
+ *     reaches the target in round 1 pays exactly the v3.67 price.
+ *   - The per-search /exec timeout SCALES with the placement count
+ *     (300 s at 30 → 450 s at 60 → 600 s at 90, capped 10 min) so a
+ *     bigger appended round can never be killed by the round-1
+ *     timeout (the relay /exec has no server-side timeout — only this
+ *     client-side abort matters).
+ *   - HONEST LOGGING: the run log states the active target + the
+ *     escalation schedule up front, every appended round logs WHY it
+ *     ran and what it found, and a post-ladder line explains a
+ *     full-resolution score that stays below target (lowpass already
+ *     at target = full-res noise/resolution difference, more rounds
+ *     cannot help; lowpass below target too = rounds exhausted, the
+ *     map is genuinely hard against this reference).
  */
 
 import { chimeraClassColor } from "./chimera-colors";
@@ -952,19 +981,34 @@ const SIGMA_FINE_A = 3;
  * far-field solvent noise is exactly what used to reward wrong poses
  * and inflate scores on noisy maps). */
 const MASK_RATIO = 0.5 * LEVEL_RATIO;
-/** v3.66: random placements for the global fitmap search — covers
- * arbitrary rotations (90°/any tilt), the pose space the fixed
- * 180°-pre-turn candidates of v3.63 could never reach. */
+/** v3.66: random placements for the global fitmap search's FIRST
+ * round — covers arbitrary rotations (90°/any tilt), the pose space the
+ * fixed 180°-pre-turn candidates of v3.63 could never reach. v3.68:
+ * every APPENDED round escalates the count (SEARCH_PLACEMENTS × round). */
 const SEARCH_PLACEMENTS = 30;
-/** v3.67: skip the global search when the local track already reached
- * this MASKED σ-fine correlation — a near-aligned map needs no random
- * search (0.80: the masked cosine runs a little lower than the old
- * whole-box number; kept conservative — an unnecessary search only
- * costs time, a skipped one costs the pose). */
-const SEARCH_SKIP_CORR = 0.8;
+/** v3.68 (round-27 “能设置成如果 correlation 没有达到指定目标，则增加
+ * 搜索轮次吗？”): the ALIGNMENT TARGET correlation. It is BOTH the
+ * round-1 SKIP threshold (a local track already at the target needs no
+ * random search — v3.67 skipped at 0.80, letting 0.80–0.85 maps through
+ * unsearched) AND the ESCALATION trigger: while the best fine-scale
+ * correlation stays below the target, MORE global-search rounds run,
+ * each a fresh random-placement sample with an escalating count, until
+ * the target is met or SEARCH_MAX_ROUNDS is exhausted. 0.85: the masked
+ * σ3 Å cosine of a genuinely-aligned same-pipeline map sits well above
+ * this. Override per run via RenderMapsOptions.corrTarget. */
+const CORR_TARGET = 0.85;
+/** v3.68: the per-hand cap on global-search rounds (placements escalate
+ * 30 → 60 → 90 … = SEARCH_PLACEMENTS × round). A fully-failing map
+ * costs at most 180 placements total; a map that reaches the target in
+ * round 1 pays exactly the v3.67 price. Override via
+ * RenderMapsOptions.searchMaxRounds. */
+const SEARCH_MAX_ROUNDS = 3;
 /** v3.66: the global search can legitimately run minutes on big maps —
  * it gets its own (longer) /exec timeout; a timeout disables the search
- * for the rest of the run instead of stalling every hand. */
+ * for the rest of the run instead of stalling every hand. v3.68: the
+ * timeout now SCALES with the placement count (300 s at 30 → 450 s at
+ * 60 → 600 s at 90, capped at 10 min) so a bigger appended round can
+ * never be killed by the round-1 timeout. */
 const FIT_SEARCH_TIMEOUT_MS = 300_000;
 const THUMB_SIZE = 220;
 const SNAPSHOT_W = 1600;
@@ -1034,6 +1078,15 @@ export interface RenderMapsOptions {
   onProgress?: (p: RenderProgress) => void;
   onLog?: (line: string) => void;
   signal?: AbortSignal;
+  /** v3.68: the alignment-target correlation — while the best
+   *  fine-scale correlation (local track vs. best search round) stays
+   *  below it, more global-search rounds run with escalating placement
+   *  counts. Default CORR_TARGET (0.85); clamped to [0.1, 0.999]. */
+  corrTarget?: number;
+  /** v3.68: the per-hand cap on global-search rounds (placements
+   *  escalate SEARCH_PLACEMENTS × round). Default SEARCH_MAX_ROUNDS
+   *  (3); clamped to [1, 6]. */
+  searchMaxRounds?: number;
 }
 
 export interface RenderMapsResult {
@@ -1463,7 +1516,18 @@ export async function renderFigureMaps(
   const runFit = async (cand: number, ref: number, search?: number): Promise<ExecResult | null> => {
     if (fitShape === null) return null;
     if (fitShape && fitArgs !== undefined) {
-      return await exec(t, fitText(cand, ref, search), opts, true, search ? FIT_SEARCH_TIMEOUT_MS : undefined);
+      // v3.68: the search timeout SCALES with the placement count — 30
+      // placements keep the v3.66 300 s, every appended round's bigger
+      // search gets proportional headroom (+150 s per extra 30
+      // placements, capped at 10 min — the relay /exec has no
+      // server-side timeout, only this client-side abort matters).
+      const tmo = search
+        ? Math.min(
+            600_000,
+            Math.round(FIT_SEARCH_TIMEOUT_MS * (1 + (search - SEARCH_PLACEMENTS) / (SEARCH_PLACEMENTS * 2))),
+          )
+        : undefined;
+      return await exec(t, fitText(cand, ref, search), opts, true, tmo);
     }
     const fails: string[] = [];
     for (const args of [" metric correlation envelope true", ""]) {
@@ -1493,14 +1557,15 @@ export async function renderFigureMaps(
    * 180°-pre-turn candidates of v3.63 could never reach. A FIRST failure
    * (unsupported keyword / timeout) disables the search for the whole
    * run; a mid-run failure after an earlier success just degrades the
-   * current hand. */
-  const runSearch = async (cand: number, ref: number): Promise<ExecResult | null> => {
+   * current hand. v3.68: takes the round's PLACEMENT count — the
+   * adaptive ladder escalates it per appended round (30 → 60 → 90 …). */
+  const runSearch = async (cand: number, ref: number, placements: number): Promise<ExecResult | null> => {
     if (searchOk === false || fitShape == null) return null;
-    const r = await runFit(cand, ref, SEARCH_PLACEMENTS);
+    const r = await runFit(cand, ref, placements);
     if (r && !r.error) {
       if (searchOk === undefined) {
         searchOk = true;
-        log(`全局搜索可用（${fitShape.cmd} … search ${SEARCH_PLACEMENTS} 随机放置）`);
+        log(`全局搜索可用（${fitShape.cmd} … search ${placements} 随机放置，未达目标按轮次递增）`);
       }
       return r;
     }
@@ -1528,6 +1593,24 @@ export async function renderFigureMaps(
       }
     }
   };
+
+  /* v3.68: resolved adaptive-search parameters — the target correlation
+   * and the per-hand round cap (clamped), announced once so a pasted run
+   * log carries the escalation schedule it actually ran with. */
+  const corrTarget =
+    typeof opts.corrTarget === "number" && Number.isFinite(opts.corrTarget)
+      ? Math.min(0.999, Math.max(0.1, opts.corrTarget))
+      : CORR_TARGET;
+  const searchMaxRounds =
+    typeof opts.searchMaxRounds === "number" && Number.isFinite(opts.searchMaxRounds)
+      ? Math.min(6, Math.max(1, Math.round(opts.searchMaxRounds)))
+      : SEARCH_MAX_ROUNDS;
+  log(
+    `对齐目标: 低通相关性 ≥ ${corrTarget} — 未达标自动追加全局搜索轮次（最多 ${searchMaxRounds} 轮，随机放置 ${Array.from(
+      { length: searchMaxRounds },
+      (_, i) => SEARCH_PLACEMENTS * (i + 1),
+    ).join(" → ")}），局部细化已达标的地图跳过全局搜索`,
+  );
 
   for (const req of all) {
     if (threw(opts.signal)) throw new Error("aborted");
@@ -1710,22 +1793,56 @@ export async function renderFigureMaps(
           }
         }
 
-        /* ---- 轨迹 2 · 全局搜索（任意旋转角）----
-         * Skipped when track 1 is already confident — a near-aligned map
-         * needs no random search (this saves minutes per map). */
+        /* ---- 轨迹 2 · 全局搜索（任意旋转角，v3.68 目标驱动的自适应轮次）----
+         * Round 1 runs unless the local track already reached the
+         * target; while the best fine-scale correlation stays BELOW the
+         * target, MORE rounds run with ESCALATING placement counts
+         * (SEARCH_PLACEMENTS × round) — the user's “correlation 未达标
+         * 就增加搜索轮次”. Every round is a FRESH random-placement
+         * sample of pose space (fitmap search re-places the model each
+         * time); the best round's pose (by σ-fine masked correlation)
+         * is the one kept for the full-res transfer. Stops on: target
+         * reached / round cap / the search erroring (a first failure
+         * disables it for the run, a later one just ends this hand's
+         * escalation). */
         let xf2: string | null = null;
-        if (fitShape !== null && searchOk !== false && !(corr1 != null && corr1 >= SEARCH_SKIP_CORR)) {
+        let searchRounds = 0;
+        if (fitShape !== null && searchOk !== false) {
           const searchPair = pairC ?? pairF ?? pairFull;
-          const r2 = await runSearch(searchPair.a, searchPair.b);
-          if (r2) {
+          const searchTarget = pairF ?? pairC ?? pairFull;
+          const fmtCorr = (v: number) => (v > -0.5 ? v.toFixed(4) : "—");
+          const bestFine = () => Math.max(corr1 ?? -1, corr2 ?? -1);
+          if (corr1 != null && corr1 >= corrTarget) {
+            log(`  ${req.key} · ${hand.name}: 局部细化已达目标（corr=${corr1.toFixed(4)} ≥ ${corrTarget}）— 跳过全局搜索`);
+          }
+          while (searchRounds < searchMaxRounds && bestFine() < corrTarget) {
+            const round = searchRounds + 1;
+            const placements = SEARCH_PLACEMENTS * round;
+            if (round > 1) {
+              log(
+                `  ${req.key} · ${hand.name}: 最佳相关性 ${fmtCorr(bestFine())} 未达目标 ${corrTarget} — 追加第 ${round}/${searchMaxRounds} 轮全局搜索（${placements} 个随机放置）`,
+              );
+            }
+            const rN = await runSearch(searchPair.a, searchPair.b, placements);
+            if (!rN || rN.error) break;
+            searchRounds = round;
             if (pairC && pairF) {
-              const xfc = await matrixSave(pairC.a, `${fileStem}_${hand.name}_s2c`);
+              const xfc = await matrixSave(pairC.a, `${fileStem}_${hand.name}_s2c_r${round}`);
               if (xfc) await matrixLoad(pairF.a, xfc);
             }
-            const target = pairF ?? pairC ?? pairFull;
-            await runFit(target.a, target.b);
-            corr2 = await measureCorr(target.a, target.b);
-            xf2 = await matrixSave(target.a, `${fileStem}_${hand.name}_s2`);
+            await runFit(searchTarget.a, searchTarget.b);
+            const corrN = await measureCorr(searchTarget.a, searchTarget.b);
+            if (corrN != null && (corr2 == null || corrN > corr2 + 1e-6)) {
+              corr2 = corrN;
+              xf2 = await matrixSave(searchTarget.a, `${fileStem}_${hand.name}_s2_r${round}`);
+            }
+            log(
+              `  ${req.key} · ${hand.name}: 第 ${round} 轮全局搜索（${placements} 放置）→ corr=${corrN != null ? corrN.toFixed(4) : "—"}（最佳 ${fmtCorr(bestFine())} ${
+                bestFine() >= corrTarget
+                  ? `≥ ${corrTarget} 已达标 ✓`
+                  : `< ${corrTarget}${searchRounds >= searchMaxRounds ? "，轮次已用尽" : ""}`
+              }）`,
+            );
           }
         }
 
@@ -1735,7 +1852,7 @@ export async function renderFigureMaps(
         if (corr2 != null && (corr1 == null || corr2 > corr1 + 1e-6)) {
           corr = corr2;
           xf = xf2;
-          track = "全局搜索";
+          track = searchRounds > 1 ? `全局搜索×${searchRounds}轮` : "全局搜索";
         }
         if (xf) {
           const applied = await matrixLoad(handId, xf);
@@ -1757,6 +1874,22 @@ export async function renderFigureMaps(
         post = await measureCorr(handId, refFullT);
         const score = post ?? corr ?? pre;
         if (fitShape == null) note = "拟合命令不可用 — 静止姿态评分";
+        /* v3.68: when the FULL-RESOLUTION score stays below the target,
+         * say WHY no further search round can help — either the lowpass
+         * pose already reached the target (the gap is full-res
+         * noise/resolution difference, not a wrong pose) or the rounds
+         * were exhausted (the map is genuinely hard against this
+         * reference). */
+        if (post != null && post < corrTarget) {
+          const fineBest = Math.max(corr1 ?? -1, corr2 ?? -1);
+          log(
+            `  ${req.key} · ${hand.name}: 全分辨率相关性 ${post.toFixed(4)} 低于目标 ${corrTarget} — ${
+              fineBest >= corrTarget
+                ? `低通最优姿态已达 ${fineBest.toFixed(4)}，差距来自全分辨率噪声/分辨率差异，追加搜索轮次无益`
+                : `低通最佳 ${fineBest > -0.5 ? fineBest.toFixed(4) : "—"} 亦未达标（搜索轮次已用尽或搜索不可用）— 该地图与参考的可对齐性有限`
+            }`,
+          );
+        }
         rows.push({
           candidate: hand.name,
           score,
