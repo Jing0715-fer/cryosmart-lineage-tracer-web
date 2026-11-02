@@ -15,7 +15,8 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
   驱动 ChimeraX 完成：地图先由本桥下载进固定本地缓存目录（目录里已有
   的文件跳过下载）→ ChimeraX 从本地目录打开地图 → 双手性（original/
   z-flip）双轨迹对齐（fitmap 局部细化 + 全局随机放置搜索，
-  σ4→σ2 低通金字塔，含手性检查）→ 90° 视角评分 → 高清截图回传 → 网页端组装
+  σ8→σ3 Å 高斯金字塔 + 参考图阈值噪声屏蔽（信号包络外置零），
+  含手性检查）→ 90° 视角评分 → 高清截图回传 → 网页端组装
   16:9 流程图 PPTX。
 
   ChimeraX 与浏览器可以在不同机器上（例如 ChimeraX 装在 CryoSmart

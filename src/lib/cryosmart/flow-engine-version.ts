@@ -249,5 +249,32 @@
  * naming every probe error; no search → local-only; no matrix
  * round-trip → no clones, full-res local-only; no vgaussian → full-res
  * ladder with bookkeeping; official REST → full-res ladder.
+ * v3.67 bump reason (round-26 “fit 命令执行了，但有的 map 对齐成功有的
+ * 没有，可能是噪音太大，能否屏蔽掉噪音再对齐”): the pose search now
+ * MASKS THE NOISE and speaks the REAL command spellings (verified
+ * against the official volume/fitmap/measure docs). (1) v3.64–66's
+ * `vgaussian #id sigma N` is NOT a documented ChimeraX command — the
+ * real one is `volume gaussian <spec> sDev σ` (σ in Å; `vop gaussian`
+ * on legacy builds), so on the real machine every smoothing call
+ * errored and the whole σ-pyramid silently degraded to FULL-RESOLUTION
+ * fits: the noise-dominated regime where only the already-near-aligned
+ * maps converged. The smoother is now runtime-probed (like the v3.66
+ * fit probe) and σ is in Å (8 Å coarse / 3 Å fine). (2) NOISE MASKING:
+ * `volume threshold #ref minimum <max·0.125> set 0` clones of the
+ * reference at every scale (σ-coarse / σ-fine / full-res) — fitmap
+ * samples the reference at ALL grid points regardless of its display
+ * threshold, so the un-masked far-field solvent noise used to reward
+ * wrong poses and inflate scores; the masked targets are the signal
+ * envelope only. (3) fitmap now runs `metric correlation envelope
+ * true` — the map-in-map default metric is OVERLAP and envelope
+ * defaults to FALSE for maps not shown as isosurfaces (every v3.66 fit
+ * scored ALL NONZERO points of the noisy moving map); the keywords
+ * ride the runtime probe and degrade cleanly to the bare command. (4)
+ * the full-resolution polish + the ranking score `post` run against
+ * the MASKED full-res reference (v3.66 polished against the RAW
+ * reference — the local full-res fit that could walk a noisy map off
+ * the basin the pyramid had found — and ranked the two hands by
+ * whole-box noise). Old pages keep the mis-spelled smoother and the
+ * un-masked, overlap-based, all-points fits.
  */
-export const FLOW_ENGINE_VERSION = "3.66";
+export const FLOW_ENGINE_VERSION = "3.67";

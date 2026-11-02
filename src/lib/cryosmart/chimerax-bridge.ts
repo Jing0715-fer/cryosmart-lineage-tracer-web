@@ -25,13 +25,17 @@
  *   - TWO HANDS per map: the pristine original + ONE `volume flip` z
  *     mirror (created before any fitting) — every rotation is reached
  *     by the global search, not by pre-turned re-opens
- *   - TWO TRACKS per hand on a σ4→σ2 vgaussian pyramid: 局部细化 (local
- *     fitmap from the incoming pose, coarse→fine) and 全局搜索 (fitmap
- *     search 30 random placements at σ4, refined at σ2); the winner by
- *     σ2 correlation is applied to the FULL-RESOLUTION map via
- *     matrixget/matrixset (round-trip probed on the reference first),
- *     polished with one full-res local fit and scored with a full-res
- *     `measure correlation` — the honest ranking number for both hands
+ *   - TWO TRACKS per hand on a σ8→σ3 Å `volume gaussian` pyramid over
+ *     NOISE-MASKED reference clones (v3.67: `volume threshold … set 0` —
+ *     the signal envelope only): 局部细化 (local fitmap from the
+ *     incoming pose, coarse→fine) and 全局搜索 (fitmap search 30 random
+ *     placements at σ8, refined at σ3); fits run `metric correlation
+ *     envelope true`; the winner by σ3 masked correlation is applied to
+ *     the FULL-RESOLUTION map via matrixget/matrixset (round-trip probed
+ *     on the reference first), polished with one full-res local fit
+ *     against the MASKED full-res reference and scored with a masked
+ *     full-res `measure correlation` — the honest ranking number for
+ *     both hands
  *   - chirality verdict from the flip hand vs. the original hand
  *   - one-time 90° view optimisation on the reference map by thumbnail
  *     coverage scoring, applied to every map
@@ -163,6 +167,51 @@
  *     static scoring with a loud log; no search → local-only; no matrix
  *     round-trip → no clones, full-res ladder local-only; no vgaussian →
  *     full-res ladder with bookkeeping; official REST → full-res ladder.
+ *
+ * v3.67 (round-26 “fit 命令执行了，但有的 map 对齐成功有的没有 — 可能噪音
+ * 太大，能否屏蔽掉噪音再对齐？”): NOISE-MASKED fitting with correctly-
+ * spelled commands, verified against the official ChimeraX docs
+ * (volume.html / fitmap.html / measure.html):
+ *   - SMOOTHING SPELLING BUG (the silent killer): v3.64–66 sent
+ *     `vgaussian #id sigma N` — NOT a documented ChimeraX command. The
+ *     real one is `volume gaussian <spec> sDev σ` (σ in the map's
+ *     PHYSICAL units, Å; `vop gaussian` on legacy builds). On the real
+ *     machine every smoothing call errored and gaussianSmooth returned
+ *     null, so the ENTIRE lowpass pyramid silently degraded to
+ *     FULL-RESOLUTION fits — exactly the noise-dominated regime where
+ *     only the already-near-aligned maps happened to converge while
+ *     everything else stalled in a noise local optimum. The smoother is
+ *     now a RUNTIME-PROBED command shape (volume gaussian sDev → vop
+ *     gaussian sDev → vgaussian sDev → vgaussian sigma — same pattern
+ *     as the v3.66 fit probe), σ is in Å (8 Å coarse / 3 Å fine — no
+ *     voxel-size dependence), and a build with no smoothing at all now
+ *     STILL gets masked full-resolution fits (below).
+ *   - NOISE MASKING (the user's request): `volume threshold #ref
+ *     minimum <max·0.125> set 0` clones of the reference at EVERY scale
+ *     (σ-coarse, σ-fine, full-resolution) — everything below half the
+ *     display contour level is zeroed, so the fit targets are the
+ *     reference's SIGNAL ENVELOPE only. fitmap samples the reference at
+ *     ALL grid points “regardless of what step level and threshold are
+ *     used to display the ref-model” (fitmap docs) — the un-masked
+ *     far-field solvent noise is precisely what used to reward wrong
+ *     poses and inflate scores on noisy maps.
+ *   - fitmap now runs `metric correlation envelope true` explicitly: the
+ *     map-in-map default metric is OVERLAP (a scale-carrying inner
+ *     product), and envelope defaults to FALSE when the fit map has not
+ *     been shown as an isosurface — i.e. every v3.66 fit scored ALL
+ *     NONZERO points of the (noisy) moving map. envelope true samples
+ *     only the moving map's above-contour points (their level is set
+ *     explicitly), and correlation (cosine) makes the objective
+ *     scale-free. The keywords ride the same runtime probe as the
+ *     command shape (dropped cleanly on a build that rejects them).
+ *   - the FULL-RESOLUTION polish + the ranking score `post` now run
+ *     against the MASKED full-res reference — v3.66 polished and scored
+ *     against the RAW reference, so the local full-res fit could walk a
+ *     noisy map off the basin the pyramid had just found, and the
+ *     whole-box correlation ranked the two hands partly by noise.
+ *     `measure correlation` already samples envelope-true (the first
+ *     map's above-level points) — against the masked reference its
+ *     number is a pure signal-agreement score, for honest hand ranking.
  */
 
 import { chimeraClassColor } from "./chimera-colors";
@@ -885,21 +934,34 @@ async function thumbnailCoverageScore(png: Uint8Array): Promise<number> {
 const LEVEL_RATIO = 0.25;
 const STEP = 1;
 const CHIRALITY_EPSILON = 0.01;
-/** v3.66 multi-scale lowpass ladder — VOXEL units. The GLOBAL search
- * runs at σ coarse (a ~1 Å/voxel map gets ≈12–16 Å — the molecular
- * envelope, wide smooth basins where random placements converge),
- * refinement and the track decision at σ fine (≈6–8 Å — enough detail
- * to discriminate poses, still washing the high-frequency noise that
- * dragged full-resolution fits into wrong local optima). */
-const SIGMA_COARSE = 4;
-const SIGMA_FINE = 2;
+/** v3.67 multi-scale lowpass ladder — ÅNGSTRÖM units (`volume gaussian
+ * sDev σ` takes the map's physical units, so the pyramid no longer
+ * depends on voxel size). The GLOBAL search runs at σ 8 Å (FWHM ≈ 19 Å
+ * — the molecular envelope, wide smooth basins where random placements
+ * converge), refinement and the track decision at σ 3 Å (FWHM ≈ 7 Å —
+ * enough detail to discriminate poses, still washing the
+ * high-frequency noise that dragged full-resolution fits into wrong
+ * local optima). */
+const SIGMA_COARSE_A = 8;
+const SIGMA_FINE_A = 3;
+/** v3.67 NOISE MASK: fit targets are `volume threshold #ref minimum
+ * <max·MASK_RATIO> set 0` clones of the reference — everything below
+ * half the display contour level is zeroed, so only the reference's
+ * SIGNAL ENVELOPE rewards a pose (fitmap samples the reference at ALL
+ * grid points regardless of its display threshold — the un-masked
+ * far-field solvent noise is exactly what used to reward wrong poses
+ * and inflate scores on noisy maps). */
+const MASK_RATIO = 0.5 * LEVEL_RATIO;
 /** v3.66: random placements for the global fitmap search — covers
  * arbitrary rotations (90°/any tilt), the pose space the fixed
  * 180°-pre-turn candidates of v3.63 could never reach. */
 const SEARCH_PLACEMENTS = 30;
-/** v3.66: skip the global search when the local track already reached
- * this correlation — a near-aligned map needs no random search. */
-const SEARCH_SKIP_CORR = 0.85;
+/** v3.67: skip the global search when the local track already reached
+ * this MASKED σ-fine correlation — a near-aligned map needs no random
+ * search (0.80: the masked cosine runs a little lower than the old
+ * whole-box number; kept conservative — an unnecessary search only
+ * costs time, a skipped one costs the pose). */
+const SEARCH_SKIP_CORR = 0.8;
 /** v3.66: the global search can legitimately run minutes on big maps —
  * it gets its own (longer) /exec timeout; a timeout disables the search
  * for the rest of the run instead of stalling every hand. */
@@ -940,7 +1002,10 @@ export interface CandidateRow {
    * AFTER the lowpass-found pose was applied to it (null when the lowpass
    * path was not used) — proves the transferred angle works at the
    * resolution that actually gets screenshotted. v3.66: this is the
-   * HONEST ranking score — both hands are compared by it. */
+   * HONEST ranking score — both hands are compared by it. v3.67:
+   * measured against the NOISE-MASKED full-res reference (signal
+   * envelope only), so the number ranks poses by signal agreement,
+   * not by how much far-field noise happens to correlate. */
   post?: number | null;
 }
 
@@ -1012,30 +1077,24 @@ async function exec(
  * screenshot.
  */
 
-/** v3.64: make a vgaussian (lowpass) copy of an open volume model and
- * return the NEW model's id — null when the command is unavailable on
- * this ChimeraX (the caller degrades to the full-resolution direct fit).
- * `vgaussian` convolves with a Gaussian on the SAME grid and origin, so a
- * pose found on the smoothed pair applies to the originals unchanged.
- * Tries `modelId <next>` first (relay /nextid) and falls back to plain
- * auto-id + log parsing. v3.66: the sigma is a parameter — the ladder
- * builds σ coarse (global search) and σ fine (refinement) clones. */
-async function gaussianSmooth(
-  t: FlowTransport,
-  id: number,
-  sigma: number,
-  opts: RenderMapsOptions,
-): Promise<number | null> {
-  const next = await bridgeNextModelId(t);
-  let res = next != null
-    ? await exec(t, `vgaussian #${id} sigma ${sigma} modelId ${next}`, opts, true)
-    : null;
-  if (res?.error) {
-    res = await exec(t, `vgaussian #${id} sigma ${sigma}`, opts, true);
-  }
-  if (!res || res.error) return null;
-  return parseOpenModelId(res.text) ?? next;
-}
+/** v3.67 candidate command shapes for Gaussian smoothing / threshold
+ * masking — the run probes them lazily (exactly like the v3.66 fit
+ * command probe). v3.64–66 hard-coded `vgaussian #id sigma N`, which is
+ * NOT a documented ChimeraX command — the real one is `volume gaussian
+ * <spec> sDev σ` (σ in the map's physical units, Å), with `vop gaussian`
+ * on legacy builds — so on the real machine every smoothing call errored
+ * and the whole lowpass pyramid silently degraded to FULL-RESOLUTION
+ * fits: the noise-dominated regime where only the already-near-aligned
+ * maps happened to converge. */
+const VOL_GAUSSIAN_SHAPES = [
+  { cmd: "volume gaussian", kw: "sDev" },
+  { cmd: "vop gaussian", kw: "sDev" },
+  { cmd: "vgaussian", kw: "sDev" },
+  { cmd: "vgaussian", kw: "sigma" },
+];
+/** v3.67: threshold-zero clone shapes (`volume threshold #id minimum L
+ * set 0` — values below L become exactly 0: the noise mask). */
+const VOL_THRESHOLD_SHAPES = ["volume threshold", "vop threshold"];
 
 export async function renderFigureMaps(
   t: FlowTransport,
@@ -1211,29 +1270,132 @@ export async function renderFigureMaps(
     const r = await exec(t, `matrixset "${path}" models #${id}`, opts, true);
     return !r.error;
   };
-  let refSmoothC: number | null = null;
-  let refSmoothF: number | null = null;
-  if (lowpass && matrixOk) {
-    refSmoothC = await gaussianSmooth(t, refId, SIGMA_COARSE, opts);
-    if (refSmoothC != null) {
-      refSmoothF = await gaussianSmooth(t, refId, SIGMA_FINE, opts);
-    }
-    for (const sid of [refSmoothC, refSmoothF]) {
-      if (sid == null) continue;
-      const sStats = await bridgeVolStats(t, sid);
-      if (sStats) {
-        await exec(t, `volume #${sid} level ${(sStats.max * LEVEL_RATIO).toFixed(4)} step ${STEP}`, opts, true);
+  /** v3.67: run-scoped Gaussian smoothing — probes the command shape on
+   * first use (volume gaussian sDev → vop gaussian sDev → vgaussian sDev
+   * → vgaussian sigma) and remembers the winner; returns the NEW clone's
+   * model id, or null when no shape runs (every caller degrades). The
+   * `modelId <next>` form (relay /nextid) is tried first so the id is
+   * known even on builds that log nothing — a clean modelId-form run
+   * returns `next` outright (ChimeraX honors modelId; parsing the log
+   * could grab the SOURCE map's id instead). The plain form falls back
+   * to log parsing ONLY — never the stale /nextid guess (the v3.63
+   * phantom-id disease). */
+  let gaussianShape: { cmd: string; kw: string } | null | undefined;
+  const gaussianSmooth = async (id: number, sigma: number): Promise<number | null> => {
+    if (gaussianShape === null) return null;
+    const shapes = gaussianShape ? [gaussianShape] : VOL_GAUSSIAN_SHAPES;
+    for (const s of shapes) {
+      const next = await bridgeNextModelId(t);
+      let res = next != null
+        ? await exec(t, `${s.cmd} #${id} ${s.kw} ${sigma} modelId ${next}`, opts, true)
+        : null;
+      if (res && !res.error) {
+        if (gaussianShape === undefined) {
+          gaussianShape = s;
+          log(`平滑命令: ${s.cmd} #N ${s.kw} σ ✓ — 低通金字塔以该命令形态生成`);
+        }
+        return next;
+      }
+      res = await exec(t, `${s.cmd} #${id} ${s.kw} ${sigma}`, opts, true);
+      if (res && !res.error) {
+        if (gaussianShape === undefined) {
+          gaussianShape = s;
+          log(`平滑命令: ${s.cmd} #N ${s.kw} σ ✓ — 低通金字塔以该命令形态生成`);
+        }
+        return parseOpenModelId(res.text);
       }
     }
-    if (refSmoothF != null) {
-      log(
-        `低通参考已生成（σ${SIGMA_COARSE} → #${refSmoothC}，σ${SIGMA_FINE} → #${refSmoothF}）— 全局搜索在 σ${SIGMA_COARSE} 上找角度，σ${SIGMA_FINE} 上细化比较，最优姿态经 matrixget/matrixset 应用回原 map 后全分辨率复核`,
-      );
-    } else if (refSmoothC != null) {
-      log(`低通参考仅 σ${SIGMA_COARSE} 可用（#${refSmoothC}）— 搜索与细化都在粗尺度进行`);
-    } else {
-      log("⚠ 无法生成低通参考（vgaussian 不可用或未返回 model id）— 退回全分辨率直接拟合");
+    if (gaussianShape === undefined) {
+      gaussianShape = null;
+      log("⚠ 高斯平滑命令（volume/vop/vgaussian gaussian）全部不可用 — 本次无低通金字塔，拟合在（屏蔽后的）全分辨率参考上进行");
     }
+    return null;
+  };
+
+  /** v3.67: run-scoped NOISE-MASK builder — `volume threshold #id
+   * minimum <level> set 0` clone with every value below `level` zeroed
+   * (the signal envelope). Same shape probing + id bookkeeping as
+   * gaussianSmooth. Null when the threshold command is unavailable. */
+  let thresholdShape: string | null | undefined;
+  const thresholdZero = async (id: number, level: number): Promise<number | null> => {
+    if (thresholdShape === null) return null;
+    const shapes = thresholdShape ? [thresholdShape] : VOL_THRESHOLD_SHAPES;
+    for (const cmd of shapes) {
+      const next = await bridgeNextModelId(t);
+      let res = next != null
+        ? await exec(t, `${cmd} #${id} minimum ${level.toFixed(5)} set 0 modelId ${next}`, opts, true)
+        : null;
+      if (res && !res.error) {
+        if (thresholdShape === undefined) {
+          thresholdShape = cmd;
+          log(`阈值屏蔽命令: ${cmd} #N minimum … set 0 ✓ — 参考图信号包络以外的噪声将被置零`);
+        }
+        return next;
+      }
+      res = await exec(t, `${cmd} #${id} minimum ${level.toFixed(5)} set 0`, opts, true);
+      if (res && !res.error) {
+        if (thresholdShape === undefined) {
+          thresholdShape = cmd;
+          log(`阈值屏蔽命令: ${cmd} #N minimum … set 0 ✓ — 参考图信号包络以外的噪声将被置零`);
+        }
+        return parseOpenModelId(res.text);
+      }
+    }
+    if (thresholdShape === undefined) {
+      thresholdShape = null;
+      log("⚠ 阈值命令（volume/vop threshold）不可用 — 无法屏蔽参考图噪声，拟合在未屏蔽参考上进行");
+    }
+    return null;
+  };
+
+  let refSmoothC: number | null = null;
+  let refSmoothF: number | null = null;
+  /** v3.67: the NOISE-MASKED fit targets — threshold-set-0 clones of the
+   * reference (σ-coarse / σ-fine / full-resolution). Fitting and scoring
+   * prefer these; each falls back to its unmasked parent (and the
+   * full-res target to the raw reference) on builds without the
+   * threshold command. */
+  let refMaskC: number | null = null;
+  let refMaskF: number | null = null;
+  let refMaskFull: number | null = null;
+  if (lowpass && matrixOk) {
+    refSmoothC = await gaussianSmooth(refId, SIGMA_COARSE_A);
+    if (refSmoothC != null) {
+      refSmoothF = await gaussianSmooth(refId, SIGMA_FINE_A);
+    }
+  }
+  for (const [sid, fine] of [
+    [refSmoothC, false],
+    [refSmoothF, true],
+  ] as Array<[number | null, boolean]>) {
+    if (sid == null) continue;
+    const sStats = await bridgeVolStats(t, sid);
+    if (!sStats) continue;
+    await exec(t, `volume #${sid} level ${(sStats.max * LEVEL_RATIO).toFixed(4)} step ${STEP}`, opts, true);
+    const mask = await thresholdZero(sid, sStats.max * MASK_RATIO);
+    if (fine) refMaskF = mask;
+    else refMaskC = mask;
+  }
+  // v3.67: the full-resolution masked reference needs no smoothing
+  // pyramid — even the degraded fallbacks (no gaussian / no matrix
+  // round-trip) still get noise-masked fitting.
+  if (refStats) {
+    refMaskFull = await thresholdZero(refId, refStats.max * MASK_RATIO);
+  }
+  if (refSmoothF != null && refMaskF != null) {
+    log(
+      `低通参考已生成（σ${SIGMA_COARSE_A}Å → #${refSmoothC}，σ${SIGMA_FINE_A}Å → #${refSmoothF}），噪声屏蔽拟合目标也已生成（粗 #${refMaskC ?? "—"} / 细 #${refMaskF}${refMaskFull != null ? ` / 全分辨率 #${refMaskFull}` : ""}）— 参考图信号包络以外全部置零，fitmap 只在信号区域内寻找最优姿态，背景噪声不再参与对齐`,
+    );
+  } else if (refSmoothF != null) {
+    log(
+      `低通参考已生成（σ${SIGMA_COARSE_A}Å → #${refSmoothC}，σ${SIGMA_FINE_A}Å → #${refSmoothF}）— 阈值屏蔽不可用，拟合在平滑后（未屏蔽）参考上进行`,
+    );
+  } else if (refSmoothC != null) {
+    log(`低通参考仅 σ${SIGMA_COARSE_A}Å 可用（#${refSmoothC}）— 搜索与细化都在粗尺度进行`);
+  } else if (refMaskFull != null) {
+    log(`⚠ 无法生成低通参考（平滑命令不可用）— 使用全分辨率噪声屏蔽参考 #${refMaskFull} 直接拟合`);
+  } else {
+    log("⚠ 低通参考与噪声屏蔽副本均不可用 — 退回全分辨率直接拟合（未屏蔽）");
   }
 
   /* ---- 3. per-map alignment (v3.66: fitmap probe + 双手性 × 双轨迹) ---- */
@@ -1260,11 +1422,15 @@ export async function renderFigureMaps(
     { cmd: "fit", kw: "in" },
   ];
   let fitShape: { cmd: string; kw: string } | null | undefined;
+  /** v3.67: the metric/envelope keywords appended to every fit — probed
+   * WITH the command shape (see runFit); "" when this ChimeraX rejects
+   * them (the bare v3.66 command). */
+  let fitArgs: string | undefined;
   let searchOk: boolean | undefined;
   let measureShape: "inMap" | "pos" | undefined;
 
   const fitText = (cand: number, ref: number, search?: number) =>
-    `${fitShape?.cmd} #${cand} ${fitShape?.kw} #${ref}${search ? ` search ${search}` : ""}`;
+    `${fitShape?.cmd} #${cand} ${fitShape?.kw} #${ref}${fitArgs ?? ""}${search ? ` search ${search}` : ""}`;
 
   /** v3.66: `measure correlation` with the same runtime-shape care — the
    * inMap form is what has parsed on the real machine since v3.56; the
@@ -1285,26 +1451,39 @@ export async function renderFigureMaps(
 
   /** One fitting call (LOCAL optimisation when `search` is omitted — a
    * successful fit MOVES the fitted model to its optimum). Probes the
-   * command shape on first use; returns null when no shape runs on this
-   * ChimeraX (the caller degrades to static scoring). */
+   * command shape AND the metric/envelope keywords on first use; returns
+   * null when nothing runs on this ChimeraX (the caller degrades to
+   * static scoring). v3.67: `metric correlation envelope true` — the
+   * map-in-map default metric is OVERLAP (a scale-carrying inner
+   * product), and envelope defaults to FALSE for maps not shown as
+   * isosurfaces (i.e. every v3.66 fit scored ALL NONZERO points of the
+   * noisy moving map); the cosine metric + above-level sampling make
+   * the objective scale-free and signal-only. A build that rejects the
+   * keywords falls back to the bare command. */
   const runFit = async (cand: number, ref: number, search?: number): Promise<ExecResult | null> => {
     if (fitShape === null) return null;
-    if (fitShape) {
+    if (fitShape && fitArgs !== undefined) {
       return await exec(t, fitText(cand, ref, search), opts, true, search ? FIT_SEARCH_TIMEOUT_MS : undefined);
     }
     const fails: string[] = [];
-    for (const s of FIT_SHAPES) {
-      const cmd = `${s.cmd} #${cand} ${s.kw} #${ref}`;
-      const r = await exec(t, cmd, opts, true);
-      if (!r.error) {
-        fitShape = s;
-        log(`拟合命令: ${s.cmd} #N ${s.kw} #N ✓ — 本 ChimeraX 以该形态做位姿搜索`);
-        return r;
+    for (const args of [" metric correlation envelope true", ""]) {
+      for (const s of FIT_SHAPES) {
+        const cmd = `${s.cmd} #${cand} ${s.kw} #${ref}${args}`;
+        const r = await exec(t, cmd, opts, true);
+        if (!r.error) {
+          fitShape = s;
+          fitArgs = args;
+          log(
+            `拟合命令: ${s.cmd} #N ${s.kw} #N${args ? " metric correlation envelope true" : ""} ✓ — 本 ChimeraX 以该形态做位姿搜索${args ? "（余弦度量，只采样移动图高于阈值的数据点）" : ""}`,
+          );
+          return r;
+        }
+        fails.push(`${s.cmd} ${s.kw}${args ? "+metric/envelope" : ""}: ${logSnippet(r.error, 80)}`);
       }
-      fails.push(`${s.cmd} ${s.kw}: ${logSnippet(r.error, 80)}`);
     }
     log(`⚠ 拟合命令（fitmap/fit）全部不可用 — 本次退化为静止姿态评分（不移动地图）。探测详情: ${fails.join("；")}`);
     fitShape = null;
+    fitArgs = undefined;
     return null;
   };
 
@@ -1486,9 +1665,9 @@ export async function renderFigureMaps(
       let note: string | undefined;
       try {
         if (lowpass && matrixOk && refSmoothC != null) {
-          smoothC = await gaussianSmooth(t, handId, SIGMA_COARSE, opts);
+          smoothC = await gaussianSmooth(handId, SIGMA_COARSE_A);
           if (smoothC != null) {
-            smoothF = await gaussianSmooth(t, handId, SIGMA_FINE, opts);
+            smoothF = await gaussianSmooth(handId, SIGMA_FINE_A);
           }
           for (const sid of [smoothC, smoothF]) {
             if (sid == null) continue;
@@ -1499,9 +1678,17 @@ export async function renderFigureMaps(
             await exec(t, `volume #${sid} color ${mapColor}`, opts, true);
           }
         }
-        const pairC = smoothC != null && refSmoothC != null ? { a: smoothC, b: refSmoothC } : null;
-        const pairF = smoothF != null && refSmoothF != null ? { a: smoothF, b: refSmoothF } : null;
-        const pairFull = { a: handId, b: refId };
+        /* v3.67: every fit target is the MASKED reference clone when one
+         * exists (signal envelope only), falling back to its unmasked
+         * parent — the moving side is sampled above its explicit contour
+         * level (`envelope true`), so far-field noise contributes on
+         * NEITHER side of the objective. */
+        const refCt = refMaskC ?? refSmoothC;
+        const refFt = refMaskF ?? refSmoothF;
+        const refFullT = refMaskFull ?? refId;
+        const pairC = smoothC != null && refCt != null ? { a: smoothC, b: refCt } : null;
+        const pairF = smoothF != null && refFt != null ? { a: smoothF, b: refFt } : null;
+        const pairFull = { a: handId, b: refFullT };
         const workPair = pairF ?? pairC ?? pairFull;
 
         pre = await measureCorr(workPair.a, workPair.b);
@@ -1556,11 +1743,18 @@ export async function renderFigureMaps(
         } else if ((pairF || pairC) && fitShape !== null) {
           note = "低通姿态捕获失败 — 全分辨率地图按原姿态继续细化";
         }
-        /* full-resolution polish + the honest score */
+        /* v3.67 full-resolution polish + the honest score — BOTH against
+         * the MASKED full-res reference. v3.66 polished and scored
+         * against the RAW reference: the local full-res fit could walk a
+         * noisy map off the basin the pyramid had just found, and the
+         * whole-box correlation ranked the two hands partly by noise.
+         * With the mask the polish objective is signal-only, and `post`
+         * measures the signal envelope alone (u = the hand's above-level
+         * points — set at open; v = the masked reference). */
         if (fitShape !== null) {
-          await runFit(handId, refId);
+          await runFit(handId, refFullT);
         }
-        post = await measureCorr(handId, refId);
+        post = await measureCorr(handId, refFullT);
         const score = post ?? corr ?? pre;
         if (fitShape == null) note = "拟合命令不可用 — 静止姿态评分";
         rows.push({
@@ -1590,7 +1784,7 @@ export async function renderFigureMaps(
       } finally {
         if (smoothC != null) await exec(t, `close #${smoothC}`, opts, true);
         if (smoothF != null) await exec(t, `close #${smoothF}`, opts, true);
-        await sweepStrayVolumes([refSmoothC, refSmoothF]);
+        await sweepStrayVolumes([refSmoothC, refSmoothF, refMaskC, refMaskF, refMaskFull]);
       }
     }
 
@@ -1651,18 +1845,21 @@ export async function renderFigureMaps(
     }
   }
 
-  /* ---- 3.5 v3.64/v3.66: close the lowpassed reference clones — the pose
-   * search is done and the screenshots below must render ONLY the
-   * full-resolution originals (the smoothed copies were never in
-   * openIds, so the hide-all loop would have missed them). */
-  if (refSmoothC != null) {
-    await exec(t, `close #${refSmoothC}`, opts, true);
-    refSmoothC = null;
+  /* ---- 3.5 v3.64/v3.66/v3.67: close the lowpassed reference clones
+   * AND their noise-mask clones — the pose search is done and the
+   * screenshots below must render ONLY the full-resolution originals
+   * (none of the clones were ever in openIds, so the hide-all loop
+   * would have missed them). */
+  for (const sid of [refSmoothC, refSmoothF, refMaskC, refMaskF, refMaskFull]) {
+    if (sid != null) {
+      await exec(t, `close #${sid}`, opts, true);
+    }
   }
-  if (refSmoothF != null) {
-    await exec(t, `close #${refSmoothF}`, opts, true);
-    refSmoothF = null;
-  }
+  refSmoothC = null;
+  refSmoothF = null;
+  refMaskC = null;
+  refMaskF = null;
+  refMaskFull = null;
 
   /* ---- 4. screenshots ---- */
   if (t.canFetchFiles && t.workdir) {
