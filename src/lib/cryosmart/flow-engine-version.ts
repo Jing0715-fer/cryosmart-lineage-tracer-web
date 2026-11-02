@@ -350,5 +350,44 @@
  * ChimeraX restart resets the relay to the default system-temp dir,
  * the run log announces the restore. Old pages keep the read-only dir
  * display; old relays keep the fixed dir.
+ *
+ * v3.71 bump reason (round-30 "可以增加用EMalign先确定reference的手性
+ * 是否正确吗？或者手动指定reference的手性是否正确"): REFERENCE-HAND
+ * POLICY. The v3.66–70 two-hand ladder only ever judged hands RELATIVE
+ * to the reference — a reference that is itself mirrored (e.g. a
+ * wrong-hand ab-initio initial model poisoned the whole project)
+ * aligned every map consistently into a MIRRORED figure, and nothing
+ * in the pipeline could tell. The ChimeraX panel gained a 参考手性
+ * selector with three policies, applied BEFORE the view scoring, the σ
+ * pyramid, the noise masks and every per-map fit: (1) 自动 (default —
+ * pre-3.71 behavior, relative chirality only); (2) EMalign 参照物验证
+ * — a KNOWN-HAND anchor (PDB/mmCIF model or an already-published map;
+ * path/URL the ChimeraX machine can open — bridgeOpenModel grew an
+ * "auto" open kind: any-suffix http URLs and suffix-sniffed local
+ * files instead of the forced `format mrc`) is fitted into the
+ * reference AND its z-flip with a verification-LOCAL fit probe
+ * (deliberately separate from the run-scoped fitShape — an ATOMIC
+ * anchor may reject `metric correlation envelope true`, and that
+ * rejection must not degrade the main ladder's map-map fits); the
+ * better score (fitmap's correlation for map anchors / Average map
+ * value for atomic ones, parseAvgMapValue, `measure correlation` as
+ * the last resort — comparable across the two hands since a z-flip
+ * preserves the value distribution) IS the reference's true hand, and
+ * a mirrored verdict (margin HAND_VERIFY_MARGIN 0.05) swaps the
+ * canonical reference to the flipped copy so the WHOLE figure — view,
+ * pyramid, masks, fits, screenshots — stands on the biologically
+ * correct hand; (3) 手动 — the user asserts the hand (correct =
+ * as-is; mirrored = flip once up front). Once grounded, every per-map
+ * verdict gains its biological meaning (matched without flip ⇒ the
+ * raw map's hand is correct; needed flip_z ⇒ it was mirrored — logged
+ * per map), and the render report's reference row carries the verdict
+ * (e.g. "reference · EMalign 验证镜像 · 已翻正（0.31 vs 0.94）"). The
+ * anchor and the unused mirror close BEFORE the view-scoring
+ * thumbnails (a leftover anchor would contaminate the coverage
+ * scores), stray fitmap copies are swept like the per-map hands, the
+ * choice sticks in localStorage, and every failure path (anchor
+ * unreachable / fit commands missing / scores unparseable / flip
+ * failed) degrades to the auto behavior with a loud log. Old pages
+ * keep the un-groundable relative-only chirality.
  */
-export const FLOW_ENGINE_VERSION = "3.70";
+export const FLOW_ENGINE_VERSION = "3.71";

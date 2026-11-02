@@ -728,6 +728,13 @@ export async function bridgeOpenModel(
   t: FlowTransport,
   source: string,
   timeoutMs = 300_000,
+  /** v3.71: "map" (default — the pre-3.71 guards: non-map-suffix http
+   *  URLs rejected, local paths force `format mrc`) vs. "auto" (the
+   *  reference-hand ANCHOR — a PDB/mmCIF atomic model or any
+   *  ChimeraX-sniffable file: http URLs of ANY suffix are allowed and a
+   *  local path only forces `format mrc` when its suffix is MRC-family,
+   * so .pdb/.cif paths get ChimeraX's own suffix sniffing). */
+  openKind: "map" | "auto" = "map",
 ): Promise<OpenModelResult> {
   const isHttp = /^https?:\/\//i.test(source);
   // Suffix sniffing uses the URL's PATH basename (ChimeraX's web fetch
@@ -746,7 +753,7 @@ export async function bridgeOpenModel(
       httpPathMap = /\.(?:mrc|mrcs|map|ccp4)(?:\?|#|$)/i.test(source);
     }
   }
-  if (isHttp && !httpPathMap) {
+  if (openKind === "map" && isHttp && !httpPathMap) {
     return {
       modelId: null,
       error:
@@ -755,7 +762,11 @@ export async function bridgeOpenModel(
       viaDelta: false,
     };
   }
-  const command = `open ${quotePath(source)}${isHttp ? "" : " format mrc"}`;
+  // v3.71 "auto" kind: a local path only forces `format mrc` for
+  // MRC-family suffixes (a .pdb/.cif anchor must ride ChimeraX's own
+  // suffix sniffing, not be parsed as a volume).
+  const forceMrc = openKind === "map" ? !isHttp : !isHttp && MAP_SUFFIX_RE.test(source);
+  const command = `open ${quotePath(source)}${forceMrc ? " format mrc" : ""}`;
   const nextBefore = await bridgeNextModelId(t);
   let res: ExecResult;
   try {
@@ -793,6 +804,20 @@ export function parseCorrelation(text: string | null | undefined): number | null
   if (!m) return null;
   const value = Number(m[1]);
   return Number.isFinite(value) && value >= -1 && value <= 1 ? value : null;
+}
+
+/** v3.71: fitmap's ATOMIC-fit score — "Average map value = 0.0618" (the
+ * atom-in-map analogue of the map-map correlation). Used by the
+ * reference-hand verification (EMalign anchor fits): an ATOMIC anchor
+ * reports this number instead of a correlation, and it IS comparable
+ * across the two hands of the SAME reference because a z-flip preserves
+ * the value distribution. */
+export function parseAvgMapValue(text: string | null | undefined): number | null {
+  if (!text) return null;
+  const m = /average map value\s*=?\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/i.exec(text);
+  if (!m) return null;
+  const value = Number(m[1]);
+  return Number.isFinite(value) ? value : null;
 }
 
 /** Extract the opened model id from an `open` command's log text.
@@ -1069,6 +1094,13 @@ const SEARCH_MAX_ROUNDS = 3;
  * 60 → 600 s at 90, capped at 10 min) so a bigger appended round can
  * never be killed by the round-1 timeout. */
 const FIT_SEARCH_TIMEOUT_MS = 300_000;
+/** v3.71 (round-30 “可以增加用EMalign先确定reference的手性是否正确吗？
+ * 或者手动指定reference的手性是否正确”): the margin the MIRROR-hand
+ * score must exceed the original-hand score by (fitting the same
+ * known-hand anchor into the reference vs. its z-flip) before the
+ * reference is declared mirrored — keeps a noisy / symmetric anchor fit
+ * from flipping the reference on a coin toss. */
+const HAND_VERIFY_MARGIN = 0.05;
 const THUMB_SIZE = 220;
 const SNAPSHOT_W = 1600;
 const SNAPSHOT_H = 1200;
@@ -1137,6 +1169,11 @@ export interface RenderMapsOptions {
   onProgress?: (p: RenderProgress) => void;
   onLog?: (line: string) => void;
   signal?: AbortSignal;
+  /** v3.71: how the reference's OWN biological hand is established
+   *  BEFORE per-map alignment (the default ladder only judges hands
+   *  RELATIVE to the reference; anchor/manual ground the figure's hand
+   *  — see ReferenceHandPolicy). */
+  referenceHand?: ReferenceHandPolicy;
   /** v3.68: the alignment-target correlation — while the best
    *  fine-scale correlation (local track vs. best search round) stays
    *  below it, more global-search rounds run with escalating placement
@@ -1149,6 +1186,43 @@ export interface RenderMapsOptions {
    *  escalate SEARCH_PLACEMENTS × round). Default SEARCH_MAX_ROUNDS
    *  (3); clamped to [1, 6]. */
   searchMaxRounds?: number;
+}
+
+/** v3.71 (round-30 “可以增加用EMalign先确定reference的手性是否正确吗？
+ * 或者手动指定reference的手性是否正确”): how the reference map's OWN
+ * biological handedness is established BEFORE any per-map alignment.
+ * The v3.66–70 ladder only ever judged hands RELATIVE to the reference —
+ * if the reference itself is mirrored (e.g. a wrong-hand ab-initio
+ * initial model poisoned the whole project), every map aligns
+ * consistently into a MIRRORED figure and nothing in the pipeline can
+ * tell. Three policies ground the hand instead:
+ *  - "auto": no verification (default; pre-3.71 behavior — the
+ *    reference is taken as-is and every map's hand reads relative to
+ *    it).
+ *  - "anchor": EMalign-style verification — a KNOWN-HAND anchor
+ *    (a PDB/mmCIF atomic model, or an already-published map of correct
+ *    hand; `anchor` = a path/URL the ChimeraX machine can open) is
+ *    fitted into the reference AND its z-flip with the SAME fit
+ *    command; the better-scoring hand IS the reference's true hand
+ *    (fitmap reports `correlation` for map anchors and `Average map
+ *    value` for atomic ones — both comparable across the two hands
+ *    because a z-flip preserves the value distribution). A mirrored
+ *    verdict (score margin HAND_VERIFY_MARGIN) swaps the canonical
+ *    reference to the flipped copy BEFORE the view scoring, the σ
+ *    pyramid, the noise masks and every per-map fit, so the whole
+ *    figure stands on the biologically-correct hand.
+ *  - "manual": the user asserts the hand — "correct" keeps the
+ *    reference as-is; "mirrored" flips it once up front (same swap).
+ * Once the hand is established, every per-map chirality verdict also
+ * gains its biological meaning (matched without flip ⇒ the raw map's
+ * own hand is correct; needed flip_z ⇒ it was mirrored). */
+export interface ReferenceHandPolicy {
+  mode: "auto" | "anchor" | "manual";
+  /** anchor mode: an absolute path on the ChimeraX machine, or a URL
+   *  ChimeraX can open (PDB/mmCIF model or a known-hand map). */
+  anchor?: string;
+  /** manual mode: the user's assertion about the reference's hand. */
+  manual?: "correct" | "mirrored";
 }
 
 export interface RenderMapsResult {
@@ -1251,7 +1325,11 @@ export async function renderFigureMaps(
   progress("打开参考地图", 4);
   let refLevel: number | null = null;
   const openRef = await bridgeOpenModel(t, opts.reference.sourceUrl);
-  const refId = openRef.modelId;
+  // v3.71: `let` — the reference-hand policy below may SWAP the canonical
+  // reference to its z-flipped copy (an anchor/manual "mirrored" verdict)
+  // BEFORE anything downstream (view scoring, σ pyramid, noise masks,
+  // per-map fits, screenshots) reads it.
+  let refId = openRef.modelId;
   if (refId == null) {
     // v3.46: include WHAT ChimeraX actually said — the round-5 report carried
     // no error suffix at all (open clean, id unparsed), which was
@@ -1286,6 +1364,233 @@ export async function renderFigureMaps(
   await exec(t, `volume #${refId} color ${refColor}`, opts, true);
   await exec(t, "view pad 0.25", opts, true);
   await exec(t, "wait 1", opts, true);
+
+  /* ---- 1.5 v3.71 (round-30 “可以增加用EMalign先确定reference的手性
+   * 是否正确吗？或者手动指定reference的手性是否正确”): the reference
+   * HAND policy — see ReferenceHandPolicy. Establishes the reference's
+   * OWN biological hand BEFORE the view scoring, the σ pyramid, the
+   * noise masks and every per-map fit, because everything downstream
+   * reads `refId`: a "mirrored" verdict swaps the canonical reference to
+   * its z-flipped copy ONCE, right here (and nothing downstream can
+   * tell the difference — a flip of the flip is the original). */
+  let refHandKnown = false;
+  let refIsCorrectHand = true;
+  let refHandVerdict = "";
+  /** Create the reference's z-flip copy, re-apply its display settings
+   * and swap it in as the CANONICAL reference (the original closes).
+   * Returns false when the flip fails (the run then keeps the original
+   * and says so loudly). */
+  const flipReference = async (): Promise<boolean> => {
+    try {
+      // local capture: `let refId` loses its null-narrowing inside a
+      // closure (TS resets `let` narrowing there) — re-establish it once.
+      const srcId = refId;
+      if (srcId == null) throw new Error("参考地图无 model id");
+      let fid: number | null = null;
+      const next = await bridgeNextModelId(t);
+      let res = next != null
+        ? await exec(t, `volume flip #${srcId} axis z modelId ${next}`, opts, true)
+        : null;
+      if (res && !res.error) {
+        fid = parseOpenModelId(res.text) ?? next;
+      } else {
+        res = await exec(t, `volume flip #${srcId} axis z`, opts, true);
+        if (res && !res.error) fid = parseOpenModelId(res.text);
+      }
+      if (fid == null || fid === srcId) throw new Error("flip produced no model");
+      if (refLevel != null) {
+        await exec(t, `volume #${fid} level ${refLevel.toFixed(4)} step ${STEP}`, opts, true);
+      }
+      await exec(t, `volume #${fid} color ${refColor}`, opts, true);
+      await exec(t, `close #${srcId}`, opts, true);
+      openIds.delete(srcId);
+      openIds.add(fid);
+      refId = fid;
+      return true;
+    } catch (err) {
+      log(`⚠ 翻转参考地图失败 — ${logSnippet(String(err), 140)}`);
+      return false;
+    }
+  };
+  {
+    const policy = opts.referenceHand;
+    if (policy?.mode === "manual") {
+      if (policy.manual === "mirrored") {
+        progress("按用户指定翻正参考手性", 6);
+        log("参考手性: 按用户指定为镜像 — 生成前先把参考翻正（视角评分、低通金字塔、噪声屏蔽与全部对齐/截图都以翻正后的参考为基准）");
+        if (await flipReference()) {
+          refHandKnown = true;
+          refIsCorrectHand = true;
+          refHandVerdict = "手动指定镜像 · 已翻正";
+          log(`参考手性: 已翻正 → model #${refId} — 流程图按生物学正确手性呈现`);
+        } else {
+          refHandKnown = true;
+          refIsCorrectHand = false;
+          refHandVerdict = "手动指定镜像 · 翻正失败";
+          log("⚠ 参考仍为镜像手性 — 各 map 的手性判定改按镜像参考推算（流程图将呈镜像视图）");
+        }
+      } else {
+        refHandKnown = true;
+        refIsCorrectHand = true;
+        refHandVerdict = "手动指定正确";
+        log("参考手性: 按用户指定为正确 — 以参考原样为基准（各 map 双手性对比判定相对手性）");
+      }
+    } else if (policy?.mode === "anchor" && policy.anchor && policy.anchor.trim()) {
+      const anchorSrc = policy.anchor.trim();
+      progress("验证参考手性（EMalign · 参照物对齐）", 6);
+      log(`参考手性验证（EMalign）: 参照物 ${anchorSrc} — 将分别拟合进参考原手与其 z 镜像，得分高的一侧即参考的真实手性`);
+      let anchorId: number | null = null;
+      let flipRefId: number | null = null;
+      try {
+        if (threw(opts.signal)) throw new Error("aborted");
+        // "auto" open kind: a PDB/mmCIF anchor (any-suffix URL, sniffed
+        // local path) opens as-is instead of being forced to `format mrc`.
+        const openA = await bridgeOpenModel(t, anchorSrc, 300_000, "auto");
+        anchorId = openA.modelId;
+        if (anchorId == null) {
+          throw new Error(openA.error || logSnippet(openA.text) || "参照物打开失败（ChimeraX 未返回 model id）");
+        }
+        openIds.add(anchorId);
+        {
+          const next = await bridgeNextModelId(t);
+          let fres = next != null
+            ? await exec(t, `volume flip #${refId} axis z modelId ${next}`, opts, true)
+            : null;
+          if (fres && !fres.error) {
+            flipRefId = parseOpenModelId(fres.text) ?? next;
+          } else {
+            fres = await exec(t, `volume flip #${refId} axis z`, opts, true);
+            if (fres && !fres.error) flipRefId = parseOpenModelId(fres.text);
+          }
+          if (flipRefId == null || flipRefId === refId) throw new Error("参考 z 镜像副本生成失败");
+          openIds.add(flipRefId);
+        }
+        /* The verification's OWN fit probe — deliberately SEPARATE from
+         * the run-scoped fitShape the per-map ladder probes: an ATOMIC
+         * anchor may reject `metric correlation envelope true`, and that
+         * rejection must not degrade the main ladder's map-map fits.
+         * Metric shapes come first (map anchors score better with the
+         * cosine metric); bare shapes catch atomic anchors. */
+        let vShape: { cmd: string; kw: string; extra: string } | null | undefined;
+        const VERIFY_FIT_SHAPES: Array<{ cmd: string; kw: string; extra: string }> = [
+          { cmd: "fitmap", kw: "inMap", extra: " metric correlation envelope true" },
+          { cmd: "fitmap", kw: "in", extra: " metric correlation envelope true" },
+          { cmd: "fitmap", kw: "inMap", extra: "" },
+          { cmd: "fitmap", kw: "in", extra: "" },
+          { cmd: "fit", kw: "inMap", extra: "" },
+          { cmd: "fit", kw: "in", extra: "" },
+        ];
+        const vFit = async (cand: number, target: number, search: number): Promise<ExecResult | null> => {
+          if (vShape === null) return null;
+          for (const s of vShape ? [vShape] : VERIFY_FIT_SHAPES) {
+            const r = await exec(
+              t,
+              `${s.cmd} #${cand} ${s.kw} #${target}${s.extra} search ${search}`,
+              opts,
+              true,
+              FIT_SEARCH_TIMEOUT_MS,
+            );
+            if (!r.error) {
+              if (vShape === undefined) {
+                vShape = s;
+                log(`参照物拟合命令: ${s.cmd} #N ${s.kw} #N${s.extra || ""} search N ✓ — 手性验证以该形态拟合`);
+              }
+              return r;
+            }
+          }
+          if (vShape === undefined) {
+            vShape = null;
+            log("⚠ 参照物拟合命令（fitmap/fit）全部不可用 — 无法验证参考手性");
+          }
+          return null;
+        };
+        /** Score one verification fit: fitmap's own reported number
+         * first (`correlation` for map anchors, `Average map value` for
+         * an atomic anchor — both comparable across the two hands of the
+         * SAME reference because a z-flip preserves the value
+         * distribution), `measure correlation` as the last resort. */
+        const vScore = async (cand: number, target: number, r: ExecResult | null): Promise<number | null> => {
+          if (r) {
+            const v = parseCorrelation(r.text) ?? parseAvgMapValue(r.text) ?? parseCorrelation(r.error);
+            if (v != null) return v;
+          }
+          for (const s of ["inMap", "pos"] as const) {
+            const cmd = s === "inMap"
+              ? `measure correlation #${cand} inMap #${target}`
+              : `measure correlation #${cand} #${target}`;
+            const mr = await exec(t, cmd, opts, true);
+            const v = parseCorrelation(mr.text) ?? parseCorrelation(mr.error);
+            if (v != null) return v;
+          }
+          return null;
+        };
+        const rOrig = await vFit(anchorId, refId, SEARCH_PLACEMENTS);
+        const corrO = rOrig ? await vScore(anchorId, refId, rOrig) : null;
+        const rFlip = await vFit(anchorId, flipRefId, SEARCH_PLACEMENTS);
+        const corrF = rFlip ? await vScore(anchorId, flipRefId, rFlip) : null;
+        if (corrO != null && corrF != null) {
+          log(`参考手性验证（EMalign）: 参照物拟合 参考原手 ${corrO.toFixed(4)} vs z 镜像 ${corrF.toFixed(4)}`);
+          if (corrF > corrO + HAND_VERIFY_MARGIN && flipRefId != null) {
+            log(`→ 判定: 参考为镜像手性（镜像得分高出 ${(corrF - corrO).toFixed(4)} ≥ 保证金 ${HAND_VERIFY_MARGIN}）— 翻正参考后再进行全部对齐`);
+            /* the flip copy BECOMES the canonical reference — the same
+             * swap as flipReference(), minus creating a second flip. */
+            if (refLevel != null) {
+              await exec(t, `volume #${flipRefId} level ${refLevel.toFixed(4)} step ${STEP}`, opts, true);
+            }
+            await exec(t, `volume #${flipRefId} color ${refColor}`, opts, true);
+            await exec(t, `close #${refId}`, opts, true);
+            openIds.delete(refId);
+            refId = flipRefId;
+            flipRefId = null; // consumed — the cleanup must not close it
+            refHandKnown = true;
+            refIsCorrectHand = true;
+            refHandVerdict = `EMalign 验证镜像 · 已翻正（原手 ${corrO.toFixed(3)} vs 镜像 ${corrF.toFixed(3)}）`;
+            log(`参考手性: 已翻正 → model #${refId} — 视角评分、低通金字塔、噪声屏蔽与全部对齐/截图均以翻正后的参考为基准`);
+          } else {
+            refHandKnown = true;
+            refIsCorrectHand = true;
+            refHandVerdict = `EMalign 验证正确（原手 ${corrO.toFixed(3)} vs 镜像 ${corrF.toFixed(3)}）`;
+            log(`→ 判定: 参考手性正确（原手得分未低于镜像 − ${HAND_VERIFY_MARGIN}）— 保持原样，流程图按正确手性呈现`);
+          }
+        } else {
+          log(
+            `⚠ 参照物拟合未能读出可比较得分（原手 ${corrO != null ? corrO.toFixed(4) : "—"} / 镜像 ${corrF != null ? corrF.toFixed(4) : "—"}）— 参考手性验证失败，退回自动模式（参考原样，各 map 双手性对比判定相对手性）`,
+          );
+        }
+      } catch (err) {
+        log(`⚠ 参考手性验证失败 — ${logSnippet(String(err), 160)}；退回自动模式（参考原样，各 map 双手性对比判定相对手性）`);
+      } finally {
+        /* the anchor and the unused flip copy close NOW — the
+         * view-scoring thumbnails render the whole scene, and a leftover
+         * anchor would contaminate the coverage scores (and every
+         * screenshot after it). Stray fitmap-search copies are swept the
+         * same way the per-map hands do (relay /volumes; anything
+         * outside openIds closes). */
+        if (anchorId != null) {
+          await exec(t, `close #${anchorId}`, opts, true);
+          openIds.delete(anchorId);
+        }
+        if (flipRefId != null) {
+          await exec(t, `close #${flipRefId}`, opts, true);
+          openIds.delete(flipRefId);
+        }
+        if (t.kind === "relay") {
+          const vols = await bridgeVolumeIds(t);
+          if (vols != null) {
+            const legit = new Set([...openIds].map(String));
+            for (const v of vols) {
+              if (!legit.has(v.id)) {
+                await exec(t, `close #${v.id}`, opts, true);
+                log(`  已关闭验证产生的多余地图模型 #${v.id}（${logSnippet(v.name, 60)}）— 不进入视角评分与截图`);
+              }
+            }
+          }
+        }
+      }
+    } else if (policy?.mode === "anchor") {
+      log("参考手性: 参照物验证已选但未填写参照物路径/URL — 按自动模式处理（参考原样，各 map 双手性对比判定相对手性）");
+    }
+  }
 
   /* ---- 2. standardise the 90° view (reference only) ---- */
   let view = { desc: "base", x: 0, y: 0, score: 0 };
@@ -1682,7 +1987,11 @@ export async function renderFigureMaps(
         key: req.key,
         uid: req.uid,
         group: req.group,
-        candidate: "reference",
+        // v3.71: the reference row carries the hand-policy verdict so the
+        // report table shows WHAT grounded the figure's hand (e.g.
+        // “EMalign 验证镜像 · 已翻正（0.31 vs 0.94）"); plain "reference"
+        // in auto mode (pre-3.71 look).
+        candidate: refHandVerdict ? `reference · ${refHandVerdict}` : "reference",
         score: 1,
         chirality: "consistent",
         rows: [],
@@ -2076,6 +2385,19 @@ export async function renderFigureMaps(
         chirality = "consistent";
       }
       log(`  → ${req.key} 选中 ${bestRow.candidate}（score=${bestRow.score}），手性: ${chirality}${flipHandSkipped ? "（翻转手已按达标跳过）" : ""}，配色 ${mapColor}`);
+      /* v3.71: with the reference's OWN hand established (anchor/manual
+       * policy), the per-map verdict gains its BIOLOGICAL meaning — the
+       * canonical reference is the correct hand (a mirrored verdict
+       * flipped it up front), so a map that matched WITHOUT the flip is
+       * itself correct-handed and one that needed flip_z was mirrored in
+       * the raw data. The rare non-flipped mirror reference (the manual
+       * flip FAILED) inverts the reading — noted in the log. */
+      if (refHandKnown) {
+        const mapHandCorrect = (bestRow.candidate !== "flip_z") === refIsCorrectHand;
+        log(
+          `    生物学手性: ${mapHandCorrect ? "正确 ✓ — 与经验证的参考手性一致" : "镜像 — 原始 map 手性有误，已自动翻正展示"}${refIsCorrectHand ? "" : "（注: 参考翻正失败，按镜像参考推算）"}`,
+        );
+      }
       renders.push({
         key: req.key,
         uid: req.uid,

@@ -25,6 +25,7 @@ import {
   Boxes,
   HardDrive,
   RefreshCw,
+  FlipHorizontal2,
 } from "lucide-react";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import type { LoadedMetadata } from "./data-source-card";
@@ -100,6 +101,31 @@ const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
   },
 };
 
+/** v3.71 (round-30 “可以增加用EMalign先确定reference的手性是否正确
+ * 吗？或者手动指定reference的手性是否正确”): the reference-hand
+ * policy — see ReferenceHandPolicy in chimerax-bridge.ts. The per-map
+ * ladder only ever judges hands RELATIVE to the reference; these options
+ * ground the reference's OWN biological hand before alignment. */
+type RefHandModeOption = "auto" | "anchor" | "manual-correct" | "manual-mirrored";
+const REF_HAND_META: Record<RefHandModeOption, { label: string; hint: string }> = {
+  auto: {
+    label: "自动（默认 · 相对手性）",
+    hint: "不预设参考手性 — 以参考原样为基准，每张 map 双手性（original / z-flip）对比判定「一致 / 需翻正」（v3.66–70 行为）。",
+  },
+  anchor: {
+    label: "EMalign · 参照物验证",
+    hint: "生成前先把一个已知手性的参照物（PDB/mmCIF 模型，或已发表的 map）分别拟合进参考原手与其 z 镜像 — 得分高的一侧即参考的真实手性；判定为镜像时先把参考翻正，再进行视角评分、低通金字塔与全部对齐截图。流程图按生物学正确手性呈现，每个 map 的手性判定也随之获得生物学含义（运行日志逐图标注）。",
+  },
+  "manual-correct": {
+    label: "手动 · 参考手性正确",
+    hint: "按您指定：参考手性正确 — 以参考原样为基准（各 map 双手性对比判定相对手性）。",
+  },
+  "manual-mirrored": {
+    label: "手动 · 参考为镜像（自动翻正）",
+    hint: "按您指定：参考为镜像手性 — 生成前自动翻正参考，视角评分、低通金字塔、噪声屏蔽与全部对齐/截图均以翻正后的参考为基准。",
+  },
+};
+
 /** v3.60: the 阶段数 options per mode — v3.62 (round-21 “极简模式变成
  * 4，5，6行”): 极简 offers the 4/5/6 ladder (round-19 was 4/5 with a 5
  * cap), every other mode keeps the full ladder + “全部”. */
@@ -147,6 +173,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const [cacheDirInput, setCacheDirInput] = useState("");
   const [cacheDirBusy, setCacheDirBusy] = useState(false);
   const [cacheDirNote, setCacheDirNote] = useState<string | null>(null);
+  /* v3.71 (round-30): the reference-HAND policy — how the reference
+   * map's OWN biological handedness is established before per-map
+   * alignment (自动 = as-is, relative chirality only; EMalign 参照物
+   * 验证 = fit a known-hand anchor into the reference and its z-flip,
+   * the better score wins; 手动 = the user asserts it). Remembered in
+   * localStorage like the 下载目录. */
+  const [refHandMode, setRefHandMode] = useState<RefHandModeOption>("auto");
+  const [refHandAnchor, setRefHandAnchor] = useState("");
   const [step, setStep] = useState<StepState>(IDLE);
   const [includeFsc, setIncludeFsc] = useState(false);
   // v3.60 (round-19): the figure MODE — ONE dropdown (手动/标准/简化/极简)
@@ -308,6 +342,26 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   useEffect(() => {
     if (bridge?.kind === "relay" && bridge.cacheDir) setCacheDirInput(bridge.cacheDir);
   }, [bridge?.cacheDir, bridge?.kind]);
+
+  /* v3.71: restore + persist the remembered reference-hand policy (the
+   * choice sticks across page refreshes; every failure path inside the
+   * engine degrades to auto with a loud log, so a stale anchor never
+   * blocks a run). */
+  useEffect(() => {
+    try {
+      const m = window.localStorage.getItem("cryoflow.refHandMode");
+      if (m === "auto" || m === "anchor" || m === "manual-correct" || m === "manual-mirrored") {
+        setRefHandMode(m);
+      }
+      setRefHandAnchor(window.localStorage.getItem("cryoflow.refHandAnchor") ?? "");
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("cryoflow.refHandMode", refHandMode);
+      window.localStorage.setItem("cryoflow.refHandAnchor", refHandAnchor);
+    } catch {}
+  }, [refHandMode, refHandAnchor]);
 
   /** v3.70 (round-29 “目前是先将所有的map下载到一个指定目录中吗？…没有
    * 看到UI中输入下载路径的窗口啊”): apply the 下载目录 input — POST
@@ -990,6 +1044,19 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             sourceUrl: referenceSource,
           },
           maps,
+          // v3.71 (round-30): the reference-hand policy from the ChimeraX
+          // panel — auto (undefined) / EMalign anchor verification /
+          // manual assertion. The engine verifies (and if needed flips)
+          // the reference BEFORE the view scoring, the σ pyramid and
+          // every per-map fit.
+          referenceHand:
+            refHandMode === "anchor"
+              ? { mode: "anchor", anchor: refHandAnchor.trim() || undefined }
+              : refHandMode === "manual-correct"
+                ? { mode: "manual", manual: "correct" }
+                : refHandMode === "manual-mirrored"
+                  ? { mode: "manual", manual: "mirrored" }
+                  : undefined,
           onLog: pushLog,
           onProgress: (p) => setStep((s) => ({ ...s, phase: p.phase, pct: Math.max(s.pct, p.pct ?? s.pct) })),
         });
@@ -1398,6 +1465,52 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 </div>
               </div>
             )}
+
+            {/* v3.71 (round-30 “可以增加用EMalign先确定reference的手性
+             * 是否正确吗？或者手动指定reference的手性是否正确”): the
+             * reference-HAND policy. The per-map ladder only ever judges
+             * hands RELATIVE to the reference — a reference that is
+             * itself mirrored (e.g. a wrong-hand initial model poisoned
+             * the whole project) renders the whole figure consistently
+             * mirrored. 自动 keeps that behavior; EMalign 参照物验证
+             * fits a KNOWN-HAND anchor (PDB/mmCIF model or a published
+             * map) into the reference and its z-flip — the better score
+             * IS the reference's true hand, and a mirrored verdict
+             * flips the reference once BEFORE any per-map work; 手动
+             * asserts the hand outright. The choice sticks (localStorage)
+             * and every failure path degrades to auto with a loud log. */}
+            <div
+              className="mt-2 rounded-md border border-teal-100 bg-white/70 p-2 text-[11px] leading-relaxed text-slate-600 dark:border-teal-900 dark:bg-slate-900/50 dark:text-slate-300"
+              title="参考手性策略：参考地图自身的手性如何确立（自动 / 参照物验证 / 手动）"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
+                  <FlipHorizontal2 className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+                  参考手性
+                </span>
+                <Select value={refHandMode} onValueChange={(v) => setRefHandMode(v as RefHandModeOption)}>
+                  <SelectTrigger className="h-7 w-[230px] rounded-md text-[11px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(REF_HAND_META) as RefHandModeOption[]).map((k) => (
+                      <SelectItem key={k} value={k}>{REF_HAND_META[k].label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {refHandMode === "anchor" && (
+                <Input
+                  value={refHandAnchor}
+                  onChange={(e) => setRefHandAnchor(e.target.value)}
+                  placeholder="参照物路径/URL（ChimeraX 机器可打开：如 /data/ref.pdb、https://files.rcsb.org/download/xxxx.pdb，或已发表 map 的 .mrc/.map 地址）"
+                  className="mt-1.5 h-7 min-w-0 rounded-md border-slate-300 bg-white px-2 font-mono text-[10.5px] text-slate-700 placeholder:font-sans placeholder:text-slate-400 focus-visible:ring-teal-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                />
+              )}
+              <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
+                {REF_HAND_META[refHandMode].hint}
+              </p>
+            </div>
             {!bridge && (
               <div className="mt-2 space-y-2">
                 <div className="flex items-center gap-2">
@@ -1570,7 +1683,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
           <Boxes className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
           <span>
-            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线上的关键 job — 上下游顺序不乱，导入参考体积等输入分支不进入图；连续同类型阶段合并为一行「N× 类型」，省略的步骤在箭头旁以「N×」注明；阶段数可选 4/5/6；选中 class 恒居脊柱细框 + 留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先下载到桥接机器的本地缓存目录（已有文件跳过下载），ChimeraX 从本地目录打开后做双手性（original / z-flip）双轨迹拟合：<b>局部细化</b>（同流程地图通常已接近对齐，低通 σ8→σ3 Å 副本上逐步收敛）与 <b>全局搜索</b>（<code className="font-mono">fitmap … inMap … search N</code> 随机放置，覆盖 90°/任意旋转角；<b>相关性未达目标 0.85 时自动追加搜索轮次</b>，放置数逐轮递增 30→60→90，最多 3 轮，已达标则跳过）；参考图先做<b>噪声屏蔽</b>——信号包络以外的背景/溶剂噪声全部置零，拟合（<code className="font-mono">metric correlation envelope true</code>）只在信号区域内计分，噪音不再把地图拖向错误姿态——按屏蔽后相关性选优，最优角度经 matrixget/matrixset 应用回原 map 并在屏蔽的全分辨率参考上复核 ——
+            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线上的关键 job — 上下游顺序不乱，导入参考体积等输入分支不进入图；连续同类型阶段合并为一行「N× 类型」，省略的步骤在箭头旁以「N×」注明；阶段数可选 4/5/6；选中 class 恒居脊柱细框 + 留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先下载到桥接机器的本地缓存目录（已有文件跳过下载），ChimeraX 从本地目录打开后做双手性（original / z-flip）双轨迹拟合：<b>局部细化</b>（同流程地图通常已接近对齐，低通 σ8→σ3 Å 副本上逐步收敛）与 <b>全局搜索</b>（<code className="font-mono">fitmap … inMap … search N</code> 随机放置，覆盖 90°/任意旋转角；<b>相关性未达目标 0.85 时自动追加搜索轮次</b>，放置数逐轮递增 30→60→90，最多 3 轮，已达标则跳过）；可选「<b>参考手性</b>」策略：默认自动（参考原样、判定相对手性），<b>EMalign 参照物验证</b>（用已知手性的 PDB/mmCIF 模型或已发表 map 先分别拟合参考原手与其 z 镜像定手性，镜像则先翻正参考再对齐），或手动指定正确/镜像；参考图先做<b>噪声屏蔽</b>——信号包络以外的背景/溶剂噪声全部置零，拟合（<code className="font-mono">metric correlation envelope true</code>）只在信号区域内计分，噪音不再把地图拖向错误姿态——按屏蔽后相关性选优，最优角度经 matrixget/matrixset 应用回原 map 并在屏蔽的全分辨率参考上复核 ——
             z-flip 胜出即手性相反、已自动翻正；参考地图做 90° 视角白区评分后统一应用到所有地图，保证朝向与比例一致。图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
           </span>
         </div>
