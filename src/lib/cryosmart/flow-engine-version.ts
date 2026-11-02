@@ -303,5 +303,30 @@
  * help; lowpass below target too = rounds exhausted, the map is
  * genuinely hard against this reference). Old pages keep the single
  * fixed 30-placement search.
+ * v3.69 bump reason (round-28 “继续优化align的方法，既要保证效率又要
+ * 保证效果，避免重复的无用的对比工作，比如correlation达到一定数值
+ * 就可以跳过某些之前必须要做的对比工作”): TARGET-GATED EARLY EXITS —
+ * the same CORR_TARGET number that v3.68 uses to ESCALATE the search
+ * now also CUTS work the correlation says is unnecessary, so a map
+ * that aligns easily pays the minimum price while a hard map keeps
+ * the full v3.68 escalation: (1) 静止达标 — a hand whose INCOMING
+ * pose already measures ≥ target on its working pair (masked cosine,
+ * the same number every later decision reads) skips the local fit AND
+ * the search entirely; the pose is captured as-is for the full-res
+ * transfer + polish (fitting cannot improve a pose the metric already
+ * endorses); (2) 镜像跳过 — an original hand that VALIDATED a pose
+ * (lowpass OR full-res correlation ≥ target) skips the flip_z hand's
+ * ENTIRE ladder (its smoothing, both tracks, up to N search rounds and
+ * its polish — the expensive half of the per-map work): a pose at the
+ * target cannot be beaten by a wrong-handed mirror, so the comparison
+ * was pure waste; chirality then reads 一致, justified because a
+ * wrong-handed map cannot reach the masked target against the
+ * reference. The flip copy is still CREATED upfront (flipping a
+ * FITTED model bakes its pose — the v3.63 disease) and is closed by
+ * the loser-close loop as usual. Every skip logs WHY (which number
+ * reached the target) and the per-map run log carries the 静止达标 /
+ * 跳过镜像手性对比 verdicts, so a pasted log remains
+ * self-diagnosing. Old pages keep paying the full double-hand price
+ * for every map.
  */
-export const FLOW_ENGINE_VERSION = "3.68";
+export const FLOW_ENGINE_VERSION = "3.69";

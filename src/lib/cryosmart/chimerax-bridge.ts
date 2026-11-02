@@ -24,7 +24,12 @@
  *     hard-coded spelling can never silently kill the fit again
  *   - TWO HANDS per map: the pristine original + ONE `volume flip` z
  *     mirror (created before any fitting) — every rotation is reached
- *     by the global search, not by pre-turned re-opens
+ *     by the global search, not by pre-turned re-opens. v3.69: the
+ *     mirror hand is CONDITIONAL — when the original hand's pose is
+ *     already validated (masked correlation ≥ the target, lowpass or
+ *     full-res), its whole ladder is skipped: the expensive half of the
+ *     per-map work, with zero quality loss (a pose at the target
+ *     correlation cannot be beaten by a wrong-handed mirror)
  *   - TWO TRACKS per hand on a σ8→σ3 Å `volume gaussian` pyramid over
  *     NOISE-MASKED reference clones (v3.67: `volume threshold … set 0` —
  *     the signal envelope only): 局部细化 (local fitmap from the
@@ -993,9 +998,14 @@ const SEARCH_PLACEMENTS = 30;
  * unsearched) AND the ESCALATION trigger: while the best fine-scale
  * correlation stays below the target, MORE global-search rounds run,
  * each a fresh random-placement sample with an escalating count, until
- * the target is met or SEARCH_MAX_ROUNDS is exhausted. 0.85: the masked
- * σ3 Å cosine of a genuinely-aligned same-pipeline map sits well above
- * this. Override per run via RenderMapsOptions.corrTarget. */
+ * the target is met or SEARCH_MAX_ROUNDS is exhausted. v3.69 (round-28
+ * “correlation 达到一定数值就可以跳过某些之前必须要做的对比工作”)
+ * adds the two EARLY EXITS on the same number: a map whose INCOMING
+ * pose already measures ≥ target skips the fits outright (静止达标),
+ * and an original hand that validated a pose skips the MIRROR hand
+ * entirely (镜像跳过). 0.85: the masked σ3 Å cosine of a
+ * genuinely-aligned same-pipeline map sits well above this. Override
+ * per run via RenderMapsOptions.corrTarget. */
 const CORR_TARGET = 0.85;
 /** v3.68: the per-hand cap on global-search rounds (placements escalate
  * 30 → 60 → 90 … = SEARCH_PLACEMENTS × round). A fully-failing map
@@ -1081,7 +1091,10 @@ export interface RenderMapsOptions {
   /** v3.68: the alignment-target correlation — while the best
    *  fine-scale correlation (local track vs. best search round) stays
    *  below it, more global-search rounds run with escalating placement
-   *  counts. Default CORR_TARGET (0.85); clamped to [0.1, 0.999]. */
+   *  counts. v3.69: the same number also gates the early exits — an
+   *  incoming pose already at the target skips the fits, and a
+   *  validated original hand skips the mirror hand. Default
+   *  CORR_TARGET (0.85); clamped to [0.1, 0.999]. */
   corrTarget?: number;
   /** v3.68: the per-hand cap on global-search rounds (placements
    *  escalate SEARCH_PLACEMENTS × round). Default SEARCH_MAX_ROUNDS
@@ -1606,10 +1619,10 @@ export async function renderFigureMaps(
       ? Math.min(6, Math.max(1, Math.round(opts.searchMaxRounds)))
       : SEARCH_MAX_ROUNDS;
   log(
-    `对齐目标: 低通相关性 ≥ ${corrTarget} — 未达标自动追加全局搜索轮次（最多 ${searchMaxRounds} 轮，随机放置 ${Array.from(
+    `对齐目标: 相关性 ≥ ${corrTarget} — 未达标自动追加全局搜索轮次（最多 ${searchMaxRounds} 轮，随机放置 ${Array.from(
       { length: searchMaxRounds },
       (_, i) => SEARCH_PLACEMENTS * (i + 1),
-    ).join(" → ")}），局部细化已达标的地图跳过全局搜索`,
+    ).join(" → ")}）；达标即止：初始姿态达标跳过拟合，原手达标跳过镜像手性对比`,
   );
 
   for (const req of all) {
@@ -1630,7 +1643,7 @@ export async function renderFigureMaps(
       openIds.add(refId);
       continue;
     }
-    progress(`对齐 ${req.key}（双手性 × 局部细化 + 全局搜索）`, pct);
+    progress(`对齐 ${req.key}（局部细化 + 全局搜索 · 达标即止）`, pct);
     pct += perMapPct * 0.75;
 
     const rows: CandidateRow[] = [];
@@ -1734,9 +1747,49 @@ export async function renderFigureMaps(
      * matrixget/matrixset, polished with one full-res local fit and
      * verified with a full-res measure correlation (the row's `post` —
      * the honest ranking number for BOTH hands). The full-res hand model
-     * is the screenshot target either way. */
+     * is the screenshot target either way.
+     *
+     * v3.69 (round-28 “correlation 达到一定数值就可以跳过某些之前
+     * 必须要做的对比工作”): TARGET-GATED EARLY EXITS — the ladder only
+     * pays for work the correlation says is still needed:
+     *   - 静止达标: a hand whose INCOMING pose already measures ≥
+     *     corrTarget on its working pair skips the local fit AND the
+     *     search — fitting cannot improve a pose the metric already
+     *     endorses; the pose is captured (matrixget) for the transfer.
+     *   - 镜像跳过: an original hand that VALIDATED a pose (lowpass or
+     *     full-res correlation ≥ corrTarget) skips the flip_z hand's
+     *     ENTIRE ladder — a pose at the target cannot be beaten by a
+     *     wrong-handed mirror, so the comparison is pure waste. The
+     *     flip copy is still CREATED upfront (one cheap `volume flip`
+     *     BEFORE any fitting — flipping a fitted model bakes its pose,
+     *     the v3.63 disease) and simply never fitted; the loser-close
+     *     loop closes it as usual, and chirality reads 一致 — justified:
+     *     a wrong-handed map cannot reach the masked target. */
+    let priorHandMetTarget = false;
+    let priorHandMetWhy = "";
+    let flipHandSkipped = false;
     for (const hand of hands) {
       if (threw(opts.signal)) throw new Error("aborted");
+      /* v3.69 镜像跳过: the mirror hand is CONDITIONAL — skipped when the
+       * original hand already reached the target. The row keeps a loud
+       * note for the report; the flip MODEL itself is closed by the
+       * loser-close loop after the selection. */
+      if (hand.name === "flip_z" && priorHandMetTarget) {
+        flipHandSkipped = true;
+        rows.push({
+          candidate: "flip_z",
+          score: null,
+          pre: null,
+          fit1: null,
+          fit2: null,
+          ok: false,
+          note: `跳过 — 原手${priorHandMetWhy}，镜像对比属冗余工作`,
+        });
+        log(
+          `  ${req.key} · flip_z: 原手${priorHandMetWhy} — 跳过镜像手性对比（省去该手的平滑、双轨迹拟合与最多 ${searchMaxRounds} 轮全局搜索）`,
+        );
+        continue;
+      }
       const handId = hand.modelId;
       let smoothC: number | null = null;
       let smoothF: number | null = null;
@@ -1779,17 +1832,29 @@ export async function renderFigureMaps(
         /* ---- 轨迹 1 · 局部细化 ---- */
         let xf1: string | null = null;
         if (fitShape !== null) {
-          if (pairC && pairF) {
-            await runFit(pairC.a, pairC.b);
-            const xfc = await matrixSave(pairC.a, `${fileStem}_${hand.name}_s1c`);
-            if (xfc) await matrixLoad(pairF.a, xfc);
-          }
           const target = pairF ?? pairC ?? pairFull;
-          const r1 = await runFit(target.a, target.b);
-          if (r1) {
-            corr1 = await measureCorr(target.a, target.b);
+          if (pre != null && pre >= corrTarget) {
+            /* v3.69 静止达标: the incoming pose ALREADY measures ≥ target
+             * on this pair (masked cosine — the same number every later
+             * decision reads) — fitting cannot improve a pose the metric
+             * already endorses, so capture it as-is; the search gate
+             * (corr1 ≥ target) then skips track 2 as well. */
+            corr1 = pre;
             xf1 = await matrixSave(target.a, `${fileStem}_${hand.name}_s1`);
-            track = "局部细化";
+            track = "静止达标";
+            log(`  ${req.key} · ${hand.name}: 初始姿态相关性 ${pre.toFixed(4)} ≥ ${corrTarget} — 跳过局部拟合与全局搜索`);
+          } else {
+            if (pairC && pairF) {
+              await runFit(pairC.a, pairC.b);
+              const xfc = await matrixSave(pairC.a, `${fileStem}_${hand.name}_s1c`);
+              if (xfc) await matrixLoad(pairF.a, xfc);
+            }
+            const r1 = await runFit(target.a, target.b);
+            if (r1) {
+              corr1 = await measureCorr(target.a, target.b);
+              xf1 = await matrixSave(target.a, `${fileStem}_${hand.name}_s1`);
+              track = "局部细化";
+            }
           }
         }
 
@@ -1813,7 +1878,9 @@ export async function renderFigureMaps(
           const fmtCorr = (v: number) => (v > -0.5 ? v.toFixed(4) : "—");
           const bestFine = () => Math.max(corr1 ?? -1, corr2 ?? -1);
           if (corr1 != null && corr1 >= corrTarget) {
-            log(`  ${req.key} · ${hand.name}: 局部细化已达目标（corr=${corr1.toFixed(4)} ≥ ${corrTarget}）— 跳过全局搜索`);
+            if (track !== "静止达标") {
+              log(`  ${req.key} · ${hand.name}: 局部细化已达目标（corr=${corr1.toFixed(4)} ≥ ${corrTarget}）— 跳过全局搜索`);
+            }
           }
           while (searchRounds < searchMaxRounds && bestFine() < corrTarget) {
             const round = searchRounds + 1;
@@ -1890,6 +1957,19 @@ export async function renderFigureMaps(
             }`,
           );
         }
+        /* v3.69: did THIS hand validate a pose at the target? — the
+         * answer gates the MIRROR hand (see the flip_z skip at the top of
+         * the loop). Both scales count: a lowpass correlation at the
+         * target proves the pose (any full-res gap is then noise), a
+         * full-res one proves it twice over. */
+        const fineBestHand = Math.max(corr1 ?? -1, corr2 ?? -1);
+        if (post != null && post >= corrTarget) {
+          priorHandMetTarget = true;
+          priorHandMetWhy = `全分辨率相关性 ${post.toFixed(4)} ≥ ${corrTarget}`;
+        } else if (fineBestHand >= corrTarget) {
+          priorHandMetTarget = true;
+          priorHandMetWhy = `低通相关性 ${fineBestHand.toFixed(4)} ≥ ${corrTarget}`;
+        }
         rows.push({
           candidate: hand.name,
           score,
@@ -1946,7 +2026,7 @@ export async function renderFigureMaps(
       } else {
         chirality = "consistent";
       }
-      log(`  → ${req.key} 选中 ${bestRow.candidate}（score=${bestRow.score}），手性: ${chirality}，配色 ${mapColor}`);
+      log(`  → ${req.key} 选中 ${bestRow.candidate}（score=${bestRow.score}），手性: ${chirality}${flipHandSkipped ? "（翻转手已按达标跳过）" : ""}，配色 ${mapColor}`);
       renders.push({
         key: req.key,
         uid: req.uid,
