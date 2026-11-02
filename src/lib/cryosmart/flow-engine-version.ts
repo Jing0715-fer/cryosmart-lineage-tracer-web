@@ -328,5 +328,27 @@
  * 跳过镜像手性对比 verdicts, so a pasted log remains
  * self-diagnosing. Old pages keep paying the full double-hand price
  * for every map.
+ * v3.70 bump reason (round-29 “目前是先将所有的map下载到一个指定目录中
+ * 吗？如果目录中已有所需map就跳过下载，这个功能实现了吗？没有看到
+ * UI中输入下载路径的窗口啊”): the download-once cache (v3.65, relay
+ * POST /fetch into a PERSISTENT local dir, existing files skip the
+ * download) existed but its directory was FIXED to
+ * <system-temp>/cryoflow_map_cache with NO way to choose one — the
+ * panel only DISPLAYED it. (1) the relay gained POST /cachedir
+ * {"dir": <absolute path>}: it creates the dir when missing, probes
+ * writability, and only then commits the switch — every later /fetch
+ * download, /stage upload and /staged lookup uses the NEW dir; on any
+ * failure the old dir stays and the error rides back (files already
+ * cached in the old dir are NOT moved; the reply names the previous
+ * dir so the UI can say so). /ping gained "cachedir_set": true so old
+ * relays are detected. (2) the 桥接面板 now has a 下载目录 INPUT +
+ * 应用 button right under the displayed dir — Enter applies too, the
+ * prefill follows the live relay dir, success/failure shows inline,
+ * and relays without /cachedir keep the input disabled with an
+ * upgrade hint. (3) the choice is remembered in localStorage and
+ * RE-APPLIED AUTOMATICALLY at the start of every ChimeraX run — a
+ * ChimeraX restart resets the relay to the default system-temp dir,
+ * the run log announces the restore. Old pages keep the read-only dir
+ * display; old relays keep the fixed dir.
  */
-export const FLOW_ENGINE_VERSION = "3.69";
+export const FLOW_ENGINE_VERSION = "3.70";

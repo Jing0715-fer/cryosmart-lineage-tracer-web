@@ -283,6 +283,13 @@ export interface FlowTransport {
    *  screenshots. Relays without it fall back to the legacy URL-direct
    *  ladder (with an upgrade hint in the run log). */
   canFetchMaps?: boolean;
+  /** v3.70: relay-only — the bridge script advertises POST /cachedir:
+   *  the persistent map-cache dir can be SWITCHED at runtime from the
+   *  card's 桥接面板 下载目录 input (absolute path on the ChimeraX
+   *  machine; created when missing; the switch fails cleanly when the
+   *  dir is unwritable). Relays without it keep the fixed system-temp
+   *  cache dir and the input shows an upgrade hint. */
+  canSetCacheDir?: boolean;
   /** v3.50: which save rung last produced a /file-fetchable PNG — cached
    *  per transport so later saves go straight to the working shape. */
   saveMode?: SaveMode;
@@ -352,10 +359,10 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
           logs.push(`relay ${host}:${port} → HTTP ${res.status}`);
           continue;
         }
-        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean };
+        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean };
         if (data?.ok) {
           logs.push(
-            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""})`,
+            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""}${data.cachedir_set ? ", 可自定义目录" : ""})`,
           );
           return {
             transport: {
@@ -369,6 +376,7 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
               canCache: !!data.cache,
               cacheDir: data.cacheDir,
               canFetchMaps: !!data.fetch,
+              canSetCacheDir: !!data.cachedir_set,
             },
             logs,
           };
@@ -614,6 +622,47 @@ export async function bridgeFetchMap(
       return { ok: false, error: data?.error || "relay /fetch 未返回本地路径" };
     }
     return data;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** v3.70 (round-29 “没看到UI中输入下载路径的窗口”): switch the relay's
+ * persistent map-cache dir at runtime — body {"dir": <absolute path>}.
+ * The relay creates the dir when missing, probes writability, and only
+ * then commits the switch (every later /fetch, /stage and /staged uses
+ * the new dir); files already cached in the OLD dir are NOT moved — the
+ * reply carries `previous` so the UI can tell the user. Never throws;
+ * failures come back as { ok: false, error }. */
+export interface BridgeCacheDirResult {
+  ok: boolean;
+  /** The committed dir (== the requested one on success). */
+  dir?: string;
+  /** The dir in effect before the switch. */
+  previous?: string;
+  /** Number of files already in the NEW dir. */
+  cached?: number;
+  error?: string;
+}
+export async function bridgeSetCacheDir(
+  t: FlowTransport,
+  dir: string,
+  timeoutMs = 30_000,
+): Promise<BridgeCacheDirResult> {
+  if (t.kind !== "relay") return { ok: false, error: "not a relay transport" };
+  try {
+    const res = await fetchWithTimeout(
+      `${t.base}/cachedir`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dir }),
+      },
+      timeoutMs,
+    );
+    const data = (await res.json().catch(() => null)) as BridgeCacheDirResult | null;
+    if (!res.ok) return { ok: false, error: data?.error || `relay /cachedir HTTP ${res.status}` };
+    return data ?? { ok: false, error: "relay /cachedir 无响应" };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

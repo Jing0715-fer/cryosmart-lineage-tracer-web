@@ -40,6 +40,12 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         之后只 open 本地文件做对齐/截图（对齐与截图全读本地
                         盘，零重复下载）。目录里已有该文件时跳过下载，
                         直接返回路径。body: {"url": ..., "name": 规范名}。
+      POST /cachedir    v3.70 自定义下载目录：body {"dir": 绝对路径} —
+                        把持久地图缓存目录切换到指定位置（网页桥接面板
+                        的输入框驱动）。目录不存在会自动创建；不可写则
+                        报错且保持原目录。切换后 /fetch、/stage、/staged
+                        全部改用新目录；原目录中已缓存的地图不会移动
+                        （需要沿用请手动复制过去）。
       GET  /staged       v3.56 地图本地缓存查询：?name= 返回该缓存文件
                         是否存在（+ 本地绝对路径/大小/mtime）；不带 ?name=
                         返回整个缓存目录清单。缓存目录在系统 temp 下固定
@@ -380,6 +386,45 @@ def main(session):
             return {"ok": False,
                     "error": "%s: %s" % (type(exc).__name__, exc)}
 
+    def set_cache_dir(new_dir):
+        """v3.70 (round-29 “没看到UI中输入下载路径的窗口”): switch the
+        persistent map-cache dir AT RUNTIME (POST /cachedir — the page's
+        桥接面板 input drives it). The dir must be an ABSOLUTE path on
+        THIS machine; it is created when missing and probed for
+        writability before the switch commits — on any failure the relay
+        keeps the old dir (the reply carries the error). After the switch
+        every /fetch download, /stage upload and /staged lookup uses the
+        NEW dir; files already cached in the OLD dir are NOT moved (the
+        reply names the previous dir so the page can tell the user to
+        copy them over if they want to reuse them)."""
+        nonlocal staging_dir
+        new_dir = str(new_dir or "").strip()
+        if not new_dir:
+            return {"ok": False, "error": "missing dir"}
+        if not os.path.isabs(new_dir):
+            return {"ok": False,
+                    "error": "需要绝对路径（如 D:\\maps 或 /data/maps）: %s" % new_dir}
+        try:
+            os.makedirs(new_dir, exist_ok=True)
+            probe = os.path.join(new_dir, ".cryoflow_write_test")
+            with open(probe, "wb") as fh:
+                fh.write(b"ok")
+            os.remove(probe)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the page
+            return {"ok": False,
+                    "error": "目录不可用 %s: %s: %s"
+                             % (new_dir, type(exc).__name__, exc)}
+        old = staging_dir
+        staging_dir = new_dir
+        try:
+            session.logger.info(
+                "CryoSmart Flow Bridge: 地图缓存目录已切换 (v3.70 /cachedir): %s → %s"
+                % (old, new_dir))
+        except Exception:
+            pass
+        return {"ok": True, "dir": staging_dir, "previous": old,
+                "cached": len(_cache_entries())}
+
     def stage_file(data, name):
         """v3.47: write uploaded bytes into the ChimeraX-side staging dir and
         return the local absolute path. ChimeraX cannot open http MRC URLs
@@ -491,6 +536,12 @@ def main(session):
                         # exists — older copies don't send it and the page
                         # falls back to the legacy URL-direct ladder.
                         "fetch": True,
+                        # v3.70: the page checks this to know POST /cachedir
+                        # (runtime switch of the persistent cache dir from
+                        # the 桥接面板 input) exists — older copies don't
+                        # send it and the page hides the input + shows an
+                        # upgrade hint instead.
+                        "cachedir_set": True,
                         "cacheDir": staging_dir,
                         "cached": sum(1 for _ in _cache_entries()),
                         "volumes": sum(1 for m in ui_run(lambda: list(session.models.list()))
@@ -590,6 +641,19 @@ def main(session):
                         return
                     self._reply(200, fetch_map(url, name))
                     return
+                if r.path == "/cachedir":
+                    # v3.70 (round-29 “没有看到UI中输入下载路径的窗口”):
+                    # body {"dir": ...} — switch the persistent map-cache
+                    # dir at runtime; the page's 桥接面板 输入框 drives it
+                    # and refreshes its display from the reply + /ping.
+                    length = int(self.headers.get("Content-Length") or 0)
+                    body = self.rfile.read(length) if length else b"{}"
+                    try:
+                        payload = json.loads(body.decode("utf-8") or "{}")
+                    except Exception:
+                        payload = {}
+                    self._reply(200, set_cache_dir(payload.get("dir")))
+                    return
                 if r.path == "/stage":
                     # v3.47: body = raw bytes; name = X-Filename header or
                     # ?name= query. Returns the ChimeraX-openable local path.
@@ -688,7 +752,7 @@ def main(session):
     for ip in _lan_ips():
         session.logger.info("  局域网:    http://%s:%d  (ChimeraX 与浏览器不同机时用这个)" % (ip, bound_port))
     session.logger.info("允许的网页来源: %s" % ", ".join(ALLOWED_ORIGINS))
-    session.logger.info("地图本地缓存目录（v3.65 /fetch 先下载到这里再由 ChimeraX 打开；已有文件跳过下载；/stage 上传、/staged 查询）: %s" % staging_dir)
+    session.logger.info("地图本地缓存目录（v3.65 /fetch 先下载到这里再由 ChimeraX 打开；已有文件跳过下载；/stage 上传、/staged 查询；v3.70 可在网页桥接面板「下载目录」输入框随时切换）: %s" % staging_dir)
     session.logger.info("保持 ChimeraX 打开；在网页端点击 \"生成流程图\" 即可全自动完成对齐/手性检查/截图。")
     session.logger.info("=" * 60)
 

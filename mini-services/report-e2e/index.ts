@@ -703,6 +703,10 @@ const relayState = {
   commands: [] as string[],
   /** v3.47: path -> staged bytes (what POST /stage wrote). */
   staged: new Map<string, { name: string; bytes: Uint8Array }>(),
+  /** v3.70: the CURRENT persistent map-cache dir — POST /cachedir switches
+   *  it at runtime (mirrors relay.py); staged bytes stay keyed by their
+   *  full path so a switch does NOT "move" already-cached maps. */
+  cacheDir: "/tmp/cryoflow-mock/staged",
   /** v3.47: /flow-e2e/reset?http=block — all http opens fail 503. */
   httpBlocked: false,
   /** v3.48: `save image …` commands rejected (not a ChimeraX command). */
@@ -1097,7 +1101,14 @@ const relayServer = Bun.serve({
           // the /staged cache check (and keeps re-downloading maps) when
           // the ping carries no `cache` flag.
           cache: true,
-          cacheDir: "/tmp/cryoflow-mock/staged",
+          // v3.65: mirrors relay.py's POST /fetch — the card's local-dir
+          // download rung requires this flag (without it the ladder falls
+          // back to direct/proxy/page-relay).
+          fetch: true,
+          // v3.70: mirrors relay.py's POST /cachedir — the 桥接面板's
+          // 下载目录 input enables only when this flag is present.
+          cachedir_set: true,
+          cacheDir: relayState.cacheDir,
           cached: relayState.staged.size,
           volumes: relayState.models.size,
         });
@@ -1108,7 +1119,7 @@ const relayServer = Bun.serve({
         // no name → full listing. The mock's staged bytes live in the
         // in-memory relayState.staged map (keyed by path).
         const name = u.searchParams.get("name") || "";
-        const stagedPath = (n: string) => `/tmp/cryoflow-mock/staged/${n}`;
+        const stagedPath = (n: string) => `${relayState.cacheDir}/${n}`;
         if (name) {
           const entry = relayState.staged.get(stagedPath(name));
           if (entry) {
@@ -1130,10 +1141,48 @@ const relayServer = Bun.serve({
         }));
         return reply(200, {
           ok: true,
-          dir: "/tmp/cryoflow-mock/staged",
+          dir: relayState.cacheDir,
           files,
           total: files.reduce((s, f) => s + f.size, 0),
         });
+      }
+      if (req.method === "POST" && u.pathname === "/fetch") {
+        // v3.65: mirrors relay.py's /fetch — THIS relay downloads the map
+        // URL once into the (v3.70: switchable) persistent cache dir and
+        // returns the LOCAL path; a name already in the dir is a "hit"
+        // (download skipped outright).
+        const body = (await req.json().catch(() => ({}))) as { url?: string; name?: string };
+        if (!body.url || !body.name) return reply(400, { ok: false, error: "missing url/name" });
+        const safe =
+          (body.name.split("/").pop() || "map.mrc").replace(/[^\w.\- ]+/g, "_") || "map.mrc";
+        const path = `${relayState.cacheDir}/${safe}`;
+        const existing = relayState.staged.get(path);
+        if (existing) {
+          return reply(200, { ok: true, status: "hit", path, size: existing.bytes.byteLength });
+        }
+        try {
+          const res = await fetch(body.url, { redirect: "follow" });
+          if (!res.ok) return reply(200, { ok: false, error: `HTTP ${res.status}` });
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          relayState.staged.set(path, { name: safe, bytes });
+          return reply(200, { ok: true, status: "downloaded", path, size: bytes.byteLength });
+        } catch (err) {
+          return reply(200, { ok: false, error: String(err) });
+        }
+      }
+      if (req.method === "POST" && u.pathname === "/cachedir") {
+        // v3.70: mirrors relay.py's /cachedir — switch the persistent
+        // map-cache dir at runtime (the 桥接面板 下载目录 input). Absolute
+        // paths only; staged bytes stay where they "are" (no moving).
+        const body = (await req.json().catch(() => ({}))) as { dir?: string };
+        const dir = (body.dir || "").trim();
+        if (!dir) return reply(400, { ok: false, error: "missing dir" });
+        if (!dir.startsWith("/")) {
+          return reply(200, { ok: false, error: "需要绝对路径（如 D:\\maps 或 /data/maps）: " + dir });
+        }
+        const previous = relayState.cacheDir;
+        relayState.cacheDir = dir;
+        return reply(200, { ok: true, dir, previous, cached: relayState.staged.size });
       }
       if (req.method === "POST" && u.pathname === "/stage") {
         // v3.47: mirrors relay.py's /stage — raw body bytes + X-Filename
@@ -1143,7 +1192,7 @@ const relayServer = Bun.serve({
         const safe =
           (raw.split("/").pop() || "map.mrc").replace(/[^\w.\- ]+/g, "_") || "map.mrc";
         const bytes = new Uint8Array(await req.arrayBuffer());
-        const path = `/tmp/cryoflow-mock/staged/${safe}`;
+        const path = `${relayState.cacheDir}/${safe}`;
         relayState.staged.set(path, { name: safe, bytes });
         return reply(200, { ok: true, path, name: safe, size: bytes.byteLength });
       }

@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
@@ -34,6 +35,7 @@ import {
   bridgeExec,
   bridgeStagedLookup,
   bridgeFetchMap,
+  bridgeSetCacheDir,
   stagedMapFilename,
   type FlowTransport,
   type MapRender,
@@ -139,6 +141,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const [bridge, setBridge] = useState<FlowTransport | null>(null);
   const [bridgeProbing, setBridgeProbing] = useState(false);
   const [bridgeTried, setBridgeTried] = useState(false);
+  /* v3.70 (round-29 “没看到UI中输入下载路径的窗口”): the 桥接面板's 下载目录
+   * input — POST /cachedir switches the relay's persistent map-cache dir
+   * at runtime (absolute path on the ChimeraX machine). */
+  const [cacheDirInput, setCacheDirInput] = useState("");
+  const [cacheDirBusy, setCacheDirBusy] = useState(false);
+  const [cacheDirNote, setCacheDirNote] = useState<string | null>(null);
   const [step, setStep] = useState<StepState>(IDLE);
   const [includeFsc, setIncludeFsc] = useState(false);
   // v3.60 (round-19): the figure MODE — ONE dropdown (手动/标准/简化/极简)
@@ -294,6 +302,54 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       toast.error("复制失败，请手动复制命令");
     }
   }, [relayCommand]);
+
+  /* v3.70: prefill the 下载目录 input from the live relay dir whenever it
+   * changes (connect / re-probe / successful switch). */
+  useEffect(() => {
+    if (bridge?.kind === "relay" && bridge.cacheDir) setCacheDirInput(bridge.cacheDir);
+  }, [bridge?.cacheDir, bridge?.kind]);
+
+  /** v3.70 (round-29 “目前是先将所有的map下载到一个指定目录中吗？…没有
+   * 看到UI中输入下载路径的窗口啊”): apply the 下载目录 input — POST
+   * /cachedir switches the relay's persistent map-cache dir (created when
+   * missing; unwritable dirs fail cleanly and the old dir stays). The
+   * chosen dir is remembered in localStorage and re-applied automatically
+   * at the start of every ChimeraX run (a ChimeraX restart resets the
+   * relay to its default system-temp dir). Files already cached in the
+   * OLD dir are NOT moved — the note + run log both say so. Returns the
+   * updated transport on success (null on failure). */
+  const applyCacheDir = useCallback(
+    async (dir: string, transport: FlowTransport): Promise<FlowTransport | null> => {
+      const target = dir.trim();
+      if (transport.kind !== "relay" || !target) return null;
+      const isPanel = !!bridge && bridge.base === transport.base;
+      if (isPanel) setCacheDirBusy(true);
+      setCacheDirNote(null);
+      const res = await bridgeSetCacheDir(transport, target);
+      if (isPanel) setCacheDirBusy(false);
+      if (res.ok && res.dir) {
+        const next = { ...transport, cacheDir: res.dir };
+        setBridge((cur) => (cur && cur.base === transport.base ? next : cur));
+        setCacheDirInput(res.dir);
+        try {
+          window.localStorage.setItem("cryoflow.mapCacheDir", res.dir);
+        } catch {}
+        setCacheDirNote(
+          res.previous && res.previous !== res.dir
+            ? `已切换 ✓ — 原目录 ${res.previous} 中已缓存的地图不会自动移动，需要沿用请手动复制到新目录`
+            : "已切换 ✓",
+        );
+        pushLog(
+          `地图本地目录已切换: ${res.dir}${res.previous && res.previous !== res.dir ? `（原 ${res.previous}，其中已缓存文件不迁移）` : ""} — 之后的下载与缓存查询都用新目录`,
+        );
+        return next;
+      }
+      setCacheDirNote(`切换失败: ${res.error ?? "未知错误"}`);
+      pushLog(`⚠ 地图本地目录切换失败（${res.error ?? "未知错误"}）— 继续使用当前目录 ${transport.cacheDir ?? "（默认）"}`);
+      return null;
+    },
+    [bridge, pushLog],
+  );
 
   /* ---------------------------------------------------------------- */
   /* v3.59 手动模式: the stage checklist                               */
@@ -577,7 +633,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           try {
             const res = await fetch(`${transport.base}/ping`, { cache: "no-store" });
             if (res.ok) {
-              const data = (await res.json()) as { workdir?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean };
+              const data = (await res.json()) as { workdir?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean };
               if (typeof data.workdir === "string" && data.workdir !== transport.workdir) {
                 transport = {
                   ...transport,
@@ -586,14 +642,15 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   canCache: !!data.cache,
                   cacheDir: data.cacheDir,
                   canFetchMaps: !!data.fetch,
+                  canSetCacheDir: !!data.cachedir_set,
                   saveMode: undefined,
                   cdDone: false,
                 };
                 setBridge(transport);
                 pushLog(`桥接工作目录已更新: ${data.workdir}（ChimeraX/桥已重启 — 已自动重新校准）`);
               } else {
-                const next = { ...transport, canStage: !!data.stage, canCache: !!data.cache, cacheDir: data.cacheDir, canFetchMaps: !!data.fetch };
-                if (next.canStage !== transport.canStage || next.canCache !== transport.canCache || next.cacheDir !== transport.cacheDir || next.canFetchMaps !== transport.canFetchMaps) {
+                const next = { ...transport, canStage: !!data.stage, canCache: !!data.cache, cacheDir: data.cacheDir, canFetchMaps: !!data.fetch, canSetCacheDir: !!data.cachedir_set };
+                if (next.canStage !== transport.canStage || next.canCache !== transport.canCache || next.cacheDir !== transport.cacheDir || next.canFetchMaps !== transport.canFetchMaps || next.canSetCacheDir !== transport.canSetCacheDir) {
                   transport = next;
                   setBridge(transport);
                 }
@@ -610,6 +667,20 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           }
           if (!transport) {
             throw new Error(`先前连接的 ChimeraX 桥已不可达（ChimeraX 已关闭？）— 请重新打开 ChimeraX 并运行一次: ${relayCommand}`);
+          }
+        }
+
+        /* v3.70: re-apply the remembered 下载目录 — a ChimeraX restart resets
+         * the relay to its default system-temp cache dir, so the user's pick
+         * (set once in the 桥接面板 input) is re-applied at every run. */
+        if (transport.kind === "relay" && transport.canSetCacheDir) {
+          let remembered: string | null = null;
+          try {
+            remembered = window.localStorage.getItem("cryoflow.mapCacheDir");
+          } catch {}
+          if (remembered && remembered.trim() && remembered.trim() !== transport.cacheDir) {
+            const applied = await applyCacheDir(remembered, transport);
+            if (applied) transport = applied;
           }
         }
         pushLog(
@@ -1053,7 +1124,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       setStep((s) => ({ ...s, busy: false, error: message }));
       toast.error(`流程图生成失败: ${message}`);
     }
-  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, relayFetchToCache, pushLog, maxGroups, includeFsc, flowMode, effectiveMaxGroups, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh]);
+  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, relayFetchToCache, pushLog, maxGroups, includeFsc, flowMode, effectiveMaxGroups, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh, applyCacheDir]);
 
   const canGenerate = !step.busy && (mode === "demo" || !!summary);
   const bridgeBadge = useMemo(() => {
@@ -1275,20 +1346,56 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * 指定目录中打开map”): the relay's persistent LOCAL map dir is
              * surfaced right in the panel — maps are downloaded into it
              * once (files already present skip the download) and ChimeraX
-             * opens them FROM there for alignment + screenshots. */}
+             * opens them FROM there for alignment + screenshots.
+             * v3.70 (round-29 “没有看到UI中输入下载路径的窗口”): the dir is
+             * now EDITABLE — the input switches it at runtime (POST
+             * /cachedir) and the choice is remembered across ChimeraX
+             * restarts (re-applied automatically at every run). */}
             {bridge?.kind === "relay" && bridge.cacheDir && (
               <div
-                className="mt-2 flex flex-wrap items-start gap-1.5 rounded-md border border-teal-100 bg-white/70 p-2 text-[11px] leading-relaxed text-slate-600 dark:border-teal-900 dark:bg-slate-900/50 dark:text-slate-300"
-                title="固定本地目录：地图先下载到这里（已有文件跳过下载），ChimeraX 再从该目录打开进行对齐与截图；跨 ChimeraX 重启保留，2GB 自动淘汰最久未用"
+                className="mt-2 rounded-md border border-teal-100 bg-white/70 p-2 text-[11px] leading-relaxed text-slate-600 dark:border-teal-900 dark:bg-slate-900/50 dark:text-slate-300"
+                title="本地下载目录：地图先下载到这里（已有文件跳过下载），ChimeraX 再从该目录打开进行对齐与截图；跨 ChimeraX 重启保留，2GB 自动淘汰最久未用"
               >
-                <HardDrive className="mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
-                <span className="min-w-0">
-                  地图本地目录（下载一次、以后免下载）:
-                  <code className="mx-1 break-all rounded bg-slate-200 px-1 font-mono text-[10px] dark:bg-slate-800">{bridge.cacheDir}</code>
-                  {bridge.canFetchMaps
-                    ? "— 桥接先把地图下载进该目录，再让 ChimeraX 从本地目录打开做对齐/截图；目录中已有的文件自动跳过下载，跨 ChimeraX 重启保留"
-                    : "— 旧桥脚本无自动下载（/fetch），建议在 ChimeraX 重新运行一次 relay.py 启用"}
-                </span>
+                <div className="flex flex-wrap items-start gap-1.5">
+                  <HardDrive className="mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+                  <span className="min-w-0 flex-1">
+                    地图本地目录（下载一次、以后免下载）:
+                    <code className="mx-1 break-all rounded bg-slate-200 px-1 font-mono text-[10px] dark:bg-slate-800">{bridge.cacheDir}</code>
+                    {bridge.canFetchMaps
+                      ? "— 桥接先把地图下载进该目录，再让 ChimeraX 从本地目录打开做对齐/截图；目录中已有的文件自动跳过下载，跨 ChimeraX 重启保留"
+                      : "— 旧桥脚本无自动下载（/fetch），建议在 ChimeraX 重新运行一次 relay.py 启用"}
+                  </span>
+                </div>
+                {/* v3.70: 自定义下载路径 — 输入框 + 应用 */}
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-5">
+                  <Input
+                    value={cacheDirInput}
+                    onChange={(e) => setCacheDirInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && bridge && !cacheDirBusy) void applyCacheDir(cacheDirInput, bridge);
+                    }}
+                    placeholder="输入 ChimeraX 机器上的绝对路径（如 D:\maps 或 /data/maps）— 目录不存在会自动创建"
+                    disabled={cacheDirBusy}
+                    className="h-7 min-w-0 flex-1 rounded-md border-slate-300 bg-white px-2 font-mono text-[10.5px] text-slate-700 placeholder:font-sans placeholder:text-slate-400 focus-visible:ring-teal-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  />
+                  <Button
+                    size="sm"
+                    className="h-7 shrink-0 gap-1 bg-teal-600 px-2.5 text-[11px] hover:bg-teal-700"
+                    disabled={cacheDirBusy || !cacheDirInput.trim() || !!bridge && !bridge.canSetCacheDir}
+                    onClick={() => bridge && void applyCacheDir(cacheDirInput, bridge)}
+                  >
+                    {cacheDirBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <HardDrive className="h-3 w-3" />}
+                    应用
+                  </Button>
+                </div>
+                <div className="pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
+                  {bridge.canSetCacheDir
+                    ? "自定义下载目录：切换后 /fetch 下载、/stage 上传与缓存查询全部改用新目录；原目录中已缓存的地图不会自动移动（需要沿用请手动复制过去）；选择会记住，ChimeraX 重启后每次生成前自动恢复。"
+                    : "当前桥脚本不支持自定义目录（无 /cachedir）— 在 ChimeraX 重新运行一次 relay.py 后即可在此指定下载目录。"}
+                  {cacheDirNote && (
+                    <span className={`ml-1 ${cacheDirNote.startsWith("已切换") ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500"}`}>{cacheDirNote}</span>
+                  )}
+                </div>
               </div>
             )}
             {!bridge && (
