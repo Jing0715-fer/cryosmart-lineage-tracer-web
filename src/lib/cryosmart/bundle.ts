@@ -21,7 +21,6 @@ import {
 } from "./report-html";
 import { prefetchImagesForReport } from "./image-embed";
 import { buildPictureFlowSvg } from "./report-svg";
-import { buildPictureFlowPptx } from "./report-pptx";
 import { makePreview, normalMapAssets } from "./lineage";
 import { StreamingZipWriter } from "./zip";
 import { createBundleSink, type BundleSink } from "./zip-sink";
@@ -38,7 +37,6 @@ import {
 } from "./proxy-client";
 
 export interface BundleOptions {
-  includePptx: boolean;
   includeImages: boolean;
   includeMaps: boolean;
   includeFinalResults: boolean;
@@ -94,12 +92,14 @@ export interface BundleResult {
   warnings: string[];
 }
 
-const HELPER_FILES = [
-  "helpers/CryoSmart_align_maps_check_view.py",
-  "helpers/CryoSmart_export_current_view_ppt.py",
-  "helpers/CryoSmart_auto_align_export_ppt.py",
-  "helpers/rebuild_picture_flow_pptx.mjs",
-];
+/* v3.73 (round-32 “之前的打包下载部分的导出pptx部分的功能可以移除掉”):
+ * the legacy picture-flow PPTX (single A4 slide with embedded preview
+ * images) and its 4 desktop helper files (3 ChimeraX .py scripts that
+ * aligned maps and substituted them into the PPTX + the standalone Node
+ * rebuilder) are GONE — the Workflow Figure card's relay-driven ChimeraX
+ * pipeline (alignment + chirality + screenshots + portrait deck) replaced
+ * the whole chain. The ZIP still carries the JSON / HTML report / A4 SVG
+ * / Mermaid / preview text. */
 
 /* ── Download concurrency tuning (v3.16 speed-up) ────────────────────
  * The maps phase used to download every .mrc SEQUENTIALLY (one at a
@@ -115,14 +115,12 @@ const HELPER_FILES = [
 const MAP_CONCURRENCY = 4;
 /** Concurrent downloads for direct-URL images (bytes never uploaded). */
 const DIRECT_IMAGE_CONCURRENCY = 3;
-/** Concurrent downloads for PPTX-embedded preview images (small PNGs). */
-const PPT_IMAGE_CONCURRENCY = 4;
 /** Concurrent best-effort fetches for the Final_Result scan. */
 const FINAL_RESULT_CONCURRENCY = 4;
 
 /** Default byte budget for the MEMORY fallback sink (see BundleOptions.
  *  memZipBudgetBytes). 1 GiB keeps the tab comfortably under its ~4 GB
- *  ceiling even with the report HTML + PPTX + in-flight download buffers
+ *  ceiling even with the report HTML + in-flight download buffers
  *  on top, while leaving room for ~1 GB of maps on the degraded path. */
 export const DEFAULT_MEM_ZIP_BUDGET_BYTES = 1024 * 1024 * 1024;
 
@@ -338,18 +336,7 @@ async function assembleBundle(
     warnings.push(`Preview text failed: ${(err as Error).message}`);
   }
 
-  onProgress?.({ phase: "report", current: 5, total: 6, message: "Bundling helper scripts…" });
-  for (const helperPath of HELPER_FILES) {
-    try {
-      const resp = await fetch(`/${helperPath}`);
-      if (resp.ok) {
-        const text = await resp.text();
-        await addFile(helperPath.replace(/^helpers\//, ""), text);
-      }
-    } catch (err) {
-      warnings.push(`Helper ${helperPath} fetch failed: ${(err as Error).message}`);
-    }
-  }
+  onProgress?.({ phase: "report", current: 5, total: 6, message: "Partitioning images…" });
 
   // ── Staged-session image partitioning + upstream reachability ──────
   // (v3.13) Images referenced by the report come in two flavours after a
@@ -387,48 +374,9 @@ async function assembleBundle(
     return upstreamReachable;
   };
 
-  // PPTX (optional). The builder embeds every byte in imageMap into the
-  // slide XML. For very large lineages the resulting blob can be sizeable
-  // (100+ jobs x multiple previews), but the user explicitly asked to see
-  // the full result first — do NOT trim here. If a build OOMs or stalls,
-  // the user will see it in the progress bar / buildCrashed banner and can
-  // re-run with a smaller option set.
-  if (options.includePptx) {
-    throwIfCancelled();
-    onProgress?.({ phase: "pptx", current: 0, total: 0, message: "Fetching PPTX images…" });
-    const imageMap = new Map<string, Uint8Array>();
-    if (options.session) {
-      try {
-        // Session-store images always; direct intranet URLs only when the
-        // app server can actually reach CryoSmart (same rule as the images
-        // phase below — skipping them avoids a wall of 10s proxy aborts).
-        const pptRequests = [...sessionImageItems, ...otherImageItems];
-        if (directImageItems.length > 0 && (await ensureReachability())) {
-          pptRequests.push(...directImageItems);
-        }
-        await collectPptImages(pptRequests, options.session, imageMap, (p) =>
-          onProgress?.({
-            phase: "pptx",
-            current: p.current,
-            total: p.total,
-            message: p.message,
-          })
-        , options.signal);
-      } catch (err) {
-        warnings.push(`PPTX image fetch failed: ${(err as Error).message}`);
-      }
-    }
-    onProgress?.({ phase: "pptx", current: 1, total: 2, message: "Building PPTX…" });
-    try {
-      const blob = buildPictureFlowPptx(summary, imageMap);
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      await addFile(`${base}_picture_flow.pptx`, bytes);
-    } catch (err) {
-      const msg = (err as Error).message || String(err);
-      warnings.push(`PPTX build failed: ${msg}`);
-      console.error("[bundle] PPTX build failed:", err);
-    }
-  }
+  // v3.73: the legacy picture-flow PPTX phase is REMOVED (round-32) —
+  // the Workflow Figure card's ChimeraX pipeline produces the real
+  // workflow deck; this bundle no longer embeds a preview-image slide.
 
   // Images (optional)
   if (options.includeImages) {
@@ -830,44 +778,6 @@ async function assembleBundle(
     zipBytes: writer.bytesWritten,
     warnings,
   };
-}
-
-/** Fetch the given image requests for PPTX embedding.
- *
- *  The caller hands in the already-partitioned request list (session-store
- *  images plus, when the app server can reach CryoSmart, direct-URL
- *  images) — see buildBundle. */
-async function collectPptImages(
-  requests: Array<{ url: string; path: string }>,
-  session: CryoSmartSession,
-  imageMap: Map<string, Uint8Array>,
-  onProgress: (p: { current: number; total: number; message: string }) => void,
-  signal?: AbortSignal
-) {
-  if (requests.length === 0) {
-    onProgress({ current: 0, total: 0, message: "No PPT images to fetch." });
-    return;
-  }
-  let done = 0;
-  // Parallel since v3.16 (was a serial for-loop — preview PNGs are small,
-  // the win here is overlapping per-request round-trips, which dominated
-  // for 40+ images).
-  await pooledMap(requests, PPT_IMAGE_CONCURRENCY, async (req) => {
-    try {
-      const bytes = await cryoSmartBytes(session, req.url, { signal });
-      imageMap.set(req.url, bytes);
-      imageMap.set(req.path, bytes);
-    } catch (err) {
-      if (isCancelError(err)) throw err; // Stop button — bail, don't skip
-      // skip — a single missing image must not abort the rest
-    }
-    done++;
-    onProgress({
-      current: done,
-      total: requests.length,
-      message: `PPT image ${done}/${requests.length}: ${req.path}`,
-    });
-  });
 }
 
 /** Gather all preview image URLs referenced by the HTML report.

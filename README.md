@@ -129,11 +129,8 @@ cryosmart-lineage-tracer-web/
 │   │   └── types.ts                  # LineageSummary / Edge / Node 等类型
 │   └── hooks/                        # 自定义 React hooks
 ├── public/
-│   └── helpers/                      # 4 个 ChimeraX helper 脚本
-│       ├── CryoSmart_auto_align_export_ppt.py   # 一键：align + 优化 + 导出 + PPTX
-│       ├── CryoSmart_align_maps_check_view.py   # 仅对齐 + 优化
-│       ├── CryoSmart_export_current_view_ppt.py # 仅导出 + PPTX
-│       └── rebuild_picture_flow_pptx.mjs        # 独立 Node PPTX 重打包
+│   └── helpers/
+│       └── CryoSmart_flow_relay.py              # ChimeraX 桥接脚本（Workflow Figure 卡片驱动）
 ├── prisma/                           # Prisma schema（可选）
 ├── db/                               # SQL 初始化脚本
 ├── tests/                            # 运行时构建脚本
@@ -228,10 +225,7 @@ cryosmart-lineage-tracer-web/
 
 4 个脚本都随下载 bundle 一起打包，也可在页面 Help 卡片单独下载（需本地安装 ChimeraX）：
 
-- **`CryoSmart_auto_align_export_ppt.py`**（推荐一键流）：打开 lineage 全部 maps，测试 5 种对齐假设（原始 + 3 轴翻转 + z-flip），按相关性选优，优化 90° 视角，导出 PNG，白平衡 + 统一裁剪，按 `name="CryoSmartImage:<key>"` 标记替换进 PPTX
-- **`CryoSmart_align_maps_check_view.py`**：手动流程第 1 步（仅对齐 + 优化，可检查中间状态）
-- **`CryoSmart_export_current_view_ppt.py`**：手动流程第 2 步（手动调相机后仅导出）
-- **`rebuild_picture_flow_pptx.mjs`**：独立 Node 脚本，从 lineage JSON 重建 Picture Flow PPTX
+- **`CryoSmart_flow_relay.py`**：v3.73 起唯一需要的桌面脚本 — 在 ChimeraX 中 `open` 一次后，网页 Workflow Figure 卡片即可远程驱动 ChimeraX（地图本地缓存下载、8 候选双手性对齐、90° 视角统一、截图回传、参考手性 EMalign 验证、交付文件导出）。旧的 3 个 picture_flow 桌面脚本与 Node 重打包器已随打包下载中的 PPTX 导出一并移除
 
 ---
 

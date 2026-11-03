@@ -92,11 +92,11 @@ const MINIMAL_ROW_CAP = 6;
 const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
   standard: {
     label: "标准",
-    hint: "完整谱系 — 所有阶段全部展示，job id 标注 + 每 class 统计",
+    hint: "谱系精选 — 中间步骤仅展示分类结果（Hetero refinement / Ab-initio / 3D 分类），Non-uniform、Local refinement、Import volume 等中间阶段省略并在箭头旁以「omitted: N×」注明；被下游使用的 class 细框标出（居脊柱）；job id 标注 + 每 class 统计 + 页脚",
   },
   simplified: {
     label: "简化",
-    hint: "合并/省略可省的步骤：少量数据的 2D 与默认 12 Å ab-initio 整体省略，相邻同颗粒数的 non-uniform 合并，颗粒数按「从多到少」显示",
+    hint: "在标准精选之上再合并可省的步骤：少量数据的 2D 与默认 12 Å ab-initio 整体省略，相邻同颗粒数 non-uniform 合并，颗粒数按「从多到少」显示；中间步骤同样仅展示分类结果，被下游使用的 class 加框标出",
   },
   minimal: {
     label: `极简（4–6 行）`,
@@ -104,7 +104,7 @@ const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
   },
   manual: {
     label: "手动",
-    hint: "自行勾选要体现在流程图中的 job — 未勾选的阶段不渲染、不下载（标准版式）",
+    hint: "自行勾选要体现在流程图中的 job — 未勾选的阶段不渲染、不下载（标准版式，不做中间步骤精选，勾选即全部展示）",
   },
 };
 
@@ -815,6 +815,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       return buildFlowFigureModel(summary, {
         maxGroups: rawMaxGroups,
         simplified: false,
+        /* v3.73: the manual catalog lists the FULL model — the
+         * classification-only middle filter would silently hide jobs the
+         * user may want to check back in. */
+        classificationMiddles: false,
       });
     } catch {
       return null;
@@ -1035,6 +1039,9 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           maxGroups: effectiveMaxGroups,
           simplified,
           minimal: flowMode === "minimal",
+          /* v3.73 (round-32): 标准/简化 decks curate classification-only
+           *  middles like 极简; manual keeps the user's own trim. */
+          classificationMiddles: flowMode !== "manual",
         });
       }
       /* v3.59 手动模式: trim the model to the checked jobs BEFORE any
@@ -1067,8 +1074,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         pushLog(
           "简化模式: 少量数据的 2D 步骤将省略 · 默认 12 Å ab-initio 阶段整体省略（直接衔接后续精修） · 相邻同颗粒数 non-uniform 合并 · 颗粒数按「从多到少」显示",
         );
+        pushLog(
+          "中间步骤精选（v3.73）: 中间行仅展示分类结果（Hetero refinement / Ab-initio / 3D 分类）— Non-uniform / Local refinement / Import volume 等中间阶段省略，图上以「omitted: N×」注明；被下游使用的 class 加细框标出（居脊柱）",
+        );
       } else if (!manual) {
-        pushLog("标准模式: 完整谱系 · job id 标注 · 每 class 统计");
+        pushLog("标准模式: 谱系精选 · job id 标注 · 每 class 统计 · 页脚");
+        pushLog(
+          "中间步骤精选（v3.73）: 中间行仅展示分类结果（Hetero refinement / Ab-initio / 3D 分类）— Non-uniform / Local refinement / Import volume 等中间阶段省略，图上以「omitted: N×」注明；被下游使用的 class 加细框标出（居脊柱）",
+        );
       }
       const multiClassGroups = model.groups.filter((g) => g.some((i) => (i.classes?.length ?? 0) > 1));
       const mapTotal = model.groups.flat().reduce(
@@ -1847,7 +1860,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           <Badge variant="outline" className="px-1.5 py-0 text-[10px] text-teal-700 dark:text-teal-300">引擎 v{FLOW_ENGINE_VERSION}</Badge>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          竖向单列排版，箭头固定尺寸、直线连接；所有 map 由 ChimeraX 渲染并统一朝向与手性。用「模式」选择 标准 / 简化 / 极简（精选主线关键 job，连续同类型合并为「N×」行，省略步骤在图上注明，4/5/6 行可选）/ 手动勾选。
+          竖向单列排版，箭头固定尺寸、直线连接；所有 map 由 ChimeraX 渲染并统一朝向与手性。四种模式（标准 / 简化 / 极简 / 手动）的中间步骤一律仅展示分类结果 — Non-uniform、Local refinement、Import volume 等省略并在箭头旁注明，被下一步使用的 class 细框标出；可选参考手性验证（可拖入 PDB 参照物）与交付文件自动下载。
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -2034,11 +2047,17 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           </div>
         )}
 
-        {/* ChimeraX bridge panel */}
+        {/* ChimeraX bridge panel — v3.73 (round-32 UI 打磨): rebuilt as a
+         *  status bar + a settings-tile grid (地图本地目录 | 参考手性) + the
+         *  full-width 交付文件 tile, so every round-24…31 addition has its
+         *  own clearly-bounded card instead of nested teal boxes. */}
         {mode === "chimerax" && (
-          <div className="rounded-lg border border-teal-200 bg-gradient-to-br from-teal-50/70 to-emerald-50/40 p-3 dark:border-teal-800 dark:from-teal-950/20 dark:to-emerald-950/10">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-[12.5px] font-semibold text-slate-700 dark:text-slate-200">ChimeraX 桥状态</span>
+          <div className="space-y-2.5 rounded-xl border border-teal-200/80 bg-gradient-to-br from-teal-50/60 to-emerald-50/30 p-3 dark:border-teal-800/70 dark:from-teal-950/20 dark:to-emerald-950/10">
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-white/85 px-2.5 py-2 dark:border-slate-700 dark:bg-slate-900/70">
+              <span className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-700 dark:text-slate-200">
+                <Boxes className="h-4 w-4 shrink-0 text-teal-600 dark:text-teal-400" />
+                ChimeraX 桥
+              </span>
               {bridgeBadge}
               <Button variant="outline" size="sm" className="h-7 gap-1 text-[11px]" onClick={() => void probeBridge(false)} disabled={bridgeProbing}>
                 <RefreshCw className={`h-3 w-3 ${bridgeProbing ? "animate-spin" : ""}`} /> 测试连接
@@ -2060,16 +2079,29 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * now EDITABLE — the input switches it at runtime (POST
              * /cachedir) and the choice is remembered across ChimeraX
              * restarts (re-applied automatically at every run). */}
-            {bridge?.kind === "relay" && bridge.cacheDir && (
+            {/* v3.73: the round-24…31 settings as bounded TILES — 地图本地
+             *  目录 | 参考手性 side by side on wide screens (the grid
+             *  collapses to one column when the cache tile is hidden on a
+             *  REST bridge), the 交付文件 tile full-width below. */}
+            <div className={`grid grid-cols-1 gap-2.5 ${bridge?.kind === "relay" ? "lg:grid-cols-2" : ""}`}>
+            {bridge?.kind === "relay" && (
               <div
-                className="mt-2 rounded-md border border-teal-100 bg-white/70 p-2 text-[11px] leading-relaxed text-slate-600 dark:border-teal-900 dark:bg-slate-900/50 dark:text-slate-300"
+                className="rounded-lg border border-slate-200 bg-white/85 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
                 title="本地下载目录：地图先下载到这里（已有文件跳过下载），ChimeraX 再从该目录打开进行对齐与截图；跨 ChimeraX 重启保留，2GB 自动淘汰最久未用"
               >
-                <div className="flex flex-wrap items-start gap-1.5">
-                  <HardDrive className="mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <HardDrive className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+                  <span className="text-[12px] font-semibold text-slate-700 dark:text-slate-200">地图本地目录</span>
+                  {bridge.canFetchMaps ? (
+                    <Badge className="bg-emerald-100 px-1.5 py-0 text-[9px] text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/40 dark:text-emerald-300">下载一次 · 以后免下载</Badge>
+                  ) : (
+                    <Badge variant="outline" className="px-1.5 py-0 text-[9px] text-amber-600">需更新桥脚本</Badge>
+                  )}
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-start gap-1.5">
                   <span className="min-w-0 flex-1">
-                    地图本地目录（下载一次、以后免下载）:
-                    <code className="mx-1 break-all rounded bg-slate-200 px-1 font-mono text-[10px] dark:bg-slate-800">{bridge.cacheDir}</code>
+                    当前目录:
+                    <code className="mx-1 break-all rounded bg-slate-200 px-1 font-mono text-[10px] dark:bg-slate-800">{bridge.cacheDir || "（默认系统临时目录）"}</code>
                     {bridge.canFetchMaps
                       ? "— 桥接先把地图下载进该目录，再让 ChimeraX 从本地目录打开做对齐/截图；目录中已有的文件自动跳过下载，跨 ChimeraX 重启保留"
                       : "— 旧桥脚本无自动下载（/fetch），建议在 ChimeraX 重新运行一次 relay.py 启用"}
@@ -2127,10 +2159,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * its LOCAL path fills the 参照物 input and the policy switches
              * to EMalign 参照物验证 in one motion. */}
             <div
-              className={`mt-2 rounded-md border p-2 text-[11px] leading-relaxed transition-colors ${
+              className={`rounded-lg border p-2.5 text-[11px] leading-relaxed transition-colors ${
                 anchorDragOver
                   ? "border-teal-400 bg-teal-50 ring-2 ring-teal-300/60 dark:border-teal-600 dark:bg-teal-950/40"
-                  : "border-teal-100 bg-white/70 dark:border-teal-900 dark:bg-slate-900/50"
+                  : "border-slate-200 bg-white/85 dark:border-slate-700 dark:bg-slate-900/60"
               } text-slate-600 dark:text-slate-300`}
               title="参考手性策略：参考地图自身的手性如何确立（自动 / 参照物验证 / 手动）— 支持直接拖入 PDB / mmCIF / map 参照物文件"
               onDragOver={(e) => {
@@ -2211,6 +2243,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 {REF_HAND_META[refHandMode].hint}
               </p>
             </div>
+            </div>
+            {/* v3.73: the 交付文件 tile closes the settings area — full width. */}
 
             {/* v3.72 (round-31 “增加输入一个交付文件路径，可以下载没有 sharp 的
              * map，sharp 过的 map，两个 half-map，FSC 图，guinier plot 图，
@@ -2225,7 +2259,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * mirrored). The prefix auto-derives from the dir
              * (D:\Lijing\Tigr\Tigr\data → “Tigr”) and stays editable. */}
             <div
-              className="mt-2 rounded-md border border-teal-100 bg-white/70 p-2 text-[11px] leading-relaxed text-slate-600 dark:border-teal-900 dark:bg-slate-900/50 dark:text-slate-300"
+              className="rounded-lg border border-slate-200 bg-white/85 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
               title="交付文件：流程图生成后，把最终结果（手性纠正后的 map + FSC / Guinier / 角度分布图 + fsc.xml）自动下载到 ChimeraX 机器上的该目录"
             >
               <div className="flex flex-wrap items-center gap-2">
@@ -2303,7 +2337,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               </p>
             </div>
             {!bridge && (
-              <div className="mt-2 space-y-2">
+              <div className="space-y-2">
                 <div className="flex items-center gap-2">
                   <code className="flex-1 overflow-x-auto rounded-md border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-[11.5px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
                     {relayCommand}
@@ -2312,19 +2346,28 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     <Copy className="h-3.5 w-3.5" /> 复制
                   </Button>
                 </div>
-                <div className="flex items-start gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span>
-                    端口说明：此桥 open 之后在 ChimeraX 内部监听 <b>8927/8928/8929</b>；备选的官方 REST 需在 ChimeraX 里运行 <code className="font-mono">remotecontrol rest start</code>（默认 8765/8650）。
-                    <b>8080 是 CryoSmart Web 自己的端口，ChimeraX 桥不会、也不能运行在那里</b>——在 8080 上检测不到属正常。本页会同时探测
-                    {bridgeHosts.map((h) => (
-                      <code key={h} className="mx-0.5 rounded bg-slate-200 px-1 font-mono text-[10px] dark:bg-slate-800">{h}</code>
-                    ))}
-                    的上述端口（ChimeraX 装在{cryoSmartHost ? `服务器 ${cryoSmartHost} 上` : "服务器上"}也能找到——relay 监听全部网卡，可跨机访问；仅需放行系统防火墙）。
-                    若桥接机器无法直连 CryoSmart，自动降级为<b>经应用代理下载</b>（桥接 → 本应用 → CryoSmart，凭据由服务端附加，不经浏览器）→ <b>页面中转</b>（页面下载 MRC → 上传进同一本地目录）。生成前每张 map 先查 ChimeraX 机器的固定本地缓存目录（跨 ChimeraX 重启保留）：已在目录中的文件<b>跳过下载</b>；未命中的地图由桥接脚本先下载一次存入该目录，再让 ChimeraX 从指定目录打开地图进行对齐与截图（v3.65 — 对齐与截图全部只读本地文件，零重复下载）。ChimeraX 1.12 的 MCP 同样由本地 REST server 支撑，但官方 CORS 仅放行 localhost 网页；此桥用同一内部机制，Origin 校验锁定为本应用。高级：
-                    <a className="underline" href="/helpers/CryoSmart_flow_relay.py" download>下载桥脚本</a>。
-                  </span>
-                </div>
+                {/* v3.73: the port / fallback wall of text folds away by
+                 *  default — the one-liner above is what the user needs to
+                 *  act on; the details stay one click away. */}
+                <details className="group rounded-md border border-slate-200 bg-white/70 open:pb-2 dark:border-slate-700 dark:bg-slate-900/50">
+                  <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-slate-600 select-none dark:text-slate-300">
+                    <Info className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+                    连接与端口说明（探测主机、自动降级、缓存规则）
+                    <span className="ml-auto text-slate-400 transition-transform group-open:rotate-90">▸</span>
+                  </summary>
+                  <div className="px-2.5 pb-1 text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                    <span>
+                      端口说明：此桥 open 之后在 ChimeraX 内部监听 <b>8927/8928/8929</b>；备选的官方 REST 需在 ChimeraX 里运行 <code className="font-mono">remotecontrol rest start</code>（默认 8765/8650）。
+                      <b>8080 是 CryoSmart Web 自己的端口，ChimeraX 桥不会、也不能运行在那里</b>——在 8080 上检测不到属正常。本页会同时探测
+                      {bridgeHosts.map((h) => (
+                        <code key={h} className="mx-0.5 rounded bg-slate-200 px-1 font-mono text-[10px] dark:bg-slate-800">{h}</code>
+                      ))}
+                      的上述端口（ChimeraX 装在{cryoSmartHost ? `服务器 ${cryoSmartHost} 上` : "服务器上"}也能找到——relay 监听全部网卡，可跨机访问；仅需放行系统防火墙）。
+                      若桥接机器无法直连 CryoSmart，自动降级为<b>经应用代理下载</b>（桥接 → 本应用 → CryoSmart，凭据由服务端附加，不经浏览器）→ <b>页面中转</b>（页面下载 MRC → 上传进同一本地目录）。生成前每张 map 先查 ChimeraX 机器的固定本地缓存目录（跨 ChimeraX 重启保留）：已在目录中的文件<b>跳过下载</b>；未命中的地图由桥接脚本先下载一次存入该目录，再让 ChimeraX 从指定目录打开地图进行对齐与截图（v3.65 — 对齐与截图全部只读本地文件，零重复下载）。ChimeraX 1.12 的 MCP 同样由本地 REST server 支撑，但官方 CORS 仅放行 localhost 网页；此桥用同一内部机制，Origin 校验锁定为本应用。高级：
+                      <a className="underline" href="/helpers/CryoSmart_flow_relay.py" download>下载桥脚本</a>。
+                    </span>
+                  </div>
+                </details>
               </div>
             )}
           </div>
@@ -2513,18 +2556,21 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         )}
 
         {/* how it works — v3.72: restructured from one wall-of-text paragraph
-         *  into a scannable per-topic list (版式 / 下载 / 对齐 / 手性 / 交付),
-         *  and it now documents the delivery phase. */}
-        <div className="rounded-md border border-slate-200 bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
-          <div className="flex items-center gap-1.5 pb-1.5 text-[11.5px] font-semibold text-slate-700 dark:text-slate-200">
+         *  into a scannable per-topic list (版式 / 下载 / 对齐 / 手性 / 交付).
+         *  v3.73: folds away by default (the card had grown too tall) and
+         *  documents the round-32 标准/简化 classification-only middles +
+         *  anchor frames. */}
+        <details className="group rounded-md border border-slate-200 bg-slate-50/60 dark:border-slate-700 dark:bg-slate-900/40">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 px-2.5 py-2 text-[11.5px] font-semibold text-slate-700 select-none dark:text-slate-200">
             <Boxes className="h-4 w-4 shrink-0 text-slate-400" />
-            工作原理
-          </div>
-          <ul className="space-y-1.5">
+            工作原理（版式 / 下载 / 对齐 / 手性 / 交付）
+            <span className="ml-auto text-slate-400 transition-transform group-open:rotate-90">▸</span>
+          </summary>
+          <ul className="space-y-1.5 px-2.5 pb-2.5 text-[11px] leading-relaxed text-slate-600 dark:text-slate-300">
             <li className="flex gap-1.5">
               <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">版式</span>
               <span>
-                竖向单列（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸直线箭头</b>。「模式」四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线关键 job，连续同类型合并为「N×」行，省略步骤箭头旁注明，4/5/6 行可选）/ <b>手动</b>（逐个勾选）。
+                竖向单列（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸直线箭头</b>。「模式」四选一：<b>标准</b>（谱系精选，job id 标注 + 每 class 统计）/ <b>简化</b>（再合并可省步骤）/ <b>极简</b>（精选颗粒主线关键 job，连续同类型合并为「N×」行，4/5/6 行可选）/ <b>手动</b>（逐个勾选，不做精选）。<b>标准/简化/极简的中间步骤一律仅展示分类结果</b>（Hetero refinement / Ab-initio / 3D 分类）— Non-uniform、Local refinement、Import volume 等中间阶段省略，并在箭头旁以「omitted: N×」注明；<b>被下一步使用的 class 以细框标出</b>（恒居脊柱）。
               </span>
             </li>
             <li className="flex gap-1.5">
@@ -2552,14 +2598,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp"}</code> 等（unsharp / sharp / half A / half B / FSC / Guinier / 角度分布 / fsc.xml；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
               </span>
             </li>
-            <li className="flex gap-1.5">
-              <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">兼容</span>
-              <span>
-                图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
-              </span>
-            </li>
           </ul>
-        </div>
+        </details>
       </CardContent>
     </Card>
   );

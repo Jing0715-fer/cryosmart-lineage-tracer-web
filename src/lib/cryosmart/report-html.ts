@@ -61,7 +61,7 @@ import {
 } from "./constants";
 // Shared data-layer helpers. Historically these were duplicated locally
 // ("to avoid circular import") but lineage.ts only imports constants/types,
-// so no cycle exists — report-pptx.ts already follows this import pattern.
+// so no cycle exists (workflow-pptx.ts follows the same import pattern).
 import {
   reportJobNum,
   pixelSizeNumber,

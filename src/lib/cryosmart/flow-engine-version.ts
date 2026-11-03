@@ -433,5 +433,37 @@
  * bridge panel's sections (下载目录 / 参考手性 / 交付文件) share one
  * visual frame. Old pages keep the v3.71 behavior (no delivery, no
  * drag-drop, no /deliver detection).
+ *
+ * v3.73 bump reason (round-32 “简化和标准模式下的pptx报告也要参考极简的pptx
+ * 进行优化，中间步骤只展示分类结果，non-uniform或local refinement或import
+ * volume等都省略掉。也需要框出哪些类是下一步用到的。整个项目的UI界面重新
+ * 整体打磨一下…之前的打包下载部分的导出pptx部分的功能可以移除掉”):
+ * (1) workflow-figure dropNonClassificationMiddles — the 标准/简化 merge
+ * assembly now curates its MIDDLE rows from CLASSIFICATION jobs only
+ * (the 极简 rule since v3.63): import_* members strip everywhere
+ * (pure data inputs), a middle row survives only when EVERY item is
+ * hetero_refine / homo_abinit / class_3D, Non-uniform / Local
+ * refinement / homo refinement / post-processing middles drop with a
+ * named warning, and model.omissions is computed for 标准/简化 too
+ * (mainline = [2D montage?] + spine, imports included so their drops
+ * get named) — BuildModelOptions.classificationMiddles defaults true,
+ * manual catalogs/generate pass false (勾选 is the user's own trim).
+ * (2) workflow-pptx — the flow-anchor selection frame (the class
+ * feeding the next stage, centre-swapped onto the spine) now renders
+ * in EVERY style, not just 极简; 标准/简化 gaps carry the
+ * “omitted: N×” note (widened 0.3in band, note above the arrow); a
+ * framed row's incoming arrow keeps the 0.07in standoff so the tip
+ * stops at the frame edge. (3) bundle/download-card/help-card — the
+ * legacy picture-flow PPTX export is REMOVED (includePptx option,
+ * buildPictureFlowPptx, collectPptImages, the 4 desktop helpers
+ * CryoSmart_auto_align_export_ppt.py / align_maps_check_view /
+ * export_current_view_ppt + rebuild_picture_flow_pptx.mjs —
+ * report-pptx.ts and the helper files deleted; the relay bridge
+ * script stays the only downloadable). (4) flow-figure-card UI — the
+ * bridge panel rebuilt as status bar + tile grid (地图本地目录 |
+ * 参考手性 with the PDB drag zone, 交付文件 full-width), port info and
+ * 工作原理 fold into <details>, mode hints/banners document the new
+ * curation. Old pages keep the v3.72 behavior (full middles in
+ * 标准/简化, no frames there, pptx still in the bundle).
  */
-export const FLOW_ENGINE_VERSION = "3.72";
+export const FLOW_ENGINE_VERSION = "3.73";

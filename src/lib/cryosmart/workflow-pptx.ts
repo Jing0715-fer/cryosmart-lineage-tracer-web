@@ -1,5 +1,13 @@
 /**
- * Portrait workflow-figure PPTX builder (v3.63; layout rebuilt for round-18).
+ * Portrait workflow-figure PPTX builder (v3.73; layout rebuilt for round-18).
+ *
+ * v3.73 (round-32 “简化和标准模式下的pptx报告也要参考极简的pptx进行优化，
+ * 中间步骤只展示分类结果…也需要框出哪些类是下一步用到的”): the 极简
+ * showcase conventions now run in EVERY style — the flow-anchor class (the
+ * one feeding the next stage) gets the reference's thin selection rectangle
+ * centred on the spine in 标准/简化 decks too, and per-gap “omitted: N×”
+ * notes name the stages the classification-only middle filter dropped
+ * (workflow-figure's dropNonClassificationMiddles + model.omissions).
  *
  * Format modelled after the user's NEW reference `upload/workflow.pptx`
  * (7.5 × 10 in PORTRAIT slide, verified against its own geometry):
@@ -438,8 +446,13 @@ export function buildWorkflowPptx(
     x0: number;
     onSpine: boolean;
   }
+  /* v3.73 (round-32 “也需要框出哪些类是下一步用到的”): the anchor
+   *  precomputation + selection frame apply to EVERY style now —
+   *  标准/简化 decks frame the class feeding the next stage exactly like
+   *  the 极简 reference (per-class stats travel under the swapped slots
+   *  unchanged); parallel rows stay frame-less in every style. */
   const anchorInfoOf = (g: FlowFigureItem[], nextRep: number | null): AnchorInfo | null => {
-    if (!minimal || nextRep == null || g.length > 1 || rowThumbTotal(g) <= 1) return null;
+    if (nextRep == null || g.length > 1 || rowThumbTotal(g) <= 1) return null;
     const flat: Array<{ item: number; slot: number; count: number | null }> = [];
     g.forEach((it, ii) =>
       itemSlotsOf(it).forEach((s, jj) => flat.push({ item: ii, slot: jj, count: s.count })),
@@ -491,7 +504,10 @@ export function buildWorkflowPptx(
     const g = groups[i];
     if (!g) return 0.01;
     if (g.length > 1) return PLABEL_H + 0.02;
-    return minimal ? 0.07 : 0.01;
+    if (minimal) return 0.07;
+    /* v3.73: a 标准/简化 row carrying an anchor frame gets the same 0.07
+     *  standoff — the arrow tip must stop at the frame's top edge. */
+    return anchorInfos[i] ? 0.07 : 0.01;
   };
 
   let headerBottom = 0;
@@ -605,10 +621,9 @@ export function buildWorkflowPptx(
     /* 极简: resolve the precomputed anchor to its placed slot — after the
      * v3.62 swap the anchor renders at position `target`. */
     const ai = anchorInfos[i];
-    const anchor =
-      minimal && ai
-        ? items[ai.item]?.slots[ai.target] ?? items[ai.item]?.slots[ai.slot] ?? null
-        : null;
+    const anchor = ai
+      ? items[ai.item]?.slots[ai.target] ?? items[ai.item]?.slots[ai.slot] ?? null
+      : null;
 
     rows.push({ items, top, bottom, parallel, anchor });
 
@@ -619,7 +634,10 @@ export function buildWorkflowPptx(
        * 这样”): the gap note names every stage the model omitted between
        * the two adjacent rows, aggregated per displayed type (capped at 3
        * entries + ellipsis). */
-      const oms = minimal ? fig.omissions?.[i] ?? [] : [];
+      /* v3.73 (round-32): 标准/简化 decks carry the omission notes too —
+       *  their classification-only middle filter names its drops on the
+       *  slide exactly like 极简. */
+      const oms = fig.omissions?.[i] ?? [];
       const note =
         oms.length > 0
           ? `omitted: ${oms
@@ -632,7 +650,9 @@ export function buildWorkflowPptx(
        * omission-line slot) whether or not the gap carries a retention
        * label or a note, so rows never sit closer to some neighbours than
        * to others. 标准 keeps the fixed 0.12 connector gap. */
-      const gap = minimal ? MIN_GAP_BAND : 0.12;
+      /* v3.73: a 标准/简化 gap carrying an omission note widens to fit
+       *  the note line above the arrow. */
+      const gap = minimal ? MIN_GAP_BAND : note ? 0.3 : 0.12;
       const arrowStart = bottom + gap;
       ops.push({ kind: "conn", x1: SPINE, y1: arrowStart, x2: SPINE, y2: arrowStart + ARROW_LEN });
       cursor = arrowStart + ARROW_LEN + entryGap(i + 1);
@@ -682,12 +702,26 @@ export function buildWorkflowPptx(
           ops.push({
             kind: "text",
             x: Math.max(MARGIN_X, SPINE - noteW / 2),
-            y: bottom + RETAIN_H + 0.02,
+            /* v3.73: in 标准/简化 the note sits directly under the previous
+             *  row (no retention label in this style). */
+            y: minimal ? bottom + RETAIN_H + 0.02 : bottom + 0.03,
             w: noteW,
             h: OMIT_H - 0.01,
             lines: [{ runs: [{ t: note, sz: 650, color: "808080" }], align: "ctr" }],
           });
         }
+      } else if (note) {
+        /* v3.73: the 标准/简化 omission note — a small gray line centred on
+         *  the spine in the widened gap, above the connector. */
+        const noteW = Math.max(1.05, estimateRunsWidth([{ t: note, sz: 650 }]) + 0.06);
+        ops.push({
+          kind: "text",
+          x: Math.max(MARGIN_X, SPINE - noteW / 2),
+          y: bottom + 0.03,
+          w: noteW,
+          h: OMIT_H - 0.01,
+          lines: [{ runs: [{ t: note, sz: 650, color: "808080" }], align: "ctr" }],
+        });
       }
     }
   });
@@ -764,8 +798,11 @@ export function buildWorkflowPptx(
         }
       });
     });
-    /* 极简: the selection rectangle around the flow-anchor class. */
-    if (minimal && row.anchor) {
+    /* v3.73 (round-32 “也需要框出哪些类是下一步用到的”): the selection
+     *  rectangle around the flow-anchor class — EVERY style now (the 极简
+     *  thin black frame; 标准/简化 frame the same slot above their own
+     *  per-class stats). */
+    if (row.anchor) {
       const t = row.anchor.thumb;
       ops.push({ kind: "frame", x: t.x - 0.04, y: t.y - 0.04, w: t.w + 0.08, h: t.h + 0.08 });
     }

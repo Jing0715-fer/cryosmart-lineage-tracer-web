@@ -126,7 +126,7 @@ export default function Home() {
                 <span className="bg-gradient-to-r from-teal-600 via-emerald-600 to-cyan-600 bg-clip-text text-transparent">web-based workflow</span>
               </h1>
               <p className="mt-4 max-w-xl text-[14px] leading-[1.7] text-slate-600 sm:text-[15px]">
-                Trace particle and map lineage from CryoSmart. Build interactive HTML reports and download the full bundle with maps and images.
+                Trace particle and map lineage from CryoSmart. Generate publication-ready workflow PPTX figures (ChimeraX-aligned, chirality-corrected), build interactive HTML reports, and export the delivery set — maps, FSC, Guinier, angular plots — straight to your data folder.
               </p>
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 <a href="#data-source" className="group inline-flex h-10 items-center gap-2 rounded-lg bg-teal-600 px-5 text-[13.5px] font-semibold text-white shadow-md shadow-teal-600/20 transition-all hover:bg-teal-700 hover:shadow-lg hover:shadow-teal-600/30">
@@ -141,7 +141,7 @@ export default function Home() {
                 <FeatureCard icon={<Globe className="h-4 w-4" />} title="Cross-browser" desc="Works everywhere" tone="teal" />
                 <FeatureCard icon={<ShieldCheck className="h-4 w-4" />} title="No install" desc="Pure web app" tone="emerald" />
                 <FeatureCard icon={<Zap className="h-4 w-4" />} title="Smart Capture" desc="One-click extract" tone="cyan" />
-                <FeatureCard icon={<FileCheck2 className="h-4 w-4" />} title="Full bundle" desc="JSON HTML Maps" tone="teal" />
+                <FeatureCard icon={<FileCheck2 className="h-4 w-4" />} title="Workflow PPTX" desc="ChimeraX aligned" tone="teal" />
               </div>
             </div>
 

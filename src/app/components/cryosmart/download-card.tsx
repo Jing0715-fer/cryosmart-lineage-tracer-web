@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { toast } from "sonner";
-import { Package, Loader2, Download, AlertTriangle, CheckCircle2, FileArchive, Settings2, FileBox, Boxes, FileCheck2, PresentationIcon, StopCircle, Palette } from "lucide-react";
+import { Package, Loader2, Download, AlertTriangle, CheckCircle2, FileArchive, Settings2, FileBox, Boxes, FileCheck2, StopCircle, Palette } from "lucide-react";
 import type { LineageSummary } from "@/lib/cryosmart/types";
 import { buildBundle, downloadBlob, type BundleProgress, type BundleResult } from "@/lib/cryosmart/bundle";
 import { createBundleSink, type BundleSinkKind } from "@/lib/cryosmart/zip-sink";
@@ -46,7 +46,6 @@ function readPersistedBuild(): PersistedBuild | null {
     if (!parsed || typeof parsed !== "object") return null;
     const selections = parsed.selections && typeof parsed.selections === "object"
       ? {
-          includePptx: !!(parsed.selections as BundleSelections).includePptx,
           includeImages: !!(parsed.selections as BundleSelections).includeImages,
           includeMaps: !!(parsed.selections as BundleSelections).includeMaps,
           includeFinalResults: !!(parsed.selections as BundleSelections).includeFinalResults,
@@ -69,16 +68,17 @@ function writePersistedBuild(p: PersistedBuild): void {
   }
 }
 
-/** User-facing toggles for what to include in the next build. */
+/** User-facing toggles for what to include in the next build.
+ *  v3.73 (round-32): includePptx is GONE — the legacy picture-flow PPTX
+ *  was removed from the bundle; the Workflow Figure card builds the real
+ *  workflow deck. */
 export interface BundleSelections {
-  includePptx: boolean;
   includeImages: boolean;
   includeMaps: boolean;
   includeFinalResults: boolean;
 }
 
 const DEFAULT_SELECTIONS: BundleSelections = {
-  includePptx: true,
   includeImages: true,
   includeMaps: false,
   includeFinalResults: true,
@@ -95,11 +95,6 @@ const BUNDLE_FILES = [
   { name: "CryoSmart_*_picture_flow.svg", desc: "A4 SVG picture flow", always: true },
   { name: "CryoSmart_*.mmd", desc: "Mermaid graph source", always: true },
   { name: "CryoSmart_*_preview.txt", desc: "Plain text preview", always: true },
-  { name: "rebuild_picture_flow_pptx.mjs", desc: "Standalone Node PPTX rebuilder", always: true },
-  { name: "CryoSmart_align_maps_check_view.py", desc: "ChimeraX alignment script", always: true },
-  { name: "CryoSmart_export_current_view_ppt.py", desc: "ChimeraX export script", always: true },
-  { name: "CryoSmart_auto_align_export_ppt.py", desc: "ChimeraX one-shot pipeline", always: true },
-  { name: "CryoSmart_*_picture_flow.pptx", desc: "Picture flow PPTX (OOXML)", always: false, option: "includePptx" as const },
   { name: "images/*", desc: "Preview images", always: false, option: "includeImages" as const },
   { name: "maps/*", desc: "Map / MRC files", always: false, option: "includeMaps" as const },
   { name: "Final_Result/*", desc: "Final results package", always: false, option: "includeFinalResults" as const },
@@ -214,7 +209,6 @@ export function DownloadCard({ summary, loaded }: Props) {
       const res = await buildBundle(
         summary,
         {
-          includePptx: selections.includePptx,
           includeImages: selections.includeImages,
           includeMaps: selections.includeMaps,
           includeFinalResults: selections.includeFinalResults,
@@ -312,7 +306,6 @@ export function DownloadCard({ summary, loaded }: Props) {
   const enabled = !!summary;
   const phaseLabel = progress?.phase === "report" ? "Generating reports"
     : progress?.phase === "probe" ? "Checking CryoSmart reachability"
-    : progress?.phase === "pptx" ? "Building PPTX"
     : progress?.phase === "images" ? "Fetching preview images"
     : progress?.phase === "maps" ? "Fetching maps"
     : progress?.phase === "final" ? "Scanning final results"
@@ -329,7 +322,7 @@ export function DownloadCard({ summary, loaded }: Props) {
           <CardTitle className="text-lg">Download Bundle</CardTitle>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          Choose what to include, then build a single ZIP containing the JSON, HTML, SVG, Mermaid, preview text, PPTX, and ChimeraX helper scripts.
+          Choose what to include, then build a single ZIP containing the JSON, HTML, SVG, Mermaid and preview text. The workflow PPTX figure itself lives in the Workflow Figure card above (ChimeraX-aligned, chirality-corrected).
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -383,14 +376,6 @@ export function DownloadCard({ summary, loaded }: Props) {
 
         <div>
           <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-            <SelectionCheckbox
-              checked={selections.includePptx}
-              onChecked={(v) => updateSelection("includePptx", v)}
-              icon={<PresentationIcon className="h-3.5 w-3.5" />}
-              title="Picture Flow PPTX"
-              desc="Single A4 slide with embedded preview images (hand-rolled OOXML, no pptxgenjs). Capped at 50 embedded images to keep the build bounded."
-              tag="recommended"
-            />
             <SelectionCheckbox
               checked={selections.includeImages}
               onChecked={(v) => updateSelection("includeImages", v)}

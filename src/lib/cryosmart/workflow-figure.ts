@@ -196,11 +196,12 @@ export interface FlowFigureModel {
   fscXml: { xml?: string; url?: string; name?: string } | null;
   warnings: string[];
   projectLabel: string;
-  /** v3.62: 极简 builds only — per-GAP omitted-stage notes: omissions[i]
-   *  lists the stages removed between groups[i] and groups[i+1],
-   *  aggregated by displayed type. Undefined for non-minimal builds
-   *  (标准/简化 decks keep their round-19/20 look; 手动 drops are the
-   *  user's own choice and stay named in the run log only). */
+  /** v3.62: per-GAP omitted-stage notes: omissions[i] lists the stages
+   *  removed between groups[i] and groups[i+1], aggregated by displayed
+   *  type. v3.73: carried by 极简 AND 标准/简化 builds (the 极简 curation
+   *  and the round-32 classification-only middle filter both name their
+   *  drops on the slide); 手动 drops are the user's own choice and stay
+   *  named in the run log only. */
   omissions?: FlowOmission[][];
 }
 
@@ -256,6 +257,19 @@ export interface BuildModelOptions {
    *      NON-default resolution stays. A default-12 Å ab-initio
    *      FINAL's resolution info is ignored as well. */
   simplified?: boolean;
+  /** v3.73 (round-32 “简化和标准模式下的pptx报告也要参考极简的pptx进行
+   *  优化，中间步骤只展示分类结果，non-uniform或local refinement或
+   *  import volume等都省略掉”): 标准/简化 builds curate their MIDDLE
+   *  rows from CLASSIFICATION jobs only (the 极简 rule since v3.63) —
+   *  import_* members never render as stages (pure data inputs), and a
+   *  middle row survives only when EVERY item is a classification job
+   *  (hetero_refine / homo_abinit / class_3D); Non-uniform / Local
+   *  refinement / homo refinement / post-processing middles drop with a
+   *  named warning + per-gap “omitted: N×” notes (model.omissions —
+   *  now computed for 标准/简化 too). The FIRST and LAST rows are the
+   *  deck's anchors and never drop here. Defaults to TRUE; the manual
+   *  catalog passes false (手动勾选 = the user's own trim). */
+  classificationMiddles?: boolean;
 }
 
 /** v3.54: a 2D-classification / 2D-selection / ab-initio stage whose
@@ -757,6 +771,11 @@ export function buildFlowFigureModel(
    *  for the per-gap omission notes. */
   const minimal = !!opts.minimal;
   let minimalMainline: Array<{ uid: string; label: string }> | null = null;
+  /* v3.73: the 标准/简化 omission-notes mainline — [select_2D?] + the
+   *  volume spine ancestor→final (imports INCLUDED so a dropped import
+   *  stage still gets named in its gap note). */
+  let standardMainline: Array<{ uid: string; label: string }> | null = null;
+  let s2dMainlineHead: { uid: string; label: string } | null = null;
 
   const spineMapOrder = [...chain].reverse().filter((n) => hasMaps(n.uid));
 
@@ -928,6 +947,9 @@ export function buildFlowFigureModel(
         },
       ]);
       usedUids.add(s2d.uid);
+      /* v3.73: the 2D montage row is the omission mainline's head — gaps
+       *  below it index correctly even though it is not on the spine. */
+      s2dMainlineHead = { uid: s2d.uid, label: jobTypeLabel(s2d.job_type) };
     }
   }
 
@@ -989,6 +1011,29 @@ export function buildFlowFigureModel(
     staged = dropSimplifiedRedundant(staged, summary.start_uid, graph, warnings);
   }
 
+  /* v3.73 (round-32 “简化和标准模式下的pptx报告也要参考极简的pptx进行
+   *  优化，中间步骤只展示分类结果，non-uniform或local refinement或
+   *  import volume等都省略掉”): the SAME classification-only middle rule
+   *  the 极简 deck has used since v3.63, now on the 标准/简化 merge
+   *  assembly — import_* members strip everywhere (data inputs, not
+   *  workflow steps; the 极简 walk has always excluded them) and middle
+   *  rows survive only when EVERY item is a classification job. First /
+   *  last rows never drop here. The drops surface as warnings + per-gap
+   *  “omitted: N×” notes (model.omissions below). Manual catalogs pass
+   *  classificationMiddles:false — 勾选 is the user's own trim. */
+  const middlesCurated = !minimal && opts.classificationMiddles !== false;
+  if (middlesCurated && staged.length) {
+    staged = dropNonClassificationMiddles(staged, warnings);
+  }
+  /* v3.73: the 标准/简化 omission mainline — [2D montage?] + the spine
+   *  (ancestor → final, imports included so their drops get named). */
+  if (!minimal) {
+    standardMainline = [
+      ...(s2dMainlineHead ? [s2dMainlineHead] : []),
+      ...spineMapOrder.map((n) => ({ uid: n.uid, label: jobTypeLabel(n.job_type) })),
+    ];
+  }
+
   /* v3.62 (round-21, the uploaded P268 deck's back-to-back “Ab-initio
    * reconstruction” rows): the 极简 mainline MERGES consecutive
    * same-type stages into ONE “N× <type>” row BEFORE the row cap —
@@ -1031,7 +1076,12 @@ export function buildFlowFigureModel(
   const omissions =
     minimal && minimalMainline
       ? computeMinimalOmissions(folded, minimalMainline, mergedInto)
-      : undefined;
+      : /* v3.73: 标准/简化 builds carry per-gap “omitted: N×” notes too —
+         *  the classification-only middle filter + the row cap both name
+         *  their drops on the slide instead of only in the run log. */
+        !minimal && middlesCurated && standardMainline
+        ? computeMinimalOmissions(folded, standardMainline, null)
+        : undefined;
 
   // v3.54 (round-13 “简化模式”): enforce the 多→少 reading over the
   // DISPLAYED count lines (stage-to-stage; the header's pick count is
@@ -1430,6 +1480,65 @@ function computeMinimalOmissions(
     out.push([...byLabel].map(([label, count]) => ({ label, count })));
   }
   return out;
+}
+
+/** v3.73 (round-32 “简化和标准模式下的pptx报告也要参考极简的pptx进行
+ *  优化，中间步骤只展示分类结果，non-uniform或local refinement或
+ *  import volume等都省略掉”): the 标准/简化 middle curation — the 极简
+ *  rule (v3.63) applied to the merge assembly:
+ *  - import_* members strip from EVERY group (import volumes and other
+ *    seeds are data INPUTS, not workflow steps — the 极简 walk has always
+ *    excluded them; a group that empties disappears);
+ *  - a MIDDLE row (strictly between the first and last displayed rows)
+ *    survives only when EVERY item is a classification job
+ *    (isClassificationJobType: hetero_refine / homo_abinit / class_3D) —
+ *    Non-uniform / Local refinement / homo refinement / post-processing
+ *    middles drop with a named warning and live on in the per-gap
+ *    “omitted: N×” notes (the caller's computeMinimalOmissions);
+ *  - the FIRST and LAST rows never drop here — they anchor the funnel
+ *    (2D montage entry / final map + resolution).
+ *  A pure pass-through when nothing qualifies (≤2 rows). */
+function dropNonClassificationMiddles(
+  groups: FlowFigureItem[][],
+  warnings: string[],
+): FlowFigureItem[][] {
+  /* 1. strip import_* members everywhere (a group may keep its other
+   *    members — a parallel [import, hetero] pair renders the hetero). */
+  const noImports = groups
+    .map((g) => g.filter((it) => !/^import_/i.test(it.jobType ?? "")))
+    .filter((g) => g.length > 0);
+  const importStripped = groups.reduce((s, g) => s + g.length, 0) -
+    noImports.reduce((s, g) => s + g.length, 0);
+  const importGroupsGone = groups.length - noImports.length;
+  if (importStripped > 0) {
+    warnings.push(
+      `中间步骤精选: 已省略 ${importStripped} 个导入/种子阶段（Import volume 等纯数据输入，不作为流程步骤展示${importGroupsGone > 0 ? `，${importGroupsGone} 个仅含导入阶段的行整体移除` : ""}）。`,
+    );
+  }
+  if (noImports.length <= 2) return noImports.length ? noImports : groups;
+  /* 2. classification-only middles. */
+  const isClassRow = (g: FlowFigureItem[]) =>
+    g.length > 0 && g.every((it) => isClassificationJobType(it.jobType));
+  const lastIdx = noImports.length - 1;
+  const kept: FlowFigureItem[][] = [];
+  const dropped: Array<{ label: string; count: number }> = [];
+  const byLabel = new Map<string, number>();
+  noImports.forEach((g, i) => {
+    if (i > 0 && i < lastIdx && !isClassRow(g)) {
+      g.forEach((it) => byLabel.set(it.label, (byLabel.get(it.label) ?? 0) + 1));
+      return;
+    }
+    kept.push(g);
+  });
+  dropped.push(...[...byLabel].map(([label, count]) => ({ label, count })));
+  if (dropped.length) {
+    warnings.push(
+      `中间步骤精选: 中间行仅保留分类结果（Hetero refinement / Ab-initio / 3D 分类）— 已省略 ${dropped
+        .map((d) => `${d.count}× ${d.label}`)
+        .join("、")}（首行与末行不受影响；省略步骤在图上以「omitted: N×」注明）。`,
+    );
+  }
+  return kept;
 }
 
 /** v3.55 (round-14): does this node read as an UNREFINED default-12 Å

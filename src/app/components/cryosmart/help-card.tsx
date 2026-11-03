@@ -12,39 +12,20 @@ import { Download, BookOpen, FlaskConical, Terminal, FileCode2, ArrowRight, Info
 // shipped inside <SmartCapturePanel />). This Help card reflects that —
 // the "how to get metadata" accordion now presents just one method.
 //
-// The ChimeraX desktop helpers are still 4 files, but the recommended
-// workflow is the one-shot `CryoSmart_auto_align_export_ppt.py`; the
-// two individual scripts are kept as advanced components for users who
-// want manual control.
+// v3.73 (round-32): the four legacy picture-flow desktop helpers (the
+// one-shot align+export ChimeraX script, its two components, and the
+// standalone Node PPTX rebuilder) are REMOVED — the Workflow Figure
+// card's relay bridge (CryoSmart_flow_relay.py) drives ChimeraX directly
+// from the page (alignment, chirality, screenshots, deck assembly), so
+// the downloadable list below carries just that bridge script.
 
 const HELPER_FILES = [
   {
-    name: "CryoSmart_auto_align_export_ppt.py",
-    desc: "Recommended one-shot pipeline: opens all lineage maps in ChimeraX, tests 5 alignment hypotheses per terminal map (original + 3 axis flips + z-flip), picks the best by correlation, optimises the 90° view by thumbnail coverage, exports PNGs, white-balances & uniformly crops them, then substitutes them into the PPTX by matching the `name=\"CryoSmartImage:<key>\"` marker.",
-    size: "42 KB",
-    url: "/helpers/CryoSmart_auto_align_export_ppt.py",
+    name: "CryoSmart_flow_relay.py",
+    desc: "The ChimeraX bridge script the Workflow Figure card drives: open it once inside ChimeraX (open https://<this-site>/api/cryosmart/flow-figure/relay.py) and the page can then command ChimeraX remotely — map download into a persistent local cache dir, 8-candidate dual-hand alignment, 90° view unification, screenshot return, reference-hand (EMalign) verification and delivery-file export. Keep ChimeraX open afterwards.",
+    size: "66 KB",
+    url: "/helpers/CryoSmart_flow_relay.py",
     recommended: true,
-  },
-  {
-    name: "CryoSmart_align_maps_check_view.py",
-    desc: "Advanced component (Step 1 of the manual workflow): the align + optimise half of the one-shot script — runs the 5-hypothesis alignment + 90° view optimisation, writes `chimerax_rendered_maps/alignment_debug.log` + a manifest, but does NOT export. Use this when you want to inspect intermediate state before exporting.",
-    size: "32 KB",
-    url: "/helpers/CryoSmart_align_maps_check_view.py",
-    recommended: false,
-  },
-  {
-    name: "CryoSmart_export_current_view_ppt.py",
-    desc: "Advanced component (Step 2 of the manual workflow): the export half of the one-shot script — assumes alignment is already done. After you manually adjust the camera in ChimeraX, runs `save` for each volume, white-balances & uniformly crops all PNGs, then substitutes them into the PPTX.",
-    size: "14 KB",
-    url: "/helpers/CryoSmart_export_current_view_ppt.py",
-    recommended: false,
-  },
-  {
-    name: "rebuild_picture_flow_pptx.mjs",
-    desc: "Standalone Node ESM script that rebuilds the Picture Flow PPTX from the lineage JSON (no pptxgenjs — hand-rolled OOXML + ZIP). Run with `node rebuild_picture_flow_pptx.mjs path/to/*_lineage.json`.",
-    size: "27 KB",
-    url: "/helpers/rebuild_picture_flow_pptx.mjs",
-    recommended: false,
   },
 ];
 
@@ -56,10 +37,10 @@ export function HelpCard() {
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-slate-700 text-[13px] font-bold text-white">
             <BookOpen className="h-4 w-4" />
           </span>
-          <CardTitle className="text-lg">Help & ChimeraX Helper Scripts</CardTitle>
+          <CardTitle className="text-lg">Help & ChimeraX Bridge</CardTitle>
         </div>
         <CardDescription className="mt-1.5 pl-9 text-[13px]">
-          How to capture CryoSmart metadata with the in-page Smart Capture console snippet, the browser-portability verdict, and the downloadable ChimeraX desktop helper scripts.
+          How to capture CryoSmart metadata with the in-page Smart Capture console snippet, the browser-portability verdict, and the ChimeraX bridge script for the one-click workflow figure.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -111,7 +92,7 @@ export function HelpCard() {
               <ul className="mb-2 ml-5 list-disc space-y-1">
                 <li><strong className="text-emerald-700 dark:text-emerald-400">Pure JS logic (~6500 lines)</strong> — verbatim port. All the lineage tracing, BFS walk, HTML/SVG/PPTX report generation, and the hand-rolled ZIP writer run client-side.</li>
                 <li><strong className="text-amber-700 dark:text-amber-400">DOM scraper (1575 lines)</strong> — replaced by <strong>Smart Capture</strong>: a console snippet you paste into the CryoSmart page&apos;s DevTools console. It runs same-origin with your cookie + bearer token auto-attached, reads the Vue Pinia store directly (so it captures full metadata the legacy DOM scraper could not), uploads it to this web app, and opens a new tab with everything loaded.</li>
-                <li><strong className="text-rose-700 dark:text-rose-400">ChimeraX Python scripts (~2300 lines)</strong> — kept as downloadable desktop helpers. They require ChimeraX (UCSF molecular visualization software) which cannot run in a browser.</li>
+                <li><strong className="text-rose-700 dark:text-rose-400">ChimeraX Python scripts (~2300 lines)</strong> — superseded by the <strong>ChimeraX relay bridge</strong>: the Workflow Figure card drives ChimeraX directly from the page (one <code className="font-mono">open …/relay.py</code> in ChimeraX, then alignment, chirality and screenshots all run remotely).</li>
               </ul>
               <p>
                 The result is a web app that works in <strong>Chrome, Firefox, Safari, Edge</strong> — any browser that supports ES2020 — without installing any extension.
@@ -143,7 +124,7 @@ export function HelpCard() {
                 </div>
               </div>
               <p className="text-[12.5px] leading-relaxed text-slate-600 dark:text-slate-300">
-                以下桌面脚本（A4 竖版 picture_flow PPTX）仍随每个下载包提供，作为高级/离线方案：
+                唯一需要的桌面脚本就是上面的桥接脚本（在 ChimeraX 中 open 一次即可）。旧的 A4 picture_flow PPTX 桌面链路（3 个 ChimeraX 脚本 + 独立 Node 重打包器）已在 v3.73 移除 — 网页流程图卡片已完全取代它们（对齐、手性、截图、组装全在网页内完成）：
               </p>
               <div className="grid grid-cols-1 gap-2">
                 {HELPER_FILES.map((f) => (
@@ -162,7 +143,7 @@ export function HelpCard() {
                         <Badge variant="outline" className="px-1.5 py-0 text-[9px] text-slate-500 dark:text-slate-400">{f.size}</Badge>
                         {f.recommended && (
                           <Badge className="bg-teal-100 px-1.5 py-0 text-[9px] text-teal-700 hover:bg-teal-100 dark:bg-teal-900/40 dark:text-teal-300">
-                            recommended
+                            required for ChimeraX mode
                           </Badge>
                         )}
                       </div>
@@ -175,16 +156,6 @@ export function HelpCard() {
                     </Button>
                   </div>
                 ))}
-              </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11.5px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-                <div className="mb-1 font-medium text-slate-700 dark:text-slate-200">Recommended ChimeraX workflow (one method):</div>
-                <ol className="ml-4 list-decimal space-y-0.5">
-                  <li>Download the lineage bundle (above) and unzip.</li>
-                  <li>Open ChimeraX, then run <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">open CryoSmart_auto_align_export_ppt.py</code> — this single script aligns all maps, optimises the 90° view, exports white-balanced cropped PNGs, and substitutes them into <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">{`*_picture_flow.pptx`}</code> as <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">{`*_chimerax.pptx`}</code>.</li>
-                </ol>
-                <div className="mt-2 rounded-md border border-slate-200 bg-white p-2 text-[11px] dark:border-slate-700 dark:bg-slate-900">
-                  <strong>Advanced (manual control):</strong> if you need to inspect intermediate state, run <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">CryoSmart_align_maps_check_view.py</code> first (writes <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">chimerax_rendered_maps/alignment_debug.log</code> + a manifest), inspect or manually rotate to your preferred view, then run <code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">CryoSmart_export_current_view_ppt.py</code> to export. These are the two halves of the one-shot script, kept as individual components.
-                </div>
               </div>
             </AccordionContent>
           </AccordionItem>
@@ -231,8 +202,8 @@ export function HelpCard() {
                     <Row c="popup.js chrome.* glue (tabs, downloads, scripting)" l="~600" s="Replaced with fetch + Blob + &lt;a download&gt;" tone="amber" />
                     <Row c="content.js DOM scraper" l="1575" s="Replaced with Smart Capture console snippet" tone="amber" />
                     <Row c="background.js (service worker)" l="37" s="Dropped (Blob download)" tone="rose" />
-                    <Row c="rebuild_picture_flow_pptx.mjs (Node)" l="454" s="Ported to TS + kept as downloadable helper" tone="emerald" />
-                    <Row c="3 ChimeraX Python scripts" l="~2300" s="Kept as downloadable desktop helpers" tone="rose" />
+                    <Row c="rebuild_picture_flow_pptx.mjs (Node)" l="454" s="Removed in v3.73 — the Workflow Figure card builds the deck in-page" tone="rose" />
+                    <Row c="3 ChimeraX Python scripts" l="~2300" s="Removed in v3.73 — superseded by the relay bridge (relay.py)" tone="rose" />
                   </tbody>
                 </table>
               </div>
