@@ -46,6 +46,21 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         报错且保持原目录。切换后 /fetch、/stage、/staged
                         全部改用新目录；原目录中已缓存的地图不会移动
                         （需要沿用请手动复制过去）。
+      POST /deliver     v3.72 交付文件下载：把最终结果（手性纠正后的
+                        map / FSC / Guinier / 角度分布 / fsc.xml）写入
+                        ChimeraX 机器上的交付目录（网页「交付文件」输入框
+                        驱动）。body 四选一：
+                          {"src": 本地绝对路径, "dst": 绝对目标路径}
+                              — 复制本地文件（地图先入缓存再复制，原样交付
+                                字节一致）；
+                          {"url": ..., "dst": ...}
+                              — 由本桥直接下载到目标路径（小图/xml）；
+                          {"data_base64": ..., "dst": ...}
+                              — 写入页面内嵌字节（已捕获的 fsc.xml 文本）；
+                          {"stat": 绝对路径}
+                              — 探测文件存在/大小（ChimeraX save 后验证）。
+                        目标目录不存在自动创建；写入原子（.part + rename）；
+                        Windows 非法文件名字符自动剔除。
       GET  /staged       v3.56 地图本地缓存查询：?name= 返回该缓存文件
                         是否存在（+ 本地绝对路径/大小/mtime）；不带 ?name=
                         返回整个缓存目录清单。缓存目录在系统 temp 下固定
@@ -71,8 +86,10 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
 时桥随之消失，下次重新 open 一次。
 """
 
+import base64 as _base64
 import json
 import os
+import shutil
 import socket
 import tempfile
 import threading
@@ -425,6 +442,125 @@ def main(session):
         return {"ok": True, "dir": staging_dir, "previous": old,
                 "cached": len(_cache_entries())}
 
+    def _sanitize_deliver_name(name):
+        """v3.72: keep the page's canonical delivery basenames
+        (Tigr.volume.map_unsharp, …) but strip characters Windows forbids
+        in file names (<>:"|?* + control chars) and trailing dots/spaces."""
+        out = []
+        for ch in str(name or ""):
+            if ch in '<>:"|?*' or ord(ch) < 32:
+                continue
+            out.append(ch)
+        return "".join(out).rstrip(" .")
+
+    def deliver_payload(payload):
+        """v3.72 (round-31 交付文件下载): write ONE delivery file into the
+        user's DELIVERY dir on THIS (ChimeraX) machine. Sources (pick one):
+          {"src": abs local path, "dst": abs dst path} — copy a local file
+              (the card hands the map's CACHE path; bytes identical),
+          {"url": url, "dst": ...} — download straight to dst (plots/xml),
+          {"data_base64": ..., "dst": ...} — write embedded bytes,
+          {"stat": abs path} — existence/size probe (verifies a ChimeraX
+              `save` actually landed after a chirality flip).
+        The dst DIR is created when missing and probed for writability
+        (same policy as /cachedir); the write itself is ATOMIC (.part +
+        os.replace) so an interrupted delivery can never leave a half map
+        under the delivery name. Runs on the handler thread — no ChimeraX
+        command involved (the flip+save path is driven by the page via
+        /exec and only verified here with stat)."""
+        if payload.get("stat"):
+            p = str(payload.get("stat") or "").strip()
+            if not p:
+                return {"ok": False, "error": "missing stat path"}
+            try:
+                if os.path.isfile(p):
+                    return {"ok": True, "exists": True, "path": p,
+                            "size": os.path.getsize(p)}
+                return {"ok": True, "exists": False, "path": p}
+            except OSError as exc:
+                return {"ok": False,
+                        "error": "%s: %s" % (type(exc).__name__, exc)}
+        dst = str(payload.get("dst") or "").strip()
+        if not dst:
+            return {"ok": False, "error": "missing dst"}
+        if not os.path.isabs(dst):
+            return {"ok": False,
+                    "error": "需要绝对路径（如 D:\\data\\Tigr.volume.map）: %s" % dst}
+        norm = dst.replace("\\", "/")
+        if "/" not in norm or norm.endswith("/"):
+            return {"ok": False, "error": "dst 需为完整文件路径（含文件名）"}
+        dstdir, raw_name = norm.rsplit("/", 1)
+        if not dstdir or dstdir.endswith(":"):
+            return {"ok": False, "error": "交付目录无效: %s" % dstdir}
+        safe = _sanitize_deliver_name(raw_name)
+        if not safe:
+            return {"ok": False, "error": "文件名无效: %s" % raw_name}
+        try:
+            os.makedirs(dstdir, exist_ok=True)
+            probe = os.path.join(dstdir, ".cryoflow_write_test")
+            with open(probe, "wb") as fh:
+                fh.write(b"ok")
+            os.remove(probe)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the page
+            return {"ok": False,
+                    "error": "交付目录不可用 %s: %s: %s"
+                             % (dstdir, type(exc).__name__, exc)}
+        final = os.path.join(dstdir, safe)
+        src = str(payload.get("src") or "").strip()
+        url = str(payload.get("url") or "").strip()
+        b64 = payload.get("data_base64")
+        part = "%s.%d.part" % (final, threading.get_ident())
+        try:
+            if src:
+                if not os.path.isabs(src):
+                    return {"ok": False, "error": "src 需为绝对路径: %s" % src}
+                if not os.path.isfile(src):
+                    return {"ok": False, "error": "源文件不存在: %s" % src}
+                shutil.copyfile(src, part)
+            elif b64:
+                data = _base64.b64decode(str(b64))
+                if not data:
+                    raise RuntimeError("empty payload (0 bytes)")
+                with open(part, "wb") as f:
+                    f.write(data)
+            elif url:
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "CryoSmart-Flow-Relay/3.72"})
+                try:
+                    resp = urllib.request.urlopen(req, timeout=120)
+                except Exception:
+                    proxy_env = [k for k in ("http_proxy", "https_proxy",
+                                             "HTTP_PROXY", "HTTPS_PROXY",
+                                             "all_proxy", "ALL_PROXY")
+                                 if os.environ.get(k)]
+                    if not proxy_env:
+                        raise
+                    opener = urllib.request.build_opener(
+                        urllib.request.ProxyHandler({}))
+                    resp = opener.open(req, timeout=120)
+                with resp, open(part, "wb") as f:
+                    while True:
+                        chunk = resp.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                if os.path.getsize(part) <= 0:
+                    raise RuntimeError("empty download (0 bytes)")
+            else:
+                return {"ok": False, "error": "缺少 src/url/data_base64 之一"}
+            if not os.path.exists(part) or os.path.getsize(part) <= 0:
+                raise RuntimeError("nothing written for %s" % safe)
+            os.replace(part, final)
+            return {"ok": True, "path": final, "size": os.path.getsize(final)}
+        except Exception as exc:  # noqa: BLE001 - surfaced to the page
+            try:
+                if os.path.exists(part):
+                    os.remove(part)
+            except OSError:
+                pass
+            return {"ok": False,
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+
     def stage_file(data, name):
         """v3.47: write uploaded bytes into the ChimeraX-side staging dir and
         return the local absolute path. ChimeraX cannot open http MRC URLs
@@ -542,6 +678,12 @@ def main(session):
                         # send it and the page hides the input + shows an
                         # upgrade hint instead.
                         "cachedir_set": True,
+                        # v3.72: the page checks this to know POST /deliver
+                        # (delivery-file writes into the user's 交付目录:
+                        # local copy / url download / embedded bytes / stat)
+                        # exists — older copies don't send it and the page
+                        # skips the delivery phase with an upgrade hint.
+                        "deliver": True,
                         "cacheDir": staging_dir,
                         "cached": sum(1 for _ in _cache_entries()),
                         "volumes": sum(1 for m in ui_run(lambda: list(session.models.list()))
@@ -653,6 +795,23 @@ def main(session):
                     except Exception:
                         payload = {}
                     self._reply(200, set_cache_dir(payload.get("dir")))
+                    return
+                if r.path == "/deliver":
+                    # v3.72 (round-31 交付文件下载): body {src|url|data_base64
+                    # |stat, dst} — write one delivery file into the user's
+                    # 交付目录 on THIS machine (maps: cache copy or the
+                    # ChimeraX flip+save the page drives via /exec, verified
+                    # here by stat; plots/xml: direct url download or
+                    # embedded bytes). See deliver_payload().
+                    length = int(self.headers.get("Content-Length") or 0)
+                    body = self.rfile.read(length) if length else b"{}"
+                    try:
+                        payload = json.loads(body.decode("utf-8") or "{}")
+                    except Exception:
+                        payload = {}
+                    if not isinstance(payload, dict):
+                        payload = {}
+                    self._reply(200, deliver_payload(payload))
                     return
                 if r.path == "/stage":
                     # v3.47: body = raw bytes; name = X-Filename header or

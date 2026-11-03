@@ -38,7 +38,7 @@
  *                   'enrich' phase must have streamed.
  */
 import { _REPORT_HTML_V2_SCRIPT } from "../../src/lib/cryosmart/report-html";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 
@@ -707,6 +707,9 @@ const relayState = {
    *  it at runtime (mirrors relay.py); staged bytes stay keyed by their
    *  full path so a switch does NOT "move" already-cached maps. */
   cacheDir: "/tmp/cryoflow-mock/staged",
+  /** v3.72: every successful POST /deliver + `save … format mrc` write —
+   *  keyed by the final dst path (the E2E asserts the delivered set). */
+  delivered: new Map<string, { src: string; size: number }>(),
   /** v3.47: /flow-e2e/reset?http=block — all http opens fail 503. */
   httpBlocked: false,
   /** v3.48: `save image …` commands rejected (not a ChimeraX command). */
@@ -765,6 +768,7 @@ function resetRelayState() {
   relayState.opens = [];
   relayState.commands = [];
   relayState.staged.clear();
+  relayState.delivered.clear();
   relayState.httpBlocked = false;
   relayState.saveImageRejected = 0;
   relayState.saveRejected = false;
@@ -1014,6 +1018,28 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   //     whose path resolution diverged from the bridge's join.
   //   - RELATIVE bare name → lands in the process CWD; only /file-fetchable
   //     once `cd <workdir>` ran (the bridge's cd-rel rung).
+  // v3.72: `save "<dst>" models #N [format mrc]` — deliverFlippedMap's
+  // chirality-corrected MRC write (open cached map → volume flip → save
+  // straight into the 交付目录). The mock writes REAL bytes to disk so the
+  // page's /deliver {stat} verification finds them.
+  const saveMrcMatch = /^save\s+"([^"]+)"\s+models\s+#(\d+)(?:\s+format\s+mrc)?\s*$/i.exec(command);
+  if (saveMrcMatch) {
+    const modelId = parseInt(saveMrcMatch[2], 10);
+    const model = relayState.models.get(modelId);
+    const dst = saveMrcMatch[1];
+    try {
+      const norm = dst.replace(/\\/g, "/");
+      const dir = norm.slice(0, norm.lastIndexOf("/"));
+      mkdirSync(dir, { recursive: true });
+      const bytes = mrcBytes(model?.url || norm);
+      writeFileSync(norm, bytes);
+      relayState.delivered.set(norm, { src: `flip:${model?.url ?? "?"}`, size: bytes.length });
+      return { text: `saved ${dst}`, error: null };
+    } catch (err) {
+      return { text: "", error: `OSError: ${String(err)}` };
+    }
+  }
+
   const cdMatch = /^cd\s+"([^"]+)"\s*$/i.exec(command);
   if (cdMatch) {
     if (cdMatch[1] === relayState.workdir) {
@@ -1108,6 +1134,10 @@ const relayServer = Bun.serve({
           // v3.70: mirrors relay.py's POST /cachedir — the 桥接面板's
           // 下载目录 input enables only when this flag is present.
           cachedir_set: true,
+          // v3.72: mirrors relay.py's POST /deliver — the card's 交付文件
+          // phase (delivery writes into the user's 交付目录) arms only when
+          // this flag is present.
+          deliver: true,
           cacheDir: relayState.cacheDir,
           cached: relayState.staged.size,
           volumes: relayState.models.size,
@@ -1183,6 +1213,75 @@ const relayServer = Bun.serve({
         const previous = relayState.cacheDir;
         relayState.cacheDir = dir;
         return reply(200, { ok: true, dir, previous, cached: relayState.staged.size });
+      }
+      if (req.method === "POST" && u.pathname === "/deliver") {
+        // v3.72: mirrors relay.py's POST /deliver — write ONE delivery file
+        // into the user's 交付目录 ({src,dst} cache copy | {url,dst} |
+        // {data_base64,dst} | {stat} probe). The mock writes REAL files to
+        // disk (atomic .part + rename) so the browser E2E can assert the
+        // delivered set on the filesystem; src reads the in-memory staged
+        // cache first (the mock /fetch never touches disk), then disk.
+        const body = (await req.json().catch(() => ({}))) as Record<string, string>;
+        if (body.stat) {
+          try {
+            if (existsSync(body.stat)) {
+              return reply(200, { ok: true, exists: true, path: body.stat, size: statSync(body.stat).size });
+            }
+            return reply(200, { ok: true, exists: false, path: body.stat });
+          } catch (err) {
+            return reply(200, { ok: false, error: String(err) });
+          }
+        }
+        const dst = (body.dst || "").trim();
+        if (!dst) return reply(200, { ok: false, error: "missing dst" });
+        if (!dst.startsWith("/")) {
+          return reply(200, { ok: false, error: "需要绝对路径: " + dst });
+        }
+        const norm = dst.replace(/\\/g, "/");
+        if (!norm.includes("/") || norm.endsWith("/")) {
+          return reply(200, { ok: false, error: "dst 需为完整文件路径（含文件名）" });
+        }
+        const slash = norm.lastIndexOf("/");
+        const dstdir = norm.slice(0, slash);
+        const rawName = norm.slice(slash + 1);
+        const safe = rawName.replace(/[<>:"|?*\x00-\x1f]/g, "").replace(/[.\s]+$/, "");
+        if (!safe) return reply(200, { ok: false, error: "文件名无效: " + rawName });
+        try {
+          mkdirSync(dstdir, { recursive: true });
+        } catch (err) {
+          return reply(200, { ok: false, error: `交付目录不可用 ${dstdir}: ${String(err)}` });
+        }
+        const finalPath = `${dstdir}/${safe}`;
+        const partPath = `${finalPath}.deliver.part`;
+        const src = (body.src || "").trim();
+        try {
+          let bytes: Uint8Array | null = null;
+          if (src) {
+            const cached = relayState.staged.get(src);
+            if (cached) bytes = cached.bytes;
+            else if (existsSync(src)) bytes = new Uint8Array(readFileSync(src));
+            else return reply(200, { ok: false, error: "源文件不存在: " + src });
+          } else if (body.data_base64) {
+            bytes = Uint8Array.from(atob(body.data_base64), (c) => c.charCodeAt(0));
+            if (!bytes.length) return reply(200, { ok: false, error: "empty payload (0 bytes)" });
+          } else if (body.url) {
+            const res = await fetch(body.url, { redirect: "follow" });
+            if (!res.ok) return reply(200, { ok: false, error: `HTTP ${res.status}` });
+            bytes = new Uint8Array(await res.arrayBuffer());
+          } else {
+            return reply(200, { ok: false, error: "缺少 src/url/data_base64 之一" });
+          }
+          if (!bytes || !bytes.length) return reply(200, { ok: false, error: `nothing written for ${safe}` });
+          writeFileSync(partPath, bytes);
+          renameSync(partPath, finalPath);
+          relayState.delivered.set(finalPath, { src: src || body.url || "data", size: bytes.length });
+          return reply(200, { ok: true, path: finalPath, size: bytes.length });
+        } catch (err) {
+          try {
+            if (existsSync(partPath)) rmSync(partPath);
+          } catch {}
+          return reply(200, { ok: false, error: String(err) });
+        }
       }
       if (req.method === "POST" && u.pathname === "/stage") {
         // v3.47: mirrors relay.py's /stage — raw body bytes + X-Filename

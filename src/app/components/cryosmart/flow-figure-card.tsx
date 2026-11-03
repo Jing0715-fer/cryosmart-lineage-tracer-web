@@ -26,8 +26,12 @@ import {
   HardDrive,
   RefreshCw,
   FlipHorizontal2,
+  PackageOpen,
+  UploadCloud,
+  FileCheck2,
+  XCircle,
 } from "lucide-react";
-import type { LineageSummary } from "@/lib/cryosmart/types";
+import type { LineageSummary, LineageNode, MapAsset, ImageAsset } from "@/lib/cryosmart/types";
 import type { LoadedMetadata } from "./data-source-card";
 import {
   probeFlowBridge,
@@ -37,9 +41,12 @@ import {
   bridgeStagedLookup,
   bridgeFetchMap,
   bridgeSetCacheDir,
+  bridgeDeliverFile,
+  deliverFlippedMap,
   stagedMapFilename,
   type FlowTransport,
   type MapRender,
+  type ReferenceHandVerdict,
 } from "@/lib/cryosmart/chimerax-bridge";
 import {
   buildFlowFigureModel,
@@ -162,6 +169,346 @@ function triggerDownload(href: string, filename: string) {
   document.body.removeChild(a);
 }
 
+/* ------------------------------------------------------------------ */
+/* v3.72 (round-31 交付文件下载): the delivery plan                     */
+/* ------------------------------------------------------------------ */
+
+/** One file to write into the 交付目录 — maps (chirality-flippable) plus
+ *  the refine job's plots and fsc.xml. `urls` is a candidate LADDER
+ *  (captured asset URL first, constructed CryoSmart path as fallback —
+ *  best-effort like the bundle's final-results scan). */
+interface DeliverFileSpec {
+  /** Delivery basename, e.g. "Tigr.volume.map_sharp". */
+  filename: string;
+  /** Short log label, e.g. "sharp map". */
+  label: string;
+  /** Map files get the chirality flip treatment (z-flip on delivery when
+   *  the reference was verified/asserted mirrored). */
+  isMap: boolean;
+  /** Canonical cache key + extension (the /staged probe, /fetch download
+   *  and /stage upload all derive the SAME name from these). */
+  cacheKey: string;
+  cacheExt: string;
+  /** Embedded bytes (captured fsc.xml text) — first choice, no network. */
+  dataBase64?: string;
+  /** Candidate URLs in order (absolute; data: candidates fetch page-side). */
+  urls: string[];
+  /** Absent-source case (no DeepEMhancer job) — skipped, not an error. */
+  optional?: boolean;
+  optionalWhy?: string;
+}
+
+/** The per-file delivery outcome shown in the result panel. */
+interface DeliverOutcome {
+  filename: string;
+  label: string;
+  ok: boolean;
+  size?: number;
+  error?: string;
+  skipped?: boolean;
+}
+
+/** v3.72: UTF-8-safe base64 (btoa alone chokes on non-Latin1 chars). */
+function toBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
+/** v3.72: sanitize the delivery base name ("Tigr") — drop path separators
+ *  and Windows-invalid characters, keep letters/digits/._- and CJK. */
+function sanitizeDeliveryBase(raw: string): string {
+  return String(raw || "")
+    .replace(/[\\/:<>:"|?*\x00-\x1f]+/g, "")
+    .replace(/^[.\s]+|[.\s]+$/g, "")
+    .slice(0, 64);
+}
+
+/** v3.72: derive the delivery base from the 交付目录 — the user's example
+ *  "D:\\Lijing\\Tigr\\Tigr\\data" → "Tigr" (the directory ABOVE the data
+ *  dir, i.e. the project folder name). Falls back to the dir's own name
+ *  when there is no parent segment. */
+function deriveBaseFromDir(dir: string): string {
+  const segs = String(dir || "")
+    .replace(/[\\/]+$/, "")
+    .split(/[\\/]+/)
+    .filter((s) => s.length > 0 && !/^[A-Za-z]:$/.test(s));
+  if (segs.length >= 2) return sanitizeDeliveryBase(segs[segs.length - 2]);
+  if (segs.length === 1) return sanitizeDeliveryBase(segs[0]);
+  return "";
+}
+
+/** v3.72: does this job expose downloadable volume maps? */
+function nodeHasVolumeMaps(node: LineageNode | null | undefined): boolean {
+  if (!node) return false;
+  return (node.maps || []).some(
+    (m) =>
+      !!m.download_url &&
+      (m.group_type ? m.group_type === "volume" : !/mask/i.test(String(m.group || ""))) &&
+      !/mask|precision/i.test(String(m.result_name || "")),
+  );
+}
+
+/** v3.72: post-processing job types (DeepEMhancer / sharpen / density_mod)
+ *  — same shape workflow-figure's isPostProcessType uses. */
+function isPostProcessJobType(jobType: string): boolean {
+  return /sharpen|deep.*hancer|postprocess|density_mod/i.test(String(jobType || ""));
+}
+
+/** v3.72: find a volume map asset by result-name/group matchers (volume
+ *  group preferred over mask twins — the normalMapAssets rule). */
+function findVolumeAsset(
+  node: LineageNode,
+  match: (a: MapAsset) => boolean,
+): MapAsset | null {
+  const maps = (node.maps || []).filter((m) => !!m.download_url);
+  const volume = maps.filter(
+    (m) => m.group_type ? m.group_type === "volume" : !/mask/i.test(String(m.group || "")),
+  );
+  return volume.find(match) ?? maps.find(match) ?? null;
+}
+
+/** v3.72: a plot image's fetchable URL from a LineageNode's captured
+ *  images — absolute http(s) first, then a same-origin /api/… src (the
+ *  relay machine can reach the app origin — it fetched relay.py from
+ *  there), data: URLs last (fetched page-side, no relay fetch possible). */
+function plotImageUrl(im: ImageAsset): string | null {
+  const url = String(im.url || "");
+  const src = String(im.src || "");
+  for (const cand of [url, src]) {
+    if (/^https?:\/\//i.test(cand)) return cand;
+  }
+  if (src.startsWith("/")) {
+    try {
+      return `${window.location.origin}${src}`;
+    } catch {
+      return null;
+    }
+  }
+  if (/^data:/i.test(src) || /^data:/i.test(url)) return src || url;
+  return null;
+}
+
+/** v3.72 (round-31 交付文件下载): build the DELIVERY plan — the final
+ *  job's (or, when the final job is DeepEMhancer, its UPSTREAM refine
+ *  job's) deliverable set, exactly per the user's naming convention:
+ *    {base}.volume.map_unsharp / _sharp / _half_A / _half_B,
+ *    {base}.volume.map-DeepEMhancer (only when a post-process job exists),
+ *    {base}.volume.fsc.png / guinier_plot.png /
+ *    orientation_distribution.png / fsc.xml.
+ *  Every URL is a CANDIDATE LADDER (captured asset → constructed
+ *  CryoSmart download_result_file / log_image path); each candidate is
+ *  tried in order until one lands (best-effort per file, failures logged
+ *  but never fatal to the run). */
+function buildDeliveryPlan(
+  summary: LineageSummary,
+  model: FlowFigureModel,
+  base: string,
+): { refineUid: string | null; deepemUid: string | null; items: DeliverFileSpec[]; notes: string[] } {
+  const notes: string[] = [];
+  const items: DeliverFileSpec[] = [];
+  const nodeByUid = new Map<string, LineageNode>();
+  for (const n of summary.nodes || []) nodeByUid.set(n.uid, n);
+  if (summary.start_job?.uid) nodeByUid.set(summary.start_job.uid, summary.start_job);
+
+  const finalNode = summary.start_job ?? nodeByUid.get(summary.start_uid) ?? null;
+  const finalIsPost = finalNode ? isPostProcessJobType(finalNode.job_type) : false;
+
+  /* The upstream refine job: walk the parents (BFS) past post-processing
+   *  jobs to the nearest map-bearing refinement when the final job IS a
+   *  DeepEMhancer/sharpen; otherwise the final job itself. */
+  let refineNode: LineageNode | null = null;
+  if (finalNode && finalIsPost) {
+    const seen = new Set<string>([finalNode.uid]);
+    const queue = [...(finalNode.parents || [])];
+    let hops = 0;
+    while (queue.length && hops++ < 64) {
+      const uid = queue.shift()!;
+      if (seen.has(uid)) continue;
+      seen.add(uid);
+      const n = nodeByUid.get(uid);
+      if (!n) continue;
+      if (!isPostProcessJobType(n.job_type) && nodeHasVolumeMaps(n)) {
+        refineNode = n;
+        break;
+      }
+      for (const p of n.parents || []) if (!seen.has(p)) queue.push(p);
+    }
+    if (refineNode) {
+      notes.push(`最终 job ${finalNode.uid} 为后处理（${finalNode.title || finalNode.job_type}）— 交付文件取其上游 refine job ${refineNode.uid}`);
+    }
+  } else if (finalNode && nodeHasVolumeMaps(finalNode)) {
+    refineNode = finalNode;
+  }
+  if (!refineNode && model.referenceItem?.uid) {
+    const refNode = nodeByUid.get(model.referenceItem.uid) ?? null;
+    if (refNode && nodeHasVolumeMaps(refNode)) {
+      refineNode = refNode;
+      notes.push(`最终 job 无可下载地图 — 交付文件改取流程图参考 job ${refNode.uid}`);
+    }
+  }
+  if (!refineNode) {
+    notes.push("谱系中未找到可交付地图的 refine job — 交付文件下载跳过");
+    return { refineUid: null, deepemUid: null, items, notes };
+  }
+
+  const deepemNode = finalNode && finalIsPost ? finalNode : null;
+  const baseUrl = String(summary.base_url || "").replace(/\/$/, "");
+  const projectId = summary.project_uid || "P";
+  const constructed = (suffix: string) =>
+    `${baseUrl}/api/log_image/download_result_file/${projectId}/${refineNode!.uid}.volume.${suffix}`;
+
+  /* The four refine maps — captured asset first, constructed path as the
+   *  fallback (the bundle's final-results scan proved these paths). */
+  const mapEntries: Array<{
+    label: string;
+    suffix: string;
+    filename: string;
+    match: (a: MapAsset) => boolean;
+  }> = [
+    {
+      label: "unsharp map（未锐化）",
+      suffix: "map",
+      filename: `${base}.volume.map_unsharp`,
+      match: (a) => /^map$/i.test(String(a.result_name || "")),
+    },
+    {
+      label: "sharp map（锐化）",
+      suffix: "map_sharp",
+      filename: `${base}.volume.map_sharp`,
+      match: (a) => /sharp/i.test(String(a.result_name || "")) && !/half/i.test(String(a.result_name || "")),
+    },
+    {
+      label: "half map A",
+      suffix: "map_half_A",
+      filename: `${base}.volume.map_half_A`,
+      match: (a) => /half[\s_]?a/i.test(`${a.result_name || ""} ${a.group || ""}`),
+    },
+    {
+      label: "half map B",
+      suffix: "map_half_B",
+      filename: `${base}.volume.map_half_B`,
+      match: (a) => /half[\s_]?b/i.test(`${a.result_name || ""} ${a.group || ""}`),
+    },
+  ];
+  for (const e of mapEntries) {
+    const asset = findVolumeAsset(refineNode, e.match);
+    const urls = [asset?.download_url, constructed(e.suffix)].filter(
+      (u): u is string => !!u && /^https?:\/\//i.test(u),
+    );
+    items.push({
+      filename: e.filename,
+      label: e.label,
+      isMap: true,
+      cacheKey: `deliver_${refineNode.uid}_${e.suffix}`,
+      cacheExt: "mrc",
+      urls,
+      optional: !asset,
+      optionalWhy: asset ? undefined : `谱系捕获中未见 ${e.suffix} 的地图资源（将尝试构造的 CryoSPARC 下载路径）`,
+    });
+  }
+
+  /* The DeepEMhancer output map (only when the final job IS one). */
+  if (deepemNode) {
+    const asset = findVolumeAsset(deepemNode, (a) => /^map$/i.test(String(a.result_name || "")));
+    const urls: string[] = [];
+    if (asset?.download_url && /^https?:\/\//i.test(asset.download_url)) urls.push(asset.download_url);
+    const anyMap = asset ?? findVolumeAsset(deepemNode, () => true);
+    if (anyMap?.download_url && /^https?:\/\//i.test(anyMap.download_url) && !urls.includes(anyMap.download_url)) {
+      urls.push(anyMap.download_url);
+    }
+    if (urls.length) {
+      items.push({
+        filename: `${base}.volume.map-DeepEMhancer`,
+        label: `DeepEMhancer map（${deepemNode.uid}）`,
+        isMap: true,
+        cacheKey: `deliver_${deepemNode.uid}_deepem`,
+        cacheExt: "mrc",
+        urls,
+      });
+    } else {
+      notes.push(`后处理 job ${deepemNode.uid} 没有可下载的地图资源 — map-DeepEMhancer 不交付`);
+    }
+  }
+
+  /* Plots + fsc.xml from the REFINE job (captured images first, the
+   *  bundle-proven log_image pseudo-fileids as constructed fallbacks). */
+  const images = refineNode.images || [];
+  const plotEntries: Array<{
+    label: string;
+    filename: string;
+    cacheExt: string;
+    match: (im: ImageAsset) => boolean;
+    constructedUrl: string;
+  }> = [
+    {
+      label: "FSC 曲线图",
+      filename: `${base}.volume.fsc.png`,
+      cacheExt: "png",
+      match: (im) => /fsc/i.test(String(im.name || "")) && !/xml/i.test(String(im.name || "")),
+      constructedUrl: `${baseUrl}/api/log_image/fsc_1_FSC.png`,
+    },
+    {
+      label: "Guinier plot",
+      filename: `${base}.volume.guinier_plot.png`,
+      cacheExt: "png",
+      match: (im) => /guinier/i.test(String(im.name || im.log_text || "")),
+      constructedUrl: `${baseUrl}/api/log_image/guinier_1_Guinier_Plot.png`,
+    },
+    {
+      label: "角度分布图",
+      filename: `${base}.volume.orientation_distribution.png`,
+      cacheExt: "png",
+      match: (im) => /orientation|direction|angular/i.test(String(im.name || im.log_text || "")),
+      constructedUrl: `${baseUrl}/api/log_image/direction_distribution_1_Direction_Distribution.png`,
+    },
+  ];
+  for (const e of plotEntries) {
+    const urls: string[] = [];
+    for (const im of images) {
+      if (!e.match(im)) continue;
+      const u = plotImageUrl(im);
+      if (u && !urls.includes(u)) urls.push(u);
+    }
+    urls.push(e.constructedUrl);
+    items.push({
+      filename: e.filename,
+      label: e.label,
+      isMap: false,
+      cacheKey: `deliver_${refineNode.uid}_${e.cacheExt}`,
+      cacheExt: e.cacheExt,
+      urls,
+    });
+  }
+
+  /* fsc.xml — the captured XML text (embedded bytes, zero network) first,
+   *  then the captured ref URL, then the constructed volume/fsc.xml path. */
+  {
+    const fsc = refineNode.fsc_xml ?? null;
+    const spec: DeliverFileSpec = {
+      filename: `${base}.volume.fsc.xml`,
+      label: "FSC XML",
+      isMap: false,
+      cacheKey: `deliver_${refineNode.uid}_fscxml`,
+      cacheExt: "xml",
+      urls: [],
+    };
+    if (fsc?.xml && fsc.xml.trim()) {
+      spec.dataBase64 = toBase64(fsc.xml);
+    } else {
+      if (fsc?.url && /^https?:\/\//i.test(fsc.url)) spec.urls.push(fsc.url);
+      spec.urls.push(constructed("fsc.xml"));
+    }
+    items.push(spec);
+  }
+
+  return { refineUid: refineNode.uid, deepemUid: deepemNode?.uid ?? null, items, notes };
+}
+
 export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | null; loaded: LoadedMetadata | null }) {
   const [mode, setMode] = useState<FigureMode>("demo");
   const [bridge, setBridge] = useState<FlowTransport | null>(null);
@@ -181,6 +528,22 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
    * localStorage like the 下载目录. */
   const [refHandMode, setRefHandMode] = useState<RefHandModeOption>("auto");
   const [refHandAnchor, setRefHandAnchor] = useState("");
+  /* v3.72 (round-31 交付文件下载): the DELIVERY settings — the 交付目录 on
+   *  the ChimeraX machine (D:\Lijing\Tigr\Tigr\data) + the file-name base
+   *  auto-derived from it ("Tigr" — the directory ABOVE the data dir);
+   *  after every ChimeraX run the final result set (chirality-corrected
+   *  maps + plots + fsc.xml) is written there. Remembered in localStorage
+   *  like the 下载目录 / 参考手性 choices. */
+  const [deliverDir, setDeliverDir] = useState("");
+  const [deliverBase, setDeliverBase] = useState("");
+  const [deliverReport, setDeliverReport] = useState<DeliverOutcome[] | null>(null);
+  /* v3.72: the drag-dropped reference anchor (.pdb/.cif/.mrc) — uploaded
+   *  to the ChimeraX machine via /stage, its LOCAL path fills the 参照物
+   *  input (dropping also switches the policy to EMalign 参照物验证). */
+  const [anchorUploading, setAnchorUploading] = useState(false);
+  const [anchorDragOver, setAnchorDragOver] = useState(false);
+  const anchorFileInputRef = useRef<HTMLInputElement | null>(null);
+  const deliverAutoBaseRef = useRef("");
   const [step, setStep] = useState<StepState>(IDLE);
   const [includeFsc, setIncludeFsc] = useState(false);
   // v3.60 (round-19): the figure MODE — ONE dropdown (手动/标准/简化/极简)
@@ -363,6 +726,35 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
     } catch {}
   }, [refHandMode, refHandAnchor]);
 
+  /* v3.72: restore + persist the delivery settings (交付目录 + 文件名前缀)
+   *  — the base auto-follows the dir while the user has not overridden it
+   *  manually (the ref holds the last AUTO-derived value; once the typed
+   *  base differs, typing a new dir no longer overwrites it). */
+  useEffect(() => {
+    try {
+      const d = window.localStorage.getItem("cryoflow.deliverDir");
+      if (d) setDeliverDir(d);
+      const b = window.localStorage.getItem("cryoflow.deliverBase");
+      if (b) setDeliverBase(b);
+      deliverAutoBaseRef.current = d ? deriveBaseFromDir(d) : "";
+    } catch {}
+  }, []);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("cryoflow.deliverDir", deliverDir);
+      window.localStorage.setItem("cryoflow.deliverBase", deliverBase);
+    } catch {}
+  }, [deliverDir, deliverBase]);
+  useEffect(() => {
+    const derived = deriveBaseFromDir(deliverDir);
+    if (!derived) return;
+    // follow the dir while the base is empty or still the previous auto value
+    if (!deliverBase.trim() || deliverBase.trim() === deliverAutoBaseRef.current) {
+      deliverAutoBaseRef.current = derived;
+      setDeliverBase(derived);
+    }
+  }, [deliverDir, deliverBase]);
+
   /** v3.70 (round-29 “目前是先将所有的map下载到一个指定目录中吗？…没有
    * 看到UI中输入下载路径的窗口啊”): apply the 下载目录 input — POST
    * /cachedir switches the relay's persistent map-cache dir (created when
@@ -476,8 +868,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
    *  the relay's PERSISTENT map cache and every later run opens this map
    *  directly from disk instead of re-downloading it. */
   const stageViaRelay = useCallback(
-    async (transport: FlowTransport, key: string, url: string, bytes: Uint8Array, onLog?: (s: string) => void) => {
-      const name = stagedMapFilename(key, url);
+    async (transport: FlowTransport, key: string, url: string, bytes: Uint8Array, onLog?: (s: string) => void, ext = "mrc") => {
+      const name = stagedMapFilename(key, url, ext);
       onLog?.(`  上传中转 ${name} (${fmtSize(bytes.byteLength)})`);
       if (transport.kind !== "relay" || !transport.canStage) {
         throw new Error(
@@ -544,6 +936,61 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
     [],
   );
 
+  /** v3.72 (round-31 “给参考pdb的部分可以直接拖动pdb进去”): a dropped or
+   *  picked reference-anchor file (.pdb/.ent/.cif/.mmcif model or a
+   *  known-hand .mrc/.map volume) — the browser can only read its BYTES
+   * (never the original path), so the file is uploaded to the ChimeraX
+   * machine via relay /stage under a canonical cache name (a re-drop hits
+   * the cache), and the returned LOCAL path fills the 参照物 input —
+   * dropping also switches the 参考手性 policy to EMalign 参照物验证
+   *  (the anchor is exactly what that mode needs). */
+  const handleAnchorFile = useCallback(
+    async (file: File) => {
+      const t = bridge;
+      if (!t || t.kind !== "relay" || !t.canStage) {
+        toast.error("请先连接 ChimeraX 桥（relay）— 拖入的参照物需要先暂存到 ChimeraX 机器");
+        return;
+      }
+      const lower = file.name.toLowerCase();
+      const ext = /\.(pdb|ent)$/.test(lower)
+        ? "pdb"
+        : /\.(cif|mmcif)$/.test(lower)
+          ? "cif"
+          : /\.(mrc|mrcs|map|ccp4)$/.test(lower)
+            ? "mrc"
+            : null;
+      if (!ext) {
+        toast.error(`不支持的参照物类型 ${file.name} — 请使用 .pdb / .ent / .cif / .mmcif 模型或 .mrc / .map 地图`);
+        return;
+      }
+      setAnchorUploading(true);
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9._-]+/g, "_") || "anchor";
+        const key = `refanchor_${stem}`;
+        const urlId = `anchor-file:${file.name}:${bytes.byteLength}`;
+        const name = stagedMapFilename(key, urlId, ext);
+        let path: string | null = null;
+        const hit = await bridgeStagedLookup(t, name);
+        if (hit) {
+          path = hit.path;
+          pushLog(`参照物 ${file.name} 已在 ChimeraX 机器本地缓存（${fmtSize(hit.size)}）— 直接使用 ${path}`);
+        } else {
+          path = await stageViaRelay(t, key, urlId, bytes, pushLog, ext);
+        }
+        setRefHandAnchor(path);
+        if (refHandMode !== "anchor") setRefHandMode("anchor");
+        toast.success(`参照物已就绪: ${file.name} → ChimeraX 本机 ${path}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        toast.error(`参照物上传失败: ${msg.slice(0, 160)}`);
+      } finally {
+        setAnchorUploading(false);
+      }
+    },
+    [bridge, stageViaRelay, pushLog, refHandMode],
+  );
+
   const generate = useCallback(async () => {
     if (step.busy) return;
     /* v3.50: stale-bundle gate — a page older than the live server refuses
@@ -563,6 +1010,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
     setResult(null);
     setThumbs([]);
     setRenderReport([]);
+    setDeliverReport(null);
     setStep({ busy: true, phase: "准备", pct: 2, logs: [], error: null });
     pushLog(`流程图引擎 v${FLOW_ENGINE_VERSION}`);
 
@@ -663,6 +1111,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         );
       }
 
+      /* v3.72: hoisted for the DELIVERY phase at the tail — the chimerax
+       *  branch re-resolves `transport` several times (re-probe, ping
+       *  re-validation, 下载目录 re-apply); the final one must reach the
+       *  delivery block below, as must the reference-hand verdict (the
+       *  delivery flip decision reads it). */
+      let transportOut: FlowTransport | null = null;
+      let refHandVerdictOut: ReferenceHandVerdict | null = null;
+
       if (mode === "chimerax") {
         setStep((s) => ({ ...s, phase: "连接 ChimeraX", pct: 6 }));
         let transport = bridge ?? (await probeBridge());
@@ -687,7 +1143,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           try {
             const res = await fetch(`${transport.base}/ping`, { cache: "no-store" });
             if (res.ok) {
-              const data = (await res.json()) as { workdir?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean };
+              const data = (await res.json()) as { workdir?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean };
               if (typeof data.workdir === "string" && data.workdir !== transport.workdir) {
                 transport = {
                   ...transport,
@@ -697,14 +1153,15 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   cacheDir: data.cacheDir,
                   canFetchMaps: !!data.fetch,
                   canSetCacheDir: !!data.cachedir_set,
+                  canDeliver: !!data.deliver,
                   saveMode: undefined,
                   cdDone: false,
                 };
                 setBridge(transport);
                 pushLog(`桥接工作目录已更新: ${data.workdir}（ChimeraX/桥已重启 — 已自动重新校准）`);
               } else {
-                const next = { ...transport, canStage: !!data.stage, canCache: !!data.cache, cacheDir: data.cacheDir, canFetchMaps: !!data.fetch, canSetCacheDir: !!data.cachedir_set };
-                if (next.canStage !== transport.canStage || next.canCache !== transport.canCache || next.cacheDir !== transport.cacheDir || next.canFetchMaps !== transport.canFetchMaps || next.canSetCacheDir !== transport.canSetCacheDir) {
+                const next = { ...transport, canStage: !!data.stage, canCache: !!data.cache, cacheDir: data.cacheDir, canFetchMaps: !!data.fetch, canSetCacheDir: !!data.cachedir_set, canDeliver: !!data.deliver };
+                if (next.canStage !== transport.canStage || next.canCache !== transport.canCache || next.cacheDir !== transport.cacheDir || next.canFetchMaps !== transport.canFetchMaps || next.canSetCacheDir !== transport.canSetCacheDir || next.canDeliver !== transport.canDeliver) {
                   transport = next;
                   setBridge(transport);
                 }
@@ -740,8 +1197,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         pushLog(
           `桥接: ${transport.kind} ${transport.host}:${transport.port}` +
             (transport.kind === "relay" && transport.workdir ? ` · 工作目录 ${transport.workdir}` : "") +
-            `${transport.canFetchFiles ? "" : " (仅命令，无截图回传)"}`,
+            `${transport.canFetchFiles ? "" : " (仅命令，无截图回传)"}` +
+            `${transport.kind === "relay" && transport.canDeliver ? " · 支持交付下载" : ""}`,
         );
+        transportOut = transport;
 
         if (transport.kind === "rest") {
           // The official REST server cannot serve rendered PNGs back —
@@ -1060,6 +1519,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           onLog: pushLog,
           onProgress: (p) => setStep((s) => ({ ...s, phase: p.phase, pct: Math.max(s.pct, p.pct ?? s.pct) })),
         });
+        refHandVerdictOut = renderRes.referenceHand;
 
         const rendered = new Map<string, Uint8Array>();
         for (const r of renderRes.renders) {
@@ -1161,7 +1621,20 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       const downloadHref = serverUrl ?? blobUrl;
       triggerDownload(downloadHref, filename);
       setResult({ url: downloadHref, blobUrl, serverUrl, size: blob.size, filename });
-      setStep((s) => ({ ...s, busy: false, phase: "完成", pct: 100 }));
+      /* v3.72: the FINAL “完成” step now lands AFTER the delivery phase —
+       *  the PPTX is already in the user's hands (result set + auto
+       *  download above), but the progress bar keeps reporting the
+       *  delivery writes instead of jumping to 100% while several hundred
+       *  MB of maps still download. */
+      const deliverDirTrimmed = deliverDir.trim();
+      const deliverBaseTrimmed = sanitizeDeliveryBase(deliverBase.trim() || deriveBaseFromDir(deliverDirTrimmed));
+      const deliverWanted = mode === "chimerax" && !!summary && !!transportOut && !!deliverDirTrimmed && !!deliverBaseTrimmed;
+      if (!deliverWanted) {
+        setStep((s) => ({ ...s, busy: false, phase: "完成", pct: 100 }));
+        if (mode === "chimerax" && !!deliverDirTrimmed && !deliverBaseTrimmed) {
+          pushLog("⚠ 交付文件：文件名前缀为空（且无法从交付目录自动推导）— 已跳过交付下载");
+        }
+      }
       toast.success(`流程图已生成: ${filename} (${fmtSize(blob.size)})`);
 
       /* preview thumbnails */
@@ -1186,12 +1659,170 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         }
       }
       setThumbs(previewThumbs.slice(0, 6));
+
+      /* ---------------------------------------------------------------- */
+      /* v3.72 (round-31 交付文件下载 — “增加输入一个交付文件路径，可以下载
+       * 没有 sharp 的 map，sharp 过的 map，两个 half-map，FSC 图，guinier
+       * plot 图，角度分布图，Fsc.xml 文件。如果最终 job 是 deepemhancer
+       * 的话就是下载 deepemhancer 上游的 refine job 中的这些文件。所有的
+       * map 都要是纠正过手性的”): write the delivery set into the 交付目录
+       * on the ChimeraX machine, AFTER the PPTX is safely in the user's
+       * hands. Source selection: the final job, or — when the final job is
+       * DeepEMhancer/sharpen — its UPSTREAM refine job (plus the
+       * DeepEMhancer output map itself as {base}.volume.map-DeepEMhancer).
+       * Chirality: the reference-hand verdict drives it — a reference that
+       * was verified/asserted MIRRORED and flipped means the raw maps are
+       * mirrored, so every delivered map is z-flipped by ChimeraX
+       * (volume flip + save format mrc + stat verify) before landing in
+       * the 交付目录; unflipped references deliver byte-identical copies
+       * (relay /deliver {src,dst}). Maps fetch through the SAME cache
+       * ladder as the figure (本地缓存 → /fetch 直连 → /fetch 经代理 →
+       * 页面中转 /stage); plots/xml ride /deliver {url,dst} or embedded
+       * bytes. Per-file failures log and continue — they never fail the
+       * run (the PPTX is already delivered). */
+      if (deliverWanted && summary && transportOut) {
+        const transport = transportOut;
+        if (transport.kind !== "relay") {
+          pushLog("⚠ 交付文件：当前为官方 REST 通道（无 /deliver）— 已跳过交付下载");
+          setStep((s) => ({ ...s, busy: false, phase: "完成", pct: 100 }));
+        } else if (!transport.canDeliver) {
+          pushLog(`⚠ 交付文件：当前桥脚本无 /deliver（旧版 relay.py）— 已跳过交付下载。请在 ChimeraX 重新运行一次: ${relayCommand}`);
+          setStep((s) => ({ ...s, busy: false, phase: "完成", pct: 100 }));
+        } else {
+          const dir = deliverDirTrimmed.replace(/[\\/]+$/, "");
+          const base = deliverBaseTrimmed;
+          setStep((s) => ({ ...s, phase: "下载交付文件", pct: 92 }));
+          pushLog(`交付文件: 目录 ${dir} · 前缀 ${base} — 生成完成后自动写入（若最终 job 为 DeepEMhancer，则取其上游 refine job 的文件 + DeepEMhancer 输出 map）`);
+          try {
+            const plan = buildDeliveryPlan(summary, model, base);
+            for (const n of plan.notes) pushLog(`  · ${n}`);
+            const flip = refHandVerdictOut?.flipped === true;
+            pushLog(
+              `  手性策略: ${
+                refHandVerdictOut?.verdict || "自动（参考原样 — 交付文件与参考保持一致手性）"
+              } → 地图${flip ? "经 ChimeraX z-flip 纠正后交付" : "按原手交付"}`,
+            );
+            const outcomes: DeliverOutcome[] = [];
+            /** Bring one URL into the relay's local cache (the same ladder
+             *  the figure maps walk) and return the LOCAL path. */
+            const ensureCached = async (item: DeliverFileSpec, url: string): Promise<string | null> => {
+              // data: candidates cannot be relay-fetched — the PAGE reads
+              // them and stages the bytes instead.
+              if (/^data:/i.test(url)) {
+                try {
+                  const res = await fetch(url, { cache: "no-store" });
+                  if (!res.ok) return null;
+                  const bytes = new Uint8Array(await res.arrayBuffer());
+                  return await stageViaRelay(transport, item.cacheKey, `data-uri:${item.filename}`, bytes, pushLog, item.cacheExt);
+                } catch {
+                  return null;
+                }
+              }
+              const name = stagedMapFilename(item.cacheKey, url, item.cacheExt);
+              const hit = await bridgeStagedLookup(transport, name);
+              if (hit) {
+                pushLog(`  ✓ ${item.filename} 已在本地缓存（${fmtSize(hit.size)}）— 跳过下载`);
+                return hit.path;
+              }
+              if (transport.canFetchMaps) {
+                const r = await bridgeFetchMap(transport, url, name);
+                if (r.ok && r.path) {
+                  pushLog(`  ✓ ${item.filename} ${r.status === "hit" ? "已在本地缓存" : "桥接下载完成"}（${fmtSize(r.size ?? 0)}）`);
+                  return r.path;
+                }
+                if (session && (session.cookie || session.auth)) {
+                  const pu = buildProxyAbsoluteUrl(session, url, { origin: window.location.origin, timeoutMs: 300_000 });
+                  if (pu) {
+                    const r2 = await bridgeFetchMap(transport, pu, name);
+                    if (r2.ok && r2.path) {
+                      pushLog(`  ✓ ${item.filename} 经应用代理下载完成（${fmtSize(r2.size ?? 0)}）`);
+                      return r2.path;
+                    }
+                  }
+                }
+              }
+              try {
+                // Same-origin app URLs (staged-import images) fetch plain;
+                // CryoSmart URLs ride cryoSmartBytes (credentials/proxy).
+                const bytes = url.startsWith(window.location.origin)
+                  ? new Uint8Array(await (await fetch(url, { cache: "no-store" })).arrayBuffer())
+                  : await cryoSmartBytes(session, url, { timeoutMs: 300_000 });
+                return await stageViaRelay(transport, item.cacheKey, url, bytes, pushLog, item.cacheExt);
+              } catch {
+                return null;
+              }
+            };
+            let done = 0;
+            for (const item of plan.items) {
+              done += 1;
+              setStep((s) => ({ ...s, phase: `交付文件 ${done}/${plan.items.length}: ${item.filename}`, pct: Math.min(97, 92 + (done / plan.items.length) * 5) }));
+              const dst = `${dir}/${item.filename}`;
+              try {
+                if (item.dataBase64) {
+                  const r = await bridgeDeliverFile(transport, { dataBase64: item.dataBase64, dst });
+                  if (!r.ok) throw new Error(r.error ?? "未知错误");
+                  pushLog(`  ✓ ${item.filename}（${item.label} · 内嵌数据 ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                  outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                  continue;
+                }
+                if (!item.urls.length) throw new Error("无可用下载来源");
+                let localPath: string | null = null;
+                const errors: string[] = [];
+                for (const url of item.urls) {
+                  localPath = await ensureCached(item, url);
+                  if (localPath) break;
+                  errors.push(url.replace(/^https?:\/\/[^/]+/, ""));
+                }
+                if (!localPath) throw new Error(`所有来源均失败（${errors.join("；").slice(0, 200)}）`);
+                let r: { ok: boolean; path?: string; size?: number; error?: string };
+                if (flip && item.isMap) {
+                  pushLog(`  ⤳ ${item.filename}: 原始地图为镜像手性 — ChimeraX z-flip 翻正后保存…`);
+                  r = await deliverFlippedMap(transport, localPath, dst, pushLog);
+                } else {
+                  r = await bridgeDeliverFile(transport, { src: localPath, dst });
+                }
+                if (!r.ok) throw new Error(r.error ?? "未知错误");
+                pushLog(
+                  `  ✓ ${item.filename}（${item.label}${flip && item.isMap ? " · 已手性翻正" : ""} · ${fmtSize(r.size ?? 0)}）→ ${dst}`,
+                );
+                outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (item.optional) {
+                  pushLog(`  − ${item.filename}（${item.label}）跳过 — ${msg.slice(0, 160)}`);
+                  outcomes.push({ filename: item.filename, label: item.label, ok: false, skipped: true, error: msg });
+                } else {
+                  pushLog(`  ⚠ ${item.filename}（${item.label}）交付失败 — ${msg.slice(0, 200)}`);
+                  outcomes.push({ filename: item.filename, label: item.label, ok: false, error: msg });
+                }
+              }
+            }
+            const okCount = outcomes.filter((o) => o.ok).length;
+            const skippedCount = outcomes.filter((o) => o.skipped).length;
+            const failedCount = outcomes.length - okCount - skippedCount;
+            setDeliverReport(outcomes);
+            if (okCount === outcomes.length) {
+              pushLog(`交付完成: ${okCount}/${outcomes.length} 个文件已写入 ${dir}`);
+              toast.success(`交付文件已下载 ${okCount} 个 → ${dir}`);
+            } else {
+              pushLog(`⚠ 交付结束: 成功 ${okCount} / 跳过 ${skippedCount} / 失败 ${failedCount} — 目标目录 ${dir}`);
+              toast.warning(`交付文件: 成功 ${okCount}、跳过 ${skippedCount}、失败 ${failedCount} 个（详见运行日志）`);
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            pushLog(`⚠ 交付文件下载失败 — ${msg}`);
+            toast.warning(`交付文件下载失败: ${msg.slice(0, 140)}`);
+          } finally {
+            setStep((s) => ({ ...s, busy: false, phase: "完成", pct: 100 }));
+          }
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setStep((s) => ({ ...s, busy: false, error: message }));
       toast.error(`流程图生成失败: ${message}`);
     }
-  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, relayFetchToCache, pushLog, maxGroups, includeFsc, flowMode, effectiveMaxGroups, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh, applyCacheDir]);
+  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, relayFetchToCache, pushLog, maxGroups, includeFsc, flowMode, effectiveMaxGroups, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh, applyCacheDir, deliverDir, deliverBase, refHandMode, refHandAnchor]);
 
   const canGenerate = !step.busy && (mode === "demo" || !!summary);
   const bridgeBadge = useMemo(() => {
@@ -1234,16 +1865,27 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 setMode(m);
                 if (m === "chimerax" && !bridge && !bridgeProbing) void probeBridge();
               }}
-              className={`rounded-lg border px-3 py-2 text-left transition-all ${
+              className={`flex items-center gap-2.5 rounded-lg border px-3.5 py-2.5 text-left transition-all ${
                 mode === m
-                  ? "border-teal-300 bg-teal-50/70 shadow-sm dark:border-teal-700 dark:bg-teal-950/30"
-                  : "border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-900"
+                  ? "border-teal-300 bg-teal-50/70 shadow-sm ring-1 ring-teal-200/60 dark:border-teal-700 dark:bg-teal-950/30 dark:ring-teal-800/40"
+                  : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:border-slate-600"
               } ${m === "chimerax" && !hasSummary ? "cursor-not-allowed opacity-50" : ""}`}
               disabled={m === "chimerax" && !hasSummary}
               title={hint}
             >
-              <span className={`block text-[12.5px] font-semibold ${mode === m ? "text-teal-800 dark:text-teal-300" : "text-slate-700 dark:text-slate-200"}`}>{label}</span>
-              <span className="block text-[10.5px] text-slate-500 dark:text-slate-400">{hint}</span>
+              <span
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors ${
+                  mode === m
+                    ? "bg-gradient-to-br from-teal-500 to-emerald-600 text-white shadow-sm"
+                    : "bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500"
+                }`}
+              >
+                {m === "chimerax" ? <Boxes className="h-4 w-4" /> : m === "preview" ? <Link2 className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              </span>
+              <span className="min-w-0">
+                <span className={`block text-[12.5px] font-semibold ${mode === m ? "text-teal-800 dark:text-teal-300" : "text-slate-700 dark:text-slate-200"}`}>{label}</span>
+                <span className="block whitespace-nowrap text-[10.5px] text-slate-500 dark:text-slate-400">{hint}</span>
+              </span>
             </button>
           ))}
           <div className="ml-auto flex flex-wrap items-center gap-4">
@@ -1478,10 +2120,33 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * IS the reference's true hand, and a mirrored verdict
              * flips the reference once BEFORE any per-map work; 手动
              * asserts the hand outright. The choice sticks (localStorage)
-             * and every failure path degrades to auto with a loud log. */}
+             * and every failure path degrades to auto with a loud log.
+             * v3.72 (round-31 “给参考pdb的部分可以直接拖动pdb进去”): the
+             * whole panel is now a DROP TARGET — a dragged .pdb/.cif/.mrc
+             * file uploads to the ChimeraX machine (relay /stage, cached),
+             * its LOCAL path fills the 参照物 input and the policy switches
+             * to EMalign 参照物验证 in one motion. */}
             <div
-              className="mt-2 rounded-md border border-teal-100 bg-white/70 p-2 text-[11px] leading-relaxed text-slate-600 dark:border-teal-900 dark:bg-slate-900/50 dark:text-slate-300"
-              title="参考手性策略：参考地图自身的手性如何确立（自动 / 参照物验证 / 手动）"
+              className={`mt-2 rounded-md border p-2 text-[11px] leading-relaxed transition-colors ${
+                anchorDragOver
+                  ? "border-teal-400 bg-teal-50 ring-2 ring-teal-300/60 dark:border-teal-600 dark:bg-teal-950/40"
+                  : "border-teal-100 bg-white/70 dark:border-teal-900 dark:bg-slate-900/50"
+              } text-slate-600 dark:text-slate-300`}
+              title="参考手性策略：参考地图自身的手性如何确立（自动 / 参照物验证 / 手动）— 支持直接拖入 PDB / mmCIF / map 参照物文件"
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+                if (!anchorDragOver) setAnchorDragOver(true);
+              }}
+              onDragLeave={(e) => {
+                if (e.currentTarget === e.target) setAnchorDragOver(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setAnchorDragOver(false);
+                const f = e.dataTransfer?.files?.[0];
+                if (f) void handleAnchorFile(f);
+              }}
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
@@ -1507,8 +2172,134 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   className="mt-1.5 h-7 min-w-0 rounded-md border-slate-300 bg-white px-2 font-mono text-[10.5px] text-slate-700 placeholder:font-sans placeholder:text-slate-400 focus-visible:ring-teal-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                 />
               )}
+              {/* v3.72: the drag-and-drop / click-to-pick anchor upload zone. */}
+              <button
+                type="button"
+                onClick={() => anchorFileInputRef.current?.click()}
+                disabled={anchorUploading || !bridge || bridge.kind !== "relay" || !bridge.canStage}
+                className={`mt-1.5 flex w-full items-center justify-center gap-2 rounded-md border border-dashed px-3 py-2 text-[11px] transition-all ${
+                  anchorDragOver
+                    ? "border-teal-400 bg-teal-50 text-teal-700 dark:bg-teal-950/40 dark:text-teal-300"
+                    : "border-slate-300 bg-slate-50/60 text-slate-500 hover:border-teal-300 hover:text-teal-700 dark:border-slate-600 dark:bg-slate-800/40 dark:text-slate-400 dark:hover:border-teal-600 dark:hover:text-teal-300"
+                } ${!bridge || bridge.kind !== "relay" || !bridge.canStage ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+              >
+                {anchorUploading ? (
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-teal-600" />
+                ) : (
+                  <UploadCloud className="h-4 w-4 shrink-0" />
+                )}
+                <span>
+                  {anchorUploading
+                    ? "参照物上传中…"
+                    : !bridge || bridge.kind !== "relay" || !bridge.canStage
+                      ? "连接 relay 桥后可拖入参照物文件（.pdb / .cif / .mrc / .map）"
+                      : "拖入 PDB / mmCIF / map 参照物文件，或点击选择 — 自动上传到 ChimeraX 机器并启用 EMalign 参照物验证"}
+                </span>
+              </button>
+              <input
+                ref={anchorFileInputRef}
+                type="file"
+                accept=".pdb,.ent,.cif,.mmcif,.mrc,.mrcs,.map,.ccp4"
+                className="hidden"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleAnchorFile(f);
+                  e.target.value = "";
+                }}
+              />
               <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {REF_HAND_META[refHandMode].hint}
+              </p>
+            </div>
+
+            {/* v3.72 (round-31 “增加输入一个交付文件路径，可以下载没有 sharp 的
+             * map，sharp 过的 map，两个 half-map，FSC 图，guinier plot 图，
+             * 角度分布图，Fsc.xml 文件。如果最终job是deepemhancer的话就是
+             * 下载deepemhancer上游的refine job中的这些文件。所有的map都要
+             * 是纠正过手性的。如果路径是 D:\Lijing\Tigr\Tigr\data，则文件名
+             * Tigr.volume.map_unsharp …”): the DELIVERY panel — the 交付目录
+             * + 文件名前缀 inputs. A non-empty dir arms the delivery phase:
+             * after every ChimeraX run the final result set is written into
+             * the dir on the ChimeraX machine (maps chirality-corrected —
+             * the reference-hand verdict flips them when the raw data was
+             * mirrored). The prefix auto-derives from the dir
+             * (D:\Lijing\Tigr\Tigr\data → “Tigr”) and stays editable. */}
+            <div
+              className="mt-2 rounded-md border border-teal-100 bg-white/70 p-2 text-[11px] leading-relaxed text-slate-600 dark:border-teal-900 dark:bg-slate-900/50 dark:text-slate-300"
+              title="交付文件：流程图生成后，把最终结果（手性纠正后的 map + FSC / Guinier / 角度分布图 + fsc.xml）自动下载到 ChimeraX 机器上的该目录"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
+                  <PackageOpen className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+                  交付文件
+                </span>
+                {bridge?.kind === "relay" &&
+                  (bridge.canDeliver ? (
+                    <Badge className="gap-1 bg-emerald-100 px-1.5 py-0 text-[9.5px] text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-900/40 dark:text-emerald-300">
+                      <CheckCircle2 className="h-3 w-3" /> /deliver 就绪
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="gap-1 px-1.5 py-0 text-[9.5px] text-amber-600">
+                      <AlertTriangle className="h-3 w-3" /> 需更新桥脚本
+                    </Badge>
+                  ))}
+                <span className="text-[10px] text-slate-500 dark:text-slate-400">留空则不交付</span>
+              </div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-5">
+                <Input
+                  value={deliverDir}
+                  onChange={(e) => setDeliverDir(e.target.value)}
+                  placeholder="交付目录（ChimeraX 机器绝对路径，如 D:\Lijing\Tigr\Tigr\data）— 目录不存在会自动创建"
+                  className="h-7 min-w-[220px] flex-1 rounded-md border-slate-300 bg-white px-2 font-mono text-[10.5px] text-slate-700 placeholder:font-sans placeholder:text-slate-400 focus-visible:ring-teal-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                />
+                <div className="flex items-center gap-1" title="文件名前缀 — 自动取交付目录的上一级文件夹名（D:\Lijing\Tigr\Tigr\data → Tigr），可手动修改">
+                  <Label className="text-[10.5px] text-slate-500 dark:text-slate-400">前缀</Label>
+                  <Input
+                    value={deliverBase}
+                    onChange={(e) => setDeliverBase(e.target.value)}
+                    placeholder="Tigr"
+                    className="h-7 w-[120px] rounded-md border-slate-300 bg-white px-2 font-mono text-[10.5px] text-slate-700 placeholder:font-sans placeholder:text-slate-400 focus-visible:ring-teal-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  />
+                </div>
+              </div>
+              {/* The exact filenames the current dir+prefix produce — the
+               * user's own convention, shown before any run. */}
+              {(() => {
+                const b = deliverBase.trim() || deriveBaseFromDir(deliverDir);
+                if (!b) return null;
+                const names = [
+                  `${b}.volume.map_unsharp`,
+                  `${b}.volume.map_sharp`,
+                  `${b}.volume.map_half_A`,
+                  `${b}.volume.map_half_B`,
+                  `${b}.volume.map-DeepEMhancer`,
+                  `${b}.volume.fsc.png`,
+                  `${b}.volume.guinier_plot.png`,
+                  `${b}.volume.orientation_distribution.png`,
+                  `${b}.volume.fsc.xml`,
+                ];
+                return (
+                  <div className="mt-1.5 flex flex-wrap gap-1 pl-5">
+                    {names.map((n) => (
+                      <code
+                        key={n}
+                        title={n.endsWith("DeepEMhancer") ? "仅当最终 job 为 DeepEMhancer 等后处理时交付" : undefined}
+                        className={`rounded px-1 py-0.5 font-mono text-[9.5px] ${
+                          n.endsWith("DeepEMhancer")
+                            ? "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                            : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                        }`}
+                      >
+                        {n}
+                      </code>
+                    ))}
+                  </div>
+                );
+              })()}
+              <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
+                {bridge?.kind === "relay" && !bridge.canDeliver
+                  ? "当前桥脚本无 /deliver（旧版 relay.py）— 在 ChimeraX 重新运行一次 relay.py 后即可自动交付。"
+                  : "生成流程图后自动把最终结果下载到该目录（地图先入本地缓存再复制，重复生成不重复下载）；若最终 job 为 DeepEMhancer，则交付其上游 refine job 的这些文件并额外输出 map-DeepEMhancer；所有 map 按参考手性判定纠正（镜像 → ChimeraX z-flip 翻正后保存）。目录与前缀会记住。"}
               </p>
             </div>
             {!bridge && (
@@ -1676,16 +2467,98 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 </table>
               </div>
             )}
+            {/* v3.72: the per-file DELIVERY report — what landed in the
+             * 交付目录 (✓ size), what was skipped (no such source in this
+             * lineage) and what failed (network / ChimeraX save / dir
+             * unwritable — the error text rides the run log). */}
+            {deliverReport && deliverReport.length > 0 && (
+              <div className="overflow-hidden rounded-md border border-teal-200 bg-white/80 dark:border-teal-800 dark:bg-slate-900/70">
+                <div className="flex flex-wrap items-center gap-2 border-b border-teal-100 bg-teal-50/60 px-2.5 py-1.5 dark:border-teal-900 dark:bg-teal-950/30">
+                  <PackageOpen className="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                  <span className="text-[11.5px] font-semibold text-teal-800 dark:text-teal-300">交付文件</span>
+                  <Badge variant="outline" className="px-1.5 py-0 text-[9.5px] text-teal-700 dark:text-teal-300">
+                    {deliverReport.filter((o) => o.ok).length}/{deliverReport.length} 完成
+                  </Badge>
+                </div>
+                <div className="max-h-40 overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300 dark:[&::-webkit-scrollbar-thumb]:bg-slate-600">
+                  <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {deliverReport.map((o) => (
+                      <div key={o.filename} className="flex items-center gap-2 px-2.5 py-1.5" title={o.ok ? undefined : o.error}>
+                        {o.ok ? (
+                          <FileCheck2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+                        ) : o.skipped ? (
+                          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                        ) : (
+                          <XCircle className="h-3.5 w-3.5 shrink-0 text-rose-500" />
+                        )}
+                        <code className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-slate-700 dark:text-slate-200">{o.filename}</code>
+                        <span
+                          className={`shrink-0 text-[10px] ${
+                            o.ok
+                              ? "text-emerald-600 dark:text-emerald-400"
+                              : o.skipped
+                                ? "text-slate-400"
+                                : "text-rose-500"
+                          }`}
+                        >
+                          {o.ok ? fmtSize(o.size ?? 0) : o.skipped ? "跳过" : "失败"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
-        {/* how it works */}
-        <div className="flex items-start gap-2 rounded-md border border-slate-200 bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
-          <Boxes className="mt-0.5 h-4 w-4 shrink-0 text-slate-400" />
-          <span>
-            竖向单列排版（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸的直线箭头</b>（无折线/肘线）。「模式」下拉四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线上的关键 job — 上下游顺序不乱，导入参考体积等输入分支不进入图；连续同类型阶段合并为一行「N× 类型」，省略的步骤在箭头旁以「N×」注明；阶段数可选 4/5/6；选中 class 恒居脊柱细框 + 留存颗粒数标注，参考 workflow.pptx）/ <b>手动</b>（逐个勾选要体现的 job）。每张 map 先下载到桥接机器的本地缓存目录（已有文件跳过下载），ChimeraX 从本地目录打开后做双手性（original / z-flip）双轨迹拟合：<b>局部细化</b>（同流程地图通常已接近对齐，低通 σ8→σ3 Å 副本上逐步收敛）与 <b>全局搜索</b>（<code className="font-mono">fitmap … inMap … search N</code> 随机放置，覆盖 90°/任意旋转角；<b>相关性未达目标 0.85 时自动追加搜索轮次</b>，放置数逐轮递增 30→60→90，最多 3 轮，已达标则跳过）；可选「<b>参考手性</b>」策略：默认自动（参考原样、判定相对手性），<b>EMalign 参照物验证</b>（用已知手性的 PDB/mmCIF 模型或已发表 map 先分别拟合参考原手与其 z 镜像定手性，镜像则先翻正参考再对齐），或手动指定正确/镜像；参考图先做<b>噪声屏蔽</b>——信号包络以外的背景/溶剂噪声全部置零，拟合（<code className="font-mono">metric correlation envelope true</code>）只在信号区域内计分，噪音不再把地图拖向错误姿态——按屏蔽后相关性选优，最优角度经 matrixget/matrixset 应用回原 map 并在屏蔽的全分辨率参考上复核 ——
-            z-flip 胜出即手性相反、已自动翻正；参考地图做 90° 视角白区评分后统一应用到所有地图，保证朝向与比例一致。图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
-          </span>
+        {/* how it works — v3.72: restructured from one wall-of-text paragraph
+         *  into a scannable per-topic list (版式 / 下载 / 对齐 / 手性 / 交付),
+         *  and it now documents the delivery phase. */}
+        <div className="rounded-md border border-slate-200 bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+          <div className="flex items-center gap-1.5 pb-1.5 text-[11.5px] font-semibold text-slate-700 dark:text-slate-200">
+            <Boxes className="h-4 w-4 shrink-0 text-slate-400" />
+            工作原理
+          </div>
+          <ul className="space-y-1.5">
+            <li className="flex gap-1.5">
+              <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">版式</span>
+              <span>
+                竖向单列（画布高度随阶段数自动加长），阶段间一律为<b>固定尺寸直线箭头</b>。「模式」四选一：<b>标准</b>（完整谱系）/ <b>简化</b>（合并可省步骤）/ <b>极简</b>（精选颗粒主线关键 job，连续同类型合并为「N×」行，省略步骤箭头旁注明，4/5/6 行可选）/ <b>手动</b>（逐个勾选）。
+              </span>
+            </li>
+            <li className="flex gap-1.5">
+              <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">下载</span>
+              <span>
+                每张 map 先入桥接机器的<b>本地缓存目录</b>（已有文件跳过下载，跨 ChimeraX 重启保留），ChimeraX 只从本地目录打开地图；未命中的按 直连 → 应用代理 → 页面中转 阶梯获取。
+              </span>
+            </li>
+            <li className="flex gap-1.5">
+              <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">对齐</span>
+              <span>
+                双手性（original / z-flip）× 双轨迹：<b>局部细化</b>（低通 σ8→σ3 Å 逐步收敛）与 <b>全局搜索</b>（<code className="font-mono">fitmap … search N</code> 随机放置，覆盖任意旋转；未达目标 0.85 自动追加轮次 30→60→90，最多 3 轮，<b>达标即止</b> — 静止达标跳过拟合，原手达标跳过镜像对比）。参考图先做<b>噪声屏蔽</b>（信号包络外置零，<code className="font-mono">metric correlation envelope true</code> 只在信号区计分），最优角度经 matrixget/matrixset 应用回原 map 并在全分辨率参考上复核；90° 视角白区评分统一朝向与比例。
+              </span>
+            </li>
+            <li className="flex gap-1.5">
+              <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">手性</span>
+              <span>
+                可选「<b>参考手性</b>」策略：自动（相对手性）/ <b>EMalign 参照物验证</b>（已知手性的 PDB/mmCIF 模型或已发表 map 分别拟合参考原手与其 z 镜像，得分高者为真实手性；<b>参照物支持直接拖入本面板</b>）/ 手动指定正确或镜像。z-flip 胜出即手性相反，已自动翻正展示。
+              </span>
+            </li>
+            <li className="flex gap-1.5">
+              <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">交付</span>
+              <span>
+                填写「<b>交付文件</b>」目录后，每次生成自动把最终结果下载到 ChimeraX 机器的该目录：
+                <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp"}</code> 等（unsharp / sharp / half A / half B / FSC / Guinier / 角度分布 / fsc.xml；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
+              </span>
+            </li>
+            <li className="flex gap-1.5">
+              <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">兼容</span>
+              <span>
+                图片上的 <code className="font-mono">CryoSmartImage:&lt;uid&gt;/&lt;group&gt;</code> 标记保持与桌面 helper 脚本互换兼容。
+              </span>
+            </li>
+          </ul>
         </div>
       </CardContent>
     </Card>

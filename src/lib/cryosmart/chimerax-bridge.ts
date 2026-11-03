@@ -290,6 +290,13 @@ export interface FlowTransport {
    *  dir is unwritable). Relays without it keep the fixed system-temp
    *  cache dir and the input shows an upgrade hint. */
   canSetCacheDir?: boolean;
+  /** v3.72: relay-only — the bridge script advertises POST /deliver:
+   *  delivery files (chirality-corrected maps / plots / fsc.xml) can be
+   *  written into the user's 交付目录 on the ChimeraX machine (local
+   *  cache copy / url download / embedded bytes, plus a stat probe the
+   *  ChimeraX flip+save path verifies with). Relays without it skip the
+   *  delivery phase with an upgrade hint. */
+  canDeliver?: boolean;
   /** v3.50: which save rung last produced a /file-fetchable PNG — cached
    *  per transport so later saves go straight to the working shape. */
   saveMode?: SaveMode;
@@ -359,10 +366,10 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
           logs.push(`relay ${host}:${port} → HTTP ${res.status}`);
           continue;
         }
-        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean };
+        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean };
         if (data?.ok) {
           logs.push(
-            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""}${data.cachedir_set ? ", 可自定义目录" : ""})`,
+            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""}${data.cachedir_set ? ", 可自定义目录" : ""}${data.deliver ? ", 交付下载" : ""})`,
           );
           return {
             transport: {
@@ -377,6 +384,7 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
               cacheDir: data.cacheDir,
               canFetchMaps: !!data.fetch,
               canSetCacheDir: !!data.cachedir_set,
+              canDeliver: !!data.deliver,
             },
             logs,
           };
@@ -518,8 +526,13 @@ export interface BridgeVolumeRef {
  *  re-run CryoSmart job produces new URLs, so its maps can NEVER be
  *  confused with the previous run's cached copies (a stale-content hit
  *  is impossible by construction), while the same URL across runs is
- *  recognized as the same map and skipped outright. */
-export function stagedMapFilename(key: string, url: string): string {
+ *  recognized as the same map and skipped outright.
+ *  v3.72: `ext` generalizes the suffix beyond maps — the delivery set
+ *  (FSC/Guinier/orientation pngs, fsc.xml) and the drag-dropped reference
+ *  anchor (.pdb/.cif) also cache under canonical names, so the SAME
+ *  name must be derivable on every rung (/staged probe, /fetch download,
+ *  /stage upload) for those file types too. */
+export function stagedMapFilename(key: string, url: string, ext = "mrc"): string {
   const base = String(key || "map")
     .replace(/[^A-Za-z0-9._-]+/g, ".")
     .replace(/^\.+|\.+$/g, "") || "map";
@@ -528,7 +541,8 @@ export function stagedMapFilename(key: string, url: string): string {
   for (let i = 0; i < u.length; i++) {
     h = ((h * 33) ^ u.charCodeAt(i)) >>> 0;
   }
-  return `${base}.${h.toString(16).padStart(8, "0").slice(-8)}.mrc`;
+  const suffix = String(ext || "mrc").replace(/[^A-Za-z0-9]/g, "") || "mrc";
+  return `${base}.${h.toString(16).padStart(8, "0").slice(-8)}.${suffix}`;
 }
 
 /** v3.56: a relay map-cache hit — the ChimeraX-openable LOCAL path. */
@@ -687,6 +701,142 @@ export async function bridgeVolumeIds(
     return data.volumes.filter((v) => typeof v?.id === "string" && !!v.id);
   } catch {
     return null;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* v3.72 delivery writes (relay POST /deliver)                         */
+/* ------------------------------------------------------------------ */
+
+/** v3.72: one relay POST /deliver request — exactly one of src / url /
+ *  data_base64 (or stat alone for the existence probe). */
+export interface BridgeDeliverPayload {
+  /** Copy this LOCAL absolute path (a map's cache file) → dst. */
+  src?: string;
+  /** Download this URL straight → dst (plots / fsc.xml — small files). */
+  url?: string;
+  /** Write these base64 bytes → dst (embedded fsc.xml text). */
+  dataBase64?: string;
+  /** Full destination path on the ChimeraX machine (dir + filename). */
+  dst?: string;
+  /** Probe-only mode: does this path exist (+ size)? */
+  stat?: string;
+}
+
+/** v3.72: the reply of every relay POST /deliver call. */
+export interface BridgeDeliverResult {
+  ok: boolean;
+  path?: string;
+  size?: number;
+  /** stat-mode only: whether the probed path exists. */
+  exists?: boolean;
+  error?: string;
+}
+
+/** v3.72 (round-31 交付文件下载): write ONE delivery file into the user's
+ *  交付目录 on the ChimeraX machine via the relay's POST /deliver — local
+ *  cache copy (maps, byte-identical) / direct URL download (plots, xml) /
+ *  embedded base64 bytes (captured fsc.xml). Never throws; failures come
+ *  back as { ok: false, error } so the per-file delivery loop can log and
+ *  continue with the remaining files. */
+export async function bridgeDeliverFile(
+  t: FlowTransport,
+  payload: BridgeDeliverPayload,
+  timeoutMs = 600_000,
+): Promise<BridgeDeliverResult> {
+  if (t.kind !== "relay") return { ok: false, error: "not a relay transport" };
+  try {
+    const res = await fetchWithTimeout(
+      `${t.base}/deliver`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      timeoutMs,
+    );
+    const data = (await res.json().catch(() => null)) as BridgeDeliverResult | null;
+    if (!res.ok) return { ok: false, error: data?.error || `relay /deliver HTTP ${res.status}` };
+    return data ?? { ok: false, error: "relay /deliver 无响应" };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** v3.72: does this path exist on the ChimeraX machine (+ size)? Used to
+ *  verify a ChimeraX `save` actually landed after a chirality flip+save —
+ *  the save command can report success while writing nowhere (the same
+ *  silent-failure class the v3.50 save→fetch ladder guards against). */
+export async function bridgeDeliverStat(
+  t: FlowTransport,
+  path: string,
+  timeoutMs = 15_000,
+): Promise<BridgeDeliverResult> {
+  return bridgeDeliverFile(t, { stat: path }, timeoutMs);
+}
+
+/** v3.72: the outcome of one chirality-corrected (flipped) map delivery —
+ *  ChimeraX opens the cached RAW map, creates its z-mirror (`volume flip`,
+ *  the SAME command the two-hand alignment ladder uses), saves the flipped
+ *  grid as MRC into the 交付目录 (explicit `format mrc` — the canonical
+ *  delivery names carry no .mrc suffix), closes both models and verifies
+ *  the written file via /deliver stat. */
+export async function deliverFlippedMap(
+  t: FlowTransport,
+  localSrc: string,
+  dst: string,
+  onLog?: (line: string) => void,
+): Promise<BridgeDeliverResult> {
+  if (t.kind !== "relay") return { ok: false, error: "not a relay transport" };
+  const softExec = async (command: string, timeoutMs: number): Promise<ExecResult> => {
+    try {
+      return await bridgeExec(t, command, timeoutMs);
+    } catch (err) {
+      return { text: "", error: err instanceof Error ? err.message : String(err) };
+    }
+  };
+  const open = await bridgeOpenModel(t, localSrc, 300_000, "map");
+  const srcId = open.modelId;
+  if (srcId == null) {
+    return { ok: false, error: `打开地图失败: ${open.error || logSnippet(open.text) || "未返回 model id"}` };
+  }
+  let flipId: number | null = null;
+  try {
+    const next = await bridgeNextModelId(t);
+    let res = next != null ? await softExec(`volume flip #${srcId} axis z modelId ${next}`, 180_000) : null;
+    if (res && !res.error) {
+      flipId = parseOpenModelId(res.text) ?? next;
+    } else {
+      res = await softExec(`volume flip #${srcId} axis z`, 180_000);
+      if (res && !res.error) {
+        const ids = Array.from(res.text.matchAll(/#(\d+(?:\.\d+)?)/g)).map((m) => parseInt(m[1], 10));
+        flipId = ids.find((id) => id !== srcId) ?? null;
+      }
+    }
+    if (flipId == null || flipId === srcId) {
+      throw new Error(`volume flip 未返回新模型（${res?.error || logSnippet(res?.text) || "无输出"}）`);
+    }
+    // Forward slashes inside the quoted path survive every command
+    // tokenizer (v3.50's lesson) — Windows Python opens them natively.
+    const savePath = quotePath(dst.replace(/\\/g, "/"));
+    const save = await softExec(`save ${savePath} models #${flipId} format mrc`, 600_000);
+    if (save.error) {
+      throw new Error(`ChimeraX save 失败: ${logSnippet(save.error, 160)}`);
+    }
+    const stat = await bridgeDeliverStat(t, dst);
+    if (!stat.ok) {
+      throw new Error(`保存后验证失败: ${stat.error ?? "未知错误"}`);
+    }
+    if (!stat.exists || !stat.size) {
+      throw new Error(`保存后目标文件不存在或为空: ${dst}`);
+    }
+    onLog?.(`    翻转保存完成 → ${dst}（${Math.round((stat.size ?? 0) / 1048576)} MB）`);
+    return { ok: true, path: dst, size: stat.size };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    if (flipId != null) await softExec(`close #${flipId}`, 60_000);
+    await softExec(`close #${srcId}`, 60_000);
   }
 }
 
@@ -1225,11 +1375,31 @@ export interface ReferenceHandPolicy {
   manual?: "correct" | "mirrored";
 }
 
+/** v3.72 (round-31 交付文件下载 — 所有的 map 都要是纠正过手性的): the
+ *  structured form of the v3.71 reference-hand verdict, read by the
+ *  delivery phase: when the canonical reference was swapped to its
+ *  z-flipped copy (`flipped: true`), the RAW delivery maps are
+ *  biologically MIRRORED and every delivered map must be z-flipped the
+ *  same way; `known: false` is the auto policy (relative chirality only
+ *  — maps deliver as-is, consistent with the reference the figure used). */
+export interface ReferenceHandVerdict {
+  /** Was the reference's own hand established (anchor/manual policy)? */
+  known: boolean;
+  /** True when the canonical reference became the z-flipped copy — the
+   *  raw reference map (and every same-hand raw map) is mirrored. */
+  flipped: boolean;
+  /** Human-readable verdict ("EMalign 验证镜像 · 已翻正（0.31 vs 0.94）" …). */
+  verdict: string;
+}
+
 export interface RenderMapsResult {
   renders: MapRender[];
   view: { desc: string; x: number; y: number; score: number };
   referenceKey: string;
   logs: string[];
+  /** v3.72: the reference-hand verdict (structured form of the reference
+   *  render row's candidate note) — drives the delivery chirality flip. */
+  referenceHand: ReferenceHandVerdict;
 }
 
 function threw(signal?: AbortSignal): boolean {
@@ -1376,6 +1546,10 @@ export async function renderFigureMaps(
   let refHandKnown = false;
   let refIsCorrectHand = true;
   let refHandVerdict = "";
+  /* v3.72: did the canonical reference BECOME the z-flipped copy? The
+   *  delivery phase reads this — a flipped reference means the raw
+   *  delivery maps are mirrored and must be flipped on delivery. */
+  let refFlipped = false;
   /** Create the reference's z-flip copy, re-apply its display settings
    * and swap it in as the CANONICAL reference (the original closes).
    * Returns false when the flip fails (the run then keeps the original
@@ -1406,6 +1580,7 @@ export async function renderFigureMaps(
       openIds.delete(srcId);
       openIds.add(fid);
       refId = fid;
+      refFlipped = true;
       return true;
     } catch (err) {
       log(`⚠ 翻转参考地图失败 — ${logSnippet(String(err), 140)}`);
@@ -1544,6 +1719,7 @@ export async function renderFigureMaps(
             flipRefId = null; // consumed — the cleanup must not close it
             refHandKnown = true;
             refIsCorrectHand = true;
+            refFlipped = true;
             refHandVerdict = `EMalign 验证镜像 · 已翻正（原手 ${corrO.toFixed(3)} vs 镜像 ${corrF.toFixed(3)}）`;
             log(`参考手性: 已翻正 → model #${refId} — 视角评分、低通金字塔、噪声屏蔽与全部对齐/截图均以翻正后的参考为基准`);
           } else {
@@ -2512,7 +2688,13 @@ export async function renderFigureMaps(
   }
 
   progress("ChimeraX 渲染完成", 88);
-  return { renders, view, referenceKey: opts.reference.key, logs };
+  return {
+    renders,
+    view,
+    referenceKey: opts.reference.key,
+    logs,
+    referenceHand: { known: refHandKnown, flipped: refFlipped, verdict: refHandVerdict },
+  };
 }
 
 /**

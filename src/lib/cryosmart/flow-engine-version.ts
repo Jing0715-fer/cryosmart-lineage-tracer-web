@@ -389,5 +389,49 @@
  * unreachable / fit commands missing / scores unparseable / flip
  * failed) degrades to the auto behavior with a loud log. Old pages
  * keep the un-groundable relative-only chirality.
+ *
+ * v3.72 bump reason (round-31 "优化一下整体的UI界面，给参考pdb的部分
+ * 可以直接拖动pdb进去。增加输入一个交付文件路径，可以下载没有sharp的map，
+ * sharp过的map，两个half-map，FSC图，guinier plot图，角度分布图，Fsc.xml
+ * 文件。如果最终job是deepemhancer的话就是下载deepemhancer上游的refine
+ * job中的这些文件。所有的map都要是纠正过手性的，如果路径是
+ * D:\Lijing\Tigr\Tigr\data，则文件名Tigr.volume.map_unsharp…"): DELIVERY
+ * FILES + PDB DRAG-DROP + panel polish. (1) 交付文件下载 — the relay
+ * gained POST /deliver ({src,dst} local copy | {url,dst} download |
+ * {data_base64,dst} embedded bytes | {stat} probe; atomic .part+rename,
+ * dir auto-created, Windows-illegal basename chars stripped) and the
+ * card a 交付目录+前缀 input pair (remembered in localStorage; the
+ * prefix auto-derives from the dir — D:\Lijing\Tigr\Tigr\data →
+ * "Tigr" — and stays editable): after every ChimeraX run the delivery
+ * phase writes the final result set into that dir —
+ * {base}.volume.map_unsharp/_sharp/_half_A/_half_B, fsc.png,
+ * guinier_plot.png, orientation_distribution.png, fsc.xml from the
+ * FINAL job, or when the final job is DeepEMhancer/sharpen from its
+ * UPSTREAM refine job (BFS past post-process parents to the nearest
+ * map-bearing refinement) plus the DeepEMhancer output map itself as
+ * {base}.volume.map-DeepEMhancer. CHIRALITY: every delivered map is
+ * corrected — the render result's new structured referenceHand
+ * verdict drives it (a reference that was verified/asserted MIRRORED
+ * and flipped means the raw maps are mirrored, so each map is opened
+ * in ChimeraX, `volume flip`-ed and saved as MRC straight into the
+ * delivery dir — deliverFlippedMap, stat-verified; an unflipped
+ * reference delivers byte-identical cache copies via /deliver {src}).
+ * Maps ride the SAME cache ladder as the figure (本地缓存 → /fetch
+ * 直连 → /fetch 经代理 → 页面中转 /stage — repeated runs download
+ * nothing); plots/xml go {url,dst} or embedded bytes (captured fsc.xml
+ * text needs no network); every file's outcome lands in the result
+ * panel's 交付文件 report; per-file failures log and continue (the
+ * PPTX is already in the user's hands before the phase starts). (2)
+ * 参照物拖拽 — the 参考手性 panel is a drop target: a dragged
+ * .pdb/.ent/.cif/.mmcif/.mrc/.map file uploads to the ChimeraX machine
+ * via relay /stage under a canonical name (re-drops hit the cache),
+ * its LOCAL path fills the 参照物 input and the policy switches to
+ * EMalign 参照物验证 (stagedMapFilename grew an `ext` param so pdb/cif
+ * uploads keep their suffix for ChimeraX's sniffer). (3) Panel polish
+ * — the three mode buttons gained icon tiles, the how-it-works wall of
+ * text became a scannable 版式/下载/对齐/手性/交付 list, and the
+ * bridge panel's sections (下载目录 / 参考手性 / 交付文件) share one
+ * visual frame. Old pages keep the v3.71 behavior (no delivery, no
+ * drag-drop, no /deliver detection).
  */
-export const FLOW_ENGINE_VERSION = "3.71";
+export const FLOW_ENGINE_VERSION = "3.72";
