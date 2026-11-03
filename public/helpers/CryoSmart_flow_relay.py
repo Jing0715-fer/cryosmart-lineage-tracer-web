@@ -508,7 +508,9 @@ def main(session):
         final = os.path.join(dstdir, safe)
         src = str(payload.get("src") or "").strip()
         url = str(payload.get("url") or "").strip()
-        b64 = payload.get("data_base64")
+        # v3.74: accept BOTH the contract snake_case key and the camelCase
+        # key an older (pre-3.74) page bundle still sends.
+        b64 = payload.get("data_base64") or payload.get("dataBase64")
         part = "%s.%d.part" % (final, threading.get_ident())
         try:
             if src:

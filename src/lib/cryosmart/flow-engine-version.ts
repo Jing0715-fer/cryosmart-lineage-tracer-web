@@ -465,5 +465,41 @@
  * 工作原理 fold into <details>, mode hints/banners document the new
  * curation. Old pages keep the v3.72 behavior (full middles in
  * 标准/简化, no frames there, pptx still in the bundle).
+ *
+ * v3.74 bump reason (round-33 full code review + E2E): ten review fixes
+ * across the v3.70–73 features, no behavior change on the happy path —
+ * (1) CRITICAL: bridgeDeliverFile mapped the embedded-xml field to the
+ * relay's contract key at the wire boundary (`dataBase64` →
+ * `data_base64`) — the raw camelCase key never matched the relay's
+ * payload.get("data_base64") and EVERY captured-fsc.xml delivery failed
+ * with “缺少 src/url/data_base64 之一”; the relay now accepts both keys
+ * (old bundles keep working). (2) ReferenceHandVerdict.flipFailed — the
+ * manual-mirrored policy whose in-figure flip THREW used to render
+ * against the still-mirrored reference AND deliver the raw (mirrored)
+ * maps uncorrected (`flipped === true` could not express
+ * known-mirrored-but-not-corrected); the delivery now z-flips every map
+ * for that verdict too, the per-map 生物学手性 log line no longer claims
+ * “已自动翻正展示”, and the verdict reads “翻正失败（交付时仍将翻正）”.
+ * (3) The three `volume flip … modelId N` call sites trust the explicit
+ * modelId instead of re-parsing the log (which could grab the SOURCE
+ * map's id — the same hardening gaussianSmooth got in v3.67).
+ * (4) The delivery reuses the FIGURE's already-downloaded local map
+ * files when the URL matches (the final refine map doubles as the
+ * alignment reference and map_unsharp) — no second 100–300 MB download,
+ * no duplicate cache entry. (5) ensureCached's same-origin fallback now
+ * checks res.ok — a 404/500 HTML error page used to be staged as the
+ * "map" and silently delivered corrupt. (6) generate gained a
+ * synchronous double-click guard (the busy state only landed after the
+ * awaited freshness check; two rapid clicks started two full runs).
+ * (7) The anchor drop zone caps dropped files at 400 MB (relay /stage's
+ * own limit) and refuses concurrent drops; an empty 参照物 under the
+ * EMalign policy now logs its auto degradation before the run.
+ * (8) localStorage restore/persist race — both persist effects (ref-hand
+ * + delivery) skip their first run (the initial empty state used to be
+ * written over the stored value in the restore commit). (9) The
+ * delivery filename prefix auto-fill reacts only to DIR changes now
+ * (clearing the input to retype no longer bounces back). (10) The
+ * render-report table scrolls (overflow-x-auto) instead of clipping on
+ * narrow screens.
  */
-export const FLOW_ENGINE_VERSION = "3.73";
+export const FLOW_ENGINE_VERSION = "3.74";

@@ -605,6 +605,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
    *  banner and blocks 生成. */
   const [staleEngine, setStaleEngine] = useState<string | null>(null);
   const objectUrlsRef = useRef<string[]>([]);
+  /* v3.74 (round-33 review): synchronous double-click guard for generate —
+   * `step.busy` only lands AFTER the awaited engine-freshness check, so a
+   * second click during that await window used to start a SECOND full run
+   * (interleaved logs/downloads). The ref flips synchronously on entry and
+   * reads on the same tick, before any await. */
+  const generateStartingRef = useRef(false);
 
   const hasSummary = !!summary;
   const session = loaded?.session ?? null;
@@ -709,7 +715,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   /* v3.71: restore + persist the remembered reference-hand policy (the
    * choice sticks across page refreshes; every failure path inside the
    * engine degrades to auto with a loud log, so a stale anchor never
-   * blocks a run). */
+   * blocks a run). v3.74 (round-33 review): the persist effect used to
+   * run in the SAME commit as the restore — writing the INITIAL empty
+   * state over the stored value before the restored state landed; its
+   * first run is now skipped (the next run — with the restored state —
+   * is the real one). */
+  const refHandHydratedRef = useRef(false);
   useEffect(() => {
     try {
       const m = window.localStorage.getItem("cryoflow.refHandMode");
@@ -720,6 +731,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
     } catch {}
   }, []);
   useEffect(() => {
+    if (!refHandHydratedRef.current) {
+      refHandHydratedRef.current = true;
+      return;
+    }
     try {
       window.localStorage.setItem("cryoflow.refHandMode", refHandMode);
       window.localStorage.setItem("cryoflow.refHandAnchor", refHandAnchor);
@@ -729,7 +744,13 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   /* v3.72: restore + persist the delivery settings (交付目录 + 文件名前缀)
    *  — the base auto-follows the dir while the user has not overridden it
    *  manually (the ref holds the last AUTO-derived value; once the typed
-   *  base differs, typing a new dir no longer overwrites it). */
+   *  base differs, typing a new dir no longer overwrites it). v3.74
+   *  (round-33 review): (a) the persist effect skips its first run (the
+   *  same-commit restore/persist race as refHand above); (b) the base
+   *  auto-fill now reacts ONLY to DIR changes — it used to re-fire on
+   *  every base keystroke, so clearing the input to retype it from
+   *  scratch was instantly filled back in. */
+  const deliverHydratedRef = useRef(false);
   useEffect(() => {
     try {
       const d = window.localStorage.getItem("cryoflow.deliverDir");
@@ -740,20 +761,31 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
     } catch {}
   }, []);
   useEffect(() => {
+    if (!deliverHydratedRef.current) {
+      deliverHydratedRef.current = true;
+      return;
+    }
     try {
       window.localStorage.setItem("cryoflow.deliverDir", deliverDir);
       window.localStorage.setItem("cryoflow.deliverBase", deliverBase);
     } catch {}
   }, [deliverDir, deliverBase]);
   useEffect(() => {
+    /* v3.74: dir-change-driven only (the function-style setDeliverBase
+     *  reads the CURRENT base without listing it as a dependency) — an
+     *  empty base being typed into no longer bounces back to the derived
+     *  value; a dir change still auto-fills while the base is empty or
+     *  still the previous AUTO value. */
     const derived = deriveBaseFromDir(deliverDir);
     if (!derived) return;
-    // follow the dir while the base is empty or still the previous auto value
-    if (!deliverBase.trim() || deliverBase.trim() === deliverAutoBaseRef.current) {
-      deliverAutoBaseRef.current = derived;
-      setDeliverBase(derived);
-    }
-  }, [deliverDir, deliverBase]);
+    setDeliverBase((cur) => {
+      if (!cur.trim() || cur.trim() === deliverAutoBaseRef.current) {
+        deliverAutoBaseRef.current = derived;
+        return derived;
+      }
+      return cur;
+    });
+  }, [deliverDir]);
 
   /** v3.70 (round-29 “目前是先将所有的map下载到一个指定目录中吗？…没有
    * 看到UI中输入下载路径的窗口啊”): apply the 下载目录 input — POST
@@ -955,6 +987,14 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         toast.error("请先连接 ChimeraX 桥（relay）— 拖入的参照物需要先暂存到 ChimeraX 机器");
         return;
       }
+      /* v3.74 (round-33 review): the upload reads the WHOLE file into the
+       * browser's memory before POSTing — a multi-GB volume dragged in by
+       * mistake would OOM the tab (the relay's own /stage caps at 400 MB;
+       * refuse earlier with a clear message). */
+      if (file.size > 400 * 1024 * 1024) {
+        toast.error(`参照物 ${file.name} 有 ${fmtSize(file.size)} — 超过 400 MB 上限。大型地图请改用 ChimeraX 机器上的本地绝对路径（或小体积 .pdb/.cif 坐标文件）`);
+        return;
+      }
       const lower = file.name.toLowerCase();
       const ext = /\.(pdb|ent)$/.test(lower)
         ? "pdb"
@@ -996,27 +1036,33 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   );
 
   const generate = useCallback(async () => {
-    if (step.busy) return;
-    /* v3.50: stale-bundle gate — a page older than the live server refuses
-     * to run (its bridge JS predates the current save/fix ladder and its
-     * failures are indistinguishable from real bugs in pasted logs). */
-    const serverVersion = await checkEngineFresh();
-    if (serverVersion) {
-      const msg = `本页面是旧版本（引擎 v${FLOW_ENGINE_VERSION}），服务端已更新到 v${serverVersion} — 请刷新页面（或关闭旧标签页重新打开本应用）后再生成。`;
-      setStaleEngine(serverVersion);
-      setStep({ ...IDLE, error: msg });
-      toast.error(msg);
-      return;
-    }
-    setStaleEngine(null);
-    objectUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
-    objectUrlsRef.current = [];
-    setResult(null);
-    setThumbs([]);
-    setRenderReport([]);
-    setDeliverReport(null);
-    setStep({ busy: true, phase: "准备", pct: 2, logs: [], error: null });
-    pushLog(`流程图引擎 v${FLOW_ENGINE_VERSION}`);
+    /* v3.74: the busy state (set below, after the awaited freshness check)
+     * guards the BUTTON, but the entry check must also be synchronous —
+     * two rapid clicks both passed `if (step.busy) return` before either
+     * run reached its setStep({busy:true}). */
+    if (step.busy || generateStartingRef.current) return;
+    generateStartingRef.current = true;
+    try {
+      /* v3.50: stale-bundle gate — a page older than the live server refuses
+       * to run (its bridge JS predates the current save/fix ladder and its
+       * failures are indistinguishable from real bugs in pasted logs). */
+      const serverVersion = await checkEngineFresh();
+      if (serverVersion) {
+        const msg = `本页面是旧版本（引擎 v${FLOW_ENGINE_VERSION}），服务端已更新到 v${serverVersion} — 请刷新页面（或关闭旧标签页重新打开本应用）后再生成。`;
+        setStaleEngine(serverVersion);
+        setStep({ ...IDLE, error: msg });
+        toast.error(msg);
+        return;
+      }
+      setStaleEngine(null);
+      objectUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+      objectUrlsRef.current = [];
+      setResult(null);
+      setThumbs([]);
+      setRenderReport([]);
+      setDeliverReport(null);
+      setStep({ busy: true, phase: "准备", pct: 2, logs: [], error: null });
+      pushLog(`流程图引擎 v${FLOW_ENGINE_VERSION}`);
 
     try {
       /* 1. figure model */
@@ -1128,9 +1174,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
        *  branch re-resolves `transport` several times (re-probe, ping
        *  re-validation, 下载目录 re-apply); the final one must reach the
        *  delivery block below, as must the reference-hand verdict (the
-       *  delivery flip decision reads it). */
+       *  delivery flip decision reads it). v3.74: plus the URL→local-path
+       *  snapshot of every map the FIGURE already fetched, so the delivery
+       *  reuses those files instead of re-downloading the same URLs. */
       let transportOut: FlowTransport | null = null;
       let refHandVerdictOut: ReferenceHandVerdict | null = null;
+      let localMapByUrlOut: Map<string, string> | null = null;
 
       if (mode === "chimerax") {
         setStep((s) => ({ ...s, phase: "连接 ChimeraX", pct: 6 }));
@@ -1505,6 +1554,28 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         // volume color 着色）都在日志里留底，粘贴来的日志可自证版本。
         pushLog("地图渲染: 透明背景（save transparentBackground true）· 配色经 volume #<id> color 应用（不透明表面）");
 
+        /* v3.74 (round-33 review): an anchor policy with an EMPTY 参照物
+         * degrades to auto inside the engine — but silently; say it in the
+         * run log so the user knows the EMalign verification is NOT
+         * happening (the panel hint is easy to miss mid-run). */
+        if (refHandMode === "anchor" && !refHandAnchor.trim()) {
+          pushLog("⚠ 参考手性: 已选「EMalign 参照物验证」但参照物为空 — 本次按自动手性（仅相对手性判定）运行。请拖入/填写参照物后再生成以启用验证");
+        }
+
+        /* v3.74 (round-33 review): snapshot the URL→LOCAL-path map for the
+         * DELIVERY phase at the tail — the delivery's map_unsharp is very
+         * often the SAME file the figure just downloaded/rendered (the
+         * final refine map doubles as the alignment reference); reusing
+         * its local cache copy avoids a second 100–300 MB download and a
+         * duplicate cache entry under a different name. */
+        localMapByUrlOut = new Map<string, string>();
+        for (const [k, src] of sourceFor) {
+          const u = uniqueMaps.get(k)?.downloadUrl;
+          if (u && src && !/^https?:/i.test(src) && !localMapByUrlOut.has(u)) {
+            localMapByUrlOut.set(u, src);
+          }
+        }
+
         const renderRes = await renderFigureMaps(transport, {
           reference: {
             key: referenceKey as string,
@@ -1709,7 +1780,15 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           try {
             const plan = buildDeliveryPlan(summary, model, base);
             for (const n of plan.notes) pushLog(`  · ${n}`);
-            const flip = refHandVerdictOut?.flipped === true;
+            /* v3.74: flip on EITHER mirrored verdict — `flipped` (the
+             * reference became its z-flipped copy in-figure) OR the new
+             * `flipFailed` (manual-mirrored whose in-figure flip THREW —
+             * the run rendered against the still-mirrored reference, and
+             * the raw maps are mirrored all the same: they matched the
+             * mirrored reference as-is). Round-33 review: the old
+             * `flipped === true` read silently delivered UNCORRECTED
+             * mirrored maps in the flip-failed branch. */
+            const flip = refHandVerdictOut?.flipped === true || refHandVerdictOut?.flipFailed === true;
             pushLog(
               `  手性策略: ${
                 refHandVerdictOut?.verdict || "自动（参考原样 — 交付文件与参考保持一致手性）"
@@ -1755,11 +1834,16 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 }
               }
               try {
-                // Same-origin app URLs (staged-import images) fetch plain;
-                // CryoSmart URLs ride cryoSmartBytes (credentials/proxy).
-                const bytes = url.startsWith(window.location.origin)
-                  ? new Uint8Array(await (await fetch(url, { cache: "no-store" })).arrayBuffer())
-                  : await cryoSmartBytes(session, url, { timeoutMs: 300_000 });
+                /* v3.74: the same-origin branch used to skip the res.ok check —
+                 * a 404/500 HTML error page would be staged as the "map"
+                 * and silently delivered as a corrupt file. */
+                if (url.startsWith(window.location.origin)) {
+                  const res = await fetch(url, { cache: "no-store" });
+                  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                  const bytes = new Uint8Array(await res.arrayBuffer());
+                  return await stageViaRelay(transport, item.cacheKey, url, bytes, pushLog, item.cacheExt);
+                }
+                const bytes = await cryoSmartBytes(session, url, { timeoutMs: 300_000 });
                 return await stageViaRelay(transport, item.cacheKey, url, bytes, pushLog, item.cacheExt);
               } catch {
                 return null;
@@ -1779,12 +1863,24 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   continue;
                 }
                 if (!item.urls.length) throw new Error("无可用下载来源");
-                let localPath: string | null = null;
+                /* v3.74: rung 0 — a URL the FIGURE already fetched and
+                 * cached locally (the final refine map doubles as both the
+                 * alignment reference and map_unsharp in the typical deck):
+                 * reuse that exact local file, no re-download, no duplicate
+                 * cache entry. */
+                let localPath: string | null = item.urls
+                  .map((u) => localMapByUrlOut?.get(u) ?? null)
+                  .find((p): p is string => !!p) ?? null;
+                if (localPath) {
+                  pushLog(`  ✓ ${item.filename} 复用流程图已下载的同一地图文件 — 跳过下载`);
+                }
                 const errors: string[] = [];
-                for (const url of item.urls) {
-                  localPath = await ensureCached(item, url);
-                  if (localPath) break;
-                  errors.push(url.replace(/^https?:\/\/[^/]+/, ""));
+                if (!localPath) {
+                  for (const url of item.urls) {
+                    localPath = await ensureCached(item, url);
+                    if (localPath) break;
+                    errors.push(url.replace(/^https?:\/\/[^/]+/, ""));
+                  }
                 }
                 if (!localPath) throw new Error(`所有来源均失败（${errors.join("；").slice(0, 200)}）`);
                 let r: { ok: boolean; path?: string; size?: number; error?: string };
@@ -1834,6 +1930,11 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       const message = err instanceof Error ? err.message : String(err);
       setStep((s) => ({ ...s, busy: false, error: message }));
       toast.error(`流程图生成失败: ${message}`);
+    }
+    } finally {
+      /* v3.74: release the synchronous double-click guard whatever the
+       * outcome (stale-engine early return, thrown error, or success). */
+      generateStartingRef.current = false;
     }
   }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, relayFetchToCache, pushLog, maxGroups, includeFsc, flowMode, effectiveMaxGroups, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh, applyCacheDir, deliverDir, deliverBase, refHandMode, refHandAnchor]);
 
@@ -2176,6 +2277,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               onDrop={(e) => {
                 e.preventDefault();
                 setAnchorDragOver(false);
+                /* v3.74: guard the drop path like the button — a second drop
+                 * during an in-flight upload used to run a concurrent
+                 * handleAnchorFile (the last one to finish won the input). */
+                if (anchorUploading) return;
                 const f = e.dataTransfer?.files?.[0];
                 if (f) void handleAnchorFile(f);
               }}
@@ -2477,7 +2582,9 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               </div>
             )}
             {renderReport.length > 0 && (
-              <div className="overflow-hidden rounded-md border border-slate-200 dark:border-slate-700">
+              /* v3.74 (round-33 review): the 4-column mono-key table clipped
+               * its overflowing content on narrow screens — scroll instead. */
+              <div className="overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
                 <table className="w-full text-[11px]">
                   <thead className="bg-slate-50 text-left text-[10px] uppercase tracking-wide text-slate-500 dark:bg-slate-900 dark:text-slate-400">
                     <tr>

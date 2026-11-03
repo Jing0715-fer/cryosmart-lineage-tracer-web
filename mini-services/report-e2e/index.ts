@@ -1261,8 +1261,11 @@ const relayServer = Bun.serve({
             if (cached) bytes = cached.bytes;
             else if (existsSync(src)) bytes = new Uint8Array(readFileSync(src));
             else return reply(200, { ok: false, error: "源文件不存在: " + src });
-          } else if (body.data_base64) {
-            bytes = Uint8Array.from(atob(body.data_base64), (c) => c.charCodeAt(0));
+          } else if (body.data_base64 || body.dataBase64) {
+            // v3.74: accept both keys — mirrors the real relay.py's
+            // `payload.get("data_base64") or payload.get("dataBase64")`.
+            const b64 = body.data_base64 || body.dataBase64;
+            bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
             if (!bytes.length) return reply(200, { ok: false, error: "empty payload (0 bytes)" });
           } else if (body.url) {
             const res = await fetch(body.url, { redirect: "follow" });

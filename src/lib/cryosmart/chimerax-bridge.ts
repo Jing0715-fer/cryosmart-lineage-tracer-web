@@ -715,7 +715,11 @@ export interface BridgeDeliverPayload {
   src?: string;
   /** Download this URL straight → dst (plots / fsc.xml — small files). */
   url?: string;
-  /** Write these base64 bytes → dst (embedded fsc.xml text). */
+  /** Write these base64 bytes → dst (embedded fsc.xml text). Sent on the
+   *  WIRE as the relay's snake_case key `data_base64` (see the mapping in
+   *  bridgeDeliverFile — round-33 review: the raw camelCase key never
+   *  reached the relay's payload.get("data_base64") and broke every
+   *  embedded-xml delivery with “缺少 src/url/data_base64 之一”). */
   dataBase64?: string;
   /** Full destination path on the ChimeraX machine (dir + filename). */
   dst?: string;
@@ -746,12 +750,20 @@ export async function bridgeDeliverFile(
 ): Promise<BridgeDeliverResult> {
   if (t.kind !== "relay") return { ok: false, error: "not a relay transport" };
   try {
+    /* v3.74 (round-33 review): the relay's /deliver contract reads the
+     * SNAKE_CASE key `data_base64`; the TS-side field stays camelCase —
+     * map it at the wire boundary (undefined fields drop out of the JSON
+     * body) so captured fsc.xml text delivers without a relay round-trip. */
+    const wire =
+      payload.dataBase64 != null
+        ? { ...payload, dataBase64: undefined, data_base64: payload.dataBase64 }
+        : payload;
     const res = await fetchWithTimeout(
       `${t.base}/deliver`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(wire),
       },
       timeoutMs,
     );
@@ -805,7 +817,10 @@ export async function deliverFlippedMap(
     const next = await bridgeNextModelId(t);
     let res = next != null ? await softExec(`volume flip #${srcId} axis z modelId ${next}`, 180_000) : null;
     if (res && !res.error) {
-      flipId = parseOpenModelId(res.text) ?? next;
+      /* v3.74: trust the explicit modelId — parsing the log could grab the
+       * SOURCE map's id (or a submodel's) instead of the new volume (the
+       * same hardening gaussianSmooth got in v3.67). */
+      flipId = next;
     } else {
       res = await softExec(`volume flip #${srcId} axis z`, 180_000);
       if (res && !res.error) {
@@ -1388,6 +1403,13 @@ export interface ReferenceHandVerdict {
   /** True when the canonical reference became the z-flipped copy — the
    *  raw reference map (and every same-hand raw map) is mirrored. */
   flipped: boolean;
+  /** v3.74 (round-33 review): the manual-mirrored policy FAILED to flip
+   *  the reference in-figure (flipReference threw) — the run rendered
+   *  against the still-mirrored reference. The raw maps are mirrored all
+   *  the same (they matched the mirrored reference as-is), so the
+   *  delivery phase flips every map for THIS verdict too — a state
+   *  `flipped: true` alone could not express. */
+  flipFailed?: boolean;
   /** Human-readable verdict ("EMalign 验证镜像 · 已翻正（0.31 vs 0.94）" …). */
   verdict: string;
 }
@@ -1550,6 +1572,15 @@ export async function renderFigureMaps(
    *  delivery phase reads this — a flipped reference means the raw
    *  delivery maps are mirrored and must be flipped on delivery. */
   let refFlipped = false;
+  /* v3.74 (round-33 review): the manual-mirrored policy FAILED to flip the
+   *  reference (flipReference threw) — the run continues against the still
+   *  MIRRORED reference. The raw maps are then mirrored exactly like the
+   *  flipped-verdict case (they match the mirrored reference as-is), so
+   *  the delivery phase must STILL z-flip every map — `flipFailed` carries
+   *  that "known-mirrored but not corrected in-figure" state across, where
+   *  `flipped: true` alone ("the reference became the flipped copy") could
+   *  not express it. */
+  let refFlipFailed = false;
   /** Create the reference's z-flip copy, re-apply its display settings
    * and swap it in as the CANONICAL reference (the original closes).
    * Returns false when the flip fails (the run then keeps the original
@@ -1566,7 +1597,9 @@ export async function renderFigureMaps(
         ? await exec(t, `volume flip #${srcId} axis z modelId ${next}`, opts, true)
         : null;
       if (res && !res.error) {
-        fid = parseOpenModelId(res.text) ?? next;
+        /* v3.74: trust the explicit modelId — parsing the log could grab
+         * the SOURCE map's id (or a submodel's) instead of the new volume. */
+        fid = next;
       } else {
         res = await exec(t, `volume flip #${srcId} axis z`, opts, true);
         if (res && !res.error) fid = parseOpenModelId(res.text);
@@ -1601,8 +1634,9 @@ export async function renderFigureMaps(
         } else {
           refHandKnown = true;
           refIsCorrectHand = false;
-          refHandVerdict = "手动指定镜像 · 翻正失败";
-          log("⚠ 参考仍为镜像手性 — 各 map 的手性判定改按镜像参考推算（流程图将呈镜像视图）");
+          refFlipFailed = true;
+          refHandVerdict = "手动指定镜像 · 翻正失败（交付时仍将翻正）";
+          log("⚠ 参考仍为镜像手性 — 各 map 的手性判定改按镜像参考推算（流程图将呈镜像视图）；交付阶段的全部 map 仍会经 z-flip 翻正后写出");
         }
       } else {
         refHandKnown = true;
@@ -2238,7 +2272,10 @@ export async function renderFigureMaps(
             ? await exec(t, `volume flip #${origId} axis z modelId ${next}`, opts, true)
             : null;
           if (flipRes && !flipRes.error) {
-            flipId = parseOpenModelId(flipRes.text) ?? next;
+            /* v3.74: trust the explicit modelId — parsing the log could
+             * grab the SOURCE map's id (or a submodel's) instead of the
+             * new volume (same hardening as flipReference above). */
+            flipId = next;
           } else {
             flipRes = await exec(t, `volume flip #${origId} axis z`, opts, true);
             if (flipRes && !flipRes.error) {
@@ -2570,9 +2607,20 @@ export async function renderFigureMaps(
        * flip FAILED) inverts the reading — noted in the log. */
       if (refHandKnown) {
         const mapHandCorrect = (bestRow.candidate !== "flip_z") === refIsCorrectHand;
-        log(
-          `    生物学手性: ${mapHandCorrect ? "正确 ✓ — 与经验证的参考手性一致" : "镜像 — 原始 map 手性有误，已自动翻正展示"}${refIsCorrectHand ? "" : "（注: 参考翻正失败，按镜像参考推算）"}`,
-        );
+        /* v3.74: the manual-mirrored FLIP-FAILED branch (refIsCorrectHand
+         * false, refFlipFailed true) renders the maps as-is against the
+         * still-mirrored reference — "已自动翻正展示" would be a lie; the
+         * correction happens at DELIVERY time (every map z-flipped), and
+         * the log says exactly that. */
+        if (refFlipFailed) {
+          log(
+            `    生物学手性: 原始 map 与镜像参考同手（即均为镜像）— 因参考翻正失败，展示保持镜像；交付阶段将统一 z-flip 翻正`,
+          );
+        } else {
+          log(
+            `    生物学手性: ${mapHandCorrect ? "正确 ✓ — 与经验证的参考手性一致" : "镜像 — 原始 map 手性有误，已自动翻正展示"}`,
+          );
+        }
       }
       renders.push({
         key: req.key,
@@ -2693,7 +2741,7 @@ export async function renderFigureMaps(
     view,
     referenceKey: opts.reference.key,
     logs,
-    referenceHand: { known: refHandKnown, flipped: refFlipped, verdict: refHandVerdict },
+    referenceHand: { known: refHandKnown, flipped: refFlipped, flipFailed: refFlipFailed, verdict: refHandVerdict },
   };
 }
 
