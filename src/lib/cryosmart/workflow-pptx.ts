@@ -1,11 +1,32 @@
 /**
- * Portrait workflow-figure PPTX builder (v3.73; layout rebuilt for round-18).
+ * Portrait workflow-figure PPTX builder (v3.75; layout rebuilt for round-18).
+ *
+ * v3.75 (round-34 “按照class0,1,2从左到右顺序排列 · 保证所有模式的颗粒数
+ * 都要显示 · 框不要比图大太多 · 箭头和文字避免重叠”): four layout
+ * overhauls —
+ *   (1) STRICT CLASS ORDER: the v3.62 anchor centre-swap is GONE. Class
+ *       thumbnails render in their natural 0,1,2… order left→right (the
+ *       strip stays centred on the spine); the flow-anchor selection
+ *       frame simply lands on whichever class feeds the next stage.
+ *   (2) COUNTS EVERYWHERE: 极简 rows now carry the same per-class stats
+ *       under each thumbnail as 标准/简化 (the retention labels stay),
+ *       and single-map rows put their stats UNDER the image (centred on
+ *       the spine) instead of hanging to its right.
+ *   (3) TIGHT FRAMES: every embedded PNG is alpha-trimmed to its content
+ *       bbox (png-trim.ts — the 1600×800 ChimeraX renders carry ~50 %
+ *       transparent margins), and the anchor frame hugs the PLACED
+ *       image box, not the slot — the box is never materially bigger
+ *       than the map it marks.
+ *   (4) SPACING: per-class stats sit 0.09 in below the image (clear of
+ *       the frame's 0.04 overhang), stage labels end 0.11 in left of
+ *       the spine (arrow clearance), and a long footnote wraps onto a
+ *       second line instead of running off the canvas.
  *
  * v3.73 (round-32 “简化和标准模式下的pptx报告也要参考极简的pptx进行优化，
  * 中间步骤只展示分类结果…也需要框出哪些类是下一步用到的”): the 极简
  * showcase conventions now run in EVERY style — the flow-anchor class (the
  * one feeding the next stage) gets the reference's thin selection rectangle
- * centred on the spine in 标准/简化 decks too, and per-gap “omitted: N×”
+ * in 标准/简化 decks too, and per-gap “omitted: N×”
  * notes name the stages the classification-only middle filter dropped
  * (workflow-figure's dropNonClassificationMiddles + model.omissions).
  *
@@ -72,7 +93,8 @@
 
 import { makeZip, type ZipFileEntry } from "./zip";
 import { PPTX_CONTENT_TYPE } from "./constants";
-import { imageDims, type FlowFigureModel, type FlowFigureItem } from "./workflow-figure";
+import { trimPngAlpha } from "./png-trim";
+import type { FlowFigureModel, FlowFigureItem } from "./workflow-figure";
 
 /* ------------------------------------------------------------------ */
 /* Units & slide constants                                             */
@@ -226,12 +248,22 @@ export interface BuildPptxOptions {
   /** v3.59 (round-18 极简模式): "minimal" = the upload/workflow.pptx
    *  reference look (no job ids, selection rectangles around the flow
    *  anchor class, arrow retention labels, final Å under the last map);
-   *  "standard" (default) = the richer v3.55 conventions. */
+   *  "standard" (default) = the richer v3.55 conventions.
+   *  v3.75: the styles share the per-class stats + the anchor frame;
+   *  minimal keeps the bare labels, retention labels and no footnote. */
   style?: "standard" | "minimal";
 }
 
 function estimateTextWidth(text: string): number {
   return Math.max(0.6, text.length * 0.062 + 0.22);
+}
+
+/** v3.75: width estimate for the 7 pt footnote — CJK glyphs are full-em
+ * (~0.096 in at 7 pt) while latin/digits average ~0.049 in. */
+function footnoteTextWidth(text: string): number {
+  let w = 0;
+  for (const ch of text) w += ch.charCodeAt(0) > 0x2e7f ? 0.096 : 0.049;
+  return w;
 }
 
 function containBox(box: Box, ratio: number): Box {
@@ -244,10 +276,10 @@ function containBox(box: Box, ratio: number): Box {
   return { x: box.x + (box.w - bw) / 2, y: box.y + (box.h - bh) / 2, w: bw, h: bh };
 }
 
-export function buildWorkflowPptx(
+export async function buildWorkflowPptx(
   fig: FlowFigureModel,
   options: BuildPptxOptions,
-): Blob {
+): Promise<Blob> {
   const minimal = options.style === "minimal";
   const ops: Op[] = [];
   const pics: PicOp[] = [];
@@ -275,10 +307,14 @@ export function buildWorkflowPptx(
   /** parallel rows' label band (two lines) + the arrow standoff above it */
   const PLABEL_H = minimal ? 0.32 : 0.48;
   const ITEM_GAP = 0.16;
-  /** 标准 style: per-class stats box height under each thumbnail. */
-  const UNDER_H = 0.32;
-  /** 标准 style: side stats box for single-map rows. */
-  const STATS_W = 0.95;
+  /** v3.75: per-class stats band under EVERY multi-thumb row (极简 included
+   *  — round-34 “保证所有模式的颗粒数都要显示”) — plus the single-map
+   *  rows' stats, which now sit UNDER the image instead of hanging right. */
+  const UNDER_H = 0.34;
+  /** v3.75: image-bottom → stats-text gap — clears the anchor frame's
+   *  0.04 in overhang with breathing room (round-34 review: the frame
+   *  edge used to sit directly on the first stats line). */
+  const STATS_TOP_GAP = 0.09;
   /** 极简 style: retention label height in the inter-row gap. */
   const RETAIN_H = 0.31;
   /** v3.62: 极简 — the fixed inter-row band = retention slot + omission
@@ -322,19 +358,13 @@ export function buildWorkflowPptx(
 
   /** v3.59: SINGLE COLUMN — one row spans the slide width, thumbnails all
    *  the same size, capped by the reference width and by the widest row's
-   *  share of the content width (a row counts EVERY class thumbnail plus,
-   *  in 标准 style, the side stats of single-map rows). No column solver,
-   *  no readability floor: the canvas GROWS downward instead. */
-  const sideStatsOfRow = (g: FlowFigureItem[]): number => {
-    if (minimal || rowThumbTotal(g) !== 1) return 0;
-    return itemSlotsOf(g[0])[0]?.stats.length ? ITEM_GAP + STATS_W : 0;
-  };
+   *  share of the content width. No column solver, no readability floor:
+   *  the canvas GROWS downward instead. (v3.75: the old single-map side
+   *  stats reservation is gone — those stats moved UNDER the image.) */
   const imgW = Math.min(
     REF_IMG_W,
     ...groups.map(
-      (g) =>
-        (contentW - rowGapUnits(g) * ITEM_GAP - sideStatsOfRow(g)) /
-        Math.max(1, rowThumbTotal(g)),
+      (g) => (contentW - rowGapUnits(g) * ITEM_GAP) / Math.max(1, rowThumbTotal(g)),
     ),
   );
   const imgH = imgW / 2;
@@ -418,38 +448,27 @@ export function buildWorkflowPptx(
     }
   }
 
-  /* ---- 极简: flow-anchor precomputation (data-only, before placement) ----
+  /* ---- flow-anchor precomputation (data-only, before placement) ----
    * The anchor = the class slot whose particle count feeds the next stage
    * (fallback: the largest-count slot). Computed per row UP FRONT because
-   * the next row's ENTRY GAP depends on it: when the anchor's selection
-   * rectangle sits under the spine, the incoming arrow must stop at the
-   * frame's top edge instead of the image top — the tip would otherwise
-   * poke through the frame.
+   * the next row's ENTRY GAP depends on it: a framed row's incoming arrow
+   * stops at the frame's top edge instead of the image top — the tip
+   * would otherwise poke through the frame.
    *
-   * v3.62 (round-21 “对齐的算法还是不是对每个样品都有效"): the anchor no
-   * longer merely REPORTS whether it lands on the spine — the row is now
-   * LAID OUT so it does. `target` = the render POSITION the anchor takes:
-   * the strip's centre slot (odd thumb counts swap the anchor into the
-   * exact middle; even counts use the left-of-centre slot), and `x0` = the
-   * strip's left edge shifted so the anchor's own box centres on the
-   * spine, clamped to the page margins (a 2-thumb row always fits; ≥4
-   * thumbs may clamp, leaving the frame near — but not on — the spine).
-   * The frame therefore reads ON the flow for every sample: P268's third
-   * row framed the LEFT class while the arrow ran through the middle
-   * thumb. Parallel rows keep the plain centred strip. */
+   * v3.75 (round-34 “需要按照class0,1,2从左到右顺序排列”): the v3.62
+   * centre-swap is REMOVED. The strip renders classes in their natural
+   * 0,1,2… order (the classSlotsFor sort), centred on the spine; the
+   * selection frame simply lands on whichever class feeds the next
+   * stage, at its own position. The anchor is now pure DATA — no render
+   * position, no strip shift. Parallel rows stay frame-less. */
   interface AnchorInfo {
     item: number;
     slot: number;
-    /** v3.62: the render POSITION the anchor occupies after the swap. */
-    target: number;
-    /** v3.62: the strip's left edge that centres the anchor on the spine. */
-    x0: number;
-    onSpine: boolean;
   }
   /* v3.73 (round-32 “也需要框出哪些类是下一步用到的”): the anchor
    *  precomputation + selection frame apply to EVERY style now —
    *  标准/简化 decks frame the class feeding the next stage exactly like
-   *  the 极简 reference (per-class stats travel under the swapped slots
+   *  the 极简 reference (per-class stats travel under the slots
    *  unchanged); parallel rows stay frame-less in every style. */
   const anchorInfoOf = (g: FlowFigureItem[], nextRep: number | null): AnchorInfo | null => {
     if (nextRep == null || g.length > 1 || rowThumbTotal(g) <= 1) return null;
@@ -477,17 +496,7 @@ export function buildWorkflowPptx(
     };
     const hit = counted.find((f) => f.count === nextRep) ?? maxCountSlot();
     if (!hit) return null;
-    const stripW = rowThumbTotal(g) * imgW + rowGapUnits(g) * ITEM_GAP;
-    let target = hit.slot;
-    let x0 = SPINE - stripW / 2;
-    if (hit.item === 0 && g.length === 1) {
-      const n = rowThumbTotal(g);
-      target = n % 2 === 1 ? (n - 1) / 2 : n / 2 - 1;
-      const anchorCenter = target * (imgW + ITEM_GAP) + imgW / 2;
-      x0 = Math.max(MARGIN_X, Math.min(PAGE_W_IN - MARGIN_X - stripW, SPINE - anchorCenter));
-    }
-    const onSpine = Math.abs(x0 + target * (imgW + ITEM_GAP) + imgW / 2 - SPINE) <= 0.06;
-    return { item: hit.item, slot: hit.slot, target, x0, onSpine };
+    return { item: hit.item, slot: hit.slot };
   };
   const anchorInfos = groups.map((g, i) => anchorInfoOf(g, i + 1 < groups.length ? repCounts[i + 1] : null));
 
@@ -558,51 +567,46 @@ export function buildWorkflowPptx(
   groups.forEach((group, i) => {
     const parallel = group.length > 1;
     const thumbsTotal = rowThumbTotal(group);
-    const hasUnderStats = !minimal && thumbsTotal > 1;
+    /* v3.75: per-class stats render under the thumbnails in EVERY style
+     * (round-34 “保证所有模式的颗粒数都要显示”) — 极简 included. The band is
+     * reserved for multi-thumb rows (uniform pitch) AND for single-map rows
+     * that carry stats (the stats now sit UNDER the image — without the
+     * reservation the next row's arrow would run through the text box). */
+    const hasUnderStats =
+      thumbsTotal > 1 || group.some((it) => itemSlotsOf(it).some((s) => s.stats.length));
     const stripW = thumbsTotal * imgW + rowGapUnits(group) * ITEM_GAP;
-    /* v3.62: a row with a precomputed anchor lays out so the ANCHOR's
-     * box centres on the spine (anchorInfoOf computed x0 + the centre
-     * slot); every other row centres the whole strip as before. */
-    const ai0 = anchorInfos[i];
-    const x0 = !parallel && ai0 ? ai0.x0 : SPINE - stripW / 2;
+    /* v3.75: the strip is ALWAYS centred on the spine — classes keep
+     * their natural 0,1,2… order (the v3.62 anchor-shift is gone). */
+    const x0 = SPINE - stripW / 2;
 
     const top = cursor;
     const imgBottom = top + imgH;
-    const bottom = imgBottom + (hasUnderStats ? UNDER_H : 0);
+    const bottom = imgBottom + (hasUnderStats ? STATS_TOP_GAP + UNDER_H : 0);
 
     const items: PlacedItem[] = [];
     let x = x0;
     group.forEach((item, ii) => {
       const slots = itemSlotsOf(item);
       const itemW = slots.length * imgW + (slots.length - 1) * ITEM_GAP;
-      /* v3.62: 极简 single rows render the flow-anchor class in the
-       * strip's CENTRE slot — order[pos] = the original slot that renders
-       * at position pos (the anchor and the centre slot swap). Class
-       * thumbnails carry no per-class labels in this style, so the swap
-       * is visually just a reordered montage; the selection frame then
-       * always sits under the spine arrows for EVERY sample. Parallel
-       * rows and 标准 style keep the natural order. */
-      const order: number[] = slots.map((_, k) => k);
-      if (!parallel && ai0 && slots.length > 1) {
-        const tmp = order[ai0.slot];
-        order[ai0.slot] = ai0.target;
-        order[ai0.target] = tmp;
-      }
+      /* v3.75 (round-34 “按照class0,1,2从左到右顺序排列”): NO anchor
+       * swap — slots render in the natural class-index order the model
+       * sorted them into (classSlotsFor). The selection frame lands on
+       * the anchor class wherever it sits. */
       const placed: PlacedSlot[] = [];
-      order.forEach((orig, pos) => {
-        const s = slots[orig];
+      slots.forEach((s, pos) => {
         const tx = x + pos * (imgW + ITEM_GAP);
         const thumb: Box = { x: tx, y: top, w: imgW, h: imgH };
+        /* v3.75: stats UNDER the image in every style — multi-thumb rows
+         * under their own thumbnail, single-map rows centred on the spine
+         * (the old 标准 right-hand hang read as orphaned text and the
+         * 极简 deck showed no count at all). STATS_TOP_GAP clears the
+         * anchor frame's 0.04 in overhang. */
         let stats: Box | null = null;
-        if (!minimal && s.stats.length) {
+        if (s.stats.length) {
           stats =
             thumbsTotal === 1
-              ? /* single-map row: the THUMB stays centred on the spine and
-                 * the stats hang to its RIGHT (v3.59 — centring the pair
-                 * would push the thumb off the spine, and the spine arrow
-                 * must land on the thumb, not the stats box). */
-                { x: x0 + imgW + ITEM_GAP, y: top + imgH / 2 - 0.21, w: STATS_W, h: 0.42 }
-              : { x: tx, y: imgBottom + 0.03, w: imgW, h: 0.26 };
+              ? { x: SPINE - imgW / 2, y: imgBottom + STATS_TOP_GAP, w: imgW, h: 0.26 }
+              : { x: tx, y: imgBottom + STATS_TOP_GAP, w: imgW, h: 0.26 };
         }
         placed.push({
           thumb,
@@ -618,12 +622,10 @@ export function buildWorkflowPptx(
       x += itemW + ITEM_GAP;
     });
 
-    /* 极简: resolve the precomputed anchor to its placed slot — after the
-     * v3.62 swap the anchor renders at position `target`. */
+    /* resolve the precomputed anchor to its placed slot — its own
+     * natural position (v3.75: no swap, no re-indexing). */
     const ai = anchorInfos[i];
-    const anchor = ai
-      ? items[ai.item]?.slots[ai.target] ?? items[ai.item]?.slots[ai.slot] ?? null
-      : null;
+    const anchor = ai ? items[ai.item]?.slots[ai.slot] ?? null : null;
 
     rows.push({ items, top, bottom, parallel, anchor });
 
@@ -727,8 +729,27 @@ export function buildWorkflowPptx(
   });
 
   /* ---- emit per-row shapes ---- */
-  rows.forEach((row) => {
-    row.items.forEach((p) => {
+  /* v3.75: per-slot PNG alpha-trim cache — the ChimeraX renders carry
+   * huge transparent margins; trimming lets both the thumbnail and the
+   * anchor frame hug the actual map (round-34 “框不要比图大太多”). */
+  const trimCache = new Map<string, { bytes: Uint8Array; width: number; height: number }>();
+  const trimmedBytes = async (
+    key: string | null,
+    bytes: Uint8Array,
+  ): Promise<{ bytes: Uint8Array; width: number; height: number }> => {
+    if (!key) return { bytes, width: 1, height: 1 };
+    const hit = trimCache.get(key);
+    if (hit) return hit;
+    const res = await trimPngAlpha(bytes);
+    const out = { bytes: res.bytes, width: res.width, height: res.height };
+    trimCache.set(key, out);
+    return out;
+  };
+  /** the PLACED (contain-fitted) box of every slot that got real bytes —
+   * the anchor frame hugs this, not the raw slot. */
+  const placedBySlot = new Map<PlacedSlot, Box>();
+  for (const row of rows) {
+    for (const p of row.items) {
       if (row.parallel) {
         /* v3.55: parallel rows label each item right-aligned at its own
          * right edge; 标准 uses the compact two-line form (name / id) so
@@ -756,10 +777,11 @@ export function buildWorkflowPptx(
          * spine (the reference's “2*Hetero refinement” box ends at 3.62 vs
          * spine 3.69) — the spine arrow passes through the band without
          * ever touching the text. The box widens leftward, clamped to the
-         * margin. */
+         * margin. v3.75: the clearance widened 0.07 → 0.11 in (round-34
+         * “箭头和文字避免重叠”). */
         const runs = labelRunsOf(p.item);
         const estW = estimateRunsWidth(runs);
-        const right = SPINE - 0.07;
+        const right = SPINE - 0.11;
         const lx = Math.max(MARGIN_X, right - estW - 0.06);
         ops.push({
           kind: "text",
@@ -770,12 +792,13 @@ export function buildWorkflowPptx(
           lines: [{ align: "r", runs }],
         } as TextOp);
       }
-      p.slots.forEach((s, si) => {
+      for (const [si, s] of p.slots.entries()) {
         /* thumbnail or placeholder frame */
         const bytes = (s.key && options.images.get(s.key)) || null;
         if (bytes) {
-          const dims = imageDims(bytes);
-          const placed = containBox(s.thumb, Math.max(0.05, dims.width / Math.max(1, dims.height)));
+          const t = await trimmedBytes(s.key, bytes);
+          const placed = containBox(s.thumb, Math.max(0.05, t.width / Math.max(1, t.height)));
+          placedBySlot.set(s, placed);
           pics.push({
             kind: "pic",
             x: placed.x,
@@ -784,7 +807,7 @@ export function buildWorkflowPptx(
             h: placed.h,
             mediaKey: s.key || `img-${si}`,
             descr: s.descr,
-            bytes,
+            bytes: t.bytes,
           });
         } else {
           ops.push({ kind: "frame", ...s.thumb });
@@ -796,17 +819,18 @@ export function buildWorkflowPptx(
             lines: s.statsLines.map((t) => ({ t, align: "ctr" as Align })),
           } as TextOp);
         }
-      });
-    });
+      }
+    }
     /* v3.73 (round-32 “也需要框出哪些类是下一步用到的”): the selection
      *  rectangle around the flow-anchor class — EVERY style now (the 极简
      *  thin black frame; 标准/简化 frame the same slot above their own
-     *  per-class stats). */
+     *  per-class stats). v3.75: the frame hugs the PLACED image box
+     *  (post alpha-trim, post contain-fit) — never the empty slot. */
     if (row.anchor) {
-      const t = row.anchor.thumb;
+      const t = placedBySlot.get(row.anchor) ?? row.anchor.thumb;
       ops.push({ kind: "frame", x: t.x - 0.04, y: t.y - 0.04, w: t.w + 0.08, h: t.h + 0.08 });
     }
-  });
+  }
 
   /* ---- final stats ("C1, 3.46 Å") — under the last MAP-BEARING stage
    * (v3.55 rule: an appended FSC montage is a diagnostic panel, not the
@@ -852,20 +876,43 @@ export function buildWorkflowPptx(
   /* ---- canvas: width fixed at the reference's 7.5 in; height grows with
    * the content (round-18 “可以根据需要改变画布大小”), min 10 in, rounded
    * up to ¼ in. */
-  const tail = minimal ? 0.4 : options.footnote ? 0.62 : 0.45;
+  /* footnote — 标准 style only (the 极简 reference carries none).
+   * v3.75 (round-34 review): a long footnote WRAPS onto a second line
+   * instead of running off the right edge — the segments split at the
+   * " · " separators and are packed greedily by estimated width (CJK
+   * glyphs count full-em); anything beyond two lines is truncated with
+   * an ellipsis so the tail never crowds the canvas edge. */
+  const footnoteLines: string[] = [];
+  if (options.footnote && !minimal) {
+    const segments = options.footnote.split(" · ");
+    let line = "";
+    for (const seg of segments) {
+      const candidate = line ? `${line} · ${seg}` : seg;
+      if (footnoteTextWidth(candidate) <= contentW || !line) {
+        line = candidate;
+      } else {
+        footnoteLines.push(line);
+        line = seg;
+        if (footnoteLines.length === 2) break;
+      }
+    }
+    if (footnoteLines.length < 2 && line) footnoteLines.push(line);
+    else if (footnoteLines.length === 2 && line) footnoteLines[1] = `${footnoteLines[1]} · …`;
+  }
+  const footnoteH = footnoteLines.length > 1 ? 0.34 : 0.2;
+  const tail = minimal ? 0.4 : options.footnote ? 0.5 + footnoteH : 0.45;
   const slideH = Math.max(MIN_SLIDE_H_IN, Math.ceil((contentBottom + tail) * 4) / 4);
 
-  /* footnote — 标准 style only (the 极简 reference carries none). */
-  if (options.footnote && !minimal) {
+  if (footnoteLines.length) {
     ops.push({
       kind: "text",
       x: MARGIN_X,
-      y: slideH - 0.34,
+      y: slideH - 0.16 - footnoteH,
       w: contentW,
-      h: 0.2,
-      sz: 750,
+      h: footnoteH,
+      sz: 700,
       color: "808080",
-      lines: [{ t: options.footnote, align: "l" }],
+      lines: footnoteLines.map((t) => ({ t, align: "l" as Align })),
     });
   }
 

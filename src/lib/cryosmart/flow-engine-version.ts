@@ -501,5 +501,33 @@
  * (clearing the input to retype no longer bounces back). (10) The
  * render-report table scrolls (overflow-x-auto) instead of clipping on
  * narrow screens.
+ *
+ * v3.75 bump reason (round-34 “按照class0,1,2从左到右顺序排列 · 保证所有
+ * 模式的颗粒数都要显示 · 极简选6行但输出只有一个分类job的图 · 框不要比
+ * 图大太多 · 箭头和文字避免重叠”): the P222_J863 decks drove five layout
+ * overhauls — (1) STRICT CLASS ORDER: the v3.62 anchor centre-swap is
+ * removed; class thumbnails render in natural 0,1,2… order (strip
+ * centred on the spine), the flow-anchor frame lands on whichever class
+ * feeds the next stage. (2) COUNTS EVERYWHERE: the 简化 funnel pass
+ * (which hid every count line downstream of a re-extraction — P222's
+ * round-2 repick 172,802→1,593,094 suppressed ALL later counts, leaving
+ * bare percentages) is deleted; 极简 rows now carry per-class stats under
+ * each thumbnail like the other styles, and single-map rows put their
+ * stats UNDER the image (centred on the spine) instead of hanging right.
+ * (3) RICHER 极简: the 简化 shrink passes no longer run under 极简 (they
+ * starved P222's pool to a 2-row deck on a 6-row budget), the curated
+ * mainline prefers the LONGER of the two parent walks (the curated walk
+ * can die at a repick boundary), and curateMinimalFlow forward-fills
+ * classification rows upstream of the first row once the backward fill
+ * leaves budget. (4) TIGHT FRAMES: every embedded PNG is alpha-trimmed
+ * to its content bbox (png-trim.ts — the 1600×800 ChimeraX renders are
+ * ~50 % transparent margin) and the anchor frame hugs the PLACED image
+ * box, so the selection box is never materially bigger than the map.
+ * (5) SPACING: per-class stats sit 0.09 in below the image (clear of
+ * the frame's 0.04 overhang — the frame edge used to sit on the first
+ * stats line), stage labels end 0.11 in left of the spine, and a long
+ * footnote wraps to a second line instead of running off the canvas.
+ * Old pages keep the v3.74 behaviour (swapped classes, count-less 简化
+ * rows, sparse 极简 decks, loose frames) — refresh to pick this up.
  */
-export const FLOW_ENGINE_VERSION = "3.74";
+export const FLOW_ENGINE_VERSION = "3.75";

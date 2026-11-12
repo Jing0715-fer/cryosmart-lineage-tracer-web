@@ -804,9 +804,24 @@ export function buildFlowFigureModel(
     const curatedStages = spineCurated.filter((n) => !isImportSeed(n));
     /* safety: a lineage whose ONLY map ancestors are imported volumes must
      * still render — fall back to the plain spine's stages (imports and
-     * all) when the curated walk surfaced nothing beyond them. */
+     * all) when the curated walk surfaced nothing beyond them.
+     * v3.75 (round-34 “极简模式…选的是6行，但是输出只有一个分类job的图”):
+     * the pool now prefers the LONGER of the two walks. The two walks share
+     * the same DFS; their only divergence is the import-seed stop rule,
+     * but a divergence can silently STARVE the deck — P222's curated walk
+     * died at a repick boundary (map-less template-pick ancestry) and
+     * handed curateMinimalFlow a 4-stage pool where the plain walk (the
+     * one the 标准 spine uses) finds all 9. A rich pool is safe: the
+     * classification-only curation + the row cap still trim it down. */
     const fallbackStages = spineMapOrder.filter((n) => !isImportSeed(n));
-    const stages = curatedStages.length ? curatedStages : fallbackStages.length ? fallbackStages : spineMapOrder;
+    const stages =
+      fallbackStages.length > curatedStages.length
+        ? fallbackStages
+        : curatedStages.length
+          ? curatedStages
+          : fallbackStages.length
+            ? fallbackStages
+            : spineMapOrder;
     /* v3.64 (round-23 “最终不应该用deepEMhancer，而是deepemhancer前一步的
      * map也需要展示”): post-processing jobs (DeepEMhancer / sharpen /
      * density_mod) never enter the 极简 deck — they are not classification
@@ -1003,7 +1018,15 @@ export function buildFlowFigureModel(
   // post-pass over the built groups, BEFORE folding, so the geometry and
   // the merge logic above stay untouched.
   let staged = groups;
-  if (simplified && groups.length) {
+  /* v3.75 (round-34 “极简模式好像内容过于少了，选的是6行，但是输出只有一个
+   * 分类的图”): the 简化 shrink passes (bootstrap small-subset / default-12 Å
+   * drops, redundant non-uniform + reconstruct-only merges) NO LONGER run
+   * under 极简 — they starved the curated pool exactly when the user asked
+   * for MORE rows (P222: the drops left [J846, J850, J852, J859, J863],
+   * the same-type merge folded that to 3, and the deck showed 2). 极简's
+   * own classification-only curation + the 4/5/6 row cap do the trimming;
+   * 简化 mode keeps its passes unchanged. */
+  if (simplified && !minimal && groups.length) {
     staged = dropSimplifiedBootstrap(groups, summary.start_uid, graph.byUid, warnings);
     // v3.58 (round-17): redundant non-uniform refinements merge and
     // reconstruct-only stages drop — AFTER the bootstrap pass so "adjacent"
@@ -1083,10 +1106,13 @@ export function buildFlowFigureModel(
         ? computeMinimalOmissions(folded, standardMainline, null)
         : undefined;
 
-  // v3.54 (round-13 “简化模式”): enforce the 多→少 reading over the
-  // DISPLAYED count lines (stage-to-stage; the header's pick count is
-  // about picking and is not enforced against re-extraction merges).
-  if (simplified && folded.length) simplifiedFunnelPass(folded, warnings);
+  // v3.54 (round-13 “简化模式”): the 多→少 funnel pass was REMOVED in
+  // v3.75 (round-34 “保证所有模式的颗粒数都要显示”) — it hid every count
+  // line downstream of a re-extraction (P222: the round-2 repick lifted
+  // the entry from 172,802 to 1,593,094, so EVERY later stage's count
+  // was suppressed and the 简化 deck showed bare percentages). Counts now
+  // always render; the repick boundaries read as count jumps, which is
+  // the truthful picture.
 
   // Reference = the FINAL job's map when it has one.
   // v3.64 (round-23): 极简 never anchors to the final JOB's map — the
@@ -1364,6 +1390,17 @@ function curateMinimalFlow(
       nonClassMiddles += 1;
     }
   }
+  /* v3.75 (round-34 “极简模式好像内容过于少了，选的是6行，但是输出只有
+   * 一个分类job的图”): the budget now ALSO reaches UPSTREAM of the first
+   * row — classification rows before firstIdx used to be dropped
+   * unconditionally (they have no gap note either), so a 6-row selection
+   * could render a 2-row deck while perfectly good classification rows
+   * sat above the funnel head. Forward-fill in flow order once the
+   * backward pass (closest-to-final first, the round-20/21-approved
+   * priority) has spent the remaining budget. */
+  for (let i = 0; i < firstIdx && chosen.size < maxGroups; i++) {
+    if (isClassRow(groups[i])) chosen.add(i);
+  }
   if (chosen.size === groups.length) return groups;
   const kept = groups.filter((_, i) => chosen.has(i));
   const capDropped = classMiddles - Math.max(0, Math.min(classMiddles, maxGroups - 2));
@@ -1377,7 +1414,7 @@ function curateMinimalFlow(
     );
   if (capDropped > 0 || kept.length < groups.length)
     warnings.push(
-      `极简模式: 合并同类型后主线共 ${groups.length} 行，已精选 ${kept.length} 行（首行为颗粒数最多的分类任务、末行必留，其余自后向前仅保留分类结果 — 未选阶段在图上以「N×」省略标注，上下游顺序保持不变）。`,
+      `极简模式: 合并同类型后主线共 ${groups.length} 行，已精选 ${kept.length} 行（首行为颗粒数最多的分类任务、末行必留，其余自后向前仅保留分类结果，预算有余时再自前向后补齐上游分类行 — 未选阶段在图上以「N×」省略标注，上下游顺序保持不变）。`,
     );
   return kept;
 }
@@ -1723,69 +1760,6 @@ function dropSimplifiedRedundant(
     if (kept.length) out.push(kept);
   }
   return out;
-}
-
-/** v3.54 (round-13 “简化模式”): enforce the 多→少 reading over the
- *  DISPLAYED particle-count lines. Walks the kept stage groups in flow
- *  order with a running maximum (initialized to +∞ — the header's pick
- *  count is about PICKING, and a later re-extraction / merged dataset may
- *  legitimately exceed it, so only stage-to-stage counts are enforced):
- *
- *    - a stage whose representative count EXCEEDS the running maximum has
- *      ALL of its count lines hidden ("… particles" / "… selected";
- *      percentages stay — they are per-stage-relative and never break the
- *      funnel) and does NOT lower the bar;
- *    - a stage at or below the maximum keeps its counts and becomes the
- *      new bar.
- *
- *  Every hiding is named in the warnings so the run log explains itself. */
-function simplifiedFunnelPass(groups: FlowFigureItem[][], warnings: string[]) {
-  const isCountLine = (line: string) => / (particles|selected)$/.test(line);
-  let runningMax = Infinity;
-  for (const group of groups) {
-    const totals = group
-      .map((it) => it.particleTotal ?? null)
-      .filter((v): v is number => v != null && v > 0);
-    const groupTotal = totals.length ? Math.max(...totals) : null;
-    const overflow = groupTotal != null && groupTotal > runningMax;
-    const hiddenUids: string[] = [];
-    for (const item of group) {
-      if (item.classes?.length) {
-        for (const c of item.classes) {
-          const cOver =
-            overflow ||
-            (c.particleCount != null && c.particleCount > runningMax);
-          if (cOver && c.stats.some(isCountLine)) {
-            c.stats = c.stats.filter((l) => !isCountLine(l));
-            if (!hiddenUids.includes(item.uid)) hiddenUids.push(item.uid);
-          }
-        }
-        // single-class rows: item.stats carries the same lines the one slot
-        // was built from — filter it too so the PPTX layer's item.stats
-        // preference never resurrects a hidden count.
-        if (overflow && item.stats.some(isCountLine)) {
-          item.stats = item.stats.filter((l) => !isCountLine(l));
-          if (!hiddenUids.includes(item.uid)) hiddenUids.push(item.uid);
-        }
-      } else if (item.stats.some(isCountLine)) {
-        const over =
-          overflow ||
-          (item.particleTotal != null && item.particleTotal > runningMax);
-        if (over) {
-          item.stats = item.stats.filter((l) => !isCountLine(l));
-          hiddenUids.push(item.uid);
-        }
-      }
-    }
-    if (overflow && hiddenUids.length) {
-      warnings.push(
-        `简化模式: ${hiddenUids.join(" + ")} 的粒子数（${fmtParticles(groupTotal as number)}）大于上一阶段（${runningMax === Infinity ? "—" : fmtParticles(runningMax)}），已隐藏其计数统计，保证流程「颗粒从多到少」。`,
-      );
-    }
-    if (!overflow && groupTotal != null) {
-      runningMax = Math.min(runningMax, groupTotal);
-    }
-  }
 }
 
 /** Reference-style demo model — uses the images extracted from the user's

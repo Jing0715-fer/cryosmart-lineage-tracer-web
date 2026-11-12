@@ -22,6 +22,16 @@
  *
  * Run: cd /home/z/my-project && bun .harness/v351-figure-test.ts
  *
+ * v3.75 (round-34): re-greened for the v3.73 classification-only middles
+ * (full 11→8 groups, P268 standard no longer crams) and the v3.75 layout
+ * rules — strict class order (the anchor centre-swap assertions retired,
+ * replaced by frameHugCheck), counts in every style (极简 per-class stats
+ * now REQUIRED, the 简化 funnel count-hiding gone), the richer 极简 pool
+ * (P96 5-row budget fills; P268 keeps J230 + ends at J280; P300 ends at
+ * Refinement J375; P310 ends at J420 with no omission note), and the
+ * async buildWorkflowPptx (all call sites await — the in-browser PNG
+ * alpha-trim pipeline is exercised end-to-end by the browser E2E).
+ *
  * v3.58 (round-17): the summary now models the REAL P96 DAG — J28 hetero
  * on the full 1.59M extract (particle-only classes 1/2, single volume)
  * feeding J29 dedup → J30 → J31, J36 ctf_refinement between the two
@@ -515,10 +525,12 @@ const j41 = byUid("J41")[0];
 const j12 = byUid("J12")[0];
 const j28 = byUid("J28")[0];
 const fail: string[] = [];
-/* v3.58: [J12 montage] + spine [J27, J28, J31, J33, J34, J35, J37, J39,
- * J40, J41] = 11 groups — the particle-first walk must reach J28
+/* v3.73: 标准 also curates classification-only middles — the FULL model
+ * is [J12 montage] + [J27, J28, J31, J33, J34, J39, J41] = 8 groups
+ * (the non-classification middles J35 / J37 / J40 drop with gap notes;
+ * v3.75 harness update). The particle-first walk must still reach J28
  * THROUGH J30/J29 (the volume edge J31←J27 must not bypass it). */
-if (model.groups.length !== 11) fail.push(`groups expected 11 got ${model.groups.length}`);
+if (model.groups.length !== 8) fail.push(`groups expected 8 got ${model.groups.length}`);
 const spineUids = model.groups.flat().map((i) => i.uid).join(">");
 if (!spineUids.includes("J28")) fail.push(`J28 missing from the full figure — got ${spineUids}`);
 if (j28) {
@@ -537,9 +549,9 @@ if (!j41?.classes || j41.classes.length !== 1) fail.push(`J41 classes expected 1
 if (j41?.stats.length !== 1) fail.push(`J41 final stats should be particles-only, got ${j41?.stats.join("|")}`);
 if (!j12?.imageUrl) fail.push("J12 montage imageUrl missing");
 if (model.referenceKey !== "J41/volume") fail.push(`referenceKey got ${model.referenceKey}`);
-/* v3.58: sources = J27:2 + J28:1 + J31:3 + J33:2 + J34:3 + J35:1 +
- * J37:1 + J39:3 + J40:1 + J41:1 = 18. */
-if (srcs.size !== 18) fail.push(`figureMapSources expected 18 got ${srcs.size}`);
+/* v3.73: sources = J27:2 + J28:1 + J31:3 + J33:2 + J34:3 + J39:3 +
+ * J41:1 = 15 (the non-classification middles J35/J37/J40 dropped). */
+if (srcs.size !== 15) fail.push(`figureMapSources expected 15 got ${srcs.size}`);
 if (!srcs.has("J28/volume_class_0")) fail.push("J28/volume_class_0 missing from the render set");
 if (model.headerStats.micrographs !== "6,060 Micrographs") fail.push(`header micrographs got ${model.headerStats.micrographs}`);
 /* v3.55 (round-14): the MAINLINE pick — J25 topaz_extract's 1,634,842
@@ -555,7 +567,7 @@ for (const [key, src] of srcs) {
 }
 images.set(j12.imageUrl as string, montagePng());
 
-const blob = buildWorkflowPptx(model, {
+const blob = await buildWorkflowPptx(model, {
   images,
   footnote:
     "所有地图已对齐至参考 J41/volume · 手性检查: 1 个已翻正，14 个一致 · 视角 y-90 · CryoSmart Workflow Figure (ChimeraX aligned)",
@@ -579,16 +591,19 @@ for (const g of model2.groups) {
 console.log("== simplified warnings ==", JSON.stringify(model2.warnings, null, 1));
 
 const sUids = new Set(model2.groups.flat().map((i) => i.uid));
-/* v3.58: bootstrap drops (J12 subset, J27 absent-12, J33 explicit-12) +
- * NEW redundant drops (J35 merged into J37 — same 378,677; J40
- * reconstruct-only) → [J28, J31, J34, J37, J39, J41] = 6 groups. */
-if (model2.groups.length !== 6)
-  fail.push(`simplified groups expected 6 (J12/J27/J33/J35/J40 dropped) got ${model2.groups.length}`);
+/* v3.73+v3.75: bootstrap drops (J12 subset, J27 absent-12, J33
+ * explicit-12) + redundant drops (J35 merged into J37 — same count; J40
+ * reconstruct-only) leave [J28, J31, J34, J37, J39, J41]; the v3.73
+ * classification-only middle rule then drops the non-uniform J37 →
+ * [J28, J31, J34, J39, J41] = 5 groups. */
+if (model2.groups.length !== 5)
+  fail.push(`simplified groups expected 5 (J12/J27/J33/J35/J40 bootstrap+redundant dropped, J37 classification-excluded) got ${model2.groups.length}`);
 if (sUids.has("J12")) fail.push("simplified should drop the small-subset select_2D montage J12");
 if (sUids.has("J27")) fail.push("simplified should drop the default-12 Å (absent param) ab-initio J27");
 if (sUids.has("J33")) fail.push("simplified should drop the explicit default-12 Å ab-initio J33 (hetero J31 → hetero J34 directly)");
 if (sUids.has("J35")) fail.push("simplified must MERGE the earlier non-uniform J35 into J37 (same particle count)");
 if (sUids.has("J40")) fail.push("simplified must omit the reconstruct-only J40");
+if (sUids.has("J37")) fail.push("v3.73: simplified must also drop the non-uniform J37 middle (classification-only middles)");
 if (!sUids.has("J28")) fail.push("simplified must KEEP the particle-mainline hetero J28");
 if (!sUids.has("J39")) fail.push("simplified must KEEP the deliberately non-default 6 Å ab-initio J39");
 if (!model2.warnings.some((w) => w.includes("已省略少量数据步骤 J12") && w.includes("12,259"))) fail.push("missing J12 drop warning");
@@ -618,11 +633,11 @@ if (model2.warnings.some((w) => w.includes("从多到少"))) fail.push("funnel h
   if (j31s?.classes?.[0]?.stats.join("|") !== "77%|590,421 particles") fail.push(`simplified J31 c0 stats got ${j31s?.classes?.[0]?.stats.join("|")}`);
 }
 
-/* map sources shrink with the dropped stages (18 → 12: J27 2 + J33 2 +
- * J35 1 + J40 1 gone; J28's single map stays) */
+/* map sources shrink with the dropped stages (15 → 11: J27 2 + J33 2 +
+ * J37 1 gone; J28's single map stays) */
 const srcs2 = figureMapSources(model2);
 console.log("== simplified figureMapSources ==", srcs2.size);
-if (srcs2.size !== 12) fail.push(`simplified figureMapSources expected 12 got ${srcs2.size}`);
+if (srcs2.size !== 11) fail.push(`simplified figureMapSources expected 11 got ${srcs2.size}`);
 if (srcs2.has("J27/volume_class_0")) fail.push("J27 maps must be gone from the simplified render set");
 if (srcs2.has("J33/volume_class_0")) fail.push("J33 maps must be gone from the simplified render set");
 if (srcs2.has("J35/volume")) fail.push("J35 maps must be gone from the simplified render set (merged into J37)");
@@ -633,7 +648,7 @@ const images2 = new Map<string, Uint8Array>();
 for (const [key, src] of srcs2) {
   images2.set(key, discPng(hexToRgb(chimeraClassColor(src.classIndex))));
 }
-const blob2 = buildWorkflowPptx(model2, {
+const blob2 = await buildWorkflowPptx(model2, {
   images: images2,
   footnote: "简化模式 · 所有地图已对齐至参考 J41/volume · CryoSmart Workflow Figure (ChimeraX aligned)",
 });
@@ -645,12 +660,12 @@ console.log("== simplified pptx ==", OUT_SIMPLIFIED, buf2.length, "bytes");
  * v3.59 (round-18): 手动模式 unit — applyManualSelection               */
 /* ------------------------------------------------------------------ */
 
-/* drop two middle stages: groups 11 → 9, J41 stays final → finalStats
+/* drop two middle stages: groups 8 → 6, J41 stays final → finalStats
  * and the J41/volume reference survive; the dropped stages' maps leave
- * the render set (18 → 14). */
+ * the render set (15 → 11). */
 const manualMid = applyManualSelection(model, (uid) => uid !== "J27" && uid !== "J33");
-if (manualMid.groups.length !== 9)
-  fail.push(`manual mid-drop groups expected 9 got ${manualMid.groups.length}`);
+if (manualMid.groups.length !== 6)
+  fail.push(`manual mid-drop groups expected 6 got ${manualMid.groups.length}`);
 if (manualMid.finalStats !== "3.20 Å")
   fail.push(`manual mid-drop must KEEP the final Å (J41 kept), got ${manualMid.finalStats}`);
 if (manualMid.referenceKey !== "J41/volume")
@@ -659,7 +674,7 @@ if (manualMid.referenceKey !== "J41/volume")
   const flat = manualMid.groups.flat().map((i) => i.uid);
   if (flat.includes("J27") || flat.includes("J33")) fail.push("manual mid-drop still carries a dropped uid");
   const srcsM = figureMapSources(manualMid);
-  if (srcsM.size !== 14) fail.push(`manual mid-drop render set expected 14 got ${srcsM.size}`);
+  if (srcsM.size !== 11) fail.push(`manual mid-drop render set expected 11 got ${srcsM.size}`);
   if (srcsM.has("J27/volume_class_0") || srcsM.has("J33/volume_class_0"))
     fail.push("manual mid-drop render set still carries a dropped stage's map");
 }
@@ -667,17 +682,19 @@ if (!manualMid.warnings.some((w) => w.includes("手动勾选") && w.includes("2 
   fail.push("manual mid-drop warning missing");
 
 /* drop the FINAL job: the Å belongs to J41 and must go with it; the
- * reference re-anchors to the new last map-bearing stage J40; the render
- * set loses exactly J41/volume (18 → 17). */
+ * reference re-anchors to the new last map-bearing stage — J40 is gone
+ * from the v3.73 standard model (non-classification middle), so the
+ * re-anchor lands on J39/volume_class_0; the render set loses exactly
+ * J41/volume (15 → 14). */
 const manualTail = applyManualSelection(model, (uid) => uid !== "J41");
-if (manualTail.groups.length !== 10) fail.push(`manual tail-drop groups expected 10 got ${manualTail.groups.length}`);
+if (manualTail.groups.length !== 7) fail.push(`manual tail-drop groups expected 7 got ${manualTail.groups.length}`);
 if (manualTail.finalStats !== null) fail.push(`manual tail-drop must drop the J41 final Å, got ${manualTail.finalStats}`);
-if (manualTail.referenceKey !== "J40/volume")
-  fail.push(`manual tail-drop reference must re-anchor to J40/volume, got ${manualTail.referenceKey}`);
-if (manualTail.referenceItem?.uid !== "J40") fail.push("manual tail-drop referenceItem must be J40's item");
+if (manualTail.referenceKey !== "J39/volume_class_0")
+  fail.push(`manual tail-drop reference must re-anchor to J39/volume_class_0 (J40 is a dropped non-classification middle), got ${manualTail.referenceKey}`);
+if (manualTail.referenceItem?.uid !== "J39") fail.push("manual tail-drop referenceItem must be J39's item");
 if (!manualTail.warnings.some((w) => w.includes("最终阶段被取消勾选"))) fail.push("manual tail-drop warning missing");
-if (figureMapSources(manualTail).size !== 17)
-  fail.push(`manual tail-drop render set expected 17 got ${figureMapSources(manualTail).size}`);
+if (figureMapSources(manualTail).size !== 14)
+  fail.push(`manual tail-drop render set expected 14 got ${figureMapSources(manualTail).size}`);
 
 /* keep NONE: empty groups + warning, nothing dangles. */
 const manualNone = applyManualSelection(model, () => false);
@@ -698,14 +715,14 @@ console.log("== 手动模式 unit checks done ==");
  * ------------------------------------------------------------------ */
 
 /* The minimal deck builds from the FULL model (简化 off) so the whole
- * 11-stage chain renders small: every row is 2:1 at the reference's own
+ * 8-stage chain renders small: every row is 2:1 at the reference's own
  * 1.58 in (only 3-class rows constrain the strip, and they still fit).
- * Retention labels after each row read the NEXT row's input:
+ * v3.75: rows carry PER-CLASS STATS under the thumbnails now. Retention
+ * labels after each row read the NEXT row's input:
  *   J12 12,259 → J27 58,048 (grew: count-only) → J28 1,588,675 (count-only)
  *   → J31 766,560 (48.3%) → J33 590,421 (77.0%) → J34 590,421 (100%:
- *   count-only) → J35 378,677 (64.1%) → J37 (count-only) → J39
- *   (count-only) → J40 209,127 (55.2%) → J41 (count-only). */
-const blob3 = buildWorkflowPptx(model, { images, style: "minimal" });
+ *   count-only) → J39 378,677 (64.1%) → J41 209,127 (55.2%). */
+const blob3 = await buildWorkflowPptx(model, { images, style: "minimal" });
 const buf3 = Buffer.from(await blob3.arrayBuffer());
 fs.writeFileSync(OUT_MINIMAL, buf3);
 console.log("== minimal pptx ==", OUT_MINIMAL, buf3.length, "bytes");
@@ -713,23 +730,27 @@ console.log("== minimal pptx ==", OUT_MINIMAL, buf3.length, "bytes");
 /* ------------------------------------------------------------------
  * v3.60 (round-19): 极简模式 — 简化合并 + the row cap.
  * v3.61 (round-20): 极简 = the CURATED MAINLINE (minimal:true).
- * v3.62 (round-21 “省略的步骤可能需要写为几*hetero refine… + 极简变成
- * 4，5，6行”): the mainline now MERGES consecutive same-type stages
+ * v3.62 (round-21): the mainline MERGES consecutive same-type stages
  * into ONE “N×” row BEFORE the cap.
- * v3.63 (round-22 “极简模式中间精选的一定是分类的结果，不要选
- * non-uniform这种非分类的job” + “每步展示的颗粒数和上一步的比例要
- * 重新用这一步除以上一步来计算”): the middle rows curate from
- * CLASSIFICATION jobs ONLY — on the P96 chain the curated mainline is
- * [J27, J28, J31, J33, J34, J35, J37, J39, J40, J41]; the simplified
- * drops leave [J28, J31, J34, J37, J39, J41]; the same-type merge folds
- * the consecutive hetero run J28+J31+J34 into ONE “3× Hetero
- * refinement” row (rep J34, 590,421 — entryParticleCount 1,588,675 =
- * J28's input); the classification rule then EXCLUDES the J37
- * non-uniform middle → [J34, J39, J41] = 3 rows. The retention
- * labels divide by the row's ENTRY: 378,677 ÷ 1,588,675 = 23.8% under
- * the 3× row (NOT the old 64.1% = ÷ J34's input); 55.2% under J39.
- * The gap notes name J35+J37 (aggregated “2× Non-uniform refinement”)
- * and the reconstruct-only J40.
+ * v3.63 (round-22): the middle rows curate from CLASSIFICATION jobs
+ * ONLY.
+ * v3.75 (round-34 “极简模式…选的是6行，但是输出只有一个分类的图”): the
+ * 简化 shrink passes NO LONGER run under 极简 (a rich pool feeds the
+ * budget) and curateMinimalFlow forward-fills classification rows
+ * upstream of the first row once the backward fill leaves budget — a
+ * 5-row budget must render 5 rows. On the P96 chain the curated pool
+ * is [J27, J28, J31, J33, J34, J35, J37, J39, J40, J41]; the same-type
+ * merge folds ONLY the truly consecutive hetero pair J28+J31 (the
+ * kept ab-initio J33 separates J31 from J34) → [J27, 2×Het(J31),
+ * J33, J34, J35, J37, J39, J40, J41]; the curation picks firstIdx =
+ * the 2× row (entry 1,588,675), lastIdx = J41, backward-fills J34 /
+ * J33 (J35/J37/J40 are non-classification middles), and the rows read
+ * [2× Hetero refinement(J31), J33, J34, J39, J41] = 5. Retention
+ * labels divide by the row's ENTRY: 590,421 ÷ 1,588,675 = 37.2% under
+ * the 2× row, a count-only 590,421 into J34 (100%), 64.1% / 378,677
+ * into J39, 55.2% / 209,127 into J41. The gap notes name J35+J37
+ * (aggregated “2× Non-uniform refinement”) under J34 and the
+ * reconstruct-only J40 under J39.
  * ------------------------------------------------------------------ */
 const OUT_MINIMAL5 = path.join(OUT_DIR, "out-minimal5.pptx");
 const modelMini = buildFlowFigureModel(summary, { maxGroups: 5, simplified: true, minimal: true });
@@ -740,39 +761,44 @@ for (const g of modelMini.groups) {
     g.map((i) => `${i.uid}[${i.classes ? i.classes.map((c) => c.mapKey.split("/")[1]).join("+") : i.imageUrl ? "img" : "-"}]`).join(" + "),
   );
 }
-if (modelMini.groups.length !== 3) fail.push(`极简 groups expected 3 (3× merged hetero row + J39 + J41 — J37 excluded as a non-classification middle) got ${modelMini.groups.length}`);
+if (modelMini.groups.length !== 5)
+  fail.push(`极简 groups expected 5 (the 5-row budget FILLS: 2× merged hetero row + J33 + J34 + J39 + J41) got ${modelMini.groups.length}`);
 const miniUids = modelMini.groups.flat().map((i) => i.uid).join(">");
-if (miniUids !== "J34>J39>J41")
-  fail.push(`极简 rows expected J34>J39>J41 (J28+J31+J34 merged into the J34 row; non-uniform J37 excluded) got ${miniUids}`);
+if (miniUids !== "J31>J33>J34>J39>J41")
+  fail.push(`极简 rows expected J31>J33>J34>J39>J41 (J28+J31 merged into the J31 row; J35/J37/J40 non-classification middles excluded) got ${miniUids}`);
 const miniLabel = modelMini.groups[0][0].label;
-if (miniLabel !== "3× Hetero refinement")
-  fail.push(`极简 merged-row label expected "3× Hetero refinement" got ${miniLabel}`);
-/* the merged row carries the LAST member's montage + count (J34: 3
- * classes, 590,421) and the FIRST member's ENTRY (J28: 1,588,675) — the
- * retention label divides 378,677 by the ENTRY, not by J34's input */
-if (modelMini.groups[0][0].particleTotal !== 590421)
-  fail.push(`极简 merged-row count expected J34's 590,421 got ${modelMini.groups[0][0].particleTotal}`);
+if (miniLabel !== "2× Hetero refinement")
+  fail.push(`极简 merged-row label expected "2× Hetero refinement" got ${miniLabel}`);
+/* the merged row carries the LAST member's montage + count (J31: 3
+ * classes, 766,560) and the FIRST member's ENTRY (J28: 1,588,675) — the
+ * retention label divides 590,421 by the ENTRY, not by J31's input */
+if (modelMini.groups[0][0].particleTotal !== 766560)
+  fail.push(`极简 merged-row count expected J31's 766,560 got ${modelMini.groups[0][0].particleTotal}`);
 if (modelMini.groups[0][0].entryParticleCount !== 1588675)
   fail.push(`极简 merged-row entryParticleCount expected J28's 1,588,675 got ${modelMini.groups[0][0].entryParticleCount}`);
 if ((modelMini.groups[0][0].classes?.length ?? 0) !== 3)
-  fail.push(`极简 merged-row montage expected J34's 3 classes got ${modelMini.groups[0][0].classes?.length}`);
-/* per-gap omission notes: gap0 (3× row → J39) names the 简化-merged J35
- * AND the classification-excluded J37 — aggregated 2× Non-uniform;
- * gap1 (J39 → J41) names the reconstruct-only J40. */
+  fail.push(`极简 merged-row montage expected J31's 3 classes got ${modelMini.groups[0][0].classes?.length}`);
+/* per-gap omission notes: gap0 (2× row → J33) and gap1 (J33 → J34) name
+ * nothing; gap2 (J34 → J39) names the 简化-merged J35 AND the
+ * classification-excluded J37 — aggregated 2× Non-uniform; gap3 (J39 →
+ * J41) names the reconstruct-only J40. */
 if (!modelMini.omissions) fail.push("极简 model must carry per-gap omission notes");
 else {
   const omJoin = modelMini.omissions.map((g) => g.map((o) => `${o.count}× ${o.label}`).join(" + "));
   console.log("== 极简 omissions ==", JSON.stringify(omJoin));
-  if (omJoin[0] !== "2× Non-uniform refinement")
-    fail.push(`极简 gap0 omissions expected "2× Non-uniform refinement" (J35 + the excluded J37) got ${omJoin[0]}`);
-  if (omJoin[1] !== "1× Reconstruction")
-    fail.push(`极简 gap1 omissions expected "1× Reconstruction" (J40) got ${omJoin[1]}`);
+  if (omJoin[0] !== "") fail.push(`极简 gap0 omissions expected none got ${omJoin[0]}`);
+  if (omJoin[1] !== "") fail.push(`极简 gap1 omissions expected none got ${omJoin[1]}`);
+  if (omJoin[2] !== "2× Non-uniform refinement")
+    fail.push(`极简 gap2 omissions expected "2× Non-uniform refinement" (J35 + the excluded J37) got ${omJoin[2]}`);
+  if (omJoin[3] !== "1× Reconstruction")
+    fail.push(`极简 gap3 omissions expected "1× Reconstruction" (J40) got ${omJoin[3]}`);
 }
-if (!modelMini.warnings.some((w) => w.includes("已合并主线上连续 3 个同类型阶段 J28 → J31 → J34 为一行「3× Hetero refinement」")))
-  fail.push("极简 missing the J28→J31→J34 merge warning");
+if (!modelMini.warnings.some((w) => w.includes("已合并主线上连续 2 个同类型阶段 J28 → J31 为一行「2× Hetero refinement」")))
+  fail.push("极简 missing the J28→J31 merge warning");
 if (!modelMini.warnings.some((w) => w.includes("中间行仅精选分类结果")))
   fail.push("极简 missing the classification-only curation warning");
-/* the merged fold must not break the 多→少 funnel either */
+/* the merged fold keeps the funnel monotone (766,560 ≥ 590,421 ≥
+ * 590,421 ≥ 378,677 ≥ 209,127 on the kept rows) */
 {
   const totals = modelMini.groups.map((g) => Math.max(...g.map((it) => it.particleTotal ?? 0)));
   for (let i = 1; i < totals.length; i++) {
@@ -780,14 +806,13 @@ if (!modelMini.warnings.some((w) => w.includes("中间行仅精选分类结果")
   }
 }
 const srcsMini = figureMapSources(modelMini);
-if (srcsMini.size !== 7) fail.push(`极简 render set expected 7 (J34:3 + J39:3 + J41:1), got ${srcsMini.size}`);
-if (srcsMini.has("J28/volume_class_0")) fail.push("极简 must NOT render the merged-away J28 map (the N× row shows J34's montage)");
-if (srcsMini.has("J31/volume_class_0")) fail.push("极简 must NOT render the merged-away J31 maps");
+if (srcsMini.size !== 12) fail.push(`极简 render set expected 12 (J31:3 + J33:2 + J34:3 + J39:3 + J41:1), got ${srcsMini.size}`);
+if (srcsMini.has("J28/volume_class_0")) fail.push("极简 must NOT render the merged-away J28 map (the N× row shows J31's montage)");
 const imagesMini = new Map<string, Uint8Array>();
 for (const [key, src] of srcsMini) {
   imagesMini.set(key, discPng(hexToRgb(chimeraClassColor(src.classIndex))));
 }
-const blobMini = buildWorkflowPptx(modelMini, { images: imagesMini, style: "minimal" });
+const blobMini = await buildWorkflowPptx(modelMini, { images: imagesMini, style: "minimal" });
 const bufMini = Buffer.from(await blobMini.arrayBuffer());
 fs.writeFileSync(OUT_MINIMAL5, bufMini);
 console.log("== 极简 pptx ==", OUT_MINIMAL5, bufMini.length, "bytes");
@@ -941,11 +966,13 @@ const summary268: any = {
   micrograph_pixel_size_A: 0.5,
 };
 
-/* (a) the STANDARD assembly reproduces the reported disease: TWO parallel
- * rows cram an upstream + a downstream job onto the same level
- * ([J230+J220] then [J270+J250]), the imported volume J220 enters the
- * funnel, and J250 — a true mainline stage — renders ONLY inside the
- * crammed merge row (it never gets its own level). */
+/* (a) the STANDARD assembly under v3.73+ — the round-20 reported
+ * cramping is GONE in standard too: import members strip everywhere,
+ * non-classification middles drop, and the parallel merge row
+ * [J270+J250(+J220)] is dropped wholesale as a non-classification
+ * middle (its members surface in the gap notes). Expected groups:
+ * [J215 montage, J230 ab-initio, J240 hetero, J290 DeepEMhancer]
+ * (J250 rides only the dropped merge row — named in omissions). */
 const std268 = buildFlowFigureModel(summary268, { maxGroups: 0 });
 console.log("== P268 standard groups ==", std268.groups.length);
 for (const g of std268.groups) {
@@ -955,45 +982,50 @@ for (const g of std268.groups) {
   );
 }
 const parallels268 = std268.groups.filter((g) => g.length > 1);
-if (parallels268.length < 2)
-  fail.push(`P268 fixture must reproduce the cramping in the standard assembly (expected ≥2 parallel rows), got ${parallels268.length}`);
-const cramA = parallels268.find((g) => g.some((i) => i.uid === "J230") && g.some((i) => i.uid === "J220"));
-if (!cramA) fail.push("P268 standard: the ab-initio must be crammed beside the imported volumes [J230+J220]");
-const cramB = parallels268.find((g) => g.some((i) => i.uid === "J270") && g.some((i) => i.uid === "J250"));
-if (!cramB) fail.push("P268 standard: the nonuniform must be crammed beside its own upstream hetero [J270+J250]");
-if (!std268.groups.flat().some((i) => i.uid === "J220"))
-  fail.push("P268 standard: Import Volumes must be in the funnel (the reported disease)");
+if (parallels268.length !== 0)
+  fail.push(`P268 standard: v3.73 killed the cramping — expected 0 parallel rows, got ${parallels268.length}`);
+if (std268.groups.flat().some((i) => i.uid === "J220"))
+  fail.push("P268 standard: Import Volumes must be stripped (v3.73 import members never render)");
 if (!std268.groups.flat().some((i) => i.uid === "J215"))
   fail.push("P268 standard: the 2D-selection montage row must be present (contrast with the 极简 build)");
-if (std268.groups.some((g) => g.length === 1 && g[0].uid === "J250"))
-  fail.push("P268 standard: J250 must render ONLY inside the crammed merge row (never its own level)");
+if (!std268.groups.flat().some((i) => i.uid === "J240"))
+  fail.push("P268 standard: the mainline hetero J240 must keep its own row");
+if (!std268.groups.flat().some((i) => i.uid === "J230"))
+  fail.push("P268 standard: the ab-initio J230 stays (bootstrap drops are 简化-only)");
+{
+  const std268Uids = std268.groups.flat().map((i) => i.uid).join(">");
+  if (std268Uids !== "J215>J230>J240>J290")
+    fail.push(`P268 standard rows expected J215>J230>J240>J290 got ${std268Uids}`);
+}
 
-/* (b) the round-19 极简 (simplified + 5-row cap, NO curation) still carries
- * the crammed row — the mandatory-parallel protection keeps [J270+J250]
- * while folding away the MAINLINE hetero J240 entirely: the exact
- * “很多上下游的job放在同一级，该展示的却没了” deck the user uploaded. */
+/* (b) the OLD round-19 shape (simplified + 5-row cap, NO minimal
+ * curation) — under v3.73 the classification-only middle rule runs here
+ * too, so the crammed parallel row is gone and the deck keeps the
+ * classification mainline only. */
 const oldMini268 = buildFlowFigureModel(summary268, { maxGroups: 5, simplified: true });
-if (!oldMini268.groups.some((g) => g.length > 1))
-  fail.push("P268 fixture: round-19 极简 must still cram (reproduces the uploaded deck's bug)");
-if (oldMini268.groups.flat().some((i) => i.uid === "J240"))
-  fail.push("P268 fixture: round-19 极简 folded away the MAINLINE hetero J240 while keeping the crammed row (the reported bug)");
-if (!oldMini268.groups.flat().some((i) => i.uid === "J215"))
-  fail.push("P268 fixture: round-19 极简 must waste a row on the side-branch 2D montage J215 (the uploaded deck's noise)");
+if (oldMini268.groups.some((g) => g.length > 1))
+  fail.push("P268 fixture: the round-19 shape must no longer cram (v3.73 classification-only middles)");
+if (!oldMini268.groups.flat().some((i) => i.uid === "J240"))
+  fail.push("P268 fixture: the round-19 shape must keep the mainline hetero J240");
 
 /* (c) the NEW 极简 (v3.61 curated mainline + v3.62 same-type merge +
- *  v3.63 classification-only middles) = one job per row, the
- *  upstream→downstream order intact, Import Volumes / the 2D side branch
- *  / the default-12 ab-initio all out, monotone funnel. Expected:
- *  mainline [J230, J240, J250, J260, J270, J280, J290] − J230 (default-12)
- *  − J260 (same-count nonuniform merge) = [J240, J250, J270, J280, J290];
- *  then the v3.62 same-type merge folds the CONSECUTIVE hetero run
- *  J240+J250 into ONE “2× Hetero refinement” row (rep J250, 1,900,000;
- *  entryParticleCount = J240's 4,812,000); then the v3.63
- *  classification rule EXCLUDES both non-classification middles (J270
- *  non-uniform, J280 local refine) → [J250, J290] = 2 rows, with the
- *  gap note naming J260+J270 (aggregated 2× Non-uniform) + J280 (1×
- *  Local refinement) and the retention label reading 1,000,000 ÷
- *  4,812,000 = 20.8% (the merged row's ENTRY, not J250's input). */
+ *  v3.63 classification-only middles + v3.75 rich pool / budget fill):
+ *  the 简化 shrink passes no longer run under 极简, so the curated pool
+ *  keeps the ab-initio J230 (a classification row — the old default-12
+ *  pre-drop is gone); the same-type merge folds the consecutive hetero
+ *  run J240+J250 into ONE “2× Hetero refinement” row (rep J250,
+ *  1,900,000; entryParticleCount = J240's 4,812,000) and the
+ *  consecutive non-uniform run J260+J270 into “2× Non-uniform
+ *  refinement” (a non-classification middle — never chosen). The
+ *  curation picks firstIdx = the 2× hetero row (entry 4,812,000),
+ *  lastIdx = J280 (v3.64: the DeepEMhancer J290 never enters — the
+ *  funnel ends at the pre-DeepEMhancer refinement), backward-fills
+ *  nothing (J280 is adjacent), then forward-fills J230 →
+ *  [J230, 2×Het(J250), J280] = 3 rows on the 5-row budget. The gap
+ *  note names the dropped 2× Non-uniform members (J260+J270); the
+ *  retention labels read 1,000,000 ÷ 4,812,000 = 20.8% (the merged
+ *  row's ENTRY) and the 12,259 → 4,812,000 repick jump prints
+ *  count-only. */
 const mini268 = buildFlowFigureModel(summary268, { maxGroups: 5, simplified: true, minimal: true });
 console.log("== P268 极简 groups ==", mini268.groups.length);
 console.log("== P268 极简 warnings ==", JSON.stringify(mini268.warnings, null, 1));
@@ -1003,46 +1035,45 @@ for (const g of mini268.groups) {
     g.map((i) => `${i.uid}[${i.classes ? i.classes.map((c) => c.mapKey.split("/")[1]).join("+") : "-"}]`).join(" + "),
   );
 }
-if (mini268.groups.length !== 2) fail.push(`P268 极简 expected 2 rows (2× merged hetero row + the DeepEMhancer final), got ${mini268.groups.length}`);
+if (mini268.groups.length !== 3)
+  fail.push(`P268 极简 expected 3 rows (J230 + the 2× merged hetero row + the pre-DeepEMhancer J280), got ${mini268.groups.length}`);
 if (mini268.groups.some((g) => g.length > 1))
   fail.push("P268 极简: every row must be ONE job — no parallel cramping");
 const mini268Uids = mini268.groups.flat().map((i) => i.uid).join(">");
-if (mini268Uids !== "J250>J290")
-  fail.push(`P268 极简 mainline expected J250>J290 (J240+J250 merged into the J250 row; the non-uniform/local middles excluded), got ${mini268Uids}`);
-if (mini268.groups[0][0].label !== "2× Hetero refinement")
-  fail.push(`P268 极简 merged-row label expected "2× Hetero refinement" got ${mini268.groups[0][0].label}`);
-if (mini268.groups[0][0].particleTotal !== 1900000)
-  fail.push(`P268 极简 merged-row count expected J250's 1,900,000 got ${mini268.groups[0][0].particleTotal}`);
-if (mini268.groups[0][0].entryParticleCount !== 4812000)
-  fail.push(`P268 极简 merged-row entryParticleCount expected J240's 4,812,000 got ${mini268.groups[0][0].entryParticleCount}`);
-if ((mini268.groups[0][0].classes?.length ?? 0) !== 3)
-  fail.push(`P268 极简 merged-row montage expected J250's 3 classes got ${mini268.groups[0][0].classes?.length}`);
-/* the omitted J260 + the excluded J270 aggregate as 2× Non-uniform, and
- * the excluded J280 reads as 1× Local refinement, both under the 2× row */
-if (!mini268.omissions || mini268.omissions[0]?.length !== 2)
-  fail.push(`P268 极简 gap0 omissions expected 2 entries (2× Non-uniform refinement + 1× Local refinement), got ${JSON.stringify(mini268.omissions?.[0])}`);
+if (mini268Uids !== "J230>J250>J280")
+  fail.push(`P268 极简 mainline expected J230>J250>J280 (J240+J250 merged; the non-uniform middles excluded; J290 postprocess never enters), got ${mini268Uids}`);
+if (mini268.groups[1][0].label !== "2× Hetero refinement")
+  fail.push(`P268 极简 merged-row label expected "2× Hetero refinement" got ${mini268.groups[1][0].label}`);
+if (mini268.groups[1][0].particleTotal !== 1900000)
+  fail.push(`P268 极简 merged-row count expected J250's 1,900,000 got ${mini268.groups[1][0].particleTotal}`);
+if (mini268.groups[1][0].entryParticleCount !== 4812000)
+  fail.push(`P268 极简 merged-row entryParticleCount expected J240's 4,812,000 got ${mini268.groups[1][0].entryParticleCount}`);
+if ((mini268.groups[1][0].classes?.length ?? 0) !== 3)
+  fail.push(`P268 极简 merged-row montage expected J250's 3 classes got ${mini268.groups[1][0].classes?.length}`);
+/* the omitted J260 + J270 (the dropped “2× Non-uniform” row) read under
+ * the 2× row; J280 is DISPLAYED (the funnel end), so no Local note. */
+if (!mini268.omissions || (mini268.omissions[0] ?? []).length)
+  fail.push(`P268 极简 gap0 omissions expected none, got ${JSON.stringify(mini268.omissions?.[0])}`);
 else {
-  const byLabel268 = mini268.omissions[0].map((o) => `${o.count}× ${o.label}`).join(" + ");
-  if (byLabel268 !== "2× Non-uniform refinement + 1× Local refinement")
-    fail.push(`P268 极简 gap0 omissions got "${byLabel268}"`);
+  const byLabel268 = (mini268.omissions[1] ?? []).map((o) => `${o.count}× ${o.label}`).join(" + ");
+  if (byLabel268 !== "2× Non-uniform refinement")
+    fail.push(`P268 极简 gap1 omissions got "${byLabel268}"`);
 }
-for (const absent of ["J220", "J215", "J230", "J240", "J260", "J270", "J280"])
+for (const absent of ["J220", "J215", "J240", "J260", "J270", "J290"])
   if (mini268.groups.flat().some((i) => i.uid === absent))
-    fail.push(`P268 极简 must not carry ${absent} (import / side-2D / dropped bootstrap / merged-member / excluded non-classification middles)`);
-{
-  const totals = mini268.groups.map((g) => Math.max(...g.map((it) => it.particleTotal ?? 0)));
-  for (let i = 1; i < totals.length; i++) {
-    if (totals[i] > totals[i - 1]) fail.push(`P268 极简 funnel broke at group ${i}: ${totals[i]} > ${totals[i - 1]}`);
-  }
-}
-if (!mini268.warnings.some((w) => w.includes("已精选颗粒主线上的 7 个阶段")))
-  fail.push("P268 极简: missing the mainline-curation banner warning");
+    fail.push(`P268 极简 must not carry ${absent} (import / side-2D / merged-member / excluded non-classification middle / postprocess)`);
+/* v3.75: NO monotone-funnel assertion here — the 12,259 → 4,812,000
+ * re-extraction jump is the truthful picture (round-34 “保证所有模式的
+ * 颗粒数都要显示”: counts may grow at repick boundaries and must still
+ * print, count-only, without a bogus 39,251% line). */
+if (!mini268.warnings.some((w) => w.includes("已精选颗粒主线上的 6 个阶段")))
+  fail.push("P268 极简: missing the mainline-curation banner warning (7-stage pool minus the DeepEMhancer postprocess)");
 if (!mini268.warnings.some((w) => w.includes("另排除 1 个导入/种子阶段")))
   fail.push("P268 极简: missing the import-seed exclusion warning");
-if (!mini268.warnings.some((w) => w.includes("已省略 ab-initio 步骤 J230")))
-  fail.push("P268 极简: missing the default-12 Å J230 drop warning");
-if (!mini268.warnings.some((w) => w.includes("已合并连续 Non-uniform 精修 J260 → J270")))
-  fail.push("P268 极简: missing the J260→J270 non-uniform merge warning");
+if (mini268.warnings.some((w) => w.includes("已省略 ab-initio 步骤 J230")))
+  fail.push("P268 极简: v3.75 — the default-12 pre-drop must NOT fire under 极简 (J230 is a classification row)");
+if (!mini268.warnings.some((w) => w.includes("已合并主线上连续 2 个同类型阶段 J260 → J270 为一行「2× Non-uniform refinement」")))
+  fail.push("P268 极简: missing the J260→J270 same-type merge warning");
 if (!mini268.warnings.some((w) => w.includes("已合并主线上连续 2 个同类型阶段 J240 → J250 为一行「2× Hetero refinement」")))
   fail.push("P268 极简: missing the J240→J250 same-type merge warning");
 if (!mini268.warnings.some((w) => w.includes("中间行仅精选分类结果")))
@@ -1054,9 +1085,11 @@ if (mini268.headerStats.micrographs !== "14,404 Micrographs")
 if (mini268.headerStats.particles !== "4,812,000 particles")
   fail.push(`P268 header particles got ${mini268.headerStats.particles}`);
 if (mini268.finalStats !== "2.70 Å") fail.push(`P268 极简 finalStats got ${mini268.finalStats}`);
-if (mini268.referenceKey !== "J290/volume") fail.push(`P268 极简 referenceKey got ${mini268.referenceKey}`);
+/* v3.64+v3.75: the funnel ends at the pre-DeepEMhancer J280 — the
+ * reference re-anchors to ITS map, not the DeepEMhancer's. */
+if (mini268.referenceKey !== "J280/volume") fail.push(`P268 极简 referenceKey got ${mini268.referenceKey}`);
 const srcs268 = figureMapSources(mini268);
-if (srcs268.size !== 4) fail.push(`P268 极简 render set expected 4 (J250:3 + J290:1), got ${srcs268.size}`);
+if (srcs268.size !== 6) fail.push(`P268 极简 render set expected 6 (J230:2 + J250:3 + J280:1), got ${srcs268.size}`);
 if (srcs268.has("J240/volume_class_0"))
   fail.push("P268 极简 must NOT render the merged-away J240 maps (the N× row shows J250's montage)");
 const OUT_MINIMAL_P268 = path.join(OUT_DIR, "out-minimal-p268.pptx");
@@ -1064,7 +1097,7 @@ const imagesP268 = new Map<string, Uint8Array>();
 for (const [key, src] of srcs268) {
   imagesP268.set(key, discPng(hexToRgb(chimeraClassColor(src.classIndex))));
 }
-const blobP268 = buildWorkflowPptx(mini268, { images: imagesP268, style: "minimal" });
+const blobP268 = await buildWorkflowPptx(mini268, { images: imagesP268, style: "minimal" });
 const bufP268 = Buffer.from(await blobP268.arrayBuffer());
 fs.writeFileSync(OUT_MINIMAL_P268, bufP268);
 console.log("== P268 极简 pptx ==", OUT_MINIMAL_P268, bufP268.length, "bytes");
@@ -1216,19 +1249,21 @@ for (const g of mini300.groups) {
   );
 }
 if (mini300.groups.length !== 4)
-  fail.push(`P300 极简 expected 4 rows (7 post-merge − the 3 non-classification middles the v3.63 rule excludes), got ${mini300.groups.length}`);
+  fail.push(`P300 极简 expected 4 rows (2× Hetero + the 6 Å ab-initio + J340 + the pre-DeepEMhancer J375), got ${mini300.groups.length}`);
 const p300Labels = mini300.groups.map((g) => g[0].label);
+/* v3.64+v3.75: the funnel ends at the pre-DeepEMhancer refinement J375
+ * ("Refinement" — homo_refine), NOT at the DeepEMhancer itself. */
 const wantP300 = [
   "2× Hetero refinement",
   "Ab-initio reconstruction",
   "Hetero refinement",
-  "DeepEMhancer",
+  "Refinement",
 ];
 for (let i = 0; i < wantP300.length; i++)
   if (p300Labels[i] !== wantP300[i]) fail.push(`P300 极简 row ${i} label expected "${wantP300[i]}" got "${p300Labels[i]}"`);
 const p300Uids = mini300.groups.flat().map((i) => i.uid).join(">");
-if (p300Uids !== "J320>J330>J340>J380")
-  fail.push(`P300 极简 rows expected J320>J330>J340>J380 (the 6 Å ab-initio is a CLASSIFICATION middle — KEPT; the non-uniform/local/refinement middles excluded), got ${p300Uids}`);
+if (p300Uids !== "J320>J330>J340>J375")
+  fail.push(`P300 极简 rows expected J320>J330>J340>J375 (the 6 Å ab-initio is a CLASSIFICATION middle — KEPT; the non-uniform/local middles excluded; J380 postprocess never enters), got ${p300Uids}`);
 /* the CONSECUTIVE-ONLY merge rule: J310+J320 fold (adjacent), J340 stays
  * separate (the kept ab-initio J330 sits between them in the true flow) */
 if (!mini300.warnings.some((w) => w.includes("已合并主线上连续 2 个同类型阶段 J310 → J320")))
@@ -1240,14 +1275,14 @@ if (mini300.warnings.some((w) => w.includes("J320 → J340") || w.includes("J310
 if (!mini300.warnings.some((w) => w.includes("中间行仅精选分类结果")))
   fail.push("P300: missing the classification-only curation warning");
 /* gap0 (2× Hetero → J330) and gap1 (J330 → J340): nothing skipped;
- * gap2 (J340 → J380) names the DROPPED “2× Non-uniform” row's members
+ * gap2 (J340 → J375) names the DROPPED “2× Non-uniform” row's members
  * (J350+J360 — a dropped N× row counts every member as omitted) plus
- * the excluded local/refinement middles. */
+ * the excluded local middle J370 (J375 is DISPLAYED — the funnel end). */
 if (!mini300.omissions || (mini300.omissions[0] ?? []).length || (mini300.omissions[1] ?? []).length)
   fail.push(`P300 gap0/gap1 omissions expected none, got ${JSON.stringify(mini300.omissions?.slice(0, 2))}`);
 else {
   const byLabel300 = (mini300.omissions[2] ?? []).map((o) => `${o.count}× ${o.label}`).join(" + ");
-  if (byLabel300 !== "2× Non-uniform refinement + 1× Local refinement + 1× Refinement")
+  if (byLabel300 !== "2× Non-uniform refinement + 1× Local refinement")
     fail.push(`P300 gap2 omissions got "${byLabel300}"`);
 }
 {
@@ -1259,14 +1294,15 @@ else {
 if (mini300.headerStats.particles !== "5,000,000 particles")
   fail.push(`P300 header particles got ${mini300.headerStats.particles}`);
 if (mini300.finalStats !== "2.80 Å") fail.push(`P300 finalStats got ${mini300.finalStats}`);
+if (mini300.referenceKey !== "J375/volume") fail.push(`P300 极简 referenceKey got ${mini300.referenceKey}`);
 const srcs300 = figureMapSources(mini300);
-if (srcs300.size !== 7) fail.push(`P300 极简 render set expected 7 (J320:3 + J330:1 + J340:2 + J380:1), got ${srcs300.size}`);
+if (srcs300.size !== 7) fail.push(`P300 极简 render set expected 7 (J320:3 + J330:1 + J340:2 + J375:1), got ${srcs300.size}`);
 const OUT_MINIMAL_P300 = path.join(OUT_DIR, "out-minimal-p300.pptx");
 const imagesP300 = new Map<string, Uint8Array>();
 for (const [key, src] of srcs300) {
   imagesP300.set(key, discPng(hexToRgb(chimeraClassColor(src.classIndex))));
 }
-const blobP300 = buildWorkflowPptx(mini300, { images: imagesP300, style: "minimal" });
+const blobP300 = await buildWorkflowPptx(mini300, { images: imagesP300, style: "minimal" });
 const bufP300 = Buffer.from(await blobP300.arrayBuffer());
 fs.writeFileSync(OUT_MINIMAL_P300, bufP300);
 console.log("== P300 极简 pptx ==", OUT_MINIMAL_P300, bufP300.length, "bytes");
@@ -1388,30 +1424,24 @@ for (const g of mini310.groups) {
   );
 }
 if (mini310.groups.length !== 3)
-  fail.push(`P310 极简 expected 3 rows (J408 / the J410+J415 parallel row / J430), got ${mini310.groups.length}`);
+  fail.push(`P310 极简 expected 3 rows (J408 / the J410+J415 parallel row / the pre-DeepEMhancer J420), got ${mini310.groups.length}`);
 if (mini310.groups[1]?.length !== 2 || mini310.groups[1][0].uid !== "J410" || mini310.groups[1][1].uid !== "J415")
   fail.push(`P310 极简 row 1 must be the PARALLEL classification pair [J410 + J415], got ${JSON.stringify(mini310.groups[1]?.map((i) => i.uid))}`);
-if (mini310.groups[0]?.[0]?.uid !== "J408" || mini310.groups[2]?.[0]?.uid !== "J430")
-  fail.push(`P310 极简 first/last rows expected J408 / J430, got ${mini310.groups.map((g) => g.map((i) => i.uid).join("+")).join(" > ")}`);
+if (mini310.groups[0]?.[0]?.uid !== "J408" || mini310.groups[2]?.[0]?.uid !== "J420")
+  fail.push(`P310 极简 first/last rows expected J408 / J420 (v3.64: the DeepEMhancer J430 never enters — the funnel ends at its upstream refinement), got ${mini310.groups.map((g) => g.map((i) => i.uid).join("+")).join(" > ")}`);
 /* every row stays classification-or-terminal: the non-uniform merge stage
- * J420 is NOT a middle showcase — it reads in the gap note. */
-if (mini310.groups.flat().some((i) => i.uid === "J420"))
-  fail.push("P310 极简: the non-uniform merge stage must NOT be a displayed row (excluded as a non-classification middle)");
+ * J420 survives ONLY as the terminal row (the v3.64 funnel end). */
 if (!mini310.warnings.some((w) => w.includes("检测到 2 个并行分类 job（J410 + J415）在同一汇合点合并")))
   fail.push("P310 极简: missing the parallel-classification merge warning");
 if (!mini310.warnings.some((w) => w.includes("1,700,000 particles")))
   fail.push("P310 极简: the parallel merge warning must name the SUM 1,700,000");
 if (!mini310.warnings.some((w) => w.includes("中间行仅精选分类结果")))
   fail.push("P310 极简: missing the classification-only curation warning");
-/* omissions: gap0 (J408 → parallel row) empty; gap1 (parallel row → J430)
- * names the excluded J420. */
-if (!mini310.omissions || (mini310.omissions[0] ?? []).length)
-  fail.push(`P310 gap0 omissions expected none, got ${JSON.stringify(mini310.omissions?.[0])}`);
-else {
-  const byLabel310 = mini310.omissions[1] ?? [];
-  if (byLabel310.length !== 1 || byLabel310[0].label !== "Non-uniform refinement" || byLabel310[0].count !== 1)
-    fail.push(`P310 gap1 omissions expected "1× Non-uniform refinement" (J420), got ${JSON.stringify(byLabel310)}`);
-}
+/* omissions: gap0 (J408 → parallel row) and gap1 (parallel row → J420)
+ * both empty — J420 is the DISPLAYED funnel end (v3.64), so the old
+ * “1× Non-uniform refinement” note is gone. */
+if (!mini310.omissions || (mini310.omissions[0] ?? []).length || (mini310.omissions[1] ?? []).length)
+  fail.push(`P310 gap0/gap1 omissions expected none (J420 is displayed as the funnel end), got ${JSON.stringify(mini310.omissions)}`);
 {
   const totals = mini310.groups.map((g) => Math.max(...g.map((it) => it.particleTotal ?? 0)));
   for (let i = 1; i < totals.length; i++) {
@@ -1421,15 +1451,15 @@ else {
 if (mini310.headerStats.particles !== "2,000,000 particles")
   fail.push(`P310 header particles got ${mini310.headerStats.particles}`);
 if (mini310.finalStats !== "3.10 Å") fail.push(`P310 finalStats got ${mini310.finalStats}`);
-if (mini310.referenceKey !== "J430/volume") fail.push(`P310 referenceKey got ${mini310.referenceKey}`);
+if (mini310.referenceKey !== "J420/volume") fail.push(`P310 极简 referenceKey got ${mini310.referenceKey}`);
 const srcs310 = figureMapSources(mini310);
-if (srcs310.size !== 7) fail.push(`P310 极简 render set expected 7 (J408:2 + J410:2 + J415:2 + J430:1), got ${srcs310.size}`);
+if (srcs310.size !== 7) fail.push(`P310 极简 render set expected 7 (J408:2 + J410:2 + J415:2 + J420:1), got ${srcs310.size}`);
 const OUT_MINIMAL_P310 = path.join(OUT_DIR, "out-minimal-p310.pptx");
 const imagesP310 = new Map<string, Uint8Array>();
 for (const [key, src] of srcs310) {
   imagesP310.set(key, discPng(hexToRgb(chimeraClassColor(src.classIndex))));
 }
-const blobP310 = buildWorkflowPptx(mini310, { images: imagesP310, style: "minimal" });
+const blobP310 = await buildWorkflowPptx(mini310, { images: imagesP310, style: "minimal" });
 const bufP310 = Buffer.from(await blobP310.arrayBuffer());
 fs.writeFileSync(OUT_MINIMAL_P310, bufP310);
 console.log("== P310 极简 pptx ==", OUT_MINIMAL_P310, bufP310.length, "bytes");
@@ -1510,7 +1540,7 @@ console.log("== slide xml uid-run checks ==");
 if (!xmlFull.includes(" · J31") || !xmlFull.includes(" · J41"))
   fail.push("full deck labels missing the gray job-id runs (· J31 / · J41)");
 if (!xmlFull.includes(" · J28")) fail.push("full deck missing the J28 stage label id");
-if (!xmlFull.includes(" · J40")) fail.push("full deck missing the reconstruct-only J40 stage (kept in full mode)");
+if (xmlFull.includes(" · J40")) fail.push("v3.73: full deck must NOT label the reconstruct-only J40 (non-classification middle, dropped with a gap note)");
 if (!xmlFull.includes('sz="700"') || !xmlFull.includes('val="808080"'))
   fail.push("full deck job-id runs missing the 7 pt gray styling");
 if (!xmlSimplified.includes(" · J39") || !xmlSimplified.includes(" · J28")) fail.push("simplified deck missing the kept J39/J28 label ids");
@@ -1644,8 +1674,9 @@ for (const [deckXml, deck] of [
 }
 
 /* minimal deck specifics: bare stage names (NO job-id runs), NO footnote,
- * the 5 selection frames (J27 c0 / J31 c0 / J33 c0 / J34 c0 / J39 c2),
- * the retention labels with the P96 percentages, and the final Å. */
+ * the 5 selection frames (J27 / J31 / J33 / J34 / J39 rows), the
+ * retention labels with the P96 percentages, the final Å — and (v3.75)
+ * PER-CLASS STATS under every thumbnail. */
 if (xmlMinimal.includes(" · J")) fail.push("minimal deck must NOT carry job-id label runs");
 if (xmlMinimal.includes("CryoSmart Workflow Figure")) fail.push("minimal deck must NOT carry the footnote");
 {
@@ -1661,37 +1692,35 @@ if (xmlMinimal.includes("CryoSmart Workflow Figure")) fail.push("minimal deck mu
   /* 100% transitions must print the count WITHOUT a percentage line. */
   if (xmlMinimal.includes("100.0%")) fail.push("minimal deck must not print a 100% retention line");
   if (!xmlMinimal.includes("3.20 Å")) fail.push("minimal deck missing the final resolution under the last map");
-  /* the standard-only trimmings must be absent: no side stats boxes, no
-   * per-class stats under thumbs (the 2:1 minimal rows carry only labels +
-   * pics + frames + retention + Å text). */
-  if (xmlMinimal.includes("77%")) fail.push("minimal deck must not render per-class stats lines");
+  /* v3.75 (round-34 “保证所有模式的颗粒数都要显示”): 极简 rows carry the
+   * per-class stats under each thumbnail now — the count lines must
+   * render (J31 c0's 77% / 590,421 particles). */
+  if (!xmlMinimal.includes("77%")) fail.push("v3.75: minimal deck must render per-class stats (77%)");
+  if (!xmlMinimal.includes("590,421 particles")) fail.push("v3.75: minimal deck must render per-class counts (590,421 particles)");
 }
 
-/* 极简 capped deck specifics (v3.63): the SAME-TYPE MERGE folds J28+J31+J34
- * into ONE “3× Hetero refinement” row (rep J34, 590,421) and the
- * v3.63 classification rule EXCLUDES the J37 non-uniform middle → 3 rows
- * [3× Hetero, J39 ab-initio, J41] / 7 thumbnails / 2 selection frames
- * (the 3× row's J34 c0 + J39 c2, both CENTRED on the spine). The
- * retention labels read ENTRY semantics: 378,677 ÷ J28's 1,588,675 =
- * 23.8% under the merged row (NOT the old 64.1% = ÷ J34's input), then
- * 55.2% / 209,127 under J39; the per-gap omission notes name J35+J37
+/* 极简 capped deck specifics (v3.75): the SAME-TYPE MERGE folds ONLY the
+ * truly consecutive pair J28+J31 (the kept ab-initio J33 separates J31
+ * from J34) → 5 rows [2× Hetero(J31), J33, J34, J39, J41] / 12
+ * thumbnails / 4 selection frames / 6 arrows. The retention labels
+ * read ENTRY semantics: 590,421 ÷ 1,588,675 = 37.2% under the merged
+ * row, a count-only 590,421 into J34 (100%), 64.1% / 378,677 into J39,
+ * 55.2% / 209,127 into J41; the per-gap omission notes name J35+J37
  * (aggregated 2× Non-uniform) and the reconstruct-only J40; no job ids /
  * footnote; final Å kept. */
 if (xmlMini.includes(" · J")) fail.push("极简 capped deck must NOT carry job-id label runs");
 if (xmlMini.includes("CryoSmart Workflow Figure")) fail.push("极简 capped deck must NOT carry the footnote");
-if (!xmlMini.includes(">3× Hetero refinement<")) fail.push("极简 capped deck missing the merged 3× Hetero refinement row label");
-if (!xmlMini.includes("23.8%")) fail.push("极简 capped deck missing the 23.8% retention (378,677 ÷ the merged row's entry 1,588,675)");
-if (!xmlMini.includes("378,677 particles")) fail.push("极简 capped deck missing the 378,677 retention count");
+if (!xmlMini.includes(">2× Hetero refinement<")) fail.push("极简 capped deck missing the merged 2× Hetero refinement row label");
+if (!xmlMini.includes("37.2%")) fail.push("极简 capped deck missing the 37.2% retention (590,421 ÷ the merged row's entry 1,588,675)");
+if (!xmlMini.includes("590,421 particles")) fail.push("极简 capped deck missing the 590,421 retention count");
+if (!xmlMini.includes("64.1%") || !xmlMini.includes("378,677 particles")) fail.push("极简 capped deck missing the 64.1% / 378,677 retention label");
 if (!xmlMini.includes("55.2%") || !xmlMini.includes("209,127 particles")) fail.push("极简 capped deck missing the 55.2% / 209,127 retention label");
-if (xmlMini.includes("64.1%")) fail.push("极简 capped deck must not print the old ÷-rep-input 64.1% (entry semantics replaced it)");
-if (xmlMini.includes("37.2%")) fail.push("极简 capped deck must not print the merged-away J28→J34 retention 37.2%");
-if (xmlMini.includes("48.3%") || xmlMini.includes("77.0%"))
-  fail.push("极简 capped deck must NOT carry the folded-away J31 labels (48.3%/77.0%)");
+if (xmlMini.includes("23.8%")) fail.push("极简 capped deck must not print the old 3×-row 23.8% (the merge is J28+J31 only now)");
+if (xmlMini.includes("48.3%")) fail.push("极简 capped deck must NOT carry the folded-away J28 retention 48.3%");
 if (xmlMini.includes("100.0%")) fail.push("极简 capped deck must not print a 100% retention line");
 if (!xmlMini.includes("3.20 Å")) fail.push("极简 capped deck missing the final resolution under the last map");
-/* v3.62 round-21: the omitted steps are NAMED on the figure — the
- * 简化-merged J35 + the classification-excluded J37 under the 3× row
- * (aggregated 2×), J40 under J39. */
+/* the omitted steps are NAMED on the figure — the 简化-merged J35 + the
+ * classification-excluded J37 under J34 (aggregated 2×), J40 under J39. */
 if (!xmlMini.includes("omitted: 2× Non-uniform refinement"))
   fail.push("极简 capped deck missing the gap note 'omitted: 2× Non-uniform refinement' (J35 + J37)");
 if (!xmlMini.includes("omitted: 1× Reconstruction"))
@@ -1699,161 +1728,132 @@ if (!xmlMini.includes("omitted: 1× Reconstruction"))
 if (!xmlMini.includes('sz="650"')) fail.push("极简 capped deck: the omission note must be the smaller gray run (sz=650)");
 {
   const framesMini = (xmlMini.match(/name="矩形 /g) || []).length;
-  if (framesMini !== 2) fail.push(`极简 capped deck expected exactly 2 selection frames (3× row J34 c0 + J39 c2), got ${framesMini}`);
+  if (framesMini !== 4) fail.push(`极简 capped deck expected exactly 4 selection frames (2× row J31 + J33 + J34 + J39), got ${framesMini}`);
   const picsMini = (xmlMini.match(/<p:pic>/g) || []).length;
-  if (picsMini !== 7) fail.push(`极简 capped deck expected 7 thumbnails (3+3+1 over 3 rows), got ${picsMini}`);
+  if (picsMini !== 12) fail.push(`极简 capped deck expected 12 thumbnails (3+2+3+3+1 over 5 rows), got ${picsMini}`);
   const connsMini = (xmlMini.match(/直接箭头连接符/g) || []).length;
-  if (connsMini !== 4) fail.push(`极简 capped deck expected 4 arrows (pick arrow + header→row1 + 2 inter-row), got ${connsMini}`);
+  if (connsMini !== 6) fail.push(`极简 capped deck expected 6 arrows (pick arrow + header→row1 + 4 inter-row), got ${connsMini}`);
 }
-/* v3.62: UNIFORM PITCH — every inter-row band keeps the retention-slot
- * height, so all row image-tops are equally spaced (the rows without a
- * retention label used to sit 0.29 in closer). */
-{
-  const imgTops = [...xmlMini.matchAll(/<p:pic>.*?<a:off x="(-?\d+)" y="(-?\d+)"/gs)].map((m) => +m[2] / EMU).sort((a, b) => a - b);
-  const rowTops = [...new Set(imgTops.map((y) => Math.round(y * 100) / 100))];
-  for (let i = 2; i < rowTops.length; i++) {
-    const pitch = rowTops[i] - rowTops[i - 1];
-    if (Math.abs(pitch - (rowTops[1] - rowTops[0])) > 0.02)
-      fail.push(`极简 capped deck: inter-row pitch broke at row ${i} (${pitch.toFixed(2)} vs ${(rowTops[1] - rowTops[0]).toFixed(2)})`);
-  }
-}
-/* v3.62: ANCHOR-CENTRED frames — both selection rectangles sit on the
- * spine x=3.75 (±0.06): the 3-class merged row swaps its anchor into the
- * centre slot, so the frame reads under the arrows for EVERY sample. */
-{
-  const frames = [...xmlMini.matchAll(/<p:sp>.*?<\/p:sp>/gs)]
-    .filter((m) => /name="矩形 /.test(m[0]))
-    .map((m) => {
-      const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(m[0]);
-      const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(m[0]);
-      return off && ext ? { cx: (+off[1] + +ext[1] / 2) / EMU, cy: (+off[2] + +ext[3] / 2) / EMU } : null;
-    })
-    .filter((f): f is { cx: number; cy: number } => !!f);
-  for (const f of frames)
-    if (Math.abs(f.cx - 3.75) > 0.06)
-      fail.push(`极简 capped deck: selection frame centre x=${f.cx.toFixed(2)} is OFF the spine 3.75 (anchor-centring failed)`);
-}
-
-/* P268 极简 deck specifics (v3.63): the curated mainline reads as TWO
- * rows — “2× Hetero refinement” (J240+J250 merged; J250's 3-class
- * montage) → DeepEMhancer — with ONE selection frame (J250 c0 1,178,700,
- * CENTRED on the spine), the entry-semantics retention label 1,000,000 ÷
- * J240's 4,812,000 = 20.8% (the old 62.0% divided by the rep's input),
- * the J260+J270/J280 gap note under the 2× row, the full-separator header
- * (“4,812,000 particles”), NO Import Volumes text, NO dropped-stage
- * counts (58,048 / 12,259 never print), no job ids, no footnote, and the
- * final Å on the spine. */
+/* v3.62 pitch → v3.75: rows carry content-dependent stats bands now, so
+ * top-to-top pitch is no longer uniform BY DESIGN; the fixed MIN_GAP_BAND
+ * plus the no-crossing invariant below carry the rhythm instead. */
+/* v3.75: ANCHOR frames at their NATURAL class position — strict 0,1,2
+ * order, no centre swap; every frame must HUG a placed picture. */
+frameHugCheck(xmlMini, "极简 capped deck");
+/* P268 极简 deck specifics (v3.75): the curated mainline reads as THREE
+ * rows — J230 (the kept ab-initio, v3.75 rich pool) → “2× Hetero
+ * refinement” (J240+J250 merged; J250's 3-class montage) → the
+ * pre-DeepEMhancer J280 — with TWO selection frames (J230 c0 6,129 and
+ * the 2× row's J250 c0 1,178,700), the entry-semantics retention label
+ * 1,000,000 ÷ J240's 4,812,000 = 20.8%, the count-only 4,812,000 repick
+ * jump under J230, the J260+J270 gap note under the 2× row, the
+ * full-separator header (“4,812,000 particles”), NO Import Volumes text,
+ * no job ids, no footnote, and the final Å on the spine. */
 {
   if (xmlP268.includes("Import Volumes")) fail.push("P268 极简 deck must NOT carry the Import Volumes label");
   if (xmlP268.includes(" · J")) fail.push("P268 极简 deck must NOT carry job-id label runs");
   if (xmlP268.includes("CryoSmart Workflow Figure")) fail.push("P268 极简 deck must NOT carry the footnote");
   if (!xmlP268.includes(">2× Hetero refinement<")) fail.push("P268 极简 deck missing the merged “2× Hetero refinement” row label");
-  for (const frag of ["4,812,000 particles", "20.8%", "1,000,000 particles", "2.70 Å", "omitted: 2× Non-uniform refinement · 1× Local refinement"])
+  for (const frag of ["4,812,000 particles", "20.8%", "1,000,000 particles", "2.70 Å", "omitted: 2× Non-uniform refinement"])
     if (!xmlP268.includes(frag)) fail.push(`P268 极简 deck missing "${frag}"`);
   if (xmlP268.includes("62.0%") || xmlP268.includes("84.8%"))
     fail.push("P268 极简 deck must not print the old rep-input ratios 62.0%/84.8% (entry semantics replaced them)");
   if (xmlP268.includes("39.5%")) fail.push("P268 极简 deck must not print the merged-away J240→J250 retention 39.5%");
-  if (xmlP268.includes("12,259")) fail.push("P268 极简 deck must not print the dropped ab-initio / 2D-selection count");
   if (xmlP268.includes("100.0%")) fail.push("P268 极简 deck must not print a 100% retention line");
   const framesP268 = (xmlP268.match(/name="矩形 /g) || []).length;
-  if (framesP268 !== 1) fail.push(`P268 极简 deck expected exactly 1 selection frame (the merged row's J250 c0), got ${framesP268}`);
+  if (framesP268 !== 2) fail.push(`P268 极简 deck expected exactly 2 selection frames (J230 c0 + the merged row's J250 c0), got ${framesP268}`);
   const picsP268 = (xmlP268.match(/<p:pic>/g) || []).length;
-  if (picsP268 !== 4) fail.push(`P268 极简 deck expected 4 thumbnails (3+1 over 2 rows), got ${picsP268}`);
+  if (picsP268 !== 6) fail.push(`P268 极简 deck expected 6 thumbnails (2+3+1 over 3 rows), got ${picsP268}`);
   const connsP268 = (xmlP268.match(/直接箭头连接符/g) || []).length;
-  if (connsP268 !== 3) fail.push(`P268 极简 deck expected 3 arrows (pick arrow + header→row1 + 1 inter-row), got ${connsP268}`);
-  /* the merged row's frame must sit ON the spine (the 3-class anchor swap) */
-  for (const m of xmlP268.matchAll(/<p:sp>.*?<\/p:sp>/gs)) {
-    if (!/name="矩形 /.test(m[0])) continue;
-    const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(m[0]);
-    const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(m[0]);
-    if (off && ext) {
-      const cx = (+off[1] + +ext[1] / 2) / EMU;
-      if (Math.abs(cx - 3.75) > 0.06)
-        fail.push(`P268 极简 deck: the merged-row frame centre x=${cx.toFixed(2)} is OFF the spine 3.75`);
-    }
-  }
+  if (connsP268 !== 4) fail.push(`P268 极简 deck expected 4 arrows (pick arrow + header→row1 + 2 inter-row), got ${connsP268}`);
+  frameHugCheck(xmlP268, "P268 极简 deck");
 }
-
-/* P300 极简 deck specifics (v3.63): the classification-only curation
+/* P300 极简 deck specifics (v3.75): the classification-only curation
  * KEEPS the 6 Å ab-initio as a middle (it IS a classification result)
- * and EXCLUDES the non-uniform/local/refinement middles → 4 rows
- * [2× Hetero, Ab-initio reconstruction, Hetero refinement,
- * DeepEMhancer]. Retention labels read ENTRY semantics: 30.0%
- * (1,500,000 ÷ the 2× row's entry 5,000,000), a count-only 1,500,000
- * (100% into J340), then 60.0% / 900,000. The gap2 note names the
- * dropped “2× Non-uniform” row's members + the excluded middles
- * (3 entries, no ellipsis). BOTH selection frames (the odd-count swap
- * on the merged J320 row AND the even-count nudge on the J340 2-class
- * row) centre on the spine, and the 4 rows share ONE uniform pitch. */
+ * and EXCLUDES the non-uniform/local middles → 4 rows [2× Hetero,
+ * Ab-initio reconstruction, Hetero refinement, Refinement(J375 — the
+ * v3.64 pre-DeepEMhancer funnel end)]. Retention labels read ENTRY
+ * semantics: 30.0% (1,500,000 ÷ the 2× row's entry 5,000,000), a
+ * count-only 1,500,000 (100% into J340), then 60.0% / 900,000. The
+ * gap2 note names the dropped “2× Non-uniform” row's members + the
+ * excluded local middle (2 entries). TWO selection frames (the merged
+ * J320 row and the J340 2-class row), both hugging their anchor class
+ * at its natural position. */
 {
-  for (const frag of [">2× Hetero refinement<", ">Ab-initio reconstruction<", ">Hetero refinement<", ">DeepEMhancer<", "omitted: 2× Non-uniform refinement · 1× Local refinement · 1× Refinement", "30.0%", "1,500,000 particles", "60.0%", "900,000 particles", "2.80 Å"])
+  for (const frag of [">2× Hetero refinement<", ">Ab-initio reconstruction<", ">Hetero refinement<", ">Refinement<", "omitted: 2× Non-uniform refinement · 1× Local refinement", "30.0%", "1,500,000 particles", "60.0%", "900,000 particles", "2.80 Å"])
     if (!xmlP300.includes(frag)) fail.push(`P300 极简 deck missing "${frag}"`);
   if (xmlP300.includes(" · J")) fail.push("P300 极简 deck must NOT carry job-id label runs");
   if (xmlP300.includes("100.0%")) fail.push("P300 极简 deck must not print a 100% retention line");
   if (xmlP300.includes("50.0%")) fail.push("P300 极简 deck must not print the old ÷-rep-input 50.0% (entry semantics replaced it)");
-  if (!xmlP300.includes("2× Non-uniform refinement"))
-    fail.push("P300 极简 deck: the dropped N× row must be named in the gap note");
+  if (xmlP300.includes("DeepEMhancer")) fail.push("v3.64: P300 极简 deck must NOT label the DeepEMhancer (the funnel ends at the pre-DeepEMhancer J375)");
   const framesP300 = (xmlP300.match(/name="矩形 /g) || []).length;
-  if (framesP300 !== 2) fail.push(`P300 极简 deck expected exactly 2 selection frames (J320 c2 + J340 c0), got ${framesP300}`);
+  if (framesP300 !== 2) fail.push(`P300 极简 deck expected exactly 2 selection frames (J320 + J340), got ${framesP300}`);
   const picsP300 = (xmlP300.match(/<p:pic>/g) || []).length;
   if (picsP300 !== 7) fail.push(`P300 极简 deck expected 7 thumbnails (3+1+2+1 over 4 rows), got ${picsP300}`);
   const connsP300 = (xmlP300.match(/直接箭头连接符/g) || []).length;
   if (connsP300 !== 5) fail.push(`P300 极简 deck expected 5 arrows (pick arrow + header→row1 + 3 inter-row), got ${connsP300}`);
-  /* BOTH frames centred on the spine — the odd-count swap (J320) and the
-   * even-count nudge (J340) must each land under the flow. */
-  const frameCenters = [...xmlP300.matchAll(/<p:sp>.*?<\/p:sp>/gs)]
-    .filter((m) => /name="矩形 /.test(m[0]))
-    .map((m) => {
-      const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(m[0]);
-      const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(m[0]);
-      return off && ext ? (+off[1] + +ext[1] / 2) / EMU : null;
-    })
-    .filter((v): v is number => v != null);
-  for (const cx of frameCenters)
-    if (Math.abs(cx - 3.75) > 0.06)
-      fail.push(`P300 极简 deck: selection frame centre x=${cx.toFixed(2)} is OFF the spine 3.75`);
-  /* UNIFORM PITCH across all 4 rows. */
-  const imgTops = [...xmlP300.matchAll(/<p:pic>.*?<a:off x="(-?\d+)" y="(-?\d+)"/gs)].map((m) => +m[2] / EMU).sort((a, b) => a - b);
-  const rowTops = [...new Set(imgTops.map((y) => Math.round(y * 100) / 100))];
-  if (rowTops.length !== 4) fail.push(`P300 极简 deck expected 4 distinct row tops, got ${rowTops.length}`);
-  for (let i = 2; i < rowTops.length; i++) {
-    const pitch = rowTops[i] - rowTops[i - 1];
-    if (Math.abs(pitch - (rowTops[1] - rowTops[0])) > 0.02)
-      fail.push(`P300 极简 deck: inter-row pitch broke at row ${i} (${pitch.toFixed(2)} vs ${(rowTops[1] - rowTops[0]).toFixed(2)})`);
-  }
+  frameHugCheck(xmlP300, "P300 极简 deck");
 }
-
-/* P310 极简 deck specifics (v3.63): the PARALLEL CLASSIFICATION MERGE —
- * [J408] → [J410 + J415 side by side] → [J430], with the SUMMED entry
- * count on the incoming label (85.0% / 1,700,000 particles = 1,700,000
- * ÷ 2,000,000) and 58.8% / 1,000,000 on the outgoing one; the two
- * branch labels render right-aligned at each item's edge; NO selection
- * frame on the parallel row (J408's own frame still centres on the
- * spine); the gap note names the excluded J420. */
+/* P310 极简 deck specifics (v3.75): the PARALLEL CLASSIFICATION MERGE —
+ * [J408] → [J410 + J415 side by side] → [J420 (the pre-DeepEMhancer
+ * funnel end)], with the SUMMED entry count on the incoming label
+ * (85.0% / 1,700,000 particles = 1,700,000 ÷ 2,000,000) and 58.8% /
+ * 1,000,000 on the outgoing one; the two branch labels render
+ * right-aligned at each item's edge; NO selection frame on the parallel
+ * row (J408's own frame still marks its anchor class); J420 being
+ * displayed means the old “omitted: 1× Non-uniform refinement” note is
+ * GONE. */
 {
-  for (const frag of ["85.0%", "1,700,000 particles", "58.8%", "1,000,000 particles", "omitted: 1× Non-uniform refinement", "3.10 Å"])
+  for (const frag of ["85.0%", "1,700,000 particles", "58.8%", "1,000,000 particles", "3.10 Å"])
     if (!xmlP310.includes(frag)) fail.push(`P310 极简 deck missing "${frag}"`);
   if (xmlP310.includes(" · J")) fail.push("P310 极简 deck must NOT carry job-id label runs");
   if (xmlP310.includes("100.0%")) fail.push("P310 极简 deck must not print a 100% retention line");
+  if (xmlP310.includes("omitted:")) fail.push("v3.75: P310 极简 deck must carry NO omission note (J420 is the displayed funnel end)");
   /* BOTH parallel members' bare labels render (one per item edge). */
   const heteroLabelRuns = (xmlP310.match(/>Hetero refinement</g) || []).length;
   if (heteroLabelRuns < 2)
     fail.push(`P310 极简 deck: the parallel row must label EACH branch (≥2 bare “Hetero refinement” runs), got ${heteroLabelRuns}`);
   const framesP310 = (xmlP310.match(/name="矩形 /g) || []).length;
-  if (framesP310 !== 1) fail.push(`P310 极简 deck expected exactly 1 selection frame (J408 c0 — NONE on the parallel row), got ${framesP310}`);
+  if (framesP310 !== 1) fail.push(`P310 极简 deck expected exactly 1 selection frame (J408 — NONE on the parallel row), got ${framesP310}`);
   const picsP310 = (xmlP310.match(/<p:pic>/g) || []).length;
   if (picsP310 !== 7) fail.push(`P310 极简 deck expected 7 thumbnails (2+2+2+1), got ${picsP310}`);
   const connsP310 = (xmlP310.match(/直接箭头连接符/g) || []).length;
   if (connsP310 !== 4) fail.push(`P310 极简 deck expected 4 arrows (pick arrow + header→row1 + 2 inter-row), got ${connsP310}`);
-  for (const m of xmlP310.matchAll(/<p:sp>.*?<\/p:sp>/gs)) {
-    if (!/name="矩形 /.test(m[0])) continue;
-    const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(m[0]);
-    const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(m[0]);
-    if (off && ext) {
-      const cx = (+off[1] + +ext[1] / 2) / EMU;
-      if (Math.abs(cx - 3.75) > 0.06)
-        fail.push(`P310 极简 deck: the J408 frame centre x=${cx.toFixed(2)} is OFF the spine 3.75`);
-    }
+  frameHugCheck(xmlP310, "P310 极简 deck");
+}
+
+/* v3.75: frame-hug helper — every selection frame must wrap a PLACED
+ * picture (post alpha-trim, post contain-fit) with only the designed
+ * 0.08 in overhang; strict class order means the frame sits on the
+ * anchor class at its natural position (round-34 “框不要比图大太多”). */
+function frameHugCheck(xml: string, deck: string) {
+  const pics = [...xml.matchAll(/<p:pic>.*?<\/p:pic>/gs)]
+    .map((m) => {
+      const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(m[0]);
+      const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(m[0]);
+      return off && ext ? { x: +off[1] / EMU, y: +off[2] / EMU, w: +ext[1] / EMU, h: +ext[2] / EMU } : null;
+    })
+    .filter((p): p is { x: number; y: number; w: number; h: number } => !!p);
+  const frames = [...xml.matchAll(/<p:sp>.*?<\/p:sp>/gs)]
+    .filter((m) => /name="矩形 /.test(m[0]))
+    .map((m) => {
+      const off = /<a:off x="(-?\d+)" y="(-?\d+)"/.exec(m[0]);
+      const ext = /<a:ext cx="(\d+)" cy="(\d+)"/.exec(m[0]);
+      return off && ext ? { x: +off[1] / EMU, y: +off[2] / EMU, w: +ext[1] / EMU, h: +ext[2] / EMU } : null;
+    })
+    .filter((f): f is { x: number; y: number; w: number; h: number } => !!f);
+  for (const f of frames) {
+    const hugged = pics.some(
+      (p) =>
+        Math.abs(p.x + p.w / 2 - (f.x + f.w / 2)) < 0.06 &&
+        Math.abs(p.y + p.h / 2 - (f.y + f.h / 2)) < 0.06 &&
+        f.w >= p.w - 0.02 &&
+        f.w <= p.w + 0.14 &&
+        f.h >= p.h - 0.02 &&
+        f.h <= p.h + 0.14,
+    );
+    if (!hugged)
+      fail.push(`${deck}: selection frame (${f.x.toFixed(2)},${f.y.toFixed(2)}) ${f.w.toFixed(2)}x${f.h.toFixed(2)} does not hug a placed picture`);
   }
 }
 

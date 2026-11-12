@@ -92,15 +92,15 @@ const MINIMAL_ROW_CAP = 6;
 const MODE_META: Record<FlowModeOption, { label: string; hint: string }> = {
   standard: {
     label: "标准",
-    hint: "谱系精选 — 中间步骤仅展示分类结果（Hetero refinement / Ab-initio / 3D 分类），Non-uniform、Local refinement、Import volume 等中间阶段省略并在箭头旁以「omitted: N×」注明；被下游使用的 class 细框标出（居脊柱）；job id 标注 + 每 class 统计 + 页脚",
+    hint: "谱系精选 — 中间步骤仅展示分类结果（Hetero refinement / Ab-initio / 3D 分类），Non-uniform、Local refinement、Import volume 等中间阶段省略并在箭头旁以「omitted: N×」注明；class 按 0,1,2… 从左到右排列，被下游使用的 class 细框标出；每 class 百分比+颗粒数、单图行统计居图下方；job id 标注 + 页脚",
   },
   simplified: {
     label: "简化",
-    hint: "在标准精选之上再合并可省的步骤：少量数据的 2D 与默认 12 Å ab-initio 整体省略，相邻同颗粒数 non-uniform 合并，颗粒数按「从多到少」显示；中间步骤同样仅展示分类结果，被下游使用的 class 加框标出",
+    hint: "在标准精选之上再合并可省的步骤：少量数据的 2D 与默认 12 Å ab-initio 整体省略，相邻同颗粒数 non-uniform 合并；中间步骤同样仅展示分类结果，被下游使用的 class 加框标出，每 class 均显示颗粒数（重抽取后颗粒数回升时如实显示）",
   },
   minimal: {
     label: `极简（4–6 行）`,
-    hint: `精选颗粒主线上的关键 job — 中间行仅精选分类结果（Hetero refinement / Ab-initio / 3D 分类），Non-uniform 等非分类中间阶段以「omitted: N×」注明；连续同类型阶段合并为一行「N× 类型」，并行分类 job 颗粒数合并；箭头旁留存比例按「本步颗粒数 ÷ 上一步」计算；阶段数可选 4/5/6（最多 ${MINIMAL_ROW_CAP} 行）；选中 class 恒居脊柱细框，无 job id/页脚`,
+    hint: `精选颗粒主线上的关键 job — 中间行仅精选分类结果（Hetero refinement / Ab-initio / 3D 分类），Non-uniform 等非分类中间阶段以「omitted: N×」注明；连续同类型阶段合并为一行「N× 类型」，并行分类 job 颗粒数合并；阶段数 4/5/6，行数预算尽量填满（首行=颗粒数最多的分类任务，末行必留，其余自后向前、再自前向后补齐）；class 按 0,1,2… 从左到右排列，被下游使用的 class 细框标出，每 class 均显示颗粒数；箭头旁留存比例按「本步颗粒数 ÷ 上一步」计算；无 job id/页脚`,
   },
   manual: {
     label: "手动",
@@ -1103,30 +1103,32 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         }
         pushLog(`手动模式: 保留 ${model.groups.length}/${catalogItems.length} 个阶段（${checkedCount} 个 job） · 标准版式（job id 标注 + 每 class 统计）`);
       }
-      /* v3.60: the mode banner — one line per flowMode (the 极简 line
-       * carries the merge rules too: simplified=true runs under it).
+      /* v3.60: the mode banner — one line per flowMode.
        * v3.63 (round-22): the 极简 rules add the classification-only
        * middles, the entry-based retention ratios and the parallel
-       * classification count merge. */
+       * classification count merge.
+       * v3.75 (round-34): 极简 no longer pre-drops bootstrap/redundant
+       * stages (the 4/5/6 budget fills first), every mode shows per-class
+       * counts, and classes keep their natural 0,1,2… order. */
       if (flowMode === "minimal") {
         pushLog(
           "极简模式: 精选颗粒主线上的关键 job — 上下游顺序不乱；中间行仅精选分类结果（Hetero refinement / Ab-initio / 3D 分类），Non-uniform 等非分类中间阶段不入选（以「omitted: N×」注明）；并行分类 job 合并为一行、颗粒数相加",
         );
         pushLog(
-          `极简规则: 简化合并照跑（默认 12 Å ab-initio 省略 · 相邻同颗粒数 non-uniform 合并）· 阶段数 4/5/6（最多 ${MINIMAL_ROW_CAP} 行）· 箭头旁留存比例按「本步颗粒数 ÷ 上一步」重新计算`,
+          `极简规则: 不再预先省略少量数据/默认 12 Å 阶段 — 阶段数 4/5/6 的行数预算尽量填满（首行=颗粒数最多的分类任务、末行必留，其余自后向前、再自前向后补齐）· 箭头旁留存比例按「本步颗粒数 ÷ 上一步」重新计算`,
         );
-        pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头（含 Auto pick 横向箭头）· 选中 class 细框（居中）· 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
+        pushLog("极简版式: 参考 workflow.pptx — 竖向单列 · 固定长度直箭头（含 Auto pick 横向箭头）· class 按 0,1,2… 从左到右排列 · 被下游使用的 class 细框标出 · 每 class 显示颗粒数 · 箭头旁标注留存颗粒数 · 不显示 job id/页脚");
       } else if (flowMode === "simplified") {
         pushLog(
-          "简化模式: 少量数据的 2D 步骤将省略 · 默认 12 Å ab-initio 阶段整体省略（直接衔接后续精修） · 相邻同颗粒数 non-uniform 合并 · 颗粒数按「从多到少」显示",
+          "简化模式: 少量数据的 2D 步骤将省略 · 默认 12 Å ab-initio 阶段整体省略（直接衔接后续精修） · 相邻同颗粒数 non-uniform 合并 · 每行 class 均显示颗粒数（重抽取后颗粒数回升时如实显示）",
         );
         pushLog(
-          "中间步骤精选（v3.73）: 中间行仅展示分类结果（Hetero refinement / Ab-initio / 3D 分类）— Non-uniform / Local refinement / Import volume 等中间阶段省略，图上以「omitted: N×」注明；被下游使用的 class 加细框标出（居脊柱）",
+          "中间步骤精选（v3.73）: 中间行仅展示分类结果（Hetero refinement / Ab-initio / 3D 分类）— Non-uniform / Local refinement / Import volume 等中间阶段省略，图上以「omitted: N×」注明；class 按 0,1,2… 从左到右排列，被下游使用的 class 加细框标出",
         );
       } else if (!manual) {
-        pushLog("标准模式: 谱系精选 · job id 标注 · 每 class 统计 · 页脚");
+        pushLog("标准模式: 谱系精选 · job id 标注 · 每 class 百分比+颗粒数（单图行统计居图下方） · 页脚");
         pushLog(
-          "中间步骤精选（v3.73）: 中间行仅展示分类结果（Hetero refinement / Ab-initio / 3D 分类）— Non-uniform / Local refinement / Import volume 等中间阶段省略，图上以「omitted: N×」注明；被下游使用的 class 加细框标出（居脊柱）",
+          "中间步骤精选（v3.73）: 中间行仅展示分类结果（Hetero refinement / Ab-initio / 3D 分类）— Non-uniform / Local refinement / Import volume 等中间阶段省略，图上以「omitted: N×」注明；class 按 0,1,2… 从左到右排列，被下游使用的 class 加细框标出",
         );
       }
       const multiClassGroups = model.groups.filter((g) => g.some((i) => (i.classes?.length ?? 0) > 1));
@@ -1675,7 +1677,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               view: chiralityMeta.view || null,
               mode: mode === "chimerax" ? "ChimeraX aligned" : "session previews",
             });
-      const blob = buildWorkflowPptx(model, { images, footnote, style: figStyle });
+      const blob = await buildWorkflowPptx(model, { images, footnote, style: figStyle });
       const project = mode === "demo" ? "Demo" : `${summary?.project_uid ?? "P"}_${summary?.start_uid ?? "J"}`;
       const filename = `CryoSmart_${project}_workflow.pptx`;
       const blobUrl = URL.createObjectURL(blob);
