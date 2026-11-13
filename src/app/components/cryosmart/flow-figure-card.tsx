@@ -30,6 +30,8 @@ import {
   UploadCloud,
   FileCheck2,
   XCircle,
+  Layers,
+  Gauge,
 } from "lucide-react";
 import type { LineageSummary, LineageNode, MapAsset, ImageAsset } from "@/lib/cryosmart/types";
 import type { LoadedMetadata } from "./data-source-card";
@@ -581,6 +583,23 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
    * localStorage like the 下载目录. */
   const [refHandMode, setRefHandMode] = useState<RefHandModeOption>("auto");
   const [refHandAnchor, setRefHandAnchor] = useState("");
+  /* v3.77 (round-37 “map的角度可能需要择优后再截图，尤其是膜蛋白，level
+   *  不能太高…把去垢剂的盘子放在xy轴平面上，包内区朝下，包外区朝上”):
+   *  the membrane-view + screenshot-level settings. 膜视图 lays the
+   *  detergent disk flat in the screen XY plane (density-weighted PCA on
+   *  the reference via the relay's /membrane — the smallest-variance
+   *  principal axis of the oblate protein+micelle particle IS the
+   *  membrane normal; the camera looks straight down it, so top-down the
+   *  belt is a ring around the protein and the helices stay visible);
+   *  截图 level replaces the fixed 0.25×max display contour (which chased
+   *  a hot detergent peak and hid the protein) with an envelope-based
+   *  auto level (Otsu + noise floor). Fit levels stay 0.25×max — only
+   *  the visible contour changes. Remembered in localStorage like the
+   *  下载目录 / 参考手性 choices. */
+  const [membraneView, setMembraneView] = useState<"off" | "auto">("auto");
+  const [membraneFlip, setMembraneFlip] = useState(false);
+  const [levelMode, setLevelMode] = useState<"auto" | "classic" | "manual">("auto");
+  const [levelRatio, setLevelRatio] = useState("0.12");
   /* v3.72 (round-31 交付文件下载): the DELIVERY settings — the 交付目录 on
    *  the ChimeraX machine (D:\Lijing\Tigr\Tigr\data) + the file-name base
    *  auto-derived from it ("Tigr" — the directory ABOVE the data dir);
@@ -793,6 +812,34 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       window.localStorage.setItem("cryoflow.refHandAnchor", refHandAnchor);
     } catch {}
   }, [refHandMode, refHandAnchor]);
+
+  /* v3.77: restore + persist the membrane-view + screenshot-level
+   * settings (same restore/persist split as refHand above — the persist
+   * effect skips its first run so the restore is never clobbered). */
+  const membraneHydratedRef = useRef(false);
+  useEffect(() => {
+    try {
+      const mv = window.localStorage.getItem("cryoflow.membraneView");
+      if (mv === "off" || mv === "auto") setMembraneView(mv);
+      setMembraneFlip(window.localStorage.getItem("cryoflow.membraneFlip") === "1");
+      const lm = window.localStorage.getItem("cryoflow.levelMode");
+      if (lm === "classic" || lm === "manual") setLevelMode(lm);
+      const lr = parseFloat(window.localStorage.getItem("cryoflow.levelRatio") ?? "");
+      if (Number.isFinite(lr) && lr >= 0.01 && lr <= 0.9) setLevelRatio(String(lr));
+    } catch {}
+  }, []);
+  useEffect(() => {
+    if (!membraneHydratedRef.current) {
+      membraneHydratedRef.current = true;
+      return;
+    }
+    try {
+      window.localStorage.setItem("cryoflow.membraneView", membraneView);
+      window.localStorage.setItem("cryoflow.membraneFlip", membraneFlip ? "1" : "0");
+      window.localStorage.setItem("cryoflow.levelMode", levelMode);
+      window.localStorage.setItem("cryoflow.levelRatio", levelRatio);
+    } catch {}
+  }, [membraneView, membraneFlip, levelMode, levelRatio]);
 
   /* v3.72: restore + persist the delivery settings (交付目录 + 文件名前缀)
    *  — the base auto-follows the dir while the user has not overridden it
@@ -1260,7 +1307,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           try {
             const res = await fetch(`${transport.base}/ping`, { cache: "no-store" });
             if (res.ok) {
-              const data = (await res.json()) as { workdir?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean };
+              const data = (await res.json()) as { workdir?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean; membrane?: boolean };
               if (typeof data.workdir === "string" && data.workdir !== transport.workdir) {
                 transport = {
                   ...transport,
@@ -1271,14 +1318,15 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   canFetchMaps: !!data.fetch,
                   canSetCacheDir: !!data.cachedir_set,
                   canDeliver: !!data.deliver,
+                  canMembrane: !!data.membrane,
                   saveMode: undefined,
                   cdDone: false,
                 };
                 setBridge(transport);
                 pushLog(`桥接工作目录已更新: ${data.workdir}（ChimeraX/桥已重启 — 已自动重新校准）`);
               } else {
-                const next = { ...transport, canStage: !!data.stage, canCache: !!data.cache, cacheDir: data.cacheDir, canFetchMaps: !!data.fetch, canSetCacheDir: !!data.cachedir_set, canDeliver: !!data.deliver };
-                if (next.canStage !== transport.canStage || next.canCache !== transport.canCache || next.cacheDir !== transport.cacheDir || next.canFetchMaps !== transport.canFetchMaps || next.canSetCacheDir !== transport.canSetCacheDir || next.canDeliver !== transport.canDeliver) {
+                const next = { ...transport, canStage: !!data.stage, canCache: !!data.cache, cacheDir: data.cacheDir, canFetchMaps: !!data.fetch, canSetCacheDir: !!data.cachedir_set, canDeliver: !!data.deliver, canMembrane: !!data.membrane };
+                if (next.canStage !== transport.canStage || next.canCache !== transport.canCache || next.cacheDir !== transport.cacheDir || next.canFetchMaps !== transport.canFetchMaps || next.canSetCacheDir !== transport.canSetCacheDir || next.canDeliver !== transport.canDeliver || next.canMembrane !== transport.canMembrane) {
                   transport = next;
                   setBridge(transport);
                 }
@@ -1655,6 +1703,17 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 : refHandMode === "manual-mirrored"
                   ? { mode: "manual", manual: "mirrored" }
                   : undefined,
+          // v3.77 (round-37): the membrane-protein view orientation + the
+          // screenshot display-level policy from the ChimeraX panel. 膜视图
+          // lays the detergent disk flat in the screen XY plane (density
+          // PCA on the reference) with an optional 180° face flip; the
+          // level policy rides displayLevelFor inside the engine (fit
+          // levels stay 0.25×max — only the screenshot contour changes).
+          membraneView: { mode: membraneView, flip: membraneFlip },
+          contourLevel:
+            levelMode === "manual"
+              ? { mode: "manual", ratio: Math.min(0.9, Math.max(0.01, parseFloat(levelRatio) || 0.12)) }
+              : { mode: levelMode },
           onLog: pushLog,
           onProgress: (p) => setStep((s) => ({ ...s, phase: p.phase, pct: Math.max(s.pct, p.pct ?? s.pct) })),
         });
@@ -2145,7 +2204,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
        * outcome (stale-engine early return, thrown error, or success). */
       generateStartingRef.current = false;
     }
-  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, relayFetchToCache, pushLog, maxGroups, includeFsc, flowMode, effectiveMaxGroups, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh, applyCacheDir, deliverDir, deliverBase, refHandMode, refHandAnchor]);
+  }, [step.busy, mode, summary, session, bridge, probeBridge, relayCommand, stageViaRelay, relayFetchToCache, pushLog, maxGroups, includeFsc, flowMode, effectiveMaxGroups, simplified, figStyle, manual, manualSel, catalogItems, checkedCount, bridgeHosts, checkEngineFresh, applyCacheDir, deliverDir, deliverBase, refHandMode, refHandAnchor, membraneView, membraneFlip, levelMode, levelRatio]);
 
   const canGenerate = !step.busy && (mode === "demo" || !!summary);
   const bridgeBadge = useMemo(() => {
@@ -2558,6 +2617,85 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               </p>
             </div>
             </div>
+
+            {/* v3.77 (round-37 “map的角度可能需要择优后再截图，尤其是膜蛋白，
+             * level不能太高，要不看到都是去垢剂，看不到内部的helix细节了，
+             * 并且最好是能把去垢剂的盘子放在xy轴平面上，并且包内区朝下，
+             * 包外区朝上”): the membrane-protein view tile — 摆平 the
+             * detergent disk (relay /membrane density-weighted PCA on the
+             * reference: the protein+micelle particle is an oblate blob, the
+             * smallest-variance principal axis IS the membrane normal) + the
+             * screenshot DISPLAY level policy (auto Otsu envelope / classic
+             * 0.25×max / manual — fit levels stay 0.25×max, only the visible
+             * contour changes). */}
+            <div
+              className="rounded-lg border border-slate-200 bg-white/85 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
+              title="膜蛋白视图：把去垢剂盘摆到画面 XY 平面（密度 PCA 检测膜法线，相机沿法线俯视 — 俯视时去垢剂环围绕蛋白、内部 helix 可见），并按自适应/经典/手动策略设定截图等值面 level"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
+                  <Layers className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+                  膜蛋白视图
+                </span>
+                <Select value={membraneView} onValueChange={(v) => setMembraneView(v as "off" | "auto")}>
+                  <SelectTrigger className="h-7 w-[196px] rounded-md text-[11px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">自动摆平去垢剂盘（推荐）</SelectItem>
+                    <SelectItem value="off">关闭 · 覆盖率择优视角</SelectItem>
+                  </SelectContent>
+                </Select>
+                {membraneView === "auto" && (
+                  <label
+                    className="inline-flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300"
+                    title="盘面摆平后上下翻转 180°（看另一面）— 密度无法判断包内/包外：若默认朝上的一面不是目标面（如需包外区朝上），勾选后重新生成"
+                  >
+                    <Checkbox checked={membraneFlip} onCheckedChange={(v) => setMembraneFlip(!!v)} />
+                    上下翻转 180°（看另一面）
+                  </label>
+                )}
+              </div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
+                  <Gauge className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+                  截图 level
+                </span>
+                <Select value={levelMode} onValueChange={(v) => setLevelMode(v as "auto" | "classic" | "manual")}>
+                  <SelectTrigger className="h-7 w-[212px] rounded-md text-[11px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">自适应（推荐 · 膜蛋白友好）</SelectItem>
+                    <SelectItem value="classic">经典 0.25×max</SelectItem>
+                    <SelectItem value="manual">手动倍数 ×max</SelectItem>
+                  </SelectContent>
+                </Select>
+                {levelMode === "manual" && (
+                  <Input
+                    value={levelRatio}
+                    onChange={(e) => setLevelRatio(e.target.value)}
+                    inputMode="decimal"
+                    placeholder="0.12"
+                    aria-label="手动 level 倍数（各图 max 的倍数，0.01–0.9）"
+                    className="h-7 w-24 rounded-md border-slate-300 bg-white px-2 font-mono text-[10.5px] text-slate-700 focus-visible:ring-teal-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  />
+                )}
+              </div>
+              <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
+                {membraneView === "auto"
+                  ? bridge && bridge.kind === "relay" && !bridge.canMembrane
+                    ? "对参考图在显示阈值之上去密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），截图相机沿法线俯视 — 去垢剂盘平铺在画面 XY 平面（俯视时蛋白位于盘环中央，内部 helix 细节可见）。当前桥脚本较旧（无 /membrane 端点）— 在 ChimeraX 重新 open 一次 relay.py 后生效，本次运行将退回覆盖率择优视角。"
+                    : "对参考图在显示阈值之上去密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），截图相机沿法线俯视 — 去垢剂盘平铺在画面 XY 平面（俯视时蛋白位于盘环中央，内部 helix 细节可见）。默认朝上的一面由法线 Z 分量决定（同一 map 结果可复现）；若看到的不是目标面（如需包外区朝上），勾选「上下翻转 180°」后重新生成。"
+                  : "关闭膜视图：沿用基准 + 90° 覆盖率评分择优视角（v3.76 行为，适合可溶性蛋白）。"}
+                {levelMode === "auto"
+                  ? " 自适应 level：掩膜图（近零体素占比高，后处理 map）取 0.85×Otsu 阈值（主导类边界 — 正常图即溶剂/信号包络；去垢剂极热的图则是蛋白/去垢剂分界），并略偏低以保证蛋白在等值面内、helix 细节可见；未掩膜的原始图沿用 mean+2.5σ 经典噪声安全阈值。整体限制在 0.04–0.35×max — 膜蛋白 map 的去垢剂密度常高于蛋白，固定 0.25×max 会让表面只包住去垢剂盘而看不到内部 helix；对齐拟合阈值不受影响（恒为 0.25×max）。"
+                  : levelMode === "classic"
+                    ? " 经典 level：0.25×max（v3.76 及之前行为）。"
+                    : " 手动 level：按各图 max 的倍数设定（0.01–0.9），对齐拟合阈值不受影响（恒为 0.25×max）。"}
+              </p>
+            </div>
+
             {/* v3.73: the 交付文件 tile closes the settings area — full width. */}
 
             {/* v3.72 (round-31 “增加输入一个交付文件路径，可以下载没有 sharp 的

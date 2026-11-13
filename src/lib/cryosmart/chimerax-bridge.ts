@@ -297,6 +297,13 @@ export interface FlowTransport {
    *  ChimeraX flip+save path verifies with). Relays without it skip the
    *  delivery phase with an upgrade hint. */
   canDeliver?: boolean;
+  /** v3.77: relay-only — the bridge script advertises GET /membrane
+   *  (density-weighted PCA of an open volume above a level — the
+   *  membrane-normal detection that lays the detergent disk flat in the
+   *  screen XY plane for membrane-protein screenshots) plus the /volstats
+   *  Otsu key. Relays without it fall back to the 90° coverage view with
+   *  an upgrade hint. */
+  canMembrane?: boolean;
   /** v3.50: which save rung last produced a /file-fetchable PNG — cached
    *  per transport so later saves go straight to the working shape. */
   saveMode?: SaveMode;
@@ -366,10 +373,10 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
           logs.push(`relay ${host}:${port} → HTTP ${res.status}`);
           continue;
         }
-        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean };
+        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean; membrane?: boolean };
         if (data?.ok) {
           logs.push(
-            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""}${data.cachedir_set ? ", 可自定义目录" : ""}${data.deliver ? ", 交付下载" : ""})`,
+            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""}${data.cachedir_set ? ", 可自定义目录" : ""}${data.deliver ? ", 交付下载" : ""}${data.membrane ? ", 膜法线检测" : ""})`,
           );
           return {
             transport: {
@@ -385,6 +392,7 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
               canFetchMaps: !!data.fetch,
               canSetCacheDir: !!data.cachedir_set,
               canDeliver: !!data.deliver,
+              canMembrane: !!data.membrane,
             },
             logs,
           };
@@ -481,17 +489,37 @@ export async function bridgeFile(t: FlowTransport, name: string, timeoutMs = 60_
 }
 
 /** Relay-only: volume statistics (max/mean/sd) for uniform contour levels. */
+export interface BridgeVolStats {
+  max: number;
+  mean: number;
+  sd: number;
+  /** v3.77: the Otsu threshold over the full grid (relay ≥ v3.77) — the
+   *  DOMINANT class split (solvent/signal for a normal masked map,
+   *  protein/detergent-belt when the micelle is the hottest feature). */
+  otsu?: number;
+  /** v3.77: the near-zero voxel fraction (|v| < 0.002·max) — high on
+   *  masked postprocessed maps (solvent exactly 0), low on raw noisy
+   *  ones; the 自适应 display level rides Otsu only for masked maps. */
+  zeroFrac?: number;
+}
+
 export async function bridgeVolStats(
   t: FlowTransport,
   modelId: number,
-): Promise<{ max: number; mean: number; sd: number } | null> {
+): Promise<BridgeVolStats | null> {
   if (t.kind !== "relay") return null;
   try {
     const res = await fetchWithTimeout(`${t.base}/volstats?id=${modelId}`, { method: "GET" }, 120_000);
     if (!res.ok) return null;
-    const data = (await res.json()) as { max?: number; mean?: number; sd?: number };
+    const data = (await res.json()) as { max?: number; mean?: number; sd?: number; otsu?: number; zero_frac?: number };
     if (typeof data.max !== "number") return null;
-    return { max: data.max, mean: data.mean ?? 0, sd: data.sd ?? 0 };
+    return {
+      max: data.max,
+      mean: data.mean ?? 0,
+      sd: data.sd ?? 0,
+      otsu: typeof data.otsu === "number" && Number.isFinite(data.otsu) ? data.otsu : undefined,
+      zeroFrac: typeof data.zero_frac === "number" && Number.isFinite(data.zero_frac) ? data.zero_frac : undefined,
+    };
   } catch {
     return null;
   }
@@ -505,6 +533,72 @@ export async function bridgeNextModelId(t: FlowTransport): Promise<number | null
     if (!res.ok) return null;
     const data = (await res.json()) as { next?: number };
     return typeof data.next === "number" ? data.next : null;
+  } catch {
+    return null;
+  }
+}
+
+/** v3.77: the membrane-normal PCA reply (relay GET /membrane — computed
+ * inside ChimeraX on the OPEN model, so the page never ships map bytes). */
+export interface MembraneAxis {
+  ok: boolean;
+  /** Unit eigenvector of the SMALLEST variance — the membrane normal
+   *  (grid i→x, j→y, k→z; the reference sits untransformed in the scene,
+   *  so this is a scene-frame direction). */
+  normal: [number, number, number];
+  /** In-plane unit axes (largest / middle variance) — a right-handed
+   *  basis with the normal (ea × eb = normal). */
+  ea: [number, number, number];
+  eb: [number, number, number];
+  /** λmin/λmid — oblateness. A disk (membrane protein + micelle) sits
+   *  well below 1; a globular particle sits near 1 (the caller rejects
+   *  those and keeps the coverage view). */
+  ratio: number;
+  /** Above-level voxel count / grid size (diagnostics). */
+  count: number;
+  total: number;
+}
+
+/** v3.77: density-weighted PCA above `level` on an open volume — null on
+ * any failure (old relay 404, endpoint error, malformed reply); callers
+ * degrade to the coverage view. */
+export async function bridgeMembraneAxis(
+  t: FlowTransport,
+  modelId: number,
+  level: number,
+): Promise<MembraneAxis | null> {
+  if (t.kind !== "relay") return null;
+  try {
+    const res = await fetchWithTimeout(
+      `${t.base}/membrane?id=${modelId}&level=${encodeURIComponent(level)}`,
+      { method: "GET" },
+      180_000,
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as Partial<MembraneAxis> & { error?: string };
+    if (!data?.ok || !Array.isArray(data.normal) || data.normal.length !== 3 || typeof data.ratio !== "number") {
+      return null;
+    }
+    const unitVec = (v: unknown): [number, number, number] | null => {
+      if (!Array.isArray(v) || v.length !== 3) return null;
+      const a = v.map(Number);
+      if (a.some((x) => !Number.isFinite(x))) return null;
+      const len = Math.hypot(a[0], a[1], a[2]);
+      return len > 1e-9 ? [a[0] / len, a[1] / len, a[2] / len] : null;
+    };
+    const normal = unitVec(data.normal);
+    const ea = unitVec(data.ea);
+    const eb = unitVec(data.eb);
+    if (!normal || !ea || !eb) return null;
+    return {
+      ok: true,
+      normal,
+      ea,
+      eb,
+      ratio: data.ratio,
+      count: typeof data.count === "number" ? data.count : 0,
+      total: typeof data.total === "number" ? data.total : 0,
+    };
   } catch {
     return null;
   }
@@ -1226,6 +1320,28 @@ const SIGMA_FINE_A = 3;
  * far-field solvent noise is exactly what used to reward wrong poses
  * and inflate scores on noisy maps). */
 const MASK_RATIO = 0.5 * LEVEL_RATIO;
+/** v3.77 (round-37 膜蛋白视图): the membrane-normal oblateness gate —
+ * λmin/λmid below this reads as a disk-like (membrane protein +
+ * detergent micelle) particle, so the smallest-variance principal axis
+ * IS the membrane normal and the camera looks down it. At/above it the
+ * particle is globular-ish (or fibrous) and the membrane view would aim
+ * the camera along an arbitrary axis — the coverage view is kept
+ * instead. Disks typically sit at 0.2–0.5; globular particles near 1. */
+const MEMBRANE_OBLATE_MAX = 0.75;
+/** v3.77 自适应 display level: [floor, ceiling] as fractions of max. The
+ * floor keeps a tiny-sd map (heavy lowpass / all signal) from contouring
+ * at a noise-ish level; the ceiling keeps a flat map from chasing its
+ * peak into the same detergent-only regime the policy exists to fix. */
+const DISPLAY_LEVEL_MIN_RATIO = 0.04;
+const DISPLAY_LEVEL_MAX_RATIO = 0.35;
+/** v3.77: the sd-based contour for UNMASKED raw maps (mean + k·sd — the
+ * classic noise-safe level) and the Otsu bias for masked ones. */
+const DISPLAY_LEVEL_SD_K = 2.5;
+const DISPLAY_LEVEL_OTSU_BIAS = 0.85;
+/** v3.77: near-zero voxel fraction above which the map reads as MASKED
+ * (postprocessed — solvent exactly 0) and the level rides 0.85×otsu; a
+ * raw noisy map keeps ~3% near-zero voxels and stays far below. */
+const DISPLAY_LEVEL_MASKED_ZERO_FRAC = 0.25;
 /** v3.66: random placements for the global fitmap search's FIRST
  * round — covers arbitrary rotations (90°/any tilt), the pose space the
  * fixed 180°-pre-turn candidates of v3.63 could never reach. v3.68:
@@ -1275,6 +1391,40 @@ const SNAPSHOT_H = 1200;
  *  tan → …). A single-map stage = class 1 = grey. Missing → grey. */
 function requestColor(req: { color?: string }): string {
   return /^#[0-9a-fA-F]{6}$/.test(req.color ?? "") ? (req.color as string) : chimeraClassColor(0);
+}
+
+/** v3.77 (round-37 “level不能太高，要不看到都是去垢剂，看不到内部的helix
+ * 细节了”): the screenshot DISPLAY contour level for one map, from its
+ * own volume statistics. The FIT levels stay at the tuned 0.25×max —
+ * this policy only re-levels a model right before ITS screenshot, so
+ * alignment behavior is untouched.
+ *
+ *  - "auto" (masked map, zeroFrac ≥ 0.25 — postprocessed): 0.85×otsu
+ *    clamped to [0.04, 0.35]×max. Otsu finds the DOMINANT class split:
+ *    solvent/signal on a normal map, and protein/detergent-belt when
+ *    the micelle is the hottest feature (the exact case where the fixed
+ *    0.25×max wrapped only the detergent disk and hid the protein — the
+ *    belt's hot density inflated max, not the protein). The 0.85 bias
+ *    keeps the level slightly BELOW the split so the protein stays
+ *    inside the contour with its helix detail.
+ *  - "auto" (unmasked raw map, or an old relay without the otsu key):
+ *    mean + 2.5·sd — the classic noise-safe contour (Otsu would split
+ *    WITHIN the noise bell on a 95%-solvent noisy map and show
+ *    speckle; mean+k·sd does not chase peaks either way).
+ *  - "classic": 0.25×max exactly (pre-3.77 behavior).
+ *  - "manual": a user-set fraction of max, clamped to [0.01, 0.9] before
+ *    it reaches here and to the same display clamps as auto. */
+function displayLevelFor(stats: BridgeVolStats | null, policy: ContourLevelPolicy): number | null {
+  if (!stats || !Number.isFinite(stats.max) || stats.max <= 0) return null;
+  if (policy.mode === "classic") return stats.max * LEVEL_RATIO;
+  const clampToDisplay = (v: number) =>
+    Math.min(Math.max(v, DISPLAY_LEVEL_MIN_RATIO * stats!.max), DISPLAY_LEVEL_MAX_RATIO * stats!.max);
+  if (policy.mode === "manual") return clampToDisplay(stats.max * policy.ratio);
+  const masked = Number.isFinite(stats.zeroFrac as number) && (stats.zeroFrac as number) >= DISPLAY_LEVEL_MASKED_ZERO_FRAC;
+  const base = masked && Number.isFinite(stats.otsu as number)
+    ? DISPLAY_LEVEL_OTSU_BIAS * (stats.otsu as number)
+    : stats.mean + DISPLAY_LEVEL_SD_K * stats.sd;
+  return clampToDisplay(base);
 }
 
 export type ChiralityStatus = "consistent" | "corrected" | "ambiguous" | "unknown";
@@ -1352,6 +1502,14 @@ export interface RenderMapsOptions {
    *  escalate SEARCH_PLACEMENTS × round). Default SEARCH_MAX_ROUNDS
    *  (3); clamped to [1, 6]. */
   searchMaxRounds?: number;
+  /** v3.77: the membrane-protein view orientation (see
+   *  MembraneViewOptions) — lays the detergent disk flat in the screen XY
+   *  plane via the relay's /membrane PCA before the screenshots. */
+  membraneView?: MembraneViewOptions;
+  /** v3.77: the screenshot DISPLAY contour level policy (see
+   *  ContourLevelPolicy / displayLevelFor). Alignment fit levels are
+   *  unaffected. */
+  contourLevel?: ContourLevelPolicy;
 }
 
 /** v3.71 (round-30 “可以增加用EMalign先确定reference的手性是否正确吗？
@@ -1391,6 +1549,38 @@ export interface ReferenceHandPolicy {
   manual?: "correct" | "mirrored";
 }
 
+/** v3.77 (round-37 “map的角度可能需要择优后再截图，尤其是膜蛋白…最好是
+ *  能把去垢剂的盘子放在xy轴平面上，并且包内区朝下，包外区朝上”): the
+ *  membrane-protein screenshot orientation. */
+export interface MembraneViewOptions {
+  /** "auto": density-weighted PCA on the reference (relay /membrane, run
+   *  inside ChimeraX on the open model) finds the membrane normal — the
+   *  smallest-variance principal axis of the oblate protein+micelle
+   *  particle — and the camera looks straight down it, so the detergent
+   *  disk lies flat in the screen XY plane and the protein shows inside
+   *  the belt ring instead of hiding under the micelle slab. Falls back
+   *  to the 90° coverage ladder when the relay predates /membrane, the
+   *  endpoint errors, or the particle is not oblate enough (ratio
+   *  guard MEMBRANE_OBLATE_MAX).
+   *  "off": pre-3.77 coverage scoring (best for soluble proteins). */
+  mode: "off" | "auto";
+  /** View the OTHER face (180°): once the disk is laid flat, WHICH side
+   *  faces the viewer cannot be derived from density alone — the default
+   *  shows the face the PCA normal's reference-frame Z component points
+   *  at (deterministic per map); flip when the biology says the other
+   *  side is the one to show (e.g. the extracellular domain should face
+   *  the viewer but points away). */
+  flip?: boolean;
+}
+
+/** v3.77: the screenshot DISPLAY contour level policy (see
+ *  displayLevelFor). Fit levels stay 0.25×max — only the visible contour
+ *  changes, never the fit targets. */
+export type ContourLevelPolicy =
+  | { mode: "auto" }
+  | { mode: "classic" }
+  | { mode: "manual"; ratio: number };
+
 /** v3.72 (round-31 交付文件下载 — 所有的 map 都要是纠正过手性的): the
  *  structured form of the v3.71 reference-hand verdict, read by the
  *  delivery phase: when the canonical reference was swapped to its
@@ -1423,6 +1613,20 @@ export interface RenderMapsResult {
   /** v3.72: the reference-hand verdict (structured form of the reference
    *  render row's candidate note) — drives the delivery chirality flip. */
   referenceHand: ReferenceHandVerdict;
+  /** v3.77: the membrane-view outcome (only set when membraneView was
+   *  requested) — surfaced in the run report / result panel. */
+  membrane?: MembraneViewReport;
+}
+
+/** v3.77: what the membrane orientation actually did (or why it didn't). */
+export interface MembraneViewReport {
+  applied: boolean;
+  /** λmin/λmid from the reference PCA (null when detection never ran). */
+  ratio: number | null;
+  /** The detected membrane normal (scene frame, reference grid axes). */
+  normal: [number, number, number] | null;
+  /** Human-readable summary for the run log / result panel. */
+  note: string;
 }
 
 function threw(signal?: AbortSignal): boolean {
@@ -1803,57 +2007,155 @@ export async function renderFigureMaps(
     }
   }
 
-  /* ---- 2. standardise the 90° view (reference only) ---- */
+  /* ---- 2. standardise the view: v3.77 membrane plane (PCA) first, then
+   * the 90° coverage ladder as the fallback (or when membrane mode is
+   * off — the right choice for soluble proteins). ---- */
   let view = { desc: "base", x: 0, y: 0, score: 0 };
+  /** v3.77: per-model DISPLAY contour levels — recorded when each model's
+   * stats are fetched, applied right before ITS screenshot. The FIT
+   * levels stay at the tuned 0.25×max; only the visible contour rides the
+   * contourLevel policy. */
+  const displayLevelById = new Map<number, number>();
+  const contourPolicy: ContourLevelPolicy = opts.contourLevel ?? { mode: "auto" };
+  const setDisplayLevel = async (id: number): Promise<void> => {
+    const lvl = displayLevelById.get(id);
+    if (lvl == null) return;
+    await exec(t, `volume #${id} level ${lvl.toFixed(4)} step ${STEP}`, opts, true);
+  };
+  /** v3.77: the membrane-view outcome, surfaced through the result. */
+  let membraneReport: MembraneViewReport | null = null;
   if (t.canFetchFiles && t.workdir) {
-    progress("视角自动评分（基准 + Y±90 + X±90）", 10);
     await exec(t, "view name _cfbase", opts, true);
     await exec(t, "wait 1", opts, true);
-    const views: Array<{ desc: string; x: number; y: number }> = [
-      { desc: "base", x: 0, y: 0 },
-      { desc: "y+90", x: 0, y: 90 },
-      { desc: "y-90", x: 0, y: -90 },
-      { desc: "x+90", x: 90, y: 0 },
-      { desc: "x-90", x: -90, y: 0 },
-    ];
-    let best = -1;
-    for (const v of views) {
-      await exec(t, "view _cfbase", opts, true);
-      if (v.x) await exec(t, `turn x ${v.x}`, opts, true);
-      if (v.y) await exec(t, `turn y ${v.y}`, opts, true);
-      await exec(t, "wait 1", opts, true);
-      const thumb = `_thumb_${v.desc.replace(/[^a-z0-9]/gi, "")}.png`;
-      // v3.48 (round-7): plain `save <png-path> …` — `save image` is NOT a
-      // ChimeraX command (errors were swallowed by the soft flag and only
-      // surfaced as /file 404; now the real error reaches the log).
-      // v3.50 (round-9): the save→fetch rides the rung ladder — abs →
-      // abs-fwd → cd+relative — so a path/tokenizer divergence self-heals
-      // instead of failing every thumbnail with a bare /file 404.
-      try {
-        const bytes = await saveAndFetchPng(
-          t,
-          thumb,
-          { width: THUMB_SIZE, height: THUMB_SIZE, supersample: 1 },
-          (c) => exec(t, c, opts, true),
-          log,
-        );
-        const score = await thumbnailCoverageScore(bytes);
-        log(`  视角 ${v.desc}: 覆盖率 ${score.toFixed(4)}`);
-        if (score > best) {
-          best = score;
-          view = { ...v, score };
+    /* v3.77: the reference's DISPLAY level — the membrane-PCA threshold
+     * AND the reference row's screenshot level. Re-fetched for the
+     * CURRENT reference id (a hand-policy swap may have replaced the
+     * model with its z-flipped copy; a flip preserves the value
+     * distribution, but reading the live model is the honest thing). */
+    const refDispStats = await bridgeVolStats(t, refId);
+    const refDisplayLevel = displayLevelFor(refDispStats, contourPolicy) ?? refLevel;
+    if (refDisplayLevel != null) displayLevelById.set(refId, refDisplayLevel);
+    let membraneApplied = false;
+    if (opts.membraneView?.mode === "auto") {
+      progress("膜平面检测（参考图密度 PCA · 去垢剂盘置 XY 平面）", 9);
+      const mem = t.kind === "relay" && t.canMembrane
+        ? await bridgeMembraneAxis(t, refId, refDisplayLevel ?? refLevel ?? 0)
+        : null;
+      if (mem && mem.ratio < MEMBRANE_OBLATE_MAX) {
+        /* Camera basis: `view matrix camera` takes the camera axes as
+         * rows in scene coordinates — X = screen right (in-plane), Y =
+         * screen up (in-plane), Z = toward the viewer (the membrane
+         * normal). Looking straight down the normal lays the detergent
+         * disk flat in the screen XY plane, so viewed top-down the belt
+         * is a RING around the protein and the internal helices stay
+         * visible (a side view would put the micelle slab over them).
+         * The default face is deterministic (the normal's reference-frame
+         * Z component is forced >= 0); `flip` views the other side —
+         * which side is 包内/包外 cannot be derived from density alone. */
+        const flipVec = (v: [number, number, number]): [number, number, number] => [-v[0], -v[1], -v[2]];
+        let n: [number, number, number] = [...mem.normal];
+        let eb: [number, number, number] = [...mem.eb];
+        if (n[2] < 0) {
+          n = flipVec(n);
+          eb = flipVec(eb);
         }
-      } catch (err) {
-        const saveFailed = err instanceof SaveShotError && err.kind === "save";
-        const detail = err instanceof Error ? err.message : String(err);
-        log(`  视角 ${v.desc}: 缩略图${saveFailed ? "保存" : "获取"}失败 — ${logSnippet(detail, 140)}`);
+        if (opts.membraneView.flip) {
+          n = flipVec(n);
+          eb = flipVec(eb);
+        }
+        const camera = [...mem.ea, ...eb, ...n].map((v) => v.toFixed(6)).join(",");
+        const r = await exec(t, `view matrix camera ${camera}`, opts, true);
+        if (!r.error) {
+          await exec(t, "wait 1", opts, true);
+          membraneApplied = true;
+          view = {
+            desc: `膜平面俯视${opts.membraneView.flip ? " · 翻转" : ""}`,
+            x: 0,
+            y: 0,
+            score: mem.ratio,
+          };
+          membraneReport = {
+            applied: true,
+            ratio: mem.ratio,
+            normal: mem.normal,
+            note: `去垢剂盘已置于画面 XY 平面（法线=(${mem.normal
+              .map((v) => v.toFixed(3))
+              .join(", ")})，扁率 λmin/λmid=${mem.ratio.toFixed(3)}，阈值体素 ${mem.count}/${mem.total}）${
+              opts.membraneView.flip ? "，并按设置上下翻转 180° 看另一面" : ""
+            }`,
+          };
+          log(
+            `膜视图 ✓: ${membraneReport.note} — 默认朝上的一面由法线 Z 分量决定（可复现）；若看到的不是目标面（如需包外区朝上），在「膜蛋白视图」勾选「上下翻转 180°」后重新生成`,
+          );
+        } else {
+          log(`⚠ 膜视图不可用: view matrix camera 失败（${logSnippet(r.error, 120)}）— 退回覆盖率择优视角`);
+        }
+      } else if (mem) {
+        log(
+          `膜视图未启用: 参考颗粒扁率 λmin/λmid=${mem.ratio.toFixed(3)} ≥ ${MEMBRANE_OBLATE_MAX}（非扁盘状 — 更像球状/纤维状颗粒，去垢剂盘假设不成立），保持覆盖率择优视角`,
+        );
+        membraneReport = {
+          applied: false,
+          ratio: mem.ratio,
+          normal: mem.normal,
+          note: `非扁盘状（扁率 ${mem.ratio.toFixed(3)} ≥ ${MEMBRANE_OBLATE_MAX}）— 未应用膜取向`,
+        };
+      } else {
+        const why = t.kind === "relay" && !t.canMembrane
+          ? "当前桥脚本较旧（无 /membrane 端点）— 在 ChimeraX 重新 open 一次 relay.py 即可启用"
+          : "膜法线检测失败（/membrane 无响应或返回异常）";
+        log(`膜视图不可用: ${why} — 本次退回覆盖率择优视角`);
+        membraneReport = { applied: false, ratio: null, normal: null, note: why };
       }
     }
-    await exec(t, "view _cfbase", opts, true);
-    if (view.x) await exec(t, `turn x ${view.x}`, opts, true);
-    if (view.y) await exec(t, `turn y ${view.y}`, opts, true);
-    await exec(t, "wait 1", opts, true);
-    log(`最佳视角: ${view.desc} (X=${view.x}°, Y=${view.y}°, 覆盖率 ${view.score.toFixed(4)})`);
+    if (!membraneApplied) {
+      progress("视角自动评分（基准 + Y±90 + X±90）", 10);
+      const views: Array<{ desc: string; x: number; y: number }> = [
+        { desc: "base", x: 0, y: 0 },
+        { desc: "y+90", x: 0, y: 90 },
+        { desc: "y-90", x: 0, y: -90 },
+        { desc: "x+90", x: 90, y: 0 },
+        { desc: "x-90", x: -90, y: 0 },
+      ];
+      let best = -1;
+      for (const v of views) {
+        await exec(t, "view _cfbase", opts, true);
+        if (v.x) await exec(t, `turn x ${v.x}`, opts, true);
+        if (v.y) await exec(t, `turn y ${v.y}`, opts, true);
+        await exec(t, "wait 1", opts, true);
+        const thumb = `_thumb_${v.desc.replace(/[^a-z0-9]/gi, "")}.png`;
+        // v3.48 (round-7): plain `save <png-path> …` — `save image` is NOT a
+        // ChimeraX command (errors were swallowed by the soft flag and only
+        // surfaced as /file 404; now the real error reaches the log).
+        // v3.50 (round-9): the save→fetch rides the rung ladder — abs →
+        // abs-fwd → cd+relative — so a path/tokenizer divergence self-heals
+        // instead of failing every thumbnail with a bare /file 404.
+        try {
+          const bytes = await saveAndFetchPng(
+            t,
+            thumb,
+            { width: THUMB_SIZE, height: THUMB_SIZE, supersample: 1 },
+            (c) => exec(t, c, opts, true),
+            log,
+          );
+          const score = await thumbnailCoverageScore(bytes);
+          log(`  视角 ${v.desc}: 覆盖率 ${score.toFixed(4)}`);
+          if (score > best) {
+            best = score;
+            view = { ...v, score };
+          }
+        } catch (err) {
+          const saveFailed = err instanceof SaveShotError && err.kind === "save";
+          const detail = err instanceof Error ? err.message : String(err);
+          log(`  视角 ${v.desc}: 缩略图${saveFailed ? "保存" : "获取"}失败 — ${logSnippet(detail, 140)}`);
+        }
+      }
+      await exec(t, "view _cfbase", opts, true);
+      if (view.x) await exec(t, `turn x ${view.x}`, opts, true);
+      if (view.y) await exec(t, `turn y ${view.y}`, opts, true);
+      await exec(t, "wait 1", opts, true);
+      log(`最佳视角: ${view.desc} (X=${view.x}°, Y=${view.y}°, 覆盖率 ${view.score.toFixed(4)})`);
+    }
   } else {
     log("当前传输不支持文件回传 — 使用基准视角（对齐/手性诊断仍有效）");
   }
@@ -2240,6 +2542,12 @@ export async function renderFigureMaps(
         openIds.add(origId);
         const stats = await bridgeVolStats(t, origId);
         const level = stats ? stats.max * LEVEL_RATIO : refLevel;
+        /* v3.77: the DISPLAY level for this map's screenshot (auto Otsu
+         * envelope / classic / manual — see displayLevelFor). The fit
+         * level above stays 0.25×max; the screenshot loop applies the
+         * display level right before rendering. */
+        const mapDisplayLevel = displayLevelFor(stats, contourPolicy);
+        if (mapDisplayLevel != null) displayLevelById.set(origId, mapDisplayLevel);
         if (level != null) {
           await exec(t, `volume #${origId} level ${level.toFixed(4)} step ${STEP}`, opts, true);
         } else {
@@ -2288,6 +2596,11 @@ export async function renderFigureMaps(
           openIds.add(flipId);
           const stats2 = await bridgeVolStats(t, flipId);
           const level2 = stats2 ? stats2.max * LEVEL_RATIO : refLevel;
+          /* v3.77: display level for the flipped hand's screenshot (same
+           * policy as the original — the flip preserves the value
+           * distribution, so the two levels coincide). */
+          const flipDisplayLevel = displayLevelFor(stats2, contourPolicy);
+          if (flipDisplayLevel != null) displayLevelById.set(flipId, flipDisplayLevel);
           if (level2 != null) {
             await exec(t, `volume #${flipId} level ${level2.toFixed(4)} step ${STEP}`, opts, true);
           }
@@ -2685,6 +2998,13 @@ export async function renderFigureMaps(
       const showId = r.modelId;
       if (showId == null) continue;
       await exec(t, `show #${showId} models`, opts, true);
+      /* v3.77 (round-37 “level不能太高，要不看到都是去垢剂…”): re-level to
+       * the DISPLAY contour (auto Otsu envelope / classic / manual). The
+       * fit levels (0.25×max) carried the ALIGNMENT; the screenshot shows
+       * the membrane-friendly contour, so on a detergent-peaked map the
+       * surface wraps the protein + belt envelope (helix detail visible
+       * inside the ring) instead of only the micelle disk. */
+      await setDisplayLevel(showId);
       await exec(t, "wait 1", opts, true);
       const name = `render_${safeKeyPart(r.key.replace(/\//g, "__"))}.png`;
       // v3.48: plain `save <png-path> …` — see the thumbnail note above; the
@@ -2743,6 +3063,7 @@ export async function renderFigureMaps(
     referenceKey: opts.reference.key,
     logs,
     referenceHand: { known: refHandKnown, flipped: refFlipped, flipFailed: refFlipFailed, verdict: refHandVerdict },
+    membrane: membraneReport ?? undefined,
   };
 }
 

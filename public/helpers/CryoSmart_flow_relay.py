@@ -68,7 +68,14 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         重 open 持久保留——网页生成流程图前先查它，命中
                         即直接 open 本地文件，不再重复下载 map。
       GET  /file?name=  取回 /ping 工作目录里 ChimeraX 保存的 PNG
-      GET  /volstats?id= 体数据统计（max/mean/sd，用于统一等值面水平）
+      GET  /volstats?id= 体数据统计（max/mean/sd/min + v3.77 Otsu 阈值
+                        — 溶剂/信号边界，网页的自适应截图 level 用它，
+                        膜蛋白 map 的去垢剂峰值不再抬高显示阈值）
+      GET  /membrane?id=&level= v3.77 膜法线检测：对当前打开的 volume
+                        模型在给定显示阈值之上去密度加权 PCA，返回主轴/
+                        特征值/扁率（膜蛋白的蛋白+去垢剂盘整体扁盘状，
+                        最小方差主轴即膜法线 — 网页据此把去垢剂盘摆到
+                        画面 XY 平面再截图，包内朝下、包外朝上）。
       GET  /nextid      下一个空闲 model id（volume flip 需要）
       GET  /volumes    当前已打开的 volume 模型清单（id + 名称）。
                         v3.55：流程图网页在截图前先经此清单精确关闭
@@ -230,11 +237,122 @@ def main(session):
             if target is None:
                 raise RuntimeError("model #%s not found" % model_id)
             mat = np.asarray(target.data.full_matrix(), dtype=np.float64)
+            flat = mat.ravel()
+            out = {
+                "max": float(flat.max()),
+                "mean": float(flat.mean()),
+                "sd": float(flat.std()),
+                "min": float(flat.min()),
+            }
+            # v3.77 (round-37 “level不能太高，要不看到都是去垢剂”): the OTSU
+            # threshold over the full-grid histogram plus the NEAR-ZERO
+            # voxel fraction — together they let the page pick a
+            # membrane-friendly display level. On a masked postprocessed
+            # map the solvent is exactly 0 (zero_frac is high) and Otsu
+            # lands at the DOMINANT class split — solvent/signal for a
+            # normal map, protein/detergent-belt when the micelle is the
+            # hottest feature (the classic 0.25×max chased that hot peak
+            # and the surface wrapped only the micelle disk). The page's
+            # 自适应 level then rides 0.85×otsu (biased low so the protein
+            # stays inside the contour). Unmasked raw maps (zero_frac low)
+            # keep the classic mean + k·sd noise-safe contour instead.
+            try:
+                lo = float(flat.min())
+                hi = float(flat.max())
+                if hi > lo:
+                    out["zero_frac"] = float(
+                        (np.abs(flat) < 0.002 * abs(hi)).mean())
+                    edges = np.linspace(lo, hi, 257)
+                    hist, _ = np.histogram(flat, bins=edges)
+                    centers = 0.5 * (edges[:-1] + edges[1:])
+                    total = float(hist.sum())
+                    if total > 0:
+                        w0 = np.cumsum(hist).astype(np.float64)
+                        w1 = total - w0
+                        csum = np.cumsum(hist * centers)
+                        sum_all = float(csum[-1])
+                        valid = (w0 > 0) & (w1 > 0)
+                        mu0 = csum / np.maximum(w0, 1.0)
+                        mu1 = (sum_all - csum) / np.maximum(w1, 1.0)
+                        between = np.where(valid, w0 * w1 * (mu0 - mu1) ** 2, -1.0)
+                        out["otsu"] = float(centers[int(np.argmax(between))])
+            except Exception:
+                pass
+            return out
+        return ui_run(f)
+
+    def membrane_axis(model_id, level):
+        """v3.77 (round-37 “map的角度可能需要择优后再截图…把去垢剂的盘子
+        放在xy轴平面上，包内区朝下，包外区朝上”): density-weighted PCA of
+        the model's grid above `level`. For a membrane protein the
+        protein+detergent-micelle particle is an OBLATE blob — the
+        smallest-variance principal axis IS the membrane normal. The page
+        rotates the ChimeraX camera so this normal points at the viewer
+        (detergent disk flat in the screen XY plane — viewed top-down the
+        belt becomes a ring around the protein, so the internal helices
+        are no longer covered by the micelle slab) before the screenshots.
+
+        Coordinates are GRID indices mapped straight to (x, y, z): cryo-EM
+        maps have isotropic voxels and standard axis order (i→x, j→y,
+        k→z), so index-space PCA equals physical PCA; eigenvector
+        directions are unaffected by a uniform voxel scaling. The ratio
+        guard (lambda_min / lambda_mid, returned to the page) lets the
+        caller reject globular/fibrous particles and keep the coverage
+        view. `level` is the page's DISPLAY level (auto policy: Otsu
+        envelope) — the PCA sees exactly the voxels the screenshots will
+        surface."""
+        def f():
+            import numpy as np
+            target = None
+            for m in session.models.list():
+                if str(getattr(m, "id_string", "")) == str(model_id):
+                    target = m
+                    break
+            if target is None:
+                raise RuntimeError("model #%s not found" % model_id)
+            mat = np.asarray(target.data.full_matrix(), dtype=np.float64)
+            if mat.size == 0:
+                raise RuntimeError("empty grid")
+            try:
+                lvl = float(level)
+            except (TypeError, ValueError):
+                lvl = float(mat.mean())
+            mask = mat >= lvl
+            count = int(mask.sum())
+            if count < 64:
+                raise RuntimeError(
+                    "above-level voxels too few (%d) — level %.5g too high "
+                    "for a particle envelope" % (count, lvl))
+            kk, jj, ii = np.nonzero(mask)
+            w = mat[kk, jj, ii] - lvl
+            sw = float(w.sum())
+            if sw <= 0:
+                w = np.ones(count, dtype=np.float64)
+                sw = float(count)
+            coords = np.vstack([ii, jj, kk]).astype(np.float64)  # x, y, z
+            mu = (coords * w).sum(axis=1) / sw
+            d = coords - mu[:, None]
+            cov = (d * w) @ d.T / sw
+            evals, evecs = np.linalg.eigh(cov)  # ascending eigenvalues
+            lam_min = float(evals[0])
+            lam_mid = float(evals[1])
+            lam_max = float(evals[2])
+            if lam_mid <= 0:
+                raise RuntimeError("degenerate covariance (lambda_mid=%g)" % lam_mid)
+            n = evecs[:, 0]    # smallest variance → membrane normal
+            ea = evecs[:, 2]   # largest-variance in-plane axis
+            eb = evecs[:, 1]   # middle-variance in-plane axis
+            if float(np.dot(np.cross(ea, eb), n)) < 0:
+                eb = -eb       # force right-handed: ea × eb = n
             return {
-                "max": float(mat.max()),
-                "mean": float(mat.mean()),
-                "sd": float(mat.std()),
-                "min": float(mat.min()),
+                "ok": True,
+                "normal": [float(v) for v in n],
+                "ea": [float(v) for v in ea],
+                "eb": [float(v) for v in eb],
+                "ratio": lam_min / lam_mid,
+                "lambdas": [lam_min, lam_mid, lam_max],
+                "count": count,
+                "total": int(mat.size),
             }
         return ui_run(f)
 
@@ -686,6 +804,13 @@ def main(session):
                         # exists — older copies don't send it and the page
                         # skips the delivery phase with an upgrade hint.
                         "deliver": True,
+                        # v3.77: the page checks this to know GET /membrane
+                        # (density-weighted PCA above the display level — the
+                        # membrane-normal detection behind the 膜蛋白视图)
+                        # and the /volstats Otsu key exist — older copies
+                        # don't send it and the page's membrane mode falls
+                        # back to the coverage view with an upgrade hint.
+                        "membrane": True,
                         "cacheDir": staging_dir,
                         "cached": sum(1 for _ in _cache_entries()),
                         "volumes": sum(1 for m in ui_run(lambda: list(session.models.list()))
@@ -729,6 +854,28 @@ def main(session):
                         return
                     try:
                         self._reply(200, vol_stats(model_id))
+                    except Exception as exc:  # noqa: BLE001
+                        self._reply(500, {"error": str(exc)})
+                    return
+                if r.path == "/membrane":
+                    # v3.77 (round-37 膜蛋白视图): ?id=<model>&level=<display
+                    # level> — density-weighted PCA above the level; the
+                    # page uses the smallest-variance principal axis as the
+                    # membrane normal (detergent disk flat in the screen XY
+                    # plane) for the screenshot camera. Errors ride back as
+                    # {"error": …} and the page falls back to the coverage
+                    # view — never fatal.
+                    model_id = (q.get("id") or [""])[0]
+                    if not model_id:
+                        self._reply(400, {"error": "missing id"})
+                        return
+                    lvl_raw = (q.get("level") or [""])[0]
+                    try:
+                        lvl = float(lvl_raw) if lvl_raw not in ("", "null") else None
+                    except ValueError:
+                        lvl = None
+                    try:
+                        self._reply(200, membrane_axis(model_id, lvl))
                     except Exception as exc:  # noqa: BLE001
                         self._reply(500, {"error": str(exc)})
                     return

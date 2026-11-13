@@ -556,5 +556,39 @@
  * captured fsc.xml at the original plot's 4:3 landscape ratio (a
  * decodable-but-suspicious candidate still delivers as the last resort —
  * an off-ratio plot beats a missing file).
+ *
+ * v3.77 bump reason (round-37 “map的角度可能需要择优后再截图，尤其是膜蛋白，
+ * level不能太高，要不看到都是去垢剂，看不到内部的helix细节了，并且最好是
+ * 能把去垢剂的盘子放在xy轴平面上，并且包内区朝下，包外区朝上”): the
+ * membrane-protein screenshot view. (1) 膜视图 — the relay gains GET
+ * /membrane: a density-weighted PCA over the reference's above-threshold
+ * voxels, computed INSIDE ChimeraX on the open model (numpy on
+ * full_matrix — the page never ships map bytes). The protein+detergent
+ * micelle particle is an oblate blob, so the smallest-variance principal
+ * axis IS the membrane normal; the engine builds the camera basis
+ * (view matrix camera, rows = in-plane × in-plane × normal) and looks
+ * straight down it — the detergent disk lies flat in the screen XY
+ * plane and, viewed top-down, the belt is a RING around the protein so
+ * the internal helices stay visible (a side view puts the micelle slab
+ * over them). The default up-facing side is deterministic (the normal's
+ * reference-frame Z component is forced ≥ 0); 「上下翻转 180°」 views
+ * the other face (which side is 包内/包外 cannot be derived from density
+ * alone). Guards: λmin/λmid ≥ 0.75 (globular/fibrous) keeps the coverage
+ * view; an old relay without /membrane, an endpoint error, or a
+ * `view matrix camera` failure all fall back to the 90° coverage ladder
+ * with a loud log. (2) 截图 level — /volstats gains the OTSU threshold
+ * (the DOMINANT class split: solvent/signal on a normal masked map,
+ * protein/detergent-belt when the micelle is the hottest feature) plus
+ * the NEAR-ZERO voxel fraction (masked-vs-raw discriminator); the
+ * screenshot display level becomes 0.85×otsu for masked postprocessed
+ * maps (biased low so the protein stays inside the contour) and
+ * mean+2.5σ for unmasked raw ones, clamped to [0.04, 0.35]×max (自适应,
+ * default), with 经典 0.25×max and 手动倍数 as alternatives. On
+ * membrane-protein maps the micelle density is often the strongest
+ * feature, so the fixed 0.25×max wrapped only the detergent disk and
+ * hid the protein — the envelope-based level keeps the helix detail
+ * inside the ring. FIT levels stay 0.25×max (the tuned alignment
+ * behavior is untouched); only the visible contour is re-set right
+ * before each screenshot.
  */
-export const FLOW_ENGINE_VERSION = "3.76";
+export const FLOW_ENGINE_VERSION = "3.77";

@@ -22,7 +22,7 @@ import { Download, BookOpen, FlaskConical, Terminal, FileCode2, ArrowRight, Info
 const HELPER_FILES = [
   {
     name: "CryoSmart_flow_relay.py",
-    desc: "The ChimeraX bridge script the Workflow Figure card drives: open it once inside ChimeraX (open https://<this-site>/api/cryosmart/flow-figure/relay.py) and the page can then command ChimeraX remotely — map download into a persistent local cache dir, 8-candidate dual-hand alignment, 90° view unification, screenshot return, reference-hand (EMalign) verification and delivery-file export. Keep ChimeraX open afterwards.",
+    desc: "The ChimeraX bridge script the Workflow Figure card drives: open it once inside ChimeraX (open https://<this-site>/api/cryosmart/flow-figure/relay.py) and the page can then command ChimeraX remotely — map download into a persistent local cache dir, 8-candidate dual-hand alignment, membrane-plane detection (v3.77: density-weighted PCA lays the detergent disk flat in the screen XY plane for membrane proteins) or 90° view unification, adaptive screenshot contour levels, screenshot return, reference-hand (EMalign) verification and delivery-file export. Keep ChimeraX open afterwards.",
     size: "66 KB",
     url: "/helpers/CryoSmart_flow_relay.py",
     recommended: true,
@@ -116,7 +116,7 @@ export function HelpCard() {
                 <ol className="ml-4 list-decimal space-y-1 text-[12px] leading-relaxed text-slate-700 dark:text-slate-300">
                   <li>完成 Smart Capture 与 Trace Lineage 后，滚动到 <strong>Workflow Figure · 一键流程图</strong> 卡片。</li>
                   <li>在 ChimeraX（1.12+，需 GPU 桌面版）的 Command Line 运行一次（卡片内可一键复制）：<code className="rounded bg-slate-200 px-1 font-mono text-[10.5px] dark:bg-slate-800">open https://&lt;本站&gt;/api/cryosmart/flow-figure/relay.py</code></li>
-                  <li>点击卡片里的 <strong>生成流程图 PPTX</strong> —— 网页会自动驱动 ChimeraX：地图打开 → 5 候选拟合对齐（含 z-flip 手性检查与自动翻正）→ 90° 视角统一 → 1600×1200 截图回传 → 组装成 16:9 参考版式 PPTX 并下载。</li>
+                  <li>点击卡片里的 <strong>生成流程图 PPTX</strong> —— 网页会自动驱动 ChimeraX：地图打开 → 5 候选拟合对齐（含 z-flip 手性检查与自动翻正）→ 膜平面检测（膜蛋白：去垢剂盘置于画面 XY 平面）/ 90° 视角统一 → 自适应截图 level（膜蛋白不再只看到去垢剂盘）→ 1600×1200 截图回传 → 组装成 16:9 参考版式 PPTX 并下载。</li>
                   <li>若 ChimeraX 无法直读内网地图，页面自动改走中转（MRC 经本应用暂存 45 分钟）。若桥不可用，可用「会话预览图 / 演示样例」两种降级模式先生成。</li>
                 </ol>
                 <div className="mt-2 rounded-md border border-slate-200 bg-white p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
