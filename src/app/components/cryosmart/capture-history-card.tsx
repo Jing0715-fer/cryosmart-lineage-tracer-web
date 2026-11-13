@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import type { LoadedMetadata } from "./data-source-card";
 import { toLoadedFromHistory, type PendingData } from "./use-imported-metadata";
+import { navigateToModule } from "./module-nav";
 
 /** Light entry summary from GET /api/cryosmart/history. */
 interface HistoryEntrySummary {
@@ -161,9 +162,10 @@ export function CaptureHistoryCard({ importToken, onRestore }: Props) {
         );
         // Auto-trace fires in ConfigureCard; give it a beat then show the
         // result. Tracked so an unmount mid-wait doesn't fire a stray scroll.
+        // v3.76: rides the tab bus — switches to the 预览 tab first.
         if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
         scrollTimerRef.current = setTimeout(() => {
-          document.getElementById("preview")?.scrollIntoView({ behavior: "smooth", block: "start" });
+          navigateToModule("preview");
         }, 900);
       } catch (err) {
         toast.error(`Restore failed: ${(err as Error).message}`);

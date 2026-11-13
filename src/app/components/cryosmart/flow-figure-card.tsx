@@ -176,9 +176,17 @@ function triggerDownload(href: string, filename: string) {
 /** One file to write into the 交付目录 — maps (chirality-flippable) plus
  *  the refine job's plots and fsc.xml. `urls` is a candidate LADDER
  *  (captured asset URL first, constructed CryoSmart path as fallback —
- *  best-effort like the bundle's final-results scan). */
+ *  best-effort like the bundle's final-results scan).
+ *  v3.76 (round-36 “导出到工作目录的最终交付文件存在一些问题”):
+ *  map filenames now carry the .mrc suffix ({base}.volume.map_unsharp.mrc
+ *  … — the ZIP bundle has always named them .mrc; ChimeraX's flipped-map
+ *  `save format mrc` agrees), and `plotKind` tags the three PLOT files so
+ *  the delivery loop can verify the downloaded image's SHAPE (the FSC
+ *  curve once delivered as a squeezed-narrow thumbnail — a wrong-ratio or
+ *  tiny candidate is now skipped in favour of the next rung / a re-drawn
+ *  4:3 FSC from the captured xml). */
 interface DeliverFileSpec {
-  /** Delivery basename, e.g. "Tigr.volume.map_sharp". */
+  /** Delivery basename, e.g. "Tigr.volume.map_sharp.mrc". */
   filename: string;
   /** Short log label, e.g. "sharp map". */
   label: string;
@@ -196,6 +204,14 @@ interface DeliverFileSpec {
   /** Absent-source case (no DeepEMhancer job) — skipped, not an error. */
   optional?: boolean;
   optionalWhy?: string;
+  /** v3.76: which plot this is ("fsc" | "guinier" | "orientation") — the
+   *  delivery loop page-side fetches + SHAPE-CHECKS plot images (min width
+   *  and landscape ratio per kind) instead of trusting the relay ladder. */
+  plotKind?: "fsc" | "guinier" | "orientation";
+  /** v3.76: the refine job's captured FSC-XML text — the LAST-resort
+   *  re-draw source for the FSC plot when every image candidate fails the
+   *  shape check (rendered at the original plot's 4:3 landscape ratio). */
+  fscXmlText?: string;
 }
 
 /** The per-file delivery outcome shown in the result panel. */
@@ -296,8 +312,8 @@ function plotImageUrl(im: ImageAsset): string | null {
 /** v3.72 (round-31 交付文件下载): build the DELIVERY plan — the final
  *  job's (or, when the final job is DeepEMhancer, its UPSTREAM refine
  *  job's) deliverable set, exactly per the user's naming convention:
- *    {base}.volume.map_unsharp / _sharp / _half_A / _half_B,
- *    {base}.volume.map-DeepEMhancer (only when a post-process job exists),
+ *    {base}.volume.map_unsharp.mrc / _sharp.mrc / _half_A.mrc / _half_B.mrc,
+ *    {base}.volume.map-DeepEMhancer.mrc (only when a post-process job exists),
  *    {base}.volume.fsc.png / guinier_plot.png /
  *    orientation_distribution.png / fsc.xml.
  *  Every URL is a CANDIDATE LADDER (captured asset → constructed
@@ -363,7 +379,11 @@ function buildDeliveryPlan(
     `${baseUrl}/api/log_image/download_result_file/${projectId}/${refineNode!.uid}.volume.${suffix}`;
 
   /* The four refine maps — captured asset first, constructed path as the
-   *  fallback (the bundle's final-results scan proved these paths). */
+   *  fallback (the bundle's final-results scan proved these paths).
+   *  v3.76 (round-36 “文件缺少mrc后缀”): every map filename now ends in
+   *  .mrc — matches the ZIP bundle's Final_Result/Map naming
+   *  (BJ.<P>.<J>.<suffix>.mrc) and what ChimeraX's flipped-map save
+   *  writes. */
   const mapEntries: Array<{
     label: string;
     suffix: string;
@@ -373,25 +393,25 @@ function buildDeliveryPlan(
     {
       label: "unsharp map（未锐化）",
       suffix: "map",
-      filename: `${base}.volume.map_unsharp`,
+      filename: `${base}.volume.map_unsharp.mrc`,
       match: (a) => /^map$/i.test(String(a.result_name || "")),
     },
     {
       label: "sharp map（锐化）",
       suffix: "map_sharp",
-      filename: `${base}.volume.map_sharp`,
+      filename: `${base}.volume.map_sharp.mrc`,
       match: (a) => /sharp/i.test(String(a.result_name || "")) && !/half/i.test(String(a.result_name || "")),
     },
     {
       label: "half map A",
       suffix: "map_half_A",
-      filename: `${base}.volume.map_half_A`,
+      filename: `${base}.volume.map_half_A.mrc`,
       match: (a) => /half[\s_]?a/i.test(`${a.result_name || ""} ${a.group || ""}`),
     },
     {
       label: "half map B",
       suffix: "map_half_B",
-      filename: `${base}.volume.map_half_B`,
+      filename: `${base}.volume.map_half_B.mrc`,
       match: (a) => /half[\s_]?b/i.test(`${a.result_name || ""} ${a.group || ""}`),
     },
   ];
@@ -423,7 +443,7 @@ function buildDeliveryPlan(
     }
     if (urls.length) {
       items.push({
-        filename: `${base}.volume.map-DeepEMhancer`,
+        filename: `${base}.volume.map-DeepEMhancer.mrc`,
         label: `DeepEMhancer map（${deepemNode.uid}）`,
         isMap: true,
         cacheKey: `deliver_${deepemNode.uid}_deepem`,
@@ -436,26 +456,48 @@ function buildDeliveryPlan(
   }
 
   /* Plots + fsc.xml from the REFINE job (captured images first, the
-   *  bundle-proven log_image pseudo-fileids as constructed fallbacks). */
+   *  bundle-proven log_image pseudo-fileids as constructed fallbacks).
+   *  v3.76 (round-36 “图片格式的fsc曲线比例和原图不一样，比例有问题，看
+   *  起来宽度很窄”): the FSC match is now a RANKED matcher — a captured
+   *  image whose name IS the main FSC curve ("FSC" / "fsc_1_FSC.png")
+   *  outranks variants ("FSC between half maps", per-iteration thumbs…)
+   *  that used to win the first slot and deliver a wrong-ratio picture.
+   *  Every plot spec also carries its plotKind; the delivery loop
+   *  page-side downloads + shape-checks each candidate before writing it
+   *  into the 交付目录. */
   const images = refineNode.images || [];
+  /** Rank a captured image for plot candidacy (lower = better; 99 = no). */
+  const fscRank = (im: ImageAsset): number => {
+    const n = String(im.name || "").trim();
+    const low = n.toLowerCase();
+    if (/^fsc(\.png)?$/.test(low) || /^fsc_?1_?fsc\.png$/.test(low)) return 0;
+    if (/^fsc/.test(low)) return 1;
+    if (/fsc/.test(low)) return 2;
+    return 99;
+  };
   const plotEntries: Array<{
     label: string;
     filename: string;
     cacheExt: string;
+    plotKind: "fsc" | "guinier" | "orientation";
     match: (im: ImageAsset) => boolean;
+    ranked?: (im: ImageAsset) => number;
     constructedUrl: string;
   }> = [
     {
       label: "FSC 曲线图",
       filename: `${base}.volume.fsc.png`,
       cacheExt: "png",
+      plotKind: "fsc",
       match: (im) => /fsc/i.test(String(im.name || "")) && !/xml/i.test(String(im.name || "")),
+      ranked: fscRank,
       constructedUrl: `${baseUrl}/api/log_image/fsc_1_FSC.png`,
     },
     {
       label: "Guinier plot",
       filename: `${base}.volume.guinier_plot.png`,
       cacheExt: "png",
+      plotKind: "guinier",
       match: (im) => /guinier/i.test(String(im.name || im.log_text || "")),
       constructedUrl: `${baseUrl}/api/log_image/guinier_1_Guinier_Plot.png`,
     },
@@ -463,14 +505,18 @@ function buildDeliveryPlan(
       label: "角度分布图",
       filename: `${base}.volume.orientation_distribution.png`,
       cacheExt: "png",
+      plotKind: "orientation",
       match: (im) => /orientation|direction|angular/i.test(String(im.name || im.log_text || "")),
       constructedUrl: `${baseUrl}/api/log_image/direction_distribution_1_Direction_Distribution.png`,
     },
   ];
+  const fscXmlText = refineNode.fsc_xml?.xml?.trim() ? refineNode.fsc_xml.xml : undefined;
   for (const e of plotEntries) {
+    const candidates = images.filter((im) => e.match(im));
+    // v3.76: main-curve-first ordering for the FSC ladder.
+    if (e.ranked) candidates.sort((a, b) => e.ranked!(a) - e.ranked!(b));
     const urls: string[] = [];
-    for (const im of images) {
-      if (!e.match(im)) continue;
+    for (const im of candidates) {
       const u = plotImageUrl(im);
       if (u && !urls.includes(u)) urls.push(u);
     }
@@ -482,11 +528,19 @@ function buildDeliveryPlan(
       cacheKey: `deliver_${refineNode.uid}_${e.cacheExt}`,
       cacheExt: e.cacheExt,
       urls,
+      plotKind: e.plotKind,
+      fscXmlText: e.plotKind === "fsc" ? fscXmlText : undefined,
     });
   }
 
   /* fsc.xml — the captured XML text (embedded bytes, zero network) first,
-   *  then the captured ref URL, then the constructed volume/fsc.xml path. */
+   *  then the captured ref URL, then the constructed volume/fsc.xml path.
+   *  v3.76 (round-36 “xml格式的fsc曲线文件缺失”): the embedded bytes are
+   *  now only the FIRST rung — the captured http URL and the constructed
+   *  volume/fsc.xml path ride `urls` as backups even when the text is
+   *  embedded, and the delivery loop falls back to staging the embedded
+   *  bytes as a local cache file (relay {src} copy) when a direct
+   *  data_base64 write is refused by an older relay. */
   {
     const fsc = refineNode.fsc_xml ?? null;
     const spec: DeliverFileSpec = {
@@ -499,10 +553,9 @@ function buildDeliveryPlan(
     };
     if (fsc?.xml && fsc.xml.trim()) {
       spec.dataBase64 = toBase64(fsc.xml);
-    } else {
-      if (fsc?.url && /^https?:\/\//i.test(fsc.url)) spec.urls.push(fsc.url);
-      spec.urls.push(constructed("fsc.xml"));
     }
+    if (fsc?.url && /^https?:\/\//i.test(fsc.url)) spec.urls.push(fsc.url);
+    spec.urls.push(constructed("fsc.xml"));
     items.push(spec);
   }
 
@@ -1852,16 +1905,170 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               }
             };
             let done = 0;
+            /* v3.76 (round-36): page-side byte fetch for the PLOT ladder —
+             * data: URIs and same-origin proxy URLs fetch directly, real
+             * CryoSmart URLs ride cryoSmartBytes (app proxy + session
+             * credentials). Returns null instead of throwing so the caller
+             * just walks to the next candidate. */
+            const fetchPlotBytes = async (url: string): Promise<Uint8Array | null> => {
+              try {
+                if (/^data:/i.test(url)) {
+                  const res = await fetch(url, { cache: "no-store" });
+                  if (!res.ok) return null;
+                  return new Uint8Array(await res.arrayBuffer());
+                }
+                if (url.startsWith(window.location.origin)) {
+                  const res = await fetch(url, { cache: "no-store" });
+                  if (!res.ok) return null;
+                  return new Uint8Array(await res.arrayBuffer());
+                }
+                return await cryoSmartBytes(session, url, { timeoutMs: 300_000 });
+              } catch {
+                return null;
+              }
+            };
+            /** Decode a PNG's dimensions (null when the bytes are not an
+             *  image — an HTML 401/404 page, a truncated download…). */
+            const pngDimensions = async (bytes: Uint8Array): Promise<{ w: number; h: number } | null> => {
+              try {
+                const bmp = await createImageBitmap(new Blob([bytes as BlobPart], { type: "image/png" }));
+                const dims = { w: bmp.width, h: bmp.height };
+                bmp.close();
+                return dims;
+              } catch {
+                return null;
+              }
+            };
+            /** v3.76: per-kind expected plot shape — the FSC curve is a
+             * LANDSCAPE plot (CryoSPARC renders it ~6×4.5 in; a squeezed
+             * narrow or thumbnail-sized candidate is the wrong picture),
+             * Guinier is mildly landscape, the orientation distribution is
+             * roughly square (circular polar plot). */
+            const plotShapeOk = (kind: "fsc" | "guinier" | "orientation", w: number, h: number): boolean => {
+              if (kind === "fsc") return w >= 360 && w / h >= 1.05;
+              if (kind === "guinier") return w >= 300 && w / h >= 0.85;
+              return w >= 300 && w / h >= 0.55;
+            };
+            /** v3.76: decode base64 back to bytes (the embedded fsc.xml
+             * text's stage+src fallback needs raw bytes for /stage). */
+            const b64ToBytes = (b64: string): Uint8Array => {
+              const bin = atob(b64);
+              const out = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+              return out;
+            };
             for (const item of plan.items) {
               done += 1;
               setStep((s) => ({ ...s, phase: `交付文件 ${done}/${plan.items.length}: ${item.filename}`, pct: Math.min(97, 92 + (done / plan.items.length) * 5) }));
               const dst = `${dir}/${item.filename}`;
               try {
+                /* v3.76 (round-36 “xml格式的fsc曲线文件缺失”): embedded
+                 * bytes are a LADDER now — a direct data_base64 write (new
+                 * relays) first, then a /stage upload of the same bytes +
+                 * {src} copy (works on every relay since v3.47, sidesteps
+                 * an old relay that predates the dual-key /deliver), and
+                 * only then the URL rungs below. */
                 if (item.dataBase64) {
-                  const r = await bridgeDeliverFile(transport, { dataBase64: item.dataBase64, dst });
-                  if (!r.ok) throw new Error(r.error ?? "未知错误");
-                  pushLog(`  ✓ ${item.filename}（${item.label} · 内嵌数据 ${fmtSize(r.size ?? 0)}）→ ${dst}`);
-                  outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                  let r = await bridgeDeliverFile(transport, { dataBase64: item.dataBase64, dst });
+                  if (r.ok) {
+                    pushLog(`  ✓ ${item.filename}（${item.label} · 内嵌数据 ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                    outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                    continue;
+                  }
+                  pushLog(`  ⚠ ${item.filename} 内嵌数据直达失败（${r.error ?? "未知"}）— 改经本地暂存`);
+                  const staged = await stageViaRelay(
+                    transport,
+                    item.cacheKey,
+                    `embedded:${item.filename}`,
+                    b64ToBytes(item.dataBase64),
+                    pushLog,
+                    item.cacheExt,
+                  );
+                  if (staged) {
+                    r = await bridgeDeliverFile(transport, { src: staged, dst });
+                    if (r.ok) {
+                      pushLog(`  ✓ ${item.filename}（${item.label} · 内嵌数据经暂存 ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                      outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                      continue;
+                    }
+                  }
+                  pushLog(`  ⚠ ${item.filename} 内嵌数据暂存失败 — 继续尝试下载来源`);
+                  /* fall through to the URL ladder below */
+                }
+                /* v3.76 (round-36 “图片格式的fsc曲线比例和原图不一样…
+                 * 宽度很窄”): PLOT files are fetched PAGE-SIDE and
+                 * SHAPE-CHECKED before delivery — the wrong-ratio FSC
+                 * thumbnail that used to land in the 交付目录 is skipped in
+                 * favour of the next rung (and, as the last resort for the
+                 * FSC curve, a 4:3 re-draw from the captured fsc.xml). A
+                 * decodable-but-suspicious candidate is still remembered:
+                 * when nothing better exists it is delivered anyway — a
+                 * plot with an off ratio beats a missing file. */
+                if (item.plotKind) {
+                  const shapeNotes: string[] = [];
+                  let fallback: { bytes: Uint8Array; url: string; dim: { w: number; h: number } } | null = null;
+                  let delivered = false;
+                  for (const url of item.urls) {
+                    const bytes = await fetchPlotBytes(url);
+                    if (!bytes) {
+                      shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 下载失败`);
+                      continue;
+                    }
+                    const dim = await pngDimensions(bytes);
+                    if (!dim) {
+                      shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 非图片内容`);
+                      continue;
+                    }
+                    if (!plotShapeOk(item.plotKind, dim.w, dim.h)) {
+                      if (!fallback) fallback = { bytes, url, dim };
+                      shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: ${dim.w}×${dim.h} 比例异常`);
+                      continue;
+                    }
+                    const staged = await stageViaRelay(transport, item.cacheKey, url, bytes, pushLog, item.cacheExt);
+                    if (!staged) {
+                      shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 暂存失败`);
+                      continue;
+                    }
+                    const r = await bridgeDeliverFile(transport, { src: staged, dst });
+                    if (r.ok) {
+                      pushLog(`  ✓ ${item.filename}（${item.label} · ${dim.w}×${dim.h} · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                      outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                      delivered = true;
+                      break;
+                    }
+                    shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 写入失败`);
+                  }
+                  /* Last resort for the FSC curve: re-draw it from the
+                   * captured fsc.xml at the original plot's 4:3 landscape
+                   * ratio — never squeezed-narrow. */
+                  if (!delivered && item.plotKind === "fsc" && item.fscXmlText) {
+                    const png = await fscPng(item.fscXmlText, summary?.micrograph_pixel_size_A ?? null, { width: 1200, height: 900 });
+                    if (png) {
+                      const staged = await stageViaRelay(transport, item.cacheKey, "fsc-redraw", png, pushLog, item.cacheExt);
+                      if (staged) {
+                        const r = await bridgeDeliverFile(transport, { src: staged, dst });
+                        if (r.ok) {
+                          pushLog(`  ✓ ${item.filename}（FSC 曲线由 fsc.xml 以原图 4:3 比例重绘 · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                          outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                          delivered = true;
+                        }
+                      }
+                    }
+                  }
+                  /* Nothing shape-approved — deliver the first decodable
+                   * candidate rather than nothing at all. */
+                  if (!delivered && fallback) {
+                    const staged = await stageViaRelay(transport, item.cacheKey, fallback.url, fallback.bytes, pushLog, item.cacheExt);
+                    if (staged) {
+                      const r = await bridgeDeliverFile(transport, { src: staged, dst });
+                      if (r.ok) {
+                        pushLog(`  ⚠ ${item.filename}（${item.label}）仅有比例异常的原图（${fallback.dim.w}×${fallback.dim.h}）— 已按原图交付`);
+                        outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                        delivered = true;
+                      }
+                    }
+                  }
+                  if (!delivered) throw new Error(`所有来源均失败（${shapeNotes.join("；").slice(0, 200)}）`);
                   continue;
                 }
                 if (!item.urls.length) throw new Error("无可用下载来源");
@@ -2409,11 +2616,11 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 const b = deliverBase.trim() || deriveBaseFromDir(deliverDir);
                 if (!b) return null;
                 const names = [
-                  `${b}.volume.map_unsharp`,
-                  `${b}.volume.map_sharp`,
-                  `${b}.volume.map_half_A`,
-                  `${b}.volume.map_half_B`,
-                  `${b}.volume.map-DeepEMhancer`,
+                  `${b}.volume.map_unsharp.mrc`,
+                  `${b}.volume.map_sharp.mrc`,
+                  `${b}.volume.map_half_A.mrc`,
+                  `${b}.volume.map_half_B.mrc`,
+                  `${b}.volume.map-DeepEMhancer.mrc`,
                   `${b}.volume.fsc.png`,
                   `${b}.volume.guinier_plot.png`,
                   `${b}.volume.orientation_distribution.png`,
@@ -2424,9 +2631,9 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     {names.map((n) => (
                       <code
                         key={n}
-                        title={n.endsWith("DeepEMhancer") ? "仅当最终 job 为 DeepEMhancer 等后处理时交付" : undefined}
+                        title={n.includes("DeepEMhancer") ? "仅当最终 job 为 DeepEMhancer 等后处理时交付" : undefined}
                         className={`rounded px-1 py-0.5 font-mono text-[9.5px] ${
-                          n.endsWith("DeepEMhancer")
+                          n.includes("DeepEMhancer")
                             ? "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
                             : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
                         }`}
@@ -2440,7 +2647,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {bridge?.kind === "relay" && !bridge.canDeliver
                   ? "当前桥脚本无 /deliver（旧版 relay.py）— 在 ChimeraX 重新运行一次 relay.py 后即可自动交付。"
-                  : "生成流程图后自动把最终结果下载到该目录（地图先入本地缓存再复制，重复生成不重复下载）；若最终 job 为 DeepEMhancer，则交付其上游 refine job 的这些文件并额外输出 map-DeepEMhancer；所有 map 按参考手性判定纠正（镜像 → ChimeraX z-flip 翻正后保存）。目录与前缀会记住。"}
+                  : "生成流程图后自动把最终结果下载到该目录（地图 .mrc 先入本地缓存再复制，重复生成不重复下载；FSC/Guinier/角度分布图会校验比例，异常候选自动跳过或由 fsc.xml 按原图 4:3 比例重绘）；若最终 job 为 DeepEMhancer，则交付其上游 refine job 的这些文件并额外输出 map-DeepEMhancer.mrc；所有 map 按参考手性判定纠正（镜像 → ChimeraX z-flip 翻正后保存）。目录与前缀会记住。"}
               </p>
             </div>
             {!bridge && (
@@ -2704,7 +2911,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">交付</span>
               <span>
                 填写「<b>交付文件</b>」目录后，每次生成自动把最终结果下载到 ChimeraX 机器的该目录：
-                <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp"}</code> 等（unsharp / sharp / half A / half B / FSC / Guinier / 角度分布 / fsc.xml；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
+                <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp.mrc"}</code> 等（unsharp / sharp / half A / half B 地图均带 .mrc 后缀；FSC / Guinier / 角度分布图下载前校验比例与尺寸，异常候选自动跳过，FSC 无可用原图时由 fsc.xml 按原图 4:3 比例重绘；fsc.xml 内嵌数据直达失败时自动改经本地暂存写入；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer.mrc）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
               </span>
             </li>
           </ul>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { navigateToModule } from "./module-nav";
 
 interface ShortcutActions {
   onTrace?: () => void;
@@ -60,7 +61,9 @@ export function useKeyboardShortcuts(actions: ShortcutActions) {
       // `?` → Scroll to help (only when not in input)
       if (e.key === "?" && !isInput) {
         e.preventDefault();
-        document.getElementById("help")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        // v3.76: rides the tab bus — switches to the 帮助 tab first (the
+        // old in-page anchor cannot reach a section in a hidden tab).
+        navigateToModule("help");
         actions.onShowHelp?.();
         return;
       }

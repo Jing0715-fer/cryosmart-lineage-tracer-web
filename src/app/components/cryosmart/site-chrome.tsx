@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { ExternalLink, FileText, Keyboard } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -8,10 +7,24 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { navigateToModule, type ModuleTabId } from "./module-nav";
 
-export function SiteHeader() {
+/** v3.76: the header nav now drives the horizontal module tabs (the old
+ *  in-page anchors cannot reach a section hidden inside another tab). */
+export function SiteHeader({
+  activeTab,
+}: {
+  activeTab?: ModuleTabId;
+  onNavigate?: (tab: ModuleTabId) => void;
+}) {
+  const navItems: Array<{ label: string; tab: ModuleTabId }> = [
+    { label: "Data Source", tab: "data" },
+    { label: "Flow Figure", tab: "flow" },
+    { label: "Download", tab: "download" },
+    { label: "Help", tab: "help" },
+  ];
+  const go = (tab: ModuleTabId) => navigateToModule(tab);
   return (
     <header className="sticky top-0 z-40 w-full border-b border-slate-200/70 bg-white/85 backdrop-blur supports-[backdrop-filter]:bg-white/70 dark:border-slate-800/70 dark:bg-slate-950/80 dark:supports-[backdrop-filter]:bg-slate-950/60">
       <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
@@ -29,40 +42,36 @@ export function SiteHeader() {
               <path d="M17.5 17 L14 13" />
             </svg>
           </div>
-          <div className="flex flex-col leading-tight">
+          <button
+            type="button"
+            onClick={() => go("data")}
+            className="flex flex-col items-start leading-tight"
+            title="回到数据模块"
+          >
             <span className="text-[15px] font-semibold tracking-tight text-slate-900 dark:text-slate-100">
               CryoSmart Lineage Tracer <span className="text-teal-600 dark:text-teal-400">Web</span>
             </span>
             <span className="hidden text-[11px] text-slate-500 dark:text-slate-400 sm:block">
               Cross-browser reimplementation · v3.41
             </span>
-          </div>
+          </button>
         </div>
         <nav className="flex items-center gap-1">
-          <Link
-            href="#data-source"
-            className="hidden rounded-md px-3 py-1.5 text-[13px] font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100 md:inline-block"
-          >
-            Data Source
-          </Link>
-          <Link
-            href="#flow-figure"
-            className="hidden rounded-md px-3 py-1.5 text-[13px] font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100 md:inline-block"
-          >
-            Flow Figure
-          </Link>
-          <Link
-            href="#download"
-            className="hidden rounded-md px-3 py-1.5 text-[13px] font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100 md:inline-block"
-          >
-            Download
-          </Link>
-          <Link
-            href="#help"
-            className="hidden rounded-md px-3 py-1.5 text-[13px] font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100 md:inline-block"
-          >
-            Help
-          </Link>
+          {navItems.map((item) => (
+            <button
+              key={item.tab}
+              type="button"
+              onClick={() => go(item.tab)}
+              className={
+                "hidden rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors md:inline-block " +
+                (activeTab === item.tab
+                  ? "bg-teal-50 text-teal-700 dark:bg-teal-950/60 dark:text-teal-300"
+                  : "text-slate-600 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100")
+              }
+            >
+              {item.label}
+            </button>
+          ))}
 
           {/* Keyboard shortcuts help */}
           <Popover>

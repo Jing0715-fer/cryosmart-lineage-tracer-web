@@ -529,5 +529,32 @@
  * footnote wraps to a second line instead of running off the canvas.
  * Old pages keep the v3.74 behaviour (swapped classes, count-less 简化
  * rows, sparse 极简 decks, loose frames) — refresh to pick this up.
+ *
+ * v3.76 bump reason (round-36 “完全重新设计UI界面，用横向标签显示每个模块…
+ * 文件缺少mrc后缀，xml格式的fsc曲线文件缺失，图片格式的fsc曲线比例和原图
+ * 不一样…宽度很窄”): (1) HORIZONTAL TAB SHELL — the seven stacked cards
+ * became six sticky horizontal tabs (数据 / 追踪 / 预览 / 流程图 / 下载 /
+ * 帮助), every TabsContent forceMount-ed + hidden so a tab switch NEVER
+ * unmounts a module (bridge probe, delivery settings, logs, thumbnails
+ * all survive); all legacy anchor jumps (header nav, hero buttons,
+ * keyboard shortcuts, post-trace / post-restore / imported-capture
+ * auto-jumps) route through the new module-nav bus (navigateToModule —
+ * switch tab first, then scroll), and the URL hash mirrors the active
+ * tab (#module-flow, restored on reload). (2) DELIVERY .mrc SUFFIX —
+ * every delivered map is now {base}.volume.map_unsharp.mrc / _sharp.mrc /
+ * _half_A.mrc / _half_B.mrc / map-DeepEMhancer.mrc (matches the ZIP
+ * bundle naming; ChimeraX's flipped save writes the same bytes). (3)
+ * fsc.xml NEVER SILENTLY MISSING — the embedded xml bytes became a
+ * LADDER (direct data_base64 write → /stage the bytes + {src} copy on
+ * relays since v3.47 → the captured http url / constructed
+ * volume.fsc.xml rungs). (4) FSC PNG SHAPE — plot files are fetched
+ * page-side and SHAPE-CHECKED before delivery (FSC must be ≥360 px wide
+ * and landscape ≥1.05 w/h — the squeezed-narrow thumbnail that used to
+ * land in the 交付目录 is skipped for the next rung), the captured-image
+ * ladder is RANKED (main "FSC" curve outranks "FSC between half maps"
+ * variants), and when no image rung passes the FSC is re-drawn from the
+ * captured fsc.xml at the original plot's 4:3 landscape ratio (a
+ * decodable-but-suspicious candidate still delivers as the last resort —
+ * an off-ratio plot beats a missing file).
  */
-export const FLOW_ENGINE_VERSION = "3.75";
+export const FLOW_ENGINE_VERSION = "3.76";

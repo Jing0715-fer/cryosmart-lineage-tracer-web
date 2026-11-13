@@ -790,9 +790,10 @@ export async function bridgeDeliverStat(
 /** v3.72: the outcome of one chirality-corrected (flipped) map delivery —
  *  ChimeraX opens the cached RAW map, creates its z-mirror (`volume flip`,
  *  the SAME command the two-hand alignment ladder uses), saves the flipped
- *  grid as MRC into the 交付目录 (explicit `format mrc` — the canonical
- *  delivery names carry no .mrc suffix), closes both models and verifies
- *  the written file via /deliver stat. */
+ *  grid as MRC into the 交付目录 (explicit `format mrc`; v3.76 the delivery
+ *  names now carry the .mrc suffix — {base}.volume.map_sharp.mrc — which
+ *  the explicit format makes redundant-but-harmless), closes both models
+ *  and verifies the written file via /deliver stat. */
 export async function deliverFlippedMap(
   t: FlowTransport,
   localSrc: string,

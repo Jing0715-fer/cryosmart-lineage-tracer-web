@@ -1895,15 +1895,21 @@ export function parseFscAny(raw: string, pixelSizeA?: number | null): { curves: 
   return { curves: [], warnings: [...xmlResult.warnings, ...textResult.warnings] };
 }
 
-/** Render the FSC curves to a PNG (null when no curves / no DOM). */
+/** Render the FSC curves to a PNG (null when no curves / no DOM).
+ *  v3.76 (round-36 “图片格式的fsc曲线比例和原图不一样…宽度很窄”): an
+ *  optional size passthrough — the delivery fallback re-renders the FSC at
+ *  the ORIGINAL plot's ~4:3 landscape ratio (CryoSPARC renders FSC at
+ *  6×4.5 in) instead of the slide-panel's 16:9, so a re-drawn delivery
+ *  file never comes out looking squeezed-narrow. */
 export async function fscPng(
   raw: string | null,
   pixelSizeA?: number | null,
+  opts?: { width?: number; height?: number },
 ): Promise<Uint8Array | null> {
   if (!raw) return null;
   const { curves } = parseFscAny(raw, pixelSizeA);
   if (!curves.length) return null;
-  return renderFscCurvePng(curves, { title: null });
+  return renderFscCurvePng(curves, { title: null, width: opts?.width, height: opts?.height });
 }
 
 interface BBox {

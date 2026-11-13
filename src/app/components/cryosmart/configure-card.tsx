@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Play, Loader2 } from "lucide-react";
 import type { LoadedMetadata } from "./data-source-card";
+import { navigateToModule } from "./module-nav";
 import { buildSummary, normalizeLineageSummary, normalizeJobUid } from "@/lib/cryosmart/lineage";
 import { DEFAULT_BASE_URL } from "@/lib/cryosmart/constants";
 import type { JobMetadata, LineageSummary } from "@/lib/cryosmart/types";
@@ -320,9 +321,10 @@ export function ConfigureCard({ loaded, summary, onSummary, awaitingImport, impo
       // Jump to the Lineage Preview so the result is immediately visible
       // (manual traces only — an auto-trace keeps the user on the live
       // capture progress, which lives in this card).
+      // v3.76: rides the tab bus — switches to the 预览 tab first.
       if (!opts?.auto) {
         setTimeout(() => {
-          document.getElementById("preview")?.scrollIntoView({ behavior: "smooth", block: "start" });
+          navigateToModule("preview");
         }, 150);
       }
     } catch (err) {
