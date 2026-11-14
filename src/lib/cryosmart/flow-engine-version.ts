@@ -614,5 +614,53 @@
  * non-oblate / view-matrix failure → 90° coverage ladder) are
  * unchanged; the UI tile, help card and relay comments now describe
  * the side view.
+ *
+ * v3.79 bump reason (round-39 “这个fsc图还是不对啊，反而变得更错了。map的
+ * 朝向还是不对，并且level的选择还是不正常，目前是如何识别的？用最大的
+ * 25%会不会更好？” — the delivered P283_J55 files): THREE root causes
+ * found and fixed.
+ * (1) 膜视图从未生效 — the v3.78 camera rode `view matrix camera` with
+ * only NINE numbers, but ChimeraX REQUIRES 12 (3×3 rotation +
+ * translation, per the view docs): every real ChimeraX rejected the
+ * command and the run silently fell back to the coverage view, which
+ * for an oblate particle picks the TOP-DOWN orientation (largest
+ * silhouette) — exactly the delivered renders. The E2E mock's /exec
+ * accepted anything, so the bug passed. Fix: the SAME target rotation
+ * is now composed as ONE `turn <axis> <angle>` (screen-frame axis,
+ * center-of-rotation pivot — no camera position needed), computed
+ * after reading the base camera rotation from a bare `view matrix`
+ * report (identity assumed when unparsable), so it works from any
+ * base view. The base-camera parse reads the 12-number ROW-MAJOR 3×4
+ * [rotation | translation] report correctly (rotation at indices
+ * 0-2/4-6/8-10, translation interleaved at 3/7/11 — the first cut
+ * read nums[0..8] flat and folded the translation into a degenerate
+ * rotation; caught by the E2E command recording) and converts
+ * scene→camera with R₀ᵀ (not R₀). The E2E mock now VALIDATES
+ * `view matrix camera` arity (12/16) and the turn vector form (unit
+ * axis) so this class of contract bug fails loudly in E2E.
+ * (2) 截图 level — the auto policy's raw-map branch was mean+2.5σ,
+ * which lands INSIDE the solvent-noise band on a 90 %+ solvent grid:
+ * the delivered screenshots showed a snowball of disconnected noise
+ * speckles (and that noise-level threshold fed the /membrane PCA a
+ * near-spherical noise blob, compounding (1)). Per the user's
+ * 「最大的25%」 proposal, the relay's /volstats now computes
+ * suggested_level — the threshold keeping the DENSEST 25% of the
+ * molecular-envelope voxels (envelope = at/above the Otsu
+ * solvent/signal split) above the surface — and the page's 自适应
+ * chain is suggested_level → 0.85×otsu (masked, relay v3.77–78) →
+ * 0.25×max (older relays; mean+2.5σ is GONE), clamped [0.03,
+ * 0.5]×max; every map's chosen level + rule is logged. /ping gains a
+ * vollevel feature flag; the E2E mock's volstats serves 0.26.
+ * (3) FSC PNG — the delivered TMEM175.volume.fsc.png was a 2047×497
+ * matplotlib MAP-SLICE strip (a *fsc*-named job-folder file), not an
+ * FSC curve; it sailed through the v3.76 w/h ≥ 1.05 shape check. Fix:
+ * when the captured fsc.xml text is aboard, the curve is RE-DRAWN from
+ * the XML FIRST (our own 4:3 publication-style render — correct data,
+ * correct ratio, deterministic) and the image candidates only run when
+ * the XML draw fails; image candidates are additionally checked for a
+ * LIGHT background (plots are white; map renders/slice strips are
+ * near-black — mean luminance < 110 rejected) and the FSC ratio band
+ * is tightened to [1.0, 2.5]; a DARK candidate is never delivered,
+ * even as the off-ratio last resort.
  */
-export const FLOW_ENGINE_VERSION = "3.78";
+export const FLOW_ENGINE_VERSION = "3.79";

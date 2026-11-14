@@ -1991,26 +1991,61 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             };
             /** Decode a PNG's dimensions (null when the bytes are not an
              *  image — an HTML 401/404 page, a truncated download…). */
-            const pngDimensions = async (bytes: Uint8Array): Promise<{ w: number; h: number } | null> => {
+            const pngProbe = async (bytes: Uint8Array): Promise<{ w: number; h: number; meanLum: number } | null> => {
               try {
                 const bmp = await createImageBitmap(new Blob([bytes as BlobPart], { type: "image/png" }));
                 const dims = { w: bmp.width, h: bmp.height };
+                /* v3.79: mean luminance over an alpha-aware 48×48 downsample
+                 *  — PLOTS (RELION/cryoSPARC/our fsc.xml re-draw) sit on a
+                 *  WHITE background; map renders and matplotlib slice strips
+                 *  that sneak into job folders under *fsc* names are
+                 *  near-black. Best-effort: on any sampling failure the
+                 *  probe still returns the dimensions. */
+                let meanLum = 255;
+                try {
+                  const S = 48;
+                  const cv = document.createElement("canvas");
+                  cv.width = S;
+                  cv.height = S;
+                  const cctx = cv.getContext("2d");
+                  if (cctx) {
+                    cctx.drawImage(bmp, 0, 0, S, S);
+                    const px = cctx.getImageData(0, 0, S, S).data;
+                    let sum = 0;
+                    let cnt = 0;
+                    for (let i = 0; i < px.length; i += 4) {
+                      if (px[i + 3] > 8) {
+                        sum += 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+                        cnt += 1;
+                      }
+                    }
+                    if (cnt > 0) meanLum = sum / cnt;
+                  }
+                } catch {
+                  /* sampling failed — dims alone still work */
+                }
                 bmp.close();
-                return dims;
+                return { ...dims, meanLum };
               } catch {
                 return null;
               }
             };
-            /** v3.76: per-kind expected plot shape — the FSC curve is a
-             * LANDSCAPE plot (CryoSPARC renders it ~6×4.5 in; a squeezed
-             * narrow or thumbnail-sized candidate is the wrong picture),
-             * Guinier is mildly landscape, the orientation distribution is
+            /** v3.76 → v3.79: per-kind expected plot shape — the FSC curve
+             * is a LANDSCAPE plot (RELION/cryoSPARC ~4:3–3:2; a squeezed
+             * narrow thumbnail OR an absurdly wide multi-panel strip is
+             * the wrong picture — round-39 delivered a 2047×497 matplotlib
+             * slice strip that passed the old w/h ≥ 1.05 check), Guinier
+             * is mildly landscape, the orientation distribution is
              * roughly square (circular polar plot). */
             const plotShapeOk = (kind: "fsc" | "guinier" | "orientation", w: number, h: number): boolean => {
-              if (kind === "fsc") return w >= 360 && w / h >= 1.05;
+              if (kind === "fsc") return w >= 360 && h >= 220 && w / h >= 1.0 && w / h <= 2.5;
               if (kind === "guinier") return w >= 300 && w / h >= 0.85;
               return w >= 300 && w / h >= 0.55;
             };
+            /** v3.79: plot candidates must sit on a LIGHT background
+             * (RELION/cryoSPARC/our re-draw are white); a dark image is a
+             * map render / slice strip, never a curve plot. */
+            const PLOT_LIGHT_MIN_LUM = 110;
             /** v3.76: decode base64 back to bytes (the embedded fsc.xml
              * text's stage+src fallback needs raw bytes for /stage). */
             const b64ToBytes = (b64: string): Uint8Array => {
@@ -2068,21 +2103,67 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                  * plot with an off ratio beats a missing file. */
                 if (item.plotKind) {
                   const shapeNotes: string[] = [];
-                  let fallback: { bytes: Uint8Array; url: string; dim: { w: number; h: number } } | null = null;
+                  let fallback: { bytes: Uint8Array; url: string; dim: { w: number; h: number }; meanLum: number } | null = null;
                   let delivered = false;
-                  for (const url of item.urls) {
+                  /* v3.79 (round-39 “这个fsc图还是不对啊，反而变得更错了” —
+                   * the delivered TMEM175.volume.fsc.png turned out to be a
+                   * 2047×497 matplotlib MAP-SLICE strip, not an FSC curve):
+                   * when the captured fsc.xml text is aboard, RE-DRAW the
+                   * curve from the XML FIRST — our own 4:3 publication-style
+                   * render (correct data, correct ratio, deterministic)
+                   * instead of trusting whatever *fsc*-named PNG the job
+                   * folder / capture ladder surfaces. The image candidates
+                   * below only run when the XML parse/draw/deliver fails. */
+                  if (item.plotKind === "fsc" && item.fscXmlText) {
+                    const png = await fscPng(item.fscXmlText, summary?.micrograph_pixel_size_A ?? null, { width: 1200, height: 900 });
+                    if (png) {
+                      const staged = await stageViaRelay(transport, item.cacheKey, "fsc-redraw", png, pushLog, item.cacheExt);
+                      if (staged) {
+                        const r = await bridgeDeliverFile(transport, { src: staged, dst });
+                        if (r.ok) {
+                          pushLog(`  ✓ ${item.filename}（FSC 曲线由 fsc.xml 按原图 4:3 比例重绘 · 优先采用，不采信来源不明的候选图 · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                          outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                          delivered = true;
+                        } else {
+                          shapeNotes.push(`fsc.xml 重绘写入失败（${r.error ?? "未知"}）— 改试图像候选`);
+                        }
+                      } else {
+                        shapeNotes.push("fsc.xml 重绘暂存失败 — 改试图像候选");
+                      }
+                    } else {
+                      shapeNotes.push("fsc.xml 解析失败（无曲线数据）— 改试图像候选");
+                    }
+                  }
+                  /* v3.76 (round-36 “图片格式的fsc曲线比例和原图不一样…
+                   * 宽度很窄”) → v3.79: PLOT files are fetched PAGE-SIDE and
+                   * SHAPE+BACKGROUND-CHECKED before delivery — a squeezed
+                   * narrow thumbnail, an absurdly wide multi-panel strip, or
+                   * a DARK image (map render / slice strip posing as a
+                   * curve) is skipped in favour of the next rung. A
+                   * decodable LIGHT candidate with an off ratio is still
+                   * remembered: when nothing better exists it is delivered
+                   * anyway — an off-ratio plot beats a missing file; a
+                   * DARK one never is (it is the wrong file, not the
+                   * wrong ratio). */
+                  for (const url of delivered ? [] : item.urls) {
                     const bytes = await fetchPlotBytes(url);
                     if (!bytes) {
                       shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 下载失败`);
                       continue;
                     }
-                    const dim = await pngDimensions(bytes);
+                    const dim = await pngProbe(bytes);
                     if (!dim) {
                       shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 非图片内容`);
                       continue;
                     }
+                    if (dim.meanLum < PLOT_LIGHT_MIN_LUM) {
+                      shapeNotes.push(
+                        `${url.replace(/^https?:\/\/[^/]+/, "")}: ${dim.w}×${dim.h} 深色背景（亮度 ${dim.meanLum.toFixed(0)}）— 疑似地图截图/切片图而非曲线图，跳过`,
+                      );
+                      continue;
+                    }
                     if (!plotShapeOk(item.plotKind, dim.w, dim.h)) {
-                      if (!fallback) fallback = { bytes, url, dim };
+                      if (!fallback) fallback = { bytes, url, dim: { w: dim.w, h: dim.h }, meanLum: dim.meanLum };
                       shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: ${dim.w}×${dim.h} 比例异常`);
                       continue;
                     }
@@ -2100,25 +2181,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     }
                     shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 写入失败`);
                   }
-                  /* Last resort for the FSC curve: re-draw it from the
-                   * captured fsc.xml at the original plot's 4:3 landscape
-                   * ratio — never squeezed-narrow. */
-                  if (!delivered && item.plotKind === "fsc" && item.fscXmlText) {
-                    const png = await fscPng(item.fscXmlText, summary?.micrograph_pixel_size_A ?? null, { width: 1200, height: 900 });
-                    if (png) {
-                      const staged = await stageViaRelay(transport, item.cacheKey, "fsc-redraw", png, pushLog, item.cacheExt);
-                      if (staged) {
-                        const r = await bridgeDeliverFile(transport, { src: staged, dst });
-                        if (r.ok) {
-                          pushLog(`  ✓ ${item.filename}（FSC 曲线由 fsc.xml 以原图 4:3 比例重绘 · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
-                          outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
-                          delivered = true;
-                        }
-                      }
-                    }
-                  }
-                  /* Nothing shape-approved — deliver the first decodable
-                   * candidate rather than nothing at all. */
+                  /* Nothing shape-approved — deliver the first LIGHT,
+                   * decodable candidate rather than nothing at all. */
                   if (!delivered && fallback) {
                     const staged = await stageViaRelay(transport, item.cacheKey, fallback.url, fallback.bytes, pushLog, item.cacheExt);
                     if (staged) {
@@ -2670,7 +2734,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="auto">自适应（推荐 · 膜蛋白友好）</SelectItem>
+                    <SelectItem value="auto">自适应（信封内密度最高 25% · 推荐）</SelectItem>
                     <SelectItem value="classic">经典 0.25×max</SelectItem>
                     <SelectItem value="manual">手动倍数 ×max</SelectItem>
                   </SelectContent>
@@ -2693,7 +2757,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     : "对参考图在显示阈值之上去密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），截图相机按膜法线竖直、盘长轴水平取向 — 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（同一 map 结果可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。"
                   : "关闭膜视图：沿用基准 + 90° 覆盖率评分择优视角（v3.76 行为，适合可溶性蛋白）。"}
                 {levelMode === "auto"
-                  ? " 自适应 level：掩膜图（近零体素占比高，后处理 map）取 0.85×Otsu 阈值（主导类边界 — 正常图即溶剂/信号包络；去垢剂极热的图则是蛋白/去垢剂分界），并略偏低以保证蛋白在等值面内、helix 细节可见；未掩膜的原始图沿用 mean+2.5σ 经典噪声安全阈值。整体限制在 0.04–0.35×max — 膜蛋白 map 的去垢剂密度常高于蛋白，固定 0.25×max 会让表面只包住去垢剂盘而看不到内部 helix；对齐拟合阈值不受影响（恒为 0.25×max）。"
+                  ? " 自适应 level（v3.79）：优先取桥脚本按直方图计算的「信封内密度最高 25%」阈值（分子包络 = Otsu 溶剂/信号分界之上；表面贴住蛋白核心 + 去垢剂带头，既不追单点峰值也不落入溶剂噪声带）；旧桥脚本依次退回 0.85×Otsu（掩膜图）→ 0.25×max 兜底。整体限制在 0.03–0.5×max — 每张图在运行日志里都会注明所选 level 与规则；对齐拟合阈值不受影响（恒为 0.25×max）。"
                   : levelMode === "classic"
                     ? " 经典 level：0.25×max（v3.76 及之前行为）。"
                     : " 手动 level：按各图 max 的倍数设定（0.01–0.9），对齐拟合阈值不受影响（恒为 0.25×max）。"}
@@ -2789,7 +2853,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {bridge?.kind === "relay" && !bridge.canDeliver
                   ? "当前桥脚本无 /deliver（旧版 relay.py）— 在 ChimeraX 重新运行一次 relay.py 后即可自动交付。"
-                  : "生成流程图后自动把最终结果下载到该目录（地图 .mrc 先入本地缓存再复制，重复生成不重复下载；FSC/Guinier/角度分布图会校验比例，异常候选自动跳过或由 fsc.xml 按原图 4:3 比例重绘）；若最终 job 为 DeepEMhancer，则交付其上游 refine job 的这些文件并额外输出 map-DeepEMhancer.mrc；所有 map 按参考手性判定纠正（镜像 → ChimeraX z-flip 翻正后保存）。目录与前缀会记住。"}
+                  : "生成流程图后自动把最终结果下载到该目录（地图 .mrc 先入本地缓存再复制，重复生成不重复下载；FSC 曲线优先由 fsc.xml 按原图 4:3 比例重绘、不采信来源不明的同名候选图；Guinier/角度分布图会校验比例与底色，深色（疑似地图截图）或比例异常的候选自动跳过）；若最终 job 为 DeepEMhancer，则交付其上游 refine job 的这些文件并额外输出 map-DeepEMhancer.mrc；所有 map 按参考手性判定纠正（镜像 → ChimeraX z-flip 翻正后保存）。目录与前缀会记住。"}
               </p>
             </div>
             {!bridge && (
@@ -3053,7 +3117,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">交付</span>
               <span>
                 填写「<b>交付文件</b>」目录后，每次生成自动把最终结果下载到 ChimeraX 机器的该目录：
-                <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp.mrc"}</code> 等（unsharp / sharp / half A / half B 地图均带 .mrc 后缀；FSC / Guinier / 角度分布图下载前校验比例与尺寸，异常候选自动跳过，FSC 无可用原图时由 fsc.xml 按原图 4:3 比例重绘；fsc.xml 内嵌数据直达失败时自动改经本地暂存写入；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer.mrc）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
+                <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp.mrc"}</code> 等（unsharp / sharp / half A / half B 地图均带 .mrc 后缀；FSC 曲线优先由 fsc.xml 按原图 4:3 比例重绘、不采信来源不明的同名候选图；Guinier / 角度分布图下载前校验比例、尺寸与底色，深色（疑似地图截图）或比例异常的候选自动跳过；fsc.xml 内嵌数据直达失败时自动改经本地暂存写入；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer.mrc）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
               </span>
             </li>
           </ul>

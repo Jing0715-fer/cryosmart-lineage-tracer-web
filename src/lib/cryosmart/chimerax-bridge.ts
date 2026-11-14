@@ -501,6 +501,14 @@ export interface BridgeVolStats {
    *  masked postprocessed maps (solvent exactly 0), low on raw noisy
    *  ones; the 自适应 display level rides Otsu only for masked maps. */
   zeroFrac?: number;
+  /** v3.79 (round-39 “用最大的25%会不会更好？”): the relay-suggested
+   *  DISPLAY level — the threshold keeping the DENSEST 25% of the
+   *  molecular-envelope voxels (envelope = voxels at/above the Otsu
+   *  split) inside the surface. First rung of the 自适应 chain. */
+  suggested?: number;
+  /** v3.79: envelope voxel fraction (above-Otsu / total) — diagnostics
+   *  for the run log. */
+  envFrac?: number;
 }
 
 export async function bridgeVolStats(
@@ -511,7 +519,15 @@ export async function bridgeVolStats(
   try {
     const res = await fetchWithTimeout(`${t.base}/volstats?id=${modelId}`, { method: "GET" }, 120_000);
     if (!res.ok) return null;
-    const data = (await res.json()) as { max?: number; mean?: number; sd?: number; otsu?: number; zero_frac?: number };
+    const data = (await res.json()) as {
+      max?: number;
+      mean?: number;
+      sd?: number;
+      otsu?: number;
+      zero_frac?: number;
+      suggested_level?: number;
+      env_frac?: number;
+    };
     if (typeof data.max !== "number") return null;
     return {
       max: data.max,
@@ -519,6 +535,11 @@ export async function bridgeVolStats(
       sd: data.sd ?? 0,
       otsu: typeof data.otsu === "number" && Number.isFinite(data.otsu) ? data.otsu : undefined,
       zeroFrac: typeof data.zero_frac === "number" && Number.isFinite(data.zero_frac) ? data.zero_frac : undefined,
+      suggested:
+        typeof data.suggested_level === "number" && Number.isFinite(data.suggested_level)
+          ? data.suggested_level
+          : undefined,
+      envFrac: typeof data.env_frac === "number" && Number.isFinite(data.env_frac) ? data.env_frac : undefined,
     };
   } catch {
     return null;
@@ -1334,9 +1355,15 @@ const MEMBRANE_OBLATE_MAX = 0.75;
  * peak into the same detergent-only regime the policy exists to fix. */
 const DISPLAY_LEVEL_MIN_RATIO = 0.04;
 const DISPLAY_LEVEL_MAX_RATIO = 0.35;
-/** v3.77: the sd-based contour for UNMASKED raw maps (mean + k·sd — the
- * classic noise-safe level) and the Otsu bias for masked ones. */
-const DISPLAY_LEVEL_SD_K = 2.5;
+/** v3.79 (round-39 “用最大的25%”): the relay-suggested top-25%-of-envelope
+ * level rides its own wider clamp — the envelope percentile is already
+ * peak-agnostic and noise-safe, so it must not be squeezed into the
+ * detergent-guard ceiling that the raw heuristics below still need. */
+const DISPLAY_LEVEL_SUGGESTED_MIN_RATIO = 0.03;
+const DISPLAY_LEVEL_SUGGESTED_MAX_RATIO = 0.5;
+/** v3.77: the Otsu bias for masked maps (v3.79: the mean+k·sd raw-map
+ * branch is GONE — it landed inside the solvent-noise band and speckled;
+ * the fallback for keys-less relays is the classic 0.25×max). */
 const DISPLAY_LEVEL_OTSU_BIAS = 0.85;
 /** v3.77: near-zero voxel fraction above which the map reads as MASKED
  * (postprocessed — solvent exactly 0) and the level rides 0.85×otsu; a
@@ -1394,37 +1421,68 @@ function requestColor(req: { color?: string }): string {
 }
 
 /** v3.77 (round-37 “level不能太高，要不看到都是去垢剂，看不到内部的helix
- * 细节了”): the screenshot DISPLAY contour level for one map, from its
+ * 细节了”) → v3.79 (round-39 “level的选择还是不正常…用最大的25%会不会
+ * 更好？”): the screenshot DISPLAY contour level for one map, from its
  * own volume statistics. The FIT levels stay at the tuned 0.25×max —
  * this policy only re-levels a model right before ITS screenshot, so
  * alignment behavior is untouched.
  *
- *  - "auto" (masked map, zeroFrac ≥ 0.25 — postprocessed): 0.85×otsu
- *    clamped to [0.04, 0.35]×max. Otsu finds the DOMINANT class split:
- *    solvent/signal on a normal map, and protein/detergent-belt when
- *    the micelle is the hottest feature (the exact case where the fixed
- *    0.25×max wrapped only the detergent disk and hid the protein — the
- *    belt's hot density inflated max, not the protein). The 0.85 bias
- *    keeps the level slightly BELOW the split so the protein stays
- *    inside the contour with its helix detail.
- *  - "auto" (unmasked raw map, or an old relay without the otsu key):
- *    mean + 2.5·sd — the classic noise-safe contour (Otsu would split
- *    WITHIN the noise bell on a 95%-solvent noisy map and show
- *    speckle; mean+k·sd does not chase peaks either way).
+ *  - "auto" rung 1 (relay ≥ v3.79, `suggested`): the top-25%-of-envelope
+ *    threshold — the relay walks the grid histogram down from the max
+ *    until exactly 25% of the above-Otsu (molecular envelope) voxels
+ *    remain, clamped [0.03, 0.5]×max. That hugs the protein core +
+ *    detergent-belt heads: low enough to keep the protein inside the
+ *    contour with helix detail, high enough to stay above the solvent
+ *    noise (the user's “最大的25%” proposal, made adaptive per map).
+ *  - "auto" rung 2 (relay v3.77–3.78): masked map (zeroFrac ≥ 0.25):
+ *    0.85×otsu clamped [0.04, 0.35]×max.
+ *  - "auto" rung 3 (older relay / no keys): 0.25×max — the classic
+ *    level. v3.79 NOTE: this replaces mean+2.5·sd, which speckled
+ *    badly on raw/unmasked maps (solvent noise is 90 %+ of the grid,
+ *    so mean+k·sd lands INSIDE the noise band and the render shows a
+ *    snowball of disconnected speckles — exactly the round-38 P283_J55
+ *    delivered screenshots).
  *  - "classic": 0.25×max exactly (pre-3.77 behavior).
- *  - "manual": a user-set fraction of max, clamped to [0.01, 0.9] before
- *    it reaches here and to the same display clamps as auto. */
-function displayLevelFor(stats: BridgeVolStats | null, policy: ContourLevelPolicy): number | null {
+ *  - "manual": a user-set fraction of max, clamped to [0.01, 0.9]
+ *    before it reaches here and to the same display clamps as auto. */
+export interface DisplayLevelChoice {
+  level: number;
+  /** Which rung produced the level — for the run log. */
+  rule: string;
+}
+
+function displayLevelFor(stats: BridgeVolStats | null, policy: ContourLevelPolicy): DisplayLevelChoice | null {
   if (!stats || !Number.isFinite(stats.max) || stats.max <= 0) return null;
-  if (policy.mode === "classic") return stats.max * LEVEL_RATIO;
-  const clampToDisplay = (v: number) =>
-    Math.min(Math.max(v, DISPLAY_LEVEL_MIN_RATIO * stats!.max), DISPLAY_LEVEL_MAX_RATIO * stats!.max);
-  if (policy.mode === "manual") return clampToDisplay(stats.max * policy.ratio);
+  if (policy.mode === "classic") return { level: stats.max * LEVEL_RATIO, rule: "经典 0.25×max" };
+  const clampTo = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo * stats!.max), hi * stats!.max);
+  if (policy.mode === "manual") {
+    return {
+      level: clampTo(stats.max * policy.ratio, DISPLAY_LEVEL_MIN_RATIO, DISPLAY_LEVEL_MAX_RATIO),
+      rule: `手动 ${policy.ratio}×max`,
+    };
+  }
+  if (Number.isFinite(stats.suggested as number) && (stats.suggested as number) > 0) {
+    return {
+      level: clampTo(stats.suggested as number, DISPLAY_LEVEL_SUGGESTED_MIN_RATIO, DISPLAY_LEVEL_SUGGESTED_MAX_RATIO),
+      rule: `自适应 信封内密度最高25%（${((stats.suggested as number) / stats.max).toFixed(3)}×max${
+        Number.isFinite(stats.envFrac as number) ? `，信封体素 ${((stats.envFrac as number) * 100).toFixed(1)}%` : ""
+      }）`,
+    };
+  }
   const masked = Number.isFinite(stats.zeroFrac as number) && (stats.zeroFrac as number) >= DISPLAY_LEVEL_MASKED_ZERO_FRAC;
-  const base = masked && Number.isFinite(stats.otsu as number)
-    ? DISPLAY_LEVEL_OTSU_BIAS * (stats.otsu as number)
-    : stats.mean + DISPLAY_LEVEL_SD_K * stats.sd;
-  return clampToDisplay(base);
+  if (masked && Number.isFinite(stats.otsu as number)) {
+    return {
+      level: clampTo(
+        DISPLAY_LEVEL_OTSU_BIAS * (stats.otsu as number),
+        DISPLAY_LEVEL_MIN_RATIO,
+        DISPLAY_LEVEL_MAX_RATIO,
+      ),
+      rule: `自适应 0.85×Otsu（${((stats.otsu as number) / stats.max).toFixed(3)}×max，近零体素 ${(
+        ((stats.zeroFrac as number) * 100).toFixed(0)
+      )}%）`,
+    };
+  }
+  return { level: stats.max * LEVEL_RATIO, rule: "自适应 兜底 0.25×max" };
 }
 
 export type ChiralityStatus = "consistent" | "corrected" | "ambiguous" | "unknown";
@@ -2042,7 +2100,11 @@ export async function renderFigureMaps(
      * model with its z-flipped copy; a flip preserves the value
      * distribution, but reading the live model is the honest thing). */
     const refDispStats = await bridgeVolStats(t, refId);
-    const refDisplayLevel = displayLevelFor(refDispStats, contourPolicy) ?? refLevel;
+    const refDisplayChoice = displayLevelFor(refDispStats, contourPolicy);
+    const refDisplayLevel = refDisplayChoice?.level ?? refLevel;
+    if (refDisplayChoice) {
+      log(`参考图截图 level ${refDisplayChoice.level.toFixed(4)}（${refDisplayChoice.rule}）`);
+    }
     if (refDisplayLevel != null) displayLevelById.set(refId, refDisplayLevel);
     let membraneApplied = false;
     if (opts.membraneView?.mode === "auto") {
@@ -2052,23 +2114,31 @@ export async function renderFigureMaps(
         : null;
       if (mem && mem.ratio < MEMBRANE_OBLATE_MAX) {
         /* v3.78 (round-38 “之前说错了，应该是去垢剂盘放在xz平面”): the SIDE
-         * view. `view matrix camera` takes the camera axes as rows in
-         * scene coordinates — row X = screen right, row Y = screen up,
-         * row Z = toward the viewer. The membrane normal goes on screen
-         * UP (row Y) and the disk's LONGEST in-plane principal axis (ea,
-         * λmax) on screen RIGHT (row X), so the detergent disk surface
-         * spans screen X × Z = the XZ plane: the belt reads as a
-         * horizontal band, the transmembrane helices cross it vertically
-         * and stay visible (the v3.77 top-down view looked straight down
-         * the normal and the micelle slab covered the helix detail).
-         * Right-handedness: row Z = X × Y = ea × n (= −eb; the relay's
-         * triad has ea × eb = n). Which of ±n is 包外 (extracellular)
-         * cannot be derived from density alone — the default sign is
-         * deterministic (the normal's first significant component in
-         * map-frame Y/Z/X order is forced >= 0); `flip` rolls the view
-         * 180° about the screen horizontal axis (rows [ea; −n; ea×−n])
-         * so the OTHER membrane side points up (包内/包外互换 — the
-         * protein's other face shows, a rolled-over disk). */
+         * view — the detergent disk stands in the screen XZ plane: the
+         * membrane normal runs VERTICALLY on screen (the belt reads as a
+         * horizontal band, the transmembrane helices cross it vertically)
+         * and the disk's LONGEST in-plane principal axis (ea, λmax) runs
+         * horizontally. Which of ±n is 包外 (extracellular) cannot be
+         * derived from density alone — the default sign is deterministic
+         * (the normal's first significant component in map-frame Y/Z/X
+         * order is forced >= 0); `flip` flips the up side.
+         *
+         * v3.79 (round-39 “map的朝向还是不对”): the v3.78 camera rode
+         * `view matrix camera <9 numbers>` — but ChimeraX REQUIRES 12
+         * comma-separated numbers there (3×3 rotation + translation, per
+         * the view docs), so every real ChimeraX rejected the command and
+         * the run silently fell back to the coverage view (top-down for
+         * an oblate particle — exactly the delivered P283_J55 renders).
+         * The fix composes the SAME rotation as a single `turn
+         * <axis> <angle>`: turn takes its axis in the SCREEN coordinate
+         * system and rotates the scene about the center of rotation, so
+         * no camera position is needed. Math: read the current camera
+         * rotation R0 (bare `view matrix` prints it to the log; identity
+         * assumed when unparsable), express the target triad in the
+         * current camera frame — a = R0ᵀ·ea, b = R0ᵀ·n, c = R0ᵀ·(ea×n) —
+         * then the scene rotation T with rows [a; b; c] sends a→x̂,
+         * b→ŷ (membrane normal VERTICAL), c→ẑ. Axis-angle(T) becomes the
+         * one turn command. */
         const scaleVec = (v: [number, number, number], s: number): [number, number, number] => [
           v[0] * s,
           v[1] * s,
@@ -2097,8 +2167,98 @@ export async function renderFigureMaps(
         const zRaw = crossVec(xAxis, yAxis); // toward viewer, unit (ea ⊥ n)
         const zLen = Math.hypot(zRaw[0], zRaw[1], zRaw[2]);
         const zAxis: [number, number, number] = zLen > 1e-9 ? scaleVec(zRaw, 1 / zLen) : zRaw;
-        const camera = [...xAxis, ...yAxis, ...zAxis].map((v) => v.toFixed(6)).join(",");
-        const r = await exec(t, `view matrix camera ${camera}`, opts, true);
+        /* v3.79: current camera rotation (rows map camera→scene). Bare
+         * `view matrix` reports "camera: <12 numbers>" in the log — a
+         * ROW-MAJOR 3×4 [rotation | translation] where the translation
+         * occupies indices 3/7/11 (the first E2E run read nums[0..8]
+         * flat, folding the translation into the rotation and producing
+         * a garbage turn — caught by comparing the recorded command
+         * against the hand-computed identity-base expectation). A
+         * rotation-only re-orientation composes safely with any base. */
+        let r0: [number, number, number][] | null = null;
+        {
+          const vm = await exec(t, "view matrix", opts, true);
+          if (!vm.error) {
+            const m = /camera[^\d\-+]*((?:[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?[\s,]+){11}[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i.exec(vm.text);
+            if (m) {
+              const nums = m[1].match(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/g)?.map(Number) ?? [];
+              if (nums.length >= 12 && nums.slice(0, 12).every((x) => Number.isFinite(x))) {
+                const rot: [number, number, number][] = [
+                  [nums[0], nums[1], nums[2]],
+                  [nums[4], nums[5], nums[6]],
+                  [nums[8], nums[9], nums[10]],
+                ];
+                /* reject degenerate parses (a malformed/garbage line must
+                 * not corrupt the turn — fall back to the identity base) */
+                const det =
+                  rot[0][0] * (rot[1][1] * rot[2][2] - rot[1][2] * rot[2][1]) -
+                  rot[0][1] * (rot[1][0] * rot[2][2] - rot[1][2] * rot[2][0]) +
+                  rot[0][2] * (rot[1][0] * rot[2][1] - rot[1][1] * rot[2][0]);
+                if (Math.abs(det) > 0.9) r0 = rot;
+              }
+            }
+          }
+        }
+        /* toCam(v) = R₀ᵀ·v — a SCENE vector's appearance in the current
+         * camera frame (R₀ maps camera→scene, so the inverse maps
+         * scene→camera). After `turn u θ` (scene rotation conjugated into
+         * the screen frame) a scene vector v appears as T·(R₀ᵀ·v), which
+         * is exactly what rows [a; b; c] send to x̂/ŷ/ẑ. */
+        const toCam = (v: [number, number, number]): [number, number, number] =>
+          r0
+            ? [
+                r0[0][0] * v[0] + r0[1][0] * v[1] + r0[2][0] * v[2],
+                r0[0][1] * v[0] + r0[1][1] * v[1] + r0[2][1] * v[2],
+                r0[0][2] * v[0] + r0[1][2] * v[1] + r0[2][2] * v[2],
+              ]
+            : v;
+        const a = toCam(xAxis);
+        const b = toCam(yAxis);
+        const c = toCam(zAxis);
+        /* T rows [a; b; c] — the scene rotation (screen frame) that puts
+         * the disk long axis horizontal, the membrane normal vertical. */
+        const trT = a[0] + b[1] + c[2];
+        const cosT = Math.min(1, Math.max(-1, (trT - 1) / 2));
+        const theta = Math.acos(cosT); // radians, [0, π]
+        let turnCmd: string | null = null;
+        if (theta > 1e-4) {
+          let ux = c[1] - b[2];
+          let uy = a[2] - c[0];
+          let uz = b[0] - a[1];
+          let uLen = Math.hypot(ux, uy, uz);
+          if (uLen < 1e-7) {
+            /* θ≈π (or numerically degenerate): T = 2uuᵀ−I ⇒ uᵢ = ±√((Tᵢᵢ+1)/2);
+             * fix u_k = +√ on the LARGEST component, then the other two
+             * from T_ki = 2·u_k·u_i (either overall sign works at θ=π). */
+            const mag: [number, number, number] = [
+              Math.sqrt(Math.max(0, (a[0] + 1) / 2)),
+              Math.sqrt(Math.max(0, (b[1] + 1) / 2)),
+              Math.sqrt(Math.max(0, (c[2] + 1) / 2)),
+            ];
+            let best = 0;
+            for (let i = 1; i < 3; i++) if (mag[i] > mag[best]) best = i;
+            const u: [number, number, number] = [0, 0, 0];
+            u[best] = mag[best] || 1e-6;
+            const twoUk = 2 * u[best];
+            if (best === 0) {
+              u[1] = a[1] / twoUk;
+              u[2] = a[2] / twoUk;
+            } else if (best === 1) {
+              u[0] = b[0] / twoUk;
+              u[2] = b[2] / twoUk;
+            } else {
+              u[0] = c[0] / twoUk;
+              u[1] = c[1] / twoUk;
+            }
+            [ux, uy, uz] = u;
+            uLen = Math.hypot(ux, uy, uz) || 1;
+          }
+          ux /= uLen;
+          uy /= uLen;
+          uz /= uLen;
+          turnCmd = `turn ${ux.toFixed(6)},${uy.toFixed(6)},${uz.toFixed(6)} ${((theta * 180) / Math.PI).toFixed(4)}`;
+        }
+        const r = turnCmd ? await exec(t, turnCmd, opts, true) : { text: "", error: null as string | null };
         if (!r.error) {
           await exec(t, "wait 1", opts, true);
           membraneApplied = true;
@@ -2119,10 +2279,10 @@ export async function renderFigureMaps(
             }`,
           };
           log(
-            `膜视图 ✓: ${membraneReport.note} — 默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（可复现）；密度无法判断包内/包外 — 若朝上的不是包外区，在「膜蛋白视图」勾选「上下翻转 180°」后重新生成`,
+            `膜视图 ✓: ${membraneReport.note} — 由基准视角单次 turn 旋转对齐（${turnCmd ?? "已在目标视角，无需旋转"}）${r0 ? "，已按当前相机姿态换算" : ""}；默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（可复现）；密度无法判断包内/包外 — 若朝上的不是包外区，在「膜蛋白视图」勾选「上下翻转 180°」后重新生成`,
           );
         } else {
-          log(`⚠ 膜视图不可用: view matrix camera 失败（${logSnippet(r.error, 120)}）— 退回覆盖率择优视角`);
+          log(`⚠ 膜视图不可用: 膜平面旋转命令失败（${logSnippet(r.error, 120)}）— 退回覆盖率择优视角`);
         }
       } else if (mem) {
         log(
@@ -2576,12 +2736,16 @@ export async function renderFigureMaps(
         openIds.add(origId);
         const stats = await bridgeVolStats(t, origId);
         const level = stats ? stats.max * LEVEL_RATIO : refLevel;
-        /* v3.77: the DISPLAY level for this map's screenshot (auto Otsu
-         * envelope / classic / manual — see displayLevelFor). The fit
-         * level above stays 0.25×max; the screenshot loop applies the
-         * display level right before rendering. */
-        const mapDisplayLevel = displayLevelFor(stats, contourPolicy);
-        if (mapDisplayLevel != null) displayLevelById.set(origId, mapDisplayLevel);
+        /* v3.77 → v3.79: the DISPLAY level for this map's screenshot
+         * (自适应 信封内密度最高 25% → 0.85×Otsu → 0.25×max 兜底 / classic /
+         * manual — see displayLevelFor). The fit level above stays
+         * 0.25×max; the screenshot loop applies the display level right
+         * before rendering. */
+        const mapDisplayChoice = displayLevelFor(stats, contourPolicy);
+        if (mapDisplayChoice) {
+          displayLevelById.set(origId, mapDisplayChoice.level);
+          log(`  ${req.key}: 截图 level ${mapDisplayChoice.level.toFixed(4)}（${mapDisplayChoice.rule}）`);
+        }
         if (level != null) {
           await exec(t, `volume #${origId} level ${level.toFixed(4)} step ${STEP}`, opts, true);
         } else {
@@ -2630,11 +2794,11 @@ export async function renderFigureMaps(
           openIds.add(flipId);
           const stats2 = await bridgeVolStats(t, flipId);
           const level2 = stats2 ? stats2.max * LEVEL_RATIO : refLevel;
-          /* v3.77: display level for the flipped hand's screenshot (same
-           * policy as the original — the flip preserves the value
+          /* v3.77 → v3.79: display level for the flipped hand's screenshot
+           * (same policy as the original — the flip preserves the value
            * distribution, so the two levels coincide). */
-          const flipDisplayLevel = displayLevelFor(stats2, contourPolicy);
-          if (flipDisplayLevel != null) displayLevelById.set(flipId, flipDisplayLevel);
+          const flipDisplayChoice = displayLevelFor(stats2, contourPolicy);
+          if (flipDisplayChoice) displayLevelById.set(flipId, flipDisplayChoice.level);
           if (level2 != null) {
             await exec(t, `volume #${flipId} level ${level2.toFixed(4)} step ${STEP}`, opts, true);
           }

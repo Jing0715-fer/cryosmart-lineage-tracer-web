@@ -1092,6 +1092,44 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
     };
   }
 
+  // v3.79 contract guard: bare `view matrix` REPORTS the camera + model
+  // matrices in the log (12 comma-separated numbers each — identity camera
+  // here, which the page's membrane-view math reads and compensates for).
+  if (/^view\s+matrix\s*$/i.test(command)) {
+    return {
+      text: "camera: 1.000000,0.000000,0.000000,0.000000,0.000000,1.000000,0.000000,0.000000,0.000000,0.000000,1.000000,0.000000",
+      error: null,
+    };
+  }
+  // v3.79 contract guard: `view matrix camera` REQUIRES 12 (or 16)
+  // comma-separated numbers — real ChimeraX rejects the 9-number
+  // rotation-only form that v3.78 shipped (the delivered membrane view
+  // silently fell back to the top-down coverage view). Any future
+  // 9-number camera matrix fails loudly in E2E instead.
+  const vmcMatch = /^view\s+matrix\s+camera\s+([\d.,eE+\-\s]+)$/i.exec(command);
+  if (vmcMatch) {
+    const n = vmcMatch[1].split(",").filter((s) => s.trim() !== "").length;
+    if (n !== 12 && n !== 16) {
+      return {
+        text: "",
+        error: `UserError: view matrix camera: expected 12 or 16 numbers, got ${n}`,
+      };
+    }
+    return { text: "", error: null };
+  }
+  // v3.79: the membrane view now orients via a single screen-frame
+  // `turn <axis> <angle>` (axis = 3 comma-separated numbers, angle in
+  // degrees) — validate the shape so a malformed turn fails loudly.
+  const turnVecMatch = /^turn\s+(-?[\d.eE+]+),(-?[\d.eE+]+),(-?[\d.eE+]+)\s+(-?[\d.eE+.]+)$/i.exec(command);
+  if (turnVecMatch) {
+    const u = [Number(turnVecMatch[1]), Number(turnVecMatch[2]), Number(turnVecMatch[3])];
+    const len = Math.hypot(u[0], u[1], u[2]);
+    if (!(len > 0.99 && len < 1.01)) {
+      return { text: "", error: `UserError: turn: axis must be a unit vector (|u|=${len.toFixed(3)})` };
+    }
+    return { text: "", error: null };
+  }
+
   // volume level/step, set bgColor, view *, turn *, wait, hide/show —
   // silent success, exactly like the real relay's captured empty log.
   return { text: "", error: null };
@@ -1143,6 +1181,9 @@ const relayServer = Bun.serve({
           // the screen XZ plane, v3.78). Without the flag the page treats
           // this relay as legacy and falls back to the coverage view.
           membrane: true,
+          // v3.79: mirrors relay.py's /volstats suggested_level key (the
+          // top-25%-of-envelope display threshold).
+          vollevel: true,
           cacheDir: relayState.cacheDir,
           cached: relayState.staged.size,
           volumes: relayState.models.size,
@@ -1318,12 +1359,14 @@ const relayServer = Bun.serve({
       if (u.pathname === "/volstats") {
         const id = Number(u.searchParams.get("id"));
         if (!relayState.models.has(id)) return reply(404, { error: `model #${id} not found` });
-        // v3.77 E2E: the OTSU threshold + NEAR-ZERO voxel fraction the
-        // page's 自适应 screenshot level rides — zero_frac 0.62 ≥ 0.25
-        // reads as a MASKED postprocessed map (a membrane-protein map whose
-        // hottest feature is the detergent micelle), so the display level
-        // becomes 0.85 × otsu = 0.153 (inside the [0.04, 0.35]×max clamp)
-        // instead of the detergent-chasing fixed 0.25×max.
+        // v3.77 E2E: the OTSU threshold + NEAR-ZERO voxel fraction.
+        // v3.79 E2E: suggested_level — the top-25%-of-envelope display
+        // threshold the relay computes from the full grid histogram
+        // (envelope = voxels at/above otsu). With max 1.0 / otsu 0.18 /
+        // env_frac 0.06, the page's 自适应 level now lands on 0.26
+        // (rung 1) instead of the v3.77–78 0.85×otsu = 0.153 — the E2E
+        // log lines read “截图 level 0.2600（自适应 信封内密度最高25%…）”
+        // and the membrane-PCA threshold rides the same 0.26.
         return reply(200, {
           max: 1.0,
           mean: 0.1,
@@ -1331,26 +1374,29 @@ const relayServer = Bun.serve({
           min: -0.5,
           otsu: 0.18,
           zero_frac: 0.62,
+          suggested_level: 0.26,
+          env_frac: 0.06,
         });
       }
       if (u.pathname === "/membrane") {
-        // v3.77/v3.78 E2E: mirrors relay.py's GET /membrane — the
+        // v3.77/v3.78/v3.79 E2E: mirrors relay.py's GET /membrane — the
         // density-weighted PCA over the open model's above-level voxels.
         // The mock returns a FIXED oblate particle (membrane protein +
         // detergent micelle): smallest-variance principal axis
         // n = (2,1,2)/3 IS the membrane normal, ea = (1,-2,0)/√5 is the
         // disk's LONG in-plane axis, eb = n × ea completes the
         // right-handed triad (ea × eb = n), and λmin/λmid = 0.42 < 0.75
-        // passes the oblateness gate. Expected page behavior (v3.78 side
-        // view — detergent disk standing in the screen XZ plane):
+        // passes the oblateness gate. Expected page behavior (v3.79 side
+        // view — the target camera rotation rows [ea; n; ea×n=−eb] are
+        // composed into ONE screen-frame turn from the mock's identity
+        // base camera; verified numerically via Rodrigues — R·ea=(1,0,0),
+        // R·n=(0,1,0); see /flow-e2e/commands?filter=turn):
         //   default (sign rule: n's map-frame +Y component ≥ 0 → keep):
-        //     view matrix camera 0.447214,-0.894427,0.000000,
-        //       0.666667,0.333333,0.666667,
-        //      -0.596285,-0.298142,0.745356        (rows ea; n; ea×n=−eb)
-        //   flip (roll 180° about screen X — other membrane side up):
-        //     view matrix camera 0.447214,-0.894427,0.000000,
-        //      -0.666667,-0.333333,-0.666667,
-        //       0.596285,0.298142,-0.745356       (rows ea; −n; ea×−n=eb)
+        //     turn -0.500000,0.309017,0.809017 74.7547
+        //     (axis-angle of T = rows [ea; n; −eb])
+        //   flip (other membrane side up — n negated):
+        //     turn 0.834001,-0.515441,0.196881 144.6604
+        //     (axis-angle of T' = rows [ea; −n; eb])
         const mid = u.searchParams.get("id") || "";
         if (!mid) return reply(400, { error: "missing id" });
         if (!relayState.models.has(Number(mid))) {

@@ -2373,3 +2373,26 @@ Stage Summary:
 - 框图比例：嵌入 PNG 一律透明边裁剪（浏览器端流式解压/压缩实现，无依赖），选框只比图大约 0.08 in（与用户参考版一致）。
 - 间距：统计文字与框线留 0.09 in 间隙；标签右端离脊柱 0.11 in；超长页脚自动折行两行 7 pt。
 - 用户侧动作：刷新页面（徽标应为 引擎 v3.75）后重新生成三种模式即可。
+
+---
+
+## v3.79 — round-39: 交付三连修（FSC 假图 / 膜视角从未生效 / level 满屏噪声）— 根因全灭
+
+Task ID: 35 (v3.79)
+Agent: main (Z.ai Code)
+Task: User round-39 feedback with the delivered P283_J55 files: "这个fsc图还是不对啊，反而变得更错了。map的朝向还是不对，并且level的选择还是不正常，目前是如何识别的？用最大的25%会不会更好？" — VLM forensics on the uploaded TMEM175.volume.fsc.png + workflow.pptx, three root causes found and fixed.
+
+Work Log:
+- FORENSICS: (1) the uploaded "FSC" PNG (2047×497, matplotlib 3.3.1 tEXt) is a MAP-SLICE triplet + colorbar, NOT an FSC curve — a *fsc*-named job-folder file that sailed through the v3.76 w/h ≥ 1.05 shape check; (2) every map render in the delivered PPTX is a TOP-DOWN noise snowball (circular detergent ring + speckle); (3) ChimeraX view docs confirm `view matrix camera` REQUIRES 12 comma-separated numbers — v3.78 sent only 9, so EVERY real ChimeraX rejected the membrane camera command and the run silently fell back to the coverage ladder (which maximizes silhouette → top-down for an oblate particle). The E2E mock's /exec accepted anything, so the bug passed E2E.
+- chimerax-bridge.ts (1) 膜视角修复: the target rotation (rows [ea; n; ea×n] — disk long axis horizontal, membrane normal vertical) is now composed as ONE `turn <axis> <angle>` command (turn's axis is in the SCREEN coordinate system and pivots on the center of rotation — no camera position needed, immune to the 12-number requirement); the base camera rotation is read from a bare `view matrix` log report first (regex-tolerant parser; identity assumed when unparsable) so the single turn is correct from ANY base view; robust axis-angle extraction incl. the θ≈π diagonal fallback; θ≈0 skips the turn outright. The FIRST browser E2E run caught TWO more bugs in this own code (the mock's recorded command didn't match the hand-computed identity-base expectation turn -0.5,0.309017,0.809017 74.7547): (a) the `view matrix` report is a ROW-MAJOR 3×4 [rotation | translation] — the first parse read nums[0..8] FLAT, folding the translation (indices 3/7/11) into the rotation and building a degenerate matrix; (b) toCam computed R₀·v instead of R₀ᵀ·v (scene→camera needs the INVERSE). Both fixed (rotation from indices 0-2/4-6/8-10 + determinant guard; toCam = R₀ᵀ); the RE-RUN issued the EXACT expected command `turn -0.500000,0.309017,0.809017 74.7547` — Rodrigues-verified R·ea=(1,0,0), R·n=(0,1,0).
+- chimerax-bridge.ts (2) level 自适应链: displayLevelFor returns {level, rule} now and the chain is suggested_level (relay ≥ v3.79: top-25%-of-envelope threshold, clamp [0.03,0.5]×max) → 0.85×otsu (masked, relay v3.77–78, clamp [0.04,0.35]×max) → 0.25×max (older relays — mean+2.5σ is DELETED: on a 90%+ solvent grid it lands inside the noise band, which is exactly the delivered speckle snowball; it also fed /membrane a near-spherical noise blob, compounding the orientation failure). Every map's chosen level + rule is logged (参考图 + per-map lines).
+- relay.py: /volstats computes suggested_level (envelope = voxels ≥ Otsu split; walk the 257-bin histogram down from max until 25% of envelope voxels remain; guards env_count ≥ 64 and ≥ 5e-4·total; clamp [0.02,0.5]·max) + env_frac; /ping gains "vollevel": true; header docs updated.
+- flow-figure-card.tsx (3) FSC PNG 交付: when the captured fsc.xml text is aboard, the curve is RE-DRAWN from the XML FIRST (4:3, 1200×900 publication render — correct data + ratio, deterministic) and the image candidates only run when the XML draw/stage/deliver fails; pngDimensions → pngProbe also measures MEAN LUMINANCE (48×48 alpha-aware canvas downsample) and any plot candidate with mean luminance < 110 (dark background = map render / slice strip) is rejected with an explicit log note — dark candidates are NEVER delivered, not even as the off-ratio last resort (only LIGHT off-ratio ones are); the FSC ratio band tightens to [1.0, 2.5] with h ≥ 220; the levelMode select reads 自适应（信封内密度最高 25% · 推荐）with a rewritten help text; both delivery description strings updated.
+- report-e2e mock: /volstats serves suggested_level 0.26 + env_frac 0.06 (the page's 自适应 now lands on 0.26, membrane PCA rides the same); /ping mirrors vollevel; /exec gains CONTRACT GUARDS — bare `view matrix` reports an identity camera matrix (12 numbers), `view matrix camera` with ≠12/16 numbers fails loudly (the exact v3.78-class bug), the vector `turn x,y,z angle` form is validated for a unit axis; /membrane comment documents the expected default/flip turn commands (turn -0.5,0.309017,0.809017 74.7449 / turn 0.833672,-0.515554,0.196864 144.7211 from the identity base).
+- flow-engine-version.ts: v3.79 bump + full round-39 changelog.
+
+Stage Summary:
+- FSC PNG：优先由 fsc.xml 重绘（数据正确、比例恒 4:3），只有 XML 不可用时才试图像候选；候选必须白底（亮度 ≥110）且比例在 [1.0, 2.5] — 深色的地图截图/切片条永远不交付。
+- 膜视角：单条 `turn 轴 角` 实现（屏幕坐标系语义，无需相机平移），先读当前相机姿态再换算，任意基准视角下都正确；v3.78 的 9 数字 `view matrix camera` 从未被真实 ChimeraX 接受过（这是本轮朝向不对的根因），E2E 现在会校验命令合法性。
+- 截图 level：自适应 = 信封内密度最高 25%（桥脚本直方图计算，即用户建议的「最大的25%」）→ 0.85×Otsu → 0.25×max 兜底；mean+2.5σ 已删除（溶剂噪声带内 → 满屏斑点）；每张图的选择都会写进运行日志。
+- 用户侧动作：在 ChimeraX 重新 open 一次 relay.py（suggested_level 需要新桥），重新生成即可；运行日志会注明每张图的 level 与规则，膜视角会打印实际执行的 turn 命令。
