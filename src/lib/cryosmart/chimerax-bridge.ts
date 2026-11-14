@@ -299,8 +299,8 @@ export interface FlowTransport {
   canDeliver?: boolean;
   /** v3.77: relay-only — the bridge script advertises GET /membrane
    *  (density-weighted PCA of an open volume above a level — the
-   *  membrane-normal detection that lays the detergent disk flat in the
-   *  screen XY plane for membrane-protein screenshots) plus the /volstats
+   *  membrane-normal detection that stands the detergent disk in the
+   *  screen XZ plane for membrane-protein screenshots) plus the /volstats
    *  Otsu key. Relays without it fall back to the 90° coverage view with
    *  an upgrade hint. */
   canMembrane?: boolean;
@@ -1502,9 +1502,10 @@ export interface RenderMapsOptions {
    *  escalate SEARCH_PLACEMENTS × round). Default SEARCH_MAX_ROUNDS
    *  (3); clamped to [1, 6]. */
   searchMaxRounds?: number;
-  /** v3.77: the membrane-protein view orientation (see
-   *  MembraneViewOptions) — lays the detergent disk flat in the screen XY
-   *  plane via the relay's /membrane PCA before the screenshots. */
+  /** v3.77/v3.78: the membrane-protein view orientation (see
+   *  MembraneViewOptions) — stands the detergent disk in the screen XZ
+   *  plane (membrane normal vertical, disk long axis horizontal) via the
+   *  relay's /membrane PCA before the screenshots. */
   membraneView?: MembraneViewOptions;
   /** v3.77: the screenshot DISPLAY contour level policy (see
    *  ContourLevelPolicy / displayLevelFor). Alignment fit levels are
@@ -1549,27 +1550,35 @@ export interface ReferenceHandPolicy {
   manual?: "correct" | "mirrored";
 }
 
-/** v3.77 (round-37 “map的角度可能需要择优后再截图，尤其是膜蛋白…最好是
- *  能把去垢剂的盘子放在xy轴平面上，并且包内区朝下，包外区朝上”): the
- *  membrane-protein screenshot orientation. */
+/** v3.77 (round-37 “map的角度可能需要择优后再截图，尤其是膜蛋白…包内区
+ *  朝下，包外区朝上”) / v3.78 (round-38 “之前说错了，应该是去垢剂盘放在
+ *  xz平面”): the membrane-protein screenshot orientation — the classic
+ *  SIDE view. */
 export interface MembraneViewOptions {
   /** "auto": density-weighted PCA on the reference (relay /membrane, run
    *  inside ChimeraX on the open model) finds the membrane normal — the
    *  smallest-variance principal axis of the oblate protein+micelle
-   *  particle — and the camera looks straight down it, so the detergent
-   *  disk lies flat in the screen XY plane and the protein shows inside
-   *  the belt ring instead of hiding under the micelle slab. Falls back
-   *  to the 90° coverage ladder when the relay predates /membrane, the
-   *  endpoint errors, or the particle is not oblate enough (ratio
-   *  guard MEMBRANE_OBLATE_MAX).
+   *  particle. The camera is built so the normal runs VERTICALLY on
+   *  screen (screen up) and the disk's longest in-plane axis runs
+   *  horizontally: the detergent disk stands in the screen XZ plane, the
+   *  belt reads as a horizontal band and the transmembrane helices cross
+   *  it vertically (包内区朝下、包外区朝上 — which of ±normal is the
+   *  extracellular side cannot be derived from density; see flip). The
+   *  v3.77 top-down view (camera straight down the normal) hid the
+   *  protein under the micelle slab and is gone. Falls back to the 90°
+   *  coverage ladder when the relay predates /membrane, the endpoint
+   *  errors, or the particle is not oblate enough (ratio guard
+   *  MEMBRANE_OBLATE_MAX).
    *  "off": pre-3.77 coverage scoring (best for soluble proteins). */
   mode: "off" | "auto";
-  /** View the OTHER face (180°): once the disk is laid flat, WHICH side
-   *  faces the viewer cannot be derived from density alone — the default
-   *  shows the face the PCA normal's reference-frame Z component points
-   *  at (deterministic per map); flip when the biology says the other
-   *  side is the one to show (e.g. the extracellular domain should face
-   *  the viewer but points away). */
+  /** Roll 180° about the screen horizontal axis so the OTHER membrane
+   *  side points up (the protein's other face shows — a rolled-over
+   *  disk): once the disk stands in the XZ plane, WHICH side (包内/包外)
+   *  is up cannot be derived from density alone — the default picks the
+   *  normal sign deterministically (first significant component in
+   *  map-frame Y/Z/X order ≥ 0, reproducible per map); flip when the
+   *  biology says the other side belongs up (e.g. 包外区 should point
+   *  up but points down). */
   flip?: boolean;
 }
 
@@ -2037,39 +2046,64 @@ export async function renderFigureMaps(
     if (refDisplayLevel != null) displayLevelById.set(refId, refDisplayLevel);
     let membraneApplied = false;
     if (opts.membraneView?.mode === "auto") {
-      progress("膜平面检测（参考图密度 PCA · 去垢剂盘置 XY 平面）", 9);
+      progress("膜平面检测（参考图密度 PCA · 去垢剂盘立 XZ 平面）", 9);
       const mem = t.kind === "relay" && t.canMembrane
         ? await bridgeMembraneAxis(t, refId, refDisplayLevel ?? refLevel ?? 0)
         : null;
       if (mem && mem.ratio < MEMBRANE_OBLATE_MAX) {
-        /* Camera basis: `view matrix camera` takes the camera axes as
-         * rows in scene coordinates — X = screen right (in-plane), Y =
-         * screen up (in-plane), Z = toward the viewer (the membrane
-         * normal). Looking straight down the normal lays the detergent
-         * disk flat in the screen XY plane, so viewed top-down the belt
-         * is a RING around the protein and the internal helices stay
-         * visible (a side view would put the micelle slab over them).
-         * The default face is deterministic (the normal's reference-frame
-         * Z component is forced >= 0); `flip` views the other side —
-         * which side is 包内/包外 cannot be derived from density alone. */
-        const flipVec = (v: [number, number, number]): [number, number, number] => [-v[0], -v[1], -v[2]];
+        /* v3.78 (round-38 “之前说错了，应该是去垢剂盘放在xz平面”): the SIDE
+         * view. `view matrix camera` takes the camera axes as rows in
+         * scene coordinates — row X = screen right, row Y = screen up,
+         * row Z = toward the viewer. The membrane normal goes on screen
+         * UP (row Y) and the disk's LONGEST in-plane principal axis (ea,
+         * λmax) on screen RIGHT (row X), so the detergent disk surface
+         * spans screen X × Z = the XZ plane: the belt reads as a
+         * horizontal band, the transmembrane helices cross it vertically
+         * and stay visible (the v3.77 top-down view looked straight down
+         * the normal and the micelle slab covered the helix detail).
+         * Right-handedness: row Z = X × Y = ea × n (= −eb; the relay's
+         * triad has ea × eb = n). Which of ±n is 包外 (extracellular)
+         * cannot be derived from density alone — the default sign is
+         * deterministic (the normal's first significant component in
+         * map-frame Y/Z/X order is forced >= 0); `flip` rolls the view
+         * 180° about the screen horizontal axis (rows [ea; −n; ea×−n])
+         * so the OTHER membrane side points up (包内/包外互换 — the
+         * protein's other face shows, a rolled-over disk). */
+        const scaleVec = (v: [number, number, number], s: number): [number, number, number] => [
+          v[0] * s,
+          v[1] * s,
+          v[2] * s,
+        ];
+        const crossVec = (
+          a: [number, number, number],
+          b: [number, number, number],
+        ): [number, number, number] => [
+          a[1] * b[2] - a[2] * b[1],
+          a[2] * b[0] - a[0] * b[2],
+          a[0] * b[1] - a[1] * b[0],
+        ];
         let n: [number, number, number] = [...mem.normal];
-        let eb: [number, number, number] = [...mem.eb];
-        if (n[2] < 0) {
-          n = flipVec(n);
-          eb = flipVec(eb);
+        /* deterministic default up side: the chosen +n points toward the
+         * map frame's +Y (then +Z, then +X) — same map, same side up. */
+        for (const i of [1, 2, 0] as const) {
+          if (Math.abs(n[i]) > 1e-6) {
+            if (n[i] < 0) n = scaleVec(n, -1);
+            break;
+          }
         }
-        if (opts.membraneView.flip) {
-          n = flipVec(n);
-          eb = flipVec(eb);
-        }
-        const camera = [...mem.ea, ...eb, ...n].map((v) => v.toFixed(6)).join(",");
+        if (opts.membraneView.flip) n = scaleVec(n, -1);
+        const xAxis = mem.ea; // disk long axis → horizontal on screen
+        const yAxis = n; // membrane normal → vertical (this side up)
+        const zRaw = crossVec(xAxis, yAxis); // toward viewer, unit (ea ⊥ n)
+        const zLen = Math.hypot(zRaw[0], zRaw[1], zRaw[2]);
+        const zAxis: [number, number, number] = zLen > 1e-9 ? scaleVec(zRaw, 1 / zLen) : zRaw;
+        const camera = [...xAxis, ...yAxis, ...zAxis].map((v) => v.toFixed(6)).join(",");
         const r = await exec(t, `view matrix camera ${camera}`, opts, true);
         if (!r.error) {
           await exec(t, "wait 1", opts, true);
           membraneApplied = true;
           view = {
-            desc: `膜平面俯视${opts.membraneView.flip ? " · 翻转" : ""}`,
+            desc: `膜侧面视图${opts.membraneView.flip ? " · 翻转" : ""}`,
             x: 0,
             y: 0,
             score: mem.ratio,
@@ -2078,14 +2112,14 @@ export async function renderFigureMaps(
             applied: true,
             ratio: mem.ratio,
             normal: mem.normal,
-            note: `去垢剂盘已置于画面 XY 平面（法线=(${mem.normal
+            note: `去垢剂盘已立于画面 XZ 平面（膜法线竖直=(${mem.normal
               .map((v) => v.toFixed(3))
-              .join(", ")})，扁率 λmin/λmid=${mem.ratio.toFixed(3)}，阈值体素 ${mem.count}/${mem.total}）${
-              opts.membraneView.flip ? "，并按设置上下翻转 180° 看另一面" : ""
+              .join(", ")})，盘长轴水平，扁率 λmin/λmid=${mem.ratio.toFixed(3)}，阈值体素 ${mem.count}/${mem.total}）${
+              opts.membraneView.flip ? "，并按设置上下翻转 180°（另一面朝上）" : ""
             }`,
           };
           log(
-            `膜视图 ✓: ${membraneReport.note} — 默认朝上的一面由法线 Z 分量决定（可复现）；若看到的不是目标面（如需包外区朝上），在「膜蛋白视图」勾选「上下翻转 180°」后重新生成`,
+            `膜视图 ✓: ${membraneReport.note} — 默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（可复现）；密度无法判断包内/包外 — 若朝上的不是包外区，在「膜蛋白视图」勾选「上下翻转 180°」后重新生成`,
           );
         } else {
           log(`⚠ 膜视图不可用: view matrix camera 失败（${logSnippet(r.error, 120)}）— 退回覆盖率择优视角`);

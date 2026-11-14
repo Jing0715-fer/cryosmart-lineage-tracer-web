@@ -584,13 +584,16 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const [refHandMode, setRefHandMode] = useState<RefHandModeOption>("auto");
   const [refHandAnchor, setRefHandAnchor] = useState("");
   /* v3.77 (round-37 “map的角度可能需要择优后再截图，尤其是膜蛋白，level
-   *  不能太高…把去垢剂的盘子放在xy轴平面上，包内区朝下，包外区朝上”):
-   *  the membrane-view + screenshot-level settings. 膜视图 lays the
-   *  detergent disk flat in the screen XY plane (density-weighted PCA on
+   *  不能太高…把去垢剂的盘子放在xy轴平面上，包内区朝下，包外区朝上”)
+   *  → v3.78 (round-38 “之前说错了，应该是去垢剂盘放在xz平面”): the
+   *  membrane-view + screenshot-level settings. 膜视图 stands the
+   *  detergent disk in the screen XZ plane (density-weighted PCA on
    *  the reference via the relay's /membrane — the smallest-variance
    *  principal axis of the oblate protein+micelle particle IS the
-   *  membrane normal; the camera looks straight down it, so top-down the
-   *  belt is a ring around the protein and the helices stay visible);
+   *  membrane normal; the camera puts it VERTICALLY on screen with the
+   *  disk's long axis horizontal, so the belt reads as a horizontal
+   *  band and the transmembrane helices cross it vertically — 包内朝
+   *  下、包外朝上，which side is up is deterministic + toggleable);
    *  截图 level replaces the fixed 0.25×max display contour (which chased
    *  a hot detergent peak and hid the protein) with an envelope-based
    *  auto level (Otsu + noise floor). Fit levels stay 0.25×max — only
@@ -2621,7 +2624,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             {/* v3.77 (round-37 “map的角度可能需要择优后再截图，尤其是膜蛋白，
              * level不能太高，要不看到都是去垢剂，看不到内部的helix细节了，
              * 并且最好是能把去垢剂的盘子放在xy轴平面上，并且包内区朝下，
-             * 包外区朝上”): the membrane-protein view tile — 摆平 the
+             * 包外区朝上”) → v3.78 (round-38 “之前说错了，应该是去垢剂盘
+             * 放在xz平面”): the membrane-protein view tile — 立起 the
              * detergent disk (relay /membrane density-weighted PCA on the
              * reference: the protein+micelle particle is an oblate blob, the
              * smallest-variance principal axis IS the membrane normal) + the
@@ -2630,7 +2634,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * contour changes). */}
             <div
               className="rounded-lg border border-slate-200 bg-white/85 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
-              title="膜蛋白视图：把去垢剂盘摆到画面 XY 平面（密度 PCA 检测膜法线，相机沿法线俯视 — 俯视时去垢剂环围绕蛋白、内部 helix 可见），并按自适应/经典/手动策略设定截图等值面 level"
+              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（密度 PCA 检测膜法线 → 膜法线竖直、盘长轴水平 — 侧视时去垢剂带呈水平条带、穿膜 helix 竖直可见，包内区朝下/包外区朝上），并按自适应/经典/手动策略设定截图等值面 level"
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
@@ -2642,17 +2646,17 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="auto">自动摆平去垢剂盘（推荐）</SelectItem>
+                    <SelectItem value="auto">自动立起膜平面（推荐）</SelectItem>
                     <SelectItem value="off">关闭 · 覆盖率择优视角</SelectItem>
                   </SelectContent>
                 </Select>
                 {membraneView === "auto" && (
                   <label
                     className="inline-flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300"
-                    title="盘面摆平后上下翻转 180°（看另一面）— 密度无法判断包内/包外：若默认朝上的一面不是目标面（如需包外区朝上），勾选后重新生成"
+                    title="膜平面立起后绕屏幕水平轴滚转 180°（另一面朝上）— 密度无法判断包内/包外：若默认朝上的不是包外区，勾选后重新生成（盘仍立于 XZ 平面）"
                   >
                     <Checkbox checked={membraneFlip} onCheckedChange={(v) => setMembraneFlip(!!v)} />
-                    上下翻转 180°（看另一面）
+                    上下翻转 180°（另一面朝上）
                   </label>
                 )}
               </div>
@@ -2685,8 +2689,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {membraneView === "auto"
                   ? bridge && bridge.kind === "relay" && !bridge.canMembrane
-                    ? "对参考图在显示阈值之上去密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），截图相机沿法线俯视 — 去垢剂盘平铺在画面 XY 平面（俯视时蛋白位于盘环中央，内部 helix 细节可见）。当前桥脚本较旧（无 /membrane 端点）— 在 ChimeraX 重新 open 一次 relay.py 后生效，本次运行将退回覆盖率择优视角。"
-                    : "对参考图在显示阈值之上去密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），截图相机沿法线俯视 — 去垢剂盘平铺在画面 XY 平面（俯视时蛋白位于盘环中央，内部 helix 细节可见）。默认朝上的一面由法线 Z 分量决定（同一 map 结果可复现）；若看到的不是目标面（如需包外区朝上），勾选「上下翻转 180°」后重新生成。"
+                    ? "对参考图在显示阈值之上去密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），截图相机按膜法线竖直、盘长轴水平取向 — 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。当前桥脚本较旧（无 /membrane 端点）— 在 ChimeraX 重新 open 一次 relay.py 后生效，本次运行将退回覆盖率择优视角。"
+                    : "对参考图在显示阈值之上去密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），截图相机按膜法线竖直、盘长轴水平取向 — 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（同一 map 结果可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。"
                   : "关闭膜视图：沿用基准 + 90° 覆盖率评分择优视角（v3.76 行为，适合可溶性蛋白）。"}
                 {levelMode === "auto"
                   ? " 自适应 level：掩膜图（近零体素占比高，后处理 map）取 0.85×Otsu 阈值（主导类边界 — 正常图即溶剂/信号包络；去垢剂极热的图则是蛋白/去垢剂分界），并略偏低以保证蛋白在等值面内、helix 细节可见；未掩膜的原始图沿用 mean+2.5σ 经典噪声安全阈值。整体限制在 0.04–0.35×max — 膜蛋白 map 的去垢剂密度常高于蛋白，固定 0.25×max 会让表面只包住去垢剂盘而看不到内部 helix；对齐拟合阈值不受影响（恒为 0.25×max）。"

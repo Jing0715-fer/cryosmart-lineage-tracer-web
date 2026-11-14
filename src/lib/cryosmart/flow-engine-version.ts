@@ -590,5 +590,29 @@
  * inside the ring. FIT levels stay 0.25×max (the tuned alignment
  * behavior is untouched); only the visible contour is re-set right
  * before each screenshot.
+ *
+ * v3.78 bump reason (round-38 “之前说错了，应该是去垢剂盘放在xz平面”):
+ * the v3.77 membrane view aimed the camera straight DOWN the membrane
+ * normal (disk flat in the screen XY plane — a top-down view). The
+ * corrected orientation is the classic SIDE view: the camera basis is
+ * rebuilt with the membrane normal on screen UP (camera row Y) and the
+ * disk's longest in-plane principal axis (λmax, ea) on screen RIGHT
+ * (row X; toward-viewer row Z = X × Y, renormalized — right-handed), so
+ * the detergent disk surface stands in the screen XZ plane: the belt
+ * renders as a horizontal band, the transmembrane helices cross it
+ * vertically, 包内区朝下 / 包外区朝上. Which of ±normal is the
+ * extracellular side is not derivable from density: the default sign
+ * is deterministic (the normal's first significant component in
+ * map-frame Y/Z/X order is forced ≥ 0 — same map, same side up), and
+ * 「上下翻转 180°」 now rolls the view 180° about the screen horizontal
+ * axis (rows [ea; −n; −ea×n]) so the OTHER membrane side points up
+ * (the protein's other face shows — a rolled-over disk; the toggle's
+ * meaning changed from “see the other face” to “put the other side
+ * up”). The oblateness gate (λmin/λmid < 0.75), the /membrane endpoint
+ * (orientation-agnostic — NO relay reload needed), the adaptive
+ * contour level and every fallback (old relay / endpoint error /
+ * non-oblate / view-matrix failure → 90° coverage ladder) are
+ * unchanged; the UI tile, help card and relay comments now describe
+ * the side view.
  */
-export const FLOW_ENGINE_VERSION = "3.77";
+export const FLOW_ENGINE_VERSION = "3.78";

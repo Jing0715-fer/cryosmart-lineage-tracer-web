@@ -74,8 +74,11 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
       GET  /membrane?id=&level= v3.77 膜法线检测：对当前打开的 volume
                         模型在给定显示阈值之上去密度加权 PCA，返回主轴/
                         特征值/扁率（膜蛋白的蛋白+去垢剂盘整体扁盘状，
-                        最小方差主轴即膜法线 — 网页据此把去垢剂盘摆到
-                        画面 XY 平面再截图，包内朝下、包外朝上）。
+                        最小方差主轴即膜法线 — 网页据此把去垢剂盘立到
+                        画面 XZ 平面再截图：膜法线竖直、盘长轴水平，
+                        包内区朝下、包外区朝上。v3.78 修正：盘立在 XZ
+                        平面而非平铺 XY 平面 — 端点本身与取向无关，
+                        旧桥无需重载）。
       GET  /nextid      下一个空闲 model id（volume flip 需要）
       GET  /volumes    当前已打开的 volume 模型清单（id + 名称）。
                         v3.55：流程图网页在截图前先经此清单精确关闭
@@ -283,14 +286,16 @@ def main(session):
 
     def membrane_axis(model_id, level):
         """v3.77 (round-37 “map的角度可能需要择优后再截图…把去垢剂的盘子
-        放在xy轴平面上，包内区朝下，包外区朝上”): density-weighted PCA of
-        the model's grid above `level`. For a membrane protein the
-        protein+detergent-micelle particle is an OBLATE blob — the
-        smallest-variance principal axis IS the membrane normal. The page
-        rotates the ChimeraX camera so this normal points at the viewer
-        (detergent disk flat in the screen XY plane — viewed top-down the
-        belt becomes a ring around the protein, so the internal helices
-        are no longer covered by the micelle slab) before the screenshots.
+        放在xy轴平面上，包内区朝下，包外区朝上”→ v3.78 round-38 修正为
+        xz平面): density-weighted PCA of the model's grid above `level`.
+        For a membrane protein the protein+detergent-micelle particle is
+        an OBLATE blob — the smallest-variance principal axis IS the
+        membrane normal. The page builds the ChimeraX camera so this
+        normal runs VERTICALLY on screen and the disk's longest in-plane
+        axis runs horizontally (detergent disk standing in the screen XZ
+        plane — the classic side view: the belt reads as a horizontal
+        band, the transmembrane helices cross it vertically, 包内朝下/
+        包外朝上 via the flip toggle) before the screenshots.
 
         Coordinates are GRID indices mapped straight to (x, y, z): cryo-EM
         maps have isotropic voxels and standard axis order (i→x, j→y,
@@ -858,11 +863,13 @@ def main(session):
                         self._reply(500, {"error": str(exc)})
                     return
                 if r.path == "/membrane":
-                    # v3.77 (round-37 膜蛋白视图): ?id=<model>&level=<display
-                    # level> — density-weighted PCA above the level; the
-                    # page uses the smallest-variance principal axis as the
-                    # membrane normal (detergent disk flat in the screen XY
-                    # plane) for the screenshot camera. Errors ride back as
+                    # v3.77 (round-37 膜蛋白视图) / v3.78 (round-38 盘改立
+                    # XZ 平面): ?id=<model>&level=<display level> —
+                    # density-weighted PCA above the level; the page uses
+                    # the smallest-variance principal axis as the membrane
+                    # normal and stands the disk in the screen XZ plane
+                    # (normal vertical, long axis horizontal) for the
+                    # screenshot camera. Errors ride back as
                     # {"error": …} and the page falls back to the coverage
                     # view — never fatal.
                     model_id = (q.get("id") or [""])[0]

@@ -1138,6 +1138,11 @@ const relayServer = Bun.serve({
           // phase (delivery writes into the user's 交付目录) arms only when
           // this flag is present.
           deliver: true,
+          // v3.77: mirrors relay.py's GET /membrane — the membrane-normal
+          // PCA endpoint behind the 膜蛋白视图 (detergent disk standing in
+          // the screen XZ plane, v3.78). Without the flag the page treats
+          // this relay as legacy and falls back to the coverage view.
+          membrane: true,
           cacheDir: relayState.cacheDir,
           cached: relayState.staged.size,
           volumes: relayState.models.size,
@@ -1313,7 +1318,54 @@ const relayServer = Bun.serve({
       if (u.pathname === "/volstats") {
         const id = Number(u.searchParams.get("id"));
         if (!relayState.models.has(id)) return reply(404, { error: `model #${id} not found` });
-        return reply(200, { max: 1.0, mean: 0.1, sd: 0.2, min: -0.5 });
+        // v3.77 E2E: the OTSU threshold + NEAR-ZERO voxel fraction the
+        // page's 自适应 screenshot level rides — zero_frac 0.62 ≥ 0.25
+        // reads as a MASKED postprocessed map (a membrane-protein map whose
+        // hottest feature is the detergent micelle), so the display level
+        // becomes 0.85 × otsu = 0.153 (inside the [0.04, 0.35]×max clamp)
+        // instead of the detergent-chasing fixed 0.25×max.
+        return reply(200, {
+          max: 1.0,
+          mean: 0.1,
+          sd: 0.2,
+          min: -0.5,
+          otsu: 0.18,
+          zero_frac: 0.62,
+        });
+      }
+      if (u.pathname === "/membrane") {
+        // v3.77/v3.78 E2E: mirrors relay.py's GET /membrane — the
+        // density-weighted PCA over the open model's above-level voxels.
+        // The mock returns a FIXED oblate particle (membrane protein +
+        // detergent micelle): smallest-variance principal axis
+        // n = (2,1,2)/3 IS the membrane normal, ea = (1,-2,0)/√5 is the
+        // disk's LONG in-plane axis, eb = n × ea completes the
+        // right-handed triad (ea × eb = n), and λmin/λmid = 0.42 < 0.75
+        // passes the oblateness gate. Expected page behavior (v3.78 side
+        // view — detergent disk standing in the screen XZ plane):
+        //   default (sign rule: n's map-frame +Y component ≥ 0 → keep):
+        //     view matrix camera 0.447214,-0.894427,0.000000,
+        //       0.666667,0.333333,0.666667,
+        //      -0.596285,-0.298142,0.745356        (rows ea; n; ea×n=−eb)
+        //   flip (roll 180° about screen X — other membrane side up):
+        //     view matrix camera 0.447214,-0.894427,0.000000,
+        //      -0.666667,-0.333333,-0.666667,
+        //       0.596285,0.298142,-0.745356       (rows ea; −n; ea×−n=eb)
+        const mid = u.searchParams.get("id") || "";
+        if (!mid) return reply(400, { error: "missing id" });
+        if (!relayState.models.has(Number(mid))) {
+          return reply(404, { error: `model #${mid} not found` });
+        }
+        return reply(200, {
+          ok: true,
+          normal: [0.666667, 0.333333, 0.666667],
+          ea: [0.447214, -0.894427, 0.0],
+          eb: [0.596285, 0.298142, -0.745356],
+          ratio: 0.42,
+          lambdas: [0.42, 1.0, 1.05],
+          count: 120000,
+          total: 512000,
+        });
       }
       if (u.pathname === "/file") {
         const name = u.searchParams.get("name") || "";
