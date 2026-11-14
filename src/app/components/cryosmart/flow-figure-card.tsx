@@ -826,7 +826,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       if (mv === "off" || mv === "auto") setMembraneView(mv);
       setMembraneFlip(window.localStorage.getItem("cryoflow.membraneFlip") === "1");
       const lm = window.localStorage.getItem("cryoflow.levelMode");
-      if (lm === "classic" || lm === "manual") setLevelMode(lm);
+      // v3.80: auto 与 classic 已合并（都是 0.25×max）— 存过的 classic
+      // 映射到 auto，避免下拉框出现已删除的选项值。
+      if (lm === "manual") setLevelMode("manual");
+      else if (lm === "classic" || lm === "auto") setLevelMode("auto");
       const lr = parseFloat(window.localStorage.getItem("cryoflow.levelRatio") ?? "");
       if (Number.isFinite(lr) && lr >= 0.01 && lr <= 0.9) setLevelRatio(String(lr));
     } catch {}
@@ -2686,19 +2689,18 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             </div>
 
             {/* v3.77 (round-37 “map的角度可能需要择优后再截图，尤其是膜蛋白，
-             * level不能太高，要不看到都是去垢剂，看不到内部的helix细节了，
-             * 并且最好是能把去垢剂的盘子放在xy轴平面上，并且包内区朝下，
-             * 包外区朝上”) → v3.78 (round-38 “之前说错了，应该是去垢剂盘
-             * 放在xz平面”): the membrane-protein view tile — 立起 the
-             * detergent disk (relay /membrane density-weighted PCA on the
-             * reference: the protein+micelle particle is an oblate blob, the
-             * smallest-variance principal axis IS the membrane normal) + the
-             * screenshot DISPLAY level policy (auto Otsu envelope / classic
-             * 0.25×max / manual — fit levels stay 0.25×max, only the visible
-             * contour changes). */}
+             * level不能太高，要不看到都是去垢剂，看不到内部的helix细节了…”) →
+             * v3.78 (round-38 “去垢剂盘放在xz平面”) → v3.80 (round-40
+             * “朝向还是不对/level还是不正常”): the membrane-protein view tile
+             * — 立起 the detergent disk via the documented 12-number
+             * `view matrix camera` + a RENDER-PROBE verification (the
+             * silhouette must read as a horizontal band), with a
+             * turn-grid scan fallback that works even on older relays; the
+             * screenshot DISPLAY level is literally 0.25×max (fit levels
+             * stay 0.25×max — only the screenshot contour changes). */}
             <div
               className="rounded-lg border border-slate-200 bg-white/85 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
-              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（密度 PCA 检测膜法线 → 膜法线竖直、盘长轴水平 — 侧视时去垢剂带呈水平条带、穿膜 helix 竖直可见，包内区朝下/包外区朝上），并按自适应/经典/手动策略设定截图等值面 level"
+              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（密度 PCA 检测膜法线 → 按文档化相机矩阵定向，渲染探针验证剪影呈水平条带后生效，失败自动降级为 turn 网格扫描），并按 0.25×max/手动策略设定截图等值面 level"
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
@@ -2729,13 +2731,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   <Gauge className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
                   截图 level
                 </span>
-                <Select value={levelMode} onValueChange={(v) => setLevelMode(v as "auto" | "classic" | "manual")}>
+                <Select value={levelMode} onValueChange={(v) => setLevelMode(v as "auto" | "manual")}>
                   <SelectTrigger className="h-7 w-[212px] rounded-md text-[11px]">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="auto">自适应（信封内密度最高 25% · 推荐）</SelectItem>
-                    <SelectItem value="classic">经典 0.25×max</SelectItem>
+                    <SelectItem value="auto">0.25×max（推荐）</SelectItem>
                     <SelectItem value="manual">手动倍数 ×max</SelectItem>
                   </SelectContent>
                 </Select>
@@ -2753,14 +2754,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {membraneView === "auto"
                   ? bridge && bridge.kind === "relay" && !bridge.canMembrane
-                    ? "对参考图在显示阈值之上去密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），截图相机按膜法线竖直、盘长轴水平取向 — 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。当前桥脚本较旧（无 /membrane 端点）— 在 ChimeraX 重新 open 一次 relay.py 后生效，本次运行将退回覆盖率择优视角。"
-                    : "对参考图在显示阈值之上去密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），截图相机按膜法线竖直、盘长轴水平取向 — 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（同一 map 结果可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。"
+                    ? "对参考图做密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），按文档化相机矩阵把膜法线竖直、盘长轴水平取向，并用渲染探针验证剪影呈水平条带后才生效（不达标自动改用 turn 网格扫描）— 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。当前桥脚本较旧（无 /membrane 端点）：本次会直接用探针扫描定位膜平面（结果相近）；在 ChimeraX 重新 open 一次 relay.py 可获得精确 PCA 取向。"
+                    : "对参考图做密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），按文档化相机矩阵把膜法线竖直、盘长轴水平取向，并用渲染探针验证剪影呈水平条带后才生效（不达标自动改用 turn 网格扫描）— 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（同一 map 结果可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。"
                   : "关闭膜视图：沿用基准 + 90° 覆盖率评分择优视角（v3.76 行为，适合可溶性蛋白）。"}
                 {levelMode === "auto"
-                  ? " 自适应 level（v3.79）：优先取桥脚本按直方图计算的「信封内密度最高 25%」阈值（分子包络 = Otsu 溶剂/信号分界之上；表面贴住蛋白核心 + 去垢剂带头，既不追单点峰值也不落入溶剂噪声带）；旧桥脚本依次退回 0.85×Otsu（掩膜图）→ 0.25×max 兜底。整体限制在 0.03–0.5×max — 每张图在运行日志里都会注明所选 level 与规则；对齐拟合阈值不受影响（恒为 0.25×max）。"
-                  : levelMode === "classic"
-                    ? " 经典 level：0.25×max（v3.76 及之前行为）。"
-                    : " 手动 level：按各图 max 的倍数设定（0.01–0.9），对齐拟合阈值不受影响（恒为 0.25×max）。"}
+                  ? " 截图 level（v3.80）：直接取各图最大密度的 25%（0.25×max，你提议的方案）— level 过高时等值面只包住高密度的去垢剂外壳，看不到内部穿膜 helix；降到 max 的 25% 能显出内部细节。与对齐拟合阈值一致（也恒为 0.25×max）；每张图的 level 都会写进运行日志，旧桥脚本无需更新即可生效。"
+                  : " 手动 level：按各图 max 的倍数设定（0.01–0.9），对齐拟合阈值不受影响（恒为 0.25×max）。"}
               </p>
             </div>
 

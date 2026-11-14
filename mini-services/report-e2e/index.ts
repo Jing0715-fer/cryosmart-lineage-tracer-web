@@ -253,6 +253,11 @@ const server = Bun.serve({
       if (Number.isFinite(corrOverride) && corrOverride > -1 && corrOverride <= 1) {
         relayState.corrOverride = corrOverride;
       }
+      // v3.80 E2E drill: ?membrane=camreject — every `view matrix camera`
+      // errors so the page's membrane orientation must fall through the
+      // transpose candidate to the turn-grid scan (probe-verified).
+      const camReject = sp.get("membrane") === "camreject";
+      relayState.camReject = camReject;
       return Response.json({
         ok: true,
         http_blocked: blockHttp,
@@ -260,6 +265,7 @@ const server = Bun.serve({
         file404_abs: relayState.divertAbsSave,
         workdir: relayState.workdir,
         corr: relayState.corrOverride,
+        cam_reject: camReject,
       });
     }
     if (pathname === "/flow-e2e/relay-stats") {
@@ -666,6 +672,85 @@ function mockRenderPng(): Uint8Array {
   return discPng(rgb as [number, number, number]);
 }
 
+/* ---- v3.80: the membrane-view probe renders ------------------------ */
+/* A horizontal BAND (the detergent disk standing in the screen XZ plane
+ * with the membrane normal vertical — silhouette bbox 96×36, aspect
+ * 2.67 ≥ 1.12) vs the round DISC (face-down view, aspect 1.0). The
+ * page measures these real PNG bytes browser-side (silhouetteAspect),
+ * so the E2E exercises the actual probe-verification decision path. */
+const BAND_PNG_CACHE = new Map<string, Uint8Array>();
+function bandPng(rgb: [number, number, number]): Uint8Array {
+  const key = rgb.join(",");
+  const cached = BAND_PNG_CACHE.get(key);
+  if (cached) return cached;
+  const size = 96;
+  const half = 18; // band half-height → rows [30, 66)
+  const raw = new Uint8Array(size * (size * 4 + 1));
+  for (let y = 0; y < size; y++) {
+    const row = y * (size * 4 + 1);
+    raw[row] = 0; // filter: none
+    for (let x = 0; x < size; x++) {
+      const i = row + 1 + x * 4;
+      if (y >= size / 2 - half && y < size / 2 + half) {
+        raw[i] = rgb[0];
+        raw[i + 1] = rgb[1];
+        raw[i + 2] = rgb[2];
+        raw[i + 3] = 255;
+      } else {
+        raw[i] = 0;
+        raw[i + 1] = 0;
+        raw[i + 2] = 0;
+        raw[i + 3] = 0;
+      }
+    }
+  }
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, size);
+  dv.setUint32(4, size);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // color type RGBA
+  const png = new Uint8Array(8 + 12 + 13 + 0 + 12);
+  let off = 0;
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], off); off += 8;
+  png.set(pngChunk("IHDR", ihdr), off); off += 25;
+  const idat = deflateSync(raw);
+  const withIdat = new Uint8Array(off + 12 + idat.length + 12);
+  withIdat.set(png.subarray(0, off), 0);
+  withIdat.set(pngChunk("IDAT", new Uint8Array(idat)), off);
+  off += 12 + idat.length;
+  withIdat.set(pngChunk("IEND", new Uint8Array(0)), off);
+  BAND_PNG_CACHE.set(key, withIdat);
+  return withIdat;
+}
+
+/* v3.80: the expected `view matrix camera` ROTATIONS for the mock's fixed
+ * /membrane PCA reply — n = (2,1,2)/3 (the page's sign rule keeps +Y
+ * first-significant), ea = (1,-2,0)/√5, z = ea×n = (-0.596285, -0.298143,
+ * 0.745356); the rotation COLUMNS are [ea | n | z], exactly as the page
+ * formats them (toFixed(6)). flip negates n (and z). */
+const EXPECTED_CAM_ROT_DEFAULT = [
+  [0.447214, 0.666667, -0.596285],
+  [-0.894427, 0.333333, -0.298143],
+  [0.0, 0.666667, 0.745356],
+];
+const EXPECTED_CAM_ROT_FLIP = [
+  [0.447214, -0.666667, 0.596285],
+  [-0.894427, -0.333333, 0.298143],
+  [0.0, -0.666667, -0.745356],
+];
+
+/** v3.80: `_mprobe_*.png` saves render the BAND (side view — the current
+ * camera is the expected membrane orientation / drill cell) vs the DISC
+ * (face-down); every other save keeps the old model-color render. */
+function probeRenderPng(name: string): Uint8Array | null {
+  if (!name.startsWith("_mprobe_")) return null;
+  const rgb: [number, number, number] =
+    (relayState.shownModel != null && relayState.modelColors.get(relayState.shownModel)) ||
+    [178, 178, 178];
+  return relayState.bandArmed ? bandPng(rgb as [number, number, number]) : discPng(rgb as [number, number, number]);
+}
+
 /** Minimal plausible MRC2014 volume (8³ float32 + 1024-byte header). */
 function mrcBytes(seedSource: string): Uint8Array {
   let seed = 0;
@@ -760,6 +845,21 @@ const relayState = {
   closeAllCommands: 0,
   /** v3.68 E2E: what `measure correlation` reports (reset ?corr=N). */
   corrOverride: 0.42,
+  /** v3.80 E2E: accumulated NAMED-axis turn state (view _cfbase / view
+   * orient / view matrix camera reset it) — drives the band/disc probe
+   * renders for the membrane-view scan drill. */
+  viewX: 0,
+  viewY: 0,
+  /** v3.80 E2E: is the CURRENT view the band (side) orientation? Set by
+   * an expected `view matrix camera` rotation or by the drill cell
+   * (turn x 90 + turn y 90); `_mprobe_*.png` saves render band vs disc. */
+  bandArmed: false,
+  /** v3.80 E2E drill: /flow-e2e/reset?membrane=camreject — every `view
+   * matrix camera` errors, so the page must fall through transpose →
+   * turn-grid scan (the round-39 silent-failure path, now recoverable). */
+  camReject: false,
+  cameraAccepts: 0,
+  cameraRejects: 0,
 };
 
 function resetRelayState() {
@@ -789,6 +889,12 @@ function resetRelayState() {
   relayState.closedIds = [];
   relayState.closeAllCommands = 0;
   relayState.corrOverride = 0.42;
+  relayState.viewX = 0;
+  relayState.viewY = 0;
+  relayState.bandArmed = false;
+  relayState.camReject = false;
+  relayState.cameraAccepts = 0;
+  relayState.cameraRejects = 0;
 }
 
 function relayNextModelId(): number {
@@ -1071,13 +1177,13 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
         return { text: `saved ${target}`, error: null };
       }
       const name = target.split(/[\\/]/).pop() || "img.png";
-      relayState.files.set(name, mockRenderPng());
+      relayState.files.set(name, probeRenderPng(name) ?? mockRenderPng());
       return { text: `saved ${target}`, error: null };
     }
     // Relative save — ChimeraX writes into its process cwd.
     if (relayState.cwd === relayState.workdir) {
       relayState.saveRelativeOk += 1;
-      relayState.files.set(target, mockRenderPng());
+      relayState.files.set(target, probeRenderPng(target) ?? mockRenderPng());
     } else {
       relayState.saveRelativeMissed += 1;
     }
@@ -1101,20 +1207,67 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       error: null,
     };
   }
+  // v3.80: view-state tracking for the membrane probe renders — `view
+  // orient` (deterministic base) and `view _cfbase` (restore) both reset
+  // the accumulated turn state and disarm the band.
+  if (/^view\s+orient$/i.test(command) || /^view\s+_cfbase$/i.test(command)) {
+    relayState.viewX = 0;
+    relayState.viewY = 0;
+    relayState.bandArmed = false;
+    return { text: "", error: null };
+  }
+  // v3.80: NAMED-axis turns (the membrane scan uses only these — `turn
+  // x 90`, `turn y 45`, `turn x -22.5` …). The accumulated state drives
+  // the drill's band cell (x=90, y=90 — the disk seen edge-on).
+  const namedTurnMatch = /^turn\s+([xyz])\s+(-?\d+(?:\.\d+)?)$/i.exec(command);
+  if (namedTurnMatch) {
+    const deg = Number(namedTurnMatch[2]);
+    if (namedTurnMatch[1].toLowerCase() === "x") relayState.viewX += deg;
+    else relayState.viewY += deg;
+    relayState.bandArmed =
+      Math.abs(relayState.viewX - 90) < 1e-6 && Math.abs(relayState.viewY - 90) < 1e-6;
+    return { text: "", error: null };
+  }
   // v3.79 contract guard: `view matrix camera` REQUIRES 12 (or 16)
   // comma-separated numbers — real ChimeraX rejects the 9-number
   // rotation-only form that v3.78 shipped (the delivered membrane view
   // silently fell back to the top-down coverage view). Any future
   // 9-number camera matrix fails loudly in E2E instead.
+  // v3.80: additionally, the ROTATION is validated against the mock's
+  // PCA reply (columns [ea | n | ea×n], default or flip) — the expected
+  // membrane orientation arms the BAND probe render; anything else
+  // (e.g. the transpose hedge) leaves the disc armed. ?membrane=camreject
+  // errors every camera command so the page must fall to the scan.
   const vmcMatch = /^view\s+matrix\s+camera\s+([\d.,eE+\-\s]+)$/i.exec(command);
   if (vmcMatch) {
-    const n = vmcMatch[1].split(",").filter((s) => s.trim() !== "").length;
+    const parts = vmcMatch[1].split(",").filter((s) => s.trim() !== "");
+    const n = parts.length;
     if (n !== 12 && n !== 16) {
+      relayState.cameraRejects += 1;
       return {
         text: "",
         error: `UserError: view matrix camera: expected 12 or 16 numbers, got ${n}`,
       };
     }
+    if (relayState.camReject) {
+      relayState.cameraRejects += 1;
+      return {
+        text: "",
+        error: "UserError: view matrix camera: drill rejection (?membrane=camreject)",
+      };
+    }
+    const nums = parts.map(Number);
+    const rot = [
+      [nums[0], nums[1], nums[2]],
+      [nums[4], nums[5], nums[6]],
+      [nums[8], nums[9], nums[10]],
+    ];
+    const closeTo = (want: number[][]) =>
+      want.every((row, i) => row.every((v, j) => Math.abs(rot[i][j] - v) < 1e-4));
+    relayState.bandArmed = closeTo(EXPECTED_CAM_ROT_DEFAULT) || closeTo(EXPECTED_CAM_ROT_FLIP);
+    if (relayState.bandArmed) relayState.cameraAccepts += 1;
+    relayState.viewX = 0;
+    relayState.viewY = 0;
     return { text: "", error: null };
   }
   // v3.79: the membrane view now orients via a single screen-frame
@@ -1360,13 +1513,13 @@ const relayServer = Bun.serve({
         const id = Number(u.searchParams.get("id"));
         if (!relayState.models.has(id)) return reply(404, { error: `model #${id} not found` });
         // v3.77 E2E: the OTSU threshold + NEAR-ZERO voxel fraction.
-        // v3.79 E2E: suggested_level — the top-25%-of-envelope display
-        // threshold the relay computes from the full grid histogram
-        // (envelope = voxels at/above otsu). With max 1.0 / otsu 0.18 /
-        // env_frac 0.06, the page's 自适应 level now lands on 0.26
-        // (rung 1) instead of the v3.77–78 0.85×otsu = 0.153 — the E2E
-        // log lines read “截图 level 0.2600（自适应 信封内密度最高25%…）”
-        // and the membrane-PCA threshold rides the same 0.26.
+        // v3.80 E2E: suggested_level 0.26 is STILL served on purpose — an
+        // old v3.79 relay would send it, and the page must now IGNORE it:
+        // the display level is literally 0.25×max = 0.25 (the user's
+        // round-39 「最大的25%」), so the run log must read
+        // “参考图截图 level 0.2500（0.25×max（最大值的 25%））” and the
+        // membrane-PCA threshold rides the same 0.25 — a compat proof
+        // that stale relays don't distort the level.
         return reply(200, {
           max: 1.0,
           mean: 0.1,
@@ -1379,24 +1532,32 @@ const relayServer = Bun.serve({
         });
       }
       if (u.pathname === "/membrane") {
-        // v3.77/v3.78/v3.79 E2E: mirrors relay.py's GET /membrane — the
+        // v3.77/v3.78/v3.80 E2E: mirrors relay.py's GET /membrane — the
         // density-weighted PCA over the open model's above-level voxels.
         // The mock returns a FIXED oblate particle (membrane protein +
         // detergent micelle): smallest-variance principal axis
         // n = (2,1,2)/3 IS the membrane normal, ea = (1,-2,0)/√5 is the
         // disk's LONG in-plane axis, eb = n × ea completes the
         // right-handed triad (ea × eb = n), and λmin/λmid = 0.42 < 0.75
-        // passes the oblateness gate. Expected page behavior (v3.79 side
-        // view — the target camera rotation rows [ea; n; ea×n=−eb] are
-        // composed into ONE screen-frame turn from the mock's identity
-        // base camera; verified numerically via Rodrigues — R·ea=(1,0,0),
-        // R·n=(0,1,0); see /flow-e2e/commands?filter=turn):
+        // passes the oblateness gate. Expected page behavior (v3.80
+        // documented-camera path — the target rotation COLUMNS are
+        // [ea | n | ea×n=−eb] in one 12-number `view matrix camera`, then
+        // PROBE-VERIFIED against the band render; see
+        // /flow-e2e/commands?filter=view%20matrix%20camera):
         //   default (sign rule: n's map-frame +Y component ≥ 0 → keep):
-        //     turn -0.500000,0.309017,0.809017 74.7547
-        //     (axis-angle of T = rows [ea; n; −eb])
+        //     view matrix camera 0.447214,0.666667,-0.596285,0.000000,
+        //       -0.894427,0.333333,-0.298143,0.000000,
+        //       0.000000,0.666667,0.745356,0.000000
+        //     → mock arms the BAND probe png (_mprobe_cam.png, aspect
+        //       96/36 ≈ 2.67 ≥ 1.12) → accepted, NO transpose/scan.
         //   flip (other membrane side up — n negated):
-        //     turn 0.834001,-0.515441,0.196881 144.6604
-        //     (axis-angle of T' = rows [ea; −n; eb])
+        //     view matrix camera 0.447214,-0.666667,0.596285,0.000000,
+        //       -0.894427,-0.333333,0.298143,0.000000,
+        //       0.000000,-0.666667,-0.745356,0.000000
+        //   drill ?membrane=camreject: both camera commands error → the
+        //     page must fall to the turn-grid scan; the mock arms the
+        //     band ONLY at (turn x 90, turn y 90) so the scan converges
+        //     there and re-applies it.
         const mid = u.searchParams.get("id") || "";
         if (!mid) return reply(400, { error: "missing id" });
         if (!relayState.models.has(Number(mid))) {

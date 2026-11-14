@@ -662,5 +662,41 @@
  * near-black — mean luminance < 110 rejected) and the FSC ratio band
  * is tightened to [1.0, 2.5]; a DARK candidate is never delivered,
  * even as the off-ratio last resort.
+ *
+ * v3.80 bump reason (round-40 “二和三这两个问题还是没有解决” — the
+ * orientation AND the level, both still wrong after v3.79): TWO fixes,
+ * both driven by re-reading the OFFICIAL ChimeraX command docs (view +
+ * turn pages) instead of trusting unverifiable rotation conventions.
+ * (1) 膜视图朝向 — the v3.79 single vector `turn` rode an UNDOCUMENTED
+ * rotation-direction convention that no mock could validate, and a
+ * relay without /membrane still silently fell back to the top-down
+ * coverage view (the exact delivered failure). Now: `view orient` gives
+ * a deterministic base (scene axes = screen axes: X right, Y up, Z
+ * toward the viewer — documented); the target camera is set with the
+ * DOCUMENTED 12-number `view matrix camera` (row-major 3×4, the
+ * rotation COLUMNS are the camera axes in scene coordinates — columns
+ * [ea | n | ea×n] put the disk long axis RIGHT, the membrane normal
+ * UP); and the outcome is PROBE-VERIFIED: a small thumbnail render is
+ * measured (silhouette bbox aspect — the detergent disk standing in
+ * the screen XZ plane reads as a wide horizontal band, aspect ≥ 1.12;
+ * face-down it is ~1), with a transpose candidate (hedges the opposite
+ * matrix-direction reading) and then a coarse-to-fine NAMED-axis
+ * `turn x/y` grid scan + two halving refinement rounds (±-symmetric
+ * grid → turn direction convention is irrelevant; needs only
+ * save+fetch → works even on old relays without /membrane) as the
+ * final fallback. A wrong orientation can no longer be delivered
+ * silently: either the probe confirms the band, or the run logs
+ * exactly why it fell back. The reference is contoured at the DISPLAY
+ * level BEFORE the probes so they measure the same surface the
+ * screenshots render.
+ * (2) 截图 level — v3.79 had misread 「最大的25%」 as a top-25%-of-
+ * ENVELOPE-VOXELS quantile (a HIGH threshold hugging the protein core
+ * + detergent-belt heads — exactly the 「只看到去垢剂」 regime the
+ * user rejected). Now EVERY mode resolves to the LITERAL 0.25×max
+ * (auto == classic; manual clamps to [0.01, 0.9] as documented),
+ * computed page-side from /volstats max — no relay update needed for
+ * the level at all. The relay's suggested_level walk is removed
+ * (extra keys from old relays are ignored); the level select offers
+ * 0.25×max（推荐）/ 手动倍数, stored classic settings map to auto.
  */
-export const FLOW_ENGINE_VERSION = "3.79";
+export const FLOW_ENGINE_VERSION = "3.80";

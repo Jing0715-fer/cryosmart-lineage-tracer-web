@@ -69,13 +69,12 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         即直接 open 本地文件，不再重复下载 map。
       GET  /file?name=  取回 /ping 工作目录里 ChimeraX 保存的 PNG
       GET  /volstats?id= 体数据统计（max/mean/sd/min + v3.77 Otsu 阈值
-                        — 溶剂/信号边界 + v3.79 suggested_level —
-                        信封内密度最高 25% 的显示阈值（信封 = Otsu 分界
-                        之上的体素），网页的自适应截图 level 优先取它：
-                        表面贴住蛋白核心 + 去垢剂带头，既不追单点峰值
-                        （0.25×max 只包住去垢剂盘）也不落进溶剂噪声带
-                        （mean+k·sd 会满屏噪声斑点）；env_frac 一并返回
-                        供运行日志）
+                        — 溶剂/信号边界 + 近零体素占比，供运行日志）。
+                        v3.80：网页的截图 level 直接取 0.25×max（用户
+                        指定「最大的25%」），不再需要 suggested_level —
+                        v3.79 的「信封内密度最高 25%」分位阈值贴着蛋白
+                        核心+去垢剂带头，恰是用户不要的「只看到去垢剂」
+                        区间；旧桥返回的多余键会被网页忽略
       GET  /membrane?id=&level= v3.77 膜法线检测：对当前打开的 volume
                         模型在给定显示阈值之上去密度加权 PCA，返回主轴/
                         特征值/扁率（膜蛋白的蛋白+去垢剂盘整体扁盘状，
@@ -254,25 +253,15 @@ def main(session):
             }
             # v3.77 (round-37 “level不能太高，要不看到都是去垢剂”): the OTSU
             # threshold over the full-grid histogram plus the NEAR-ZERO
-            # voxel fraction — together they let the page pick a
-            # membrane-friendly display level. On a masked postprocessed
-            # map the solvent is exactly 0 (zero_frac is high) and Otsu
-            # lands at the DOMINANT class split — solvent/signal for a
-            # normal map, protein/detergent-belt when the micelle is the
-            # hottest feature (the classic 0.25×max chased that hot peak
-            # and the surface wrapped only the micelle disk).
-            # v3.79 (round-39 “用最大的25%会不会更好？”): suggested_level —
-            # the display threshold at the TOP 25% of the MOLECULAR
-            # ENVELOPE: the envelope = voxels at/above the Otsu split
-            # (solvent/signal boundary), and the level is the histogram
-            # value where exactly 25% of those envelope voxels remain
-            # above. That hugs the protein core + detergent-belt heads
-            # instead of chasing the single hottest peak (0.25×max) or
-            # the noise floor (mean+k·sd speckled on raw half-maps — the
-            # round-38 delivered screenshots showed exactly that speckle
-            # snowball). env_frac rides along for the run log. The page's
-            # 自适应 level prefers this key; older relays without it fall
-            # back page-side (0.85×otsu → 0.25×max).
+            # voxel fraction — returned for the run log / diagnostics.
+            # v3.80 (round-40 “level的选择还是不正常”): the page's display
+            # level is now LITERALLY 0.25×max (the user's own round-39
+            # proposal “用最大的25%”), computed page-side from max — the
+            # v3.79 suggested_level envelope-percentile walk is REMOVED
+            # (it hugged the protein core + detergent-belt heads, i.e. a
+            # HIGH threshold — exactly the “只看到去垢剂” regime the user
+            # rejected; old relays' extra suggested_level/env_frac keys
+            # are simply ignored by the page).
             try:
                 lo = float(flat.min())
                 hi = float(flat.max())
@@ -292,25 +281,7 @@ def main(session):
                         mu0 = csum / np.maximum(w0, 1.0)
                         mu1 = (sum_all - csum) / np.maximum(w1, 1.0)
                         between = np.where(valid, w0 * w1 * (mu0 - mu1) ** 2, -1.0)
-                        otsu = float(centers[int(np.argmax(between))])
-                        out["otsu"] = otsu
-                        # v3.79: envelope = voxels ≥ otsu; suggested display
-                        # level = value keeping the DENSEST 25% of the
-                        # envelope above it (walk the histogram downward).
-                        env_count = float(hist[centers >= otsu].sum())
-                        out["env_frac"] = env_count / total
-                        if env_count >= 64 and env_count >= 5e-4 * total:
-                            want = 0.25 * env_count
-                            run = 0.0
-                            lvl = None
-                            for bi in range(len(centers) - 1, -1, -1):
-                                run += float(hist[bi])
-                                if run >= want:
-                                    lvl = float(centers[bi])
-                                    break
-                            if lvl is not None:
-                                lvl = min(max(lvl, 0.02 * hi), 0.5 * hi)
-                                out["suggested_level"] = lvl
+                        out["otsu"] = float(centers[int(np.argmax(between))])
             except Exception:
                 pass
             return out
@@ -335,9 +306,9 @@ def main(session):
         directions are unaffected by a uniform voxel scaling. The ratio
         guard (lambda_min / lambda_mid, returned to the page) lets the
         caller reject globular/fibrous particles and keep the coverage
-        view. `level` is the page's DISPLAY level (auto policy: Otsu
-        envelope) — the PCA sees exactly the voxels the screenshots will
-        surface."""
+        view. `level` is the page's DISPLAY level (v3.80: literally
+        0.25×max — the user's round-39 「最大的25%」) — the PCA sees
+        exactly the voxels the screenshots will surface."""
         def f():
             import numpy as np
             target = None
@@ -848,10 +819,13 @@ def main(session):
                         # don't send it and the page's membrane mode falls
                         # back to the coverage view with an upgrade hint.
                         "membrane": True,
-                        # v3.79: /volstats also carries suggested_level (the
-                        # top-25%-of-envelope display threshold) + env_frac —
-                        # older copies don't send it and the page's 自适应
-                        # level falls back to 0.85×otsu → 0.25×max.
+                        # v3.79→v3.80: /volstats used to carry
+                        # suggested_level (the top-25%-of-envelope display
+                        # threshold); v3.80 removed it — the page computes
+                        # the display level literally as 0.25×max from the
+                        # max key (the user's round-39 「最大的25%」), so
+                        # this flag is now informational only (kept so
+                        # older pages still ping cleanly).
                         "vollevel": True,
                         "cacheDir": staging_dir,
                         "cached": sum(1 for _ in _cache_entries()),
