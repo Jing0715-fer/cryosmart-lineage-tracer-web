@@ -672,12 +672,15 @@ function mockRenderPng(): Uint8Array {
   return discPng(rgb as [number, number, number]);
 }
 
-/* ---- v3.80: the membrane-view probe renders ------------------------ */
+/* ---- v3.80→v3.81: the membrane-view probe renders ---------------- */
 /* A horizontal BAND (the detergent disk standing in the screen XZ plane
- * with the membrane normal vertical — silhouette bbox 96×36, aspect
- * 2.67 ≥ 1.12) vs the round DISC (face-down view, aspect 1.0). The
- * page measures these real PNG bytes browser-side (silhouetteAspect),
- * so the E2E exercises the actual probe-verification decision path. */
+ * with the membrane normal vertical — the SIDE view the page wants: 2D
+ * second-moment anisotropy sqrt(λmax/λmin) ≈ 2.67, far above the 1.15
+ * absolute bar / 1.06× the top baseline) vs the round DISC (face-down
+ * view, anisotropy ≈ 1.0 — also what the TOP-BASELINE camera gets, and
+ * what the transpose hedge leaves armed). The page measures these real
+ * PNG bytes browser-side (silhouetteShape), so the E2E exercises the
+ * actual probe-verification decision path. */
 const BAND_PNG_CACHE = new Map<string, Uint8Array>();
 function bandPng(rgb: [number, number, number]): Uint8Array {
   const key = rgb.join(",");
@@ -740,9 +743,10 @@ const EXPECTED_CAM_ROT_FLIP = [
   [0.0, -0.666667, -0.745356],
 ];
 
-/** v3.80: `_mprobe_*.png` saves render the BAND (side view — the current
- * camera is the expected membrane orientation / drill cell) vs the DISC
- * (face-down); every other save keeps the old model-color render. */
+/** v3.80→v3.81: `_mprobe_*.png` saves render the BAND (side view — the
+ * current camera is the expected membrane orientation / drill cell) vs
+ * the DISC (face-down / top baseline / transpose hedge); every other
+ * save keeps the old model-color render. */
 function probeRenderPng(name: string): Uint8Array | null {
   if (!name.startsWith("_mprobe_")) return null;
   const rgb: [number, number, number] =
@@ -1337,6 +1341,10 @@ const relayServer = Bun.serve({
           // v3.79: mirrors relay.py's /volstats suggested_level key (the
           // top-25%-of-envelope display threshold).
           vollevel: true,
+          // v3.81: mirrors relay.py's /volstats otsu2 + env_levels/
+          // env_counts (the envelope ladder behind the count-matched
+          // display levels + the level preview).
+          vollevel2: true,
           cacheDir: relayState.cacheDir,
           cached: relayState.staged.size,
           volumes: relayState.models.size,
@@ -1512,49 +1520,56 @@ const relayServer = Bun.serve({
       if (u.pathname === "/volstats") {
         const id = Number(u.searchParams.get("id"));
         if (!relayState.models.has(id)) return reply(404, { error: `model #${id} not found` });
-        // v3.77 E2E: the OTSU threshold + NEAR-ZERO voxel fraction.
-        // v3.80 E2E: suggested_level 0.26 is STILL served on purpose — an
-        // old v3.79 relay would send it, and the page must now IGNORE it:
-        // the display level is literally 0.25×max = 0.25 (the user's
-        // round-39 「最大的25%」), so the run log must read
-        // “参考图截图 level 0.2500（0.25×max（最大值的 25%））” and the
-        // membrane-PCA threshold rides the same 0.25 — a compat proof
-        // that stale relays don't distort the level.
+        /* v3.77 E2E: the OTSU threshold + NEAR-ZERO voxel fraction.
+         * v3.80 E2E: suggested_level 0.26 is STILL served on purpose — an
+         * old v3.79 relay would send it, and the page must IGNORE it.
+         * v3.81 E2E: otsu2 0.24 + the envelope ladder — the page's auto
+         * rule computes min(0.25×max, 0.85×otsu₂) = min(0.25, 0.204) =
+         * 0.204 (the hot-detergent path: otsu₂ BELOW the quarter, so the
+         * level drops into the protein window), the ladder interpolates
+         * the reference's envelope count at 0.204 → exactly 240,000 (the
+         * rung at 0.204), and every class map count-matches back to
+         * 0.2040 — the per-map log lines read
+         * “截图 level 0.2040（参考包络匹配 240,000）”. A manual/preview
+         * ratio of 0.35 anchors 65,000 → class maps match to 0.3482. */
         return reply(200, {
           max: 1.0,
           mean: 0.1,
           sd: 0.2,
           min: -0.5,
           otsu: 0.18,
+          otsu2: 0.24,
           zero_frac: 0.62,
+          env_levels: [0.18, 0.2, 0.204, 0.24, 0.3, 0.36, 0.45, 0.55, 0.7, 0.9],
+          env_counts: [500000, 260000, 240000, 150000, 90000, 60000, 35000, 20000, 8000, 2000],
           suggested_level: 0.26,
           env_frac: 0.06,
         });
       }
       if (u.pathname === "/membrane") {
-        // v3.77/v3.78/v3.80 E2E: mirrors relay.py's GET /membrane — the
-        // density-weighted PCA over the open model's above-level voxels.
-        // The mock returns a FIXED oblate particle (membrane protein +
-        // detergent micelle): smallest-variance principal axis
+        // v3.77/v3.78/v3.80/v3.81 E2E: mirrors relay.py's GET /membrane —
+        // the density-weighted PCA over the open model's above-level
+        // voxels. The mock returns a FIXED oblate particle (membrane
+        // protein + detergent micelle): smallest-variance principal axis
         // n = (2,1,2)/3 IS the membrane normal, ea = (1,-2,0)/√5 is the
         // disk's LONG in-plane axis, eb = n × ea completes the
-        // right-handed triad (ea × eb = n), and λmin/λmid = 0.42 < 0.75
-        // passes the oblateness gate. Expected page behavior (v3.80
-        // documented-camera path — the target rotation COLUMNS are
-        // [ea | n | ea×n=−eb] in one 12-number `view matrix camera`, then
-        // PROBE-VERIFIED against the band render; see
-        // /flow-e2e/commands?filter=view%20matrix%20camera):
-        //   default (sign rule: n's map-frame +Y component ≥ 0 → keep):
+        // right-handed triad (ea × eb = n), and λmin/λmid = 0.42 is now
+        // DIAGNOSTICS ONLY (the v3.81 page removed the oblateness gate).
+        // Expected page behavior (v3.81 documented-camera path):
+        //   1. TOP BASELINE — one 12-number `view matrix camera` with
+        //      rotation COLUMNS [ea | eb | n] (looking straight down the
+        //      normal): the mock leaves the DISC armed (aniso ≈ 1.0).
+        //   2. default (sign rule: n's map-frame +Y component ≥ 0 → keep):
         //     view matrix camera 0.447214,0.666667,-0.596285,0.000000,
         //       -0.894427,0.333333,-0.298143,0.000000,
         //       0.000000,0.666667,0.745356,0.000000
-        //     → mock arms the BAND probe png (_mprobe_cam.png, aspect
-        //       96/36 ≈ 2.67 ≥ 1.12) → accepted, NO transpose/scan.
+        //     → mock arms the BAND probe png (_mprobe_cam.png, aniso
+        //       ≈ 2.67 ≥ 1.15) → accepted, NO transpose/scan.
         //   flip (other membrane side up — n negated):
         //     view matrix camera 0.447214,-0.666667,0.596285,0.000000,
         //       -0.894427,-0.333333,0.298143,0.000000,
         //       0.000000,-0.666667,-0.745356,0.000000
-        //   drill ?membrane=camreject: both camera commands error → the
+        //   drill ?membrane=camreject: every camera command errors → the
         //     page must fall to the turn-grid scan; the mock arms the
         //     band ONLY at (turn x 90, turn y 90) so the scan converges
         //     there and re-applies it.

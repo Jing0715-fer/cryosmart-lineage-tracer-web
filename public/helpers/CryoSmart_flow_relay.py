@@ -70,11 +70,19 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
       GET  /file?name=  取回 /ping 工作目录里 ChimeraX 保存的 PNG
       GET  /volstats?id= 体数据统计（max/mean/sd/min + v3.77 Otsu 阈值
                         — 溶剂/信号边界 + 近零体素占比，供运行日志）。
-                        v3.80：网页的截图 level 直接取 0.25×max（用户
-                        指定「最大的25%」），不再需要 suggested_level —
-                        v3.79 的「信封内密度最高 25%」分位阈值贴着蛋白
-                        核心+去垢剂带头，恰是用户不要的「只看到去垢剂」
-                        区间；旧桥返回的多余键会被网页忽略
+                        v3.81 新增三段 level 数据（/ping "vollevel2"）：
+                          otsu2 — 信封内（≥otsu）二次 Otsu：蛋白/去垢剂
+                                  分界（去垢剂带头常是地图最热相位，一次
+                                  Otsu 只能分开溶剂，二次 Otsu 才落在
+                                  「看到蛋白+带、不追最热壳」的区间）；
+                          env_levels/env_counts — 从 otsu 到近 max 的
+                                  level 阶梯与各 level 之上的体素计数
+                                  （网页据此把每张地图的 level 匹配到与
+                                  参考图相同的包络大小 — 噪点图的 max 常
+                                  是噪声尖峰，任何 max 比例 level 都会落
+                                  进噪声带，计数匹配自动抬高到包络处）。
+                        v3.80 的 0.25×max 字面规则保留为无 otsu2 旧数据
+                        的兜底；旧桥返回的多余键会被网页忽略
       GET  /membrane?id=&level= v3.77 膜法线检测：对当前打开的 volume
                         模型在给定显示阈值之上去密度加权 PCA，返回主轴/
                         特征值/扁率（膜蛋白的蛋白+去垢剂盘整体扁盘状，
@@ -254,14 +262,24 @@ def main(session):
             # v3.77 (round-37 “level不能太高，要不看到都是去垢剂”): the OTSU
             # threshold over the full-grid histogram plus the NEAR-ZERO
             # voxel fraction — returned for the run log / diagnostics.
-            # v3.80 (round-40 “level的选择还是不正常”): the page's display
-            # level is now LITERALLY 0.25×max (the user's own round-39
-            # proposal “用最大的25%”), computed page-side from max — the
-            # v3.79 suggested_level envelope-percentile walk is REMOVED
-            # (it hugged the protein core + detergent-belt heads, i.e. a
-            # HIGH threshold — exactly the “只看到去垢剂” regime the user
-            # rejected; old relays' extra suggested_level/env_frac keys
-            # are simply ignored by the page).
+            # v3.81 (round-41 “level取得还是不好，还是会看到胶束”): the
+            # delivered P283 renders speckled + showed free micelles — the
+            # literal 0.25×max (v3.80) sits BELOW the noise floor whenever a
+            # map's max is a noise/detergent spike (every max-ratio rule
+            # shares the disease), while the v3.79 top-25%-of-envelope sat
+            # in the detergent-only regime. Two NEW keys give the page a
+            # self-calibrating chain:
+            #   otsu2 — a SECOND Otsu over the envelope sub-histogram
+            #     (values ≥ otsu): for a hot-detergent map it lands between
+            #     the protein and detergent phases, so 0.85×otsu2 shows
+            #     protein + belt without chasing the hottest shells;
+            #   env_levels/env_counts — a 24-rung level ladder from otsu to
+            #     0.98×max with the above-level voxel count at each rung, so
+            #     the page can pick each map's level by ENVELOPE-COUNT
+            #     MATCHING to the reference (same particle ⇒ same envelope
+            #     mass; a noisy map's matched level automatically rises
+            #     above its noise floor — count-matching kills the speckle
+            #     by construction, whatever its max happened to be).
             try:
                 lo = float(flat.min())
                 hi = float(flat.max())
@@ -281,7 +299,48 @@ def main(session):
                         mu0 = csum / np.maximum(w0, 1.0)
                         mu1 = (sum_all - csum) / np.maximum(w1, 1.0)
                         between = np.where(valid, w0 * w1 * (mu0 - mu1) ** 2, -1.0)
-                        out["otsu"] = float(centers[int(np.argmax(between))])
+                        otsu1 = float(centers[int(np.argmax(between))])
+                        out["otsu"] = otsu1
+                        # v3.81: second Otsu over the envelope bins only
+                        # (centers ≥ otsu1). Guarded — a tiny/absent
+                        # envelope leaves otsu2 out and the page falls back
+                        # to its own ladder-less rule.
+                        env_bins = centers >= otsu1
+                        eh = hist[env_bins].astype(np.float64)
+                        ec = centers[env_bins]
+                        if eh.sum() >= 64 and len(eh) >= 2:
+                            et = float(eh.sum())
+                            ew0 = np.cumsum(eh)
+                            ew1 = et - ew0
+                            ecsum = np.cumsum(eh * ec)
+                            esum = float(ecsum[-1])
+                            evalid = (ew0 > 0) & (ew1 > 0)
+                            emu0 = ecsum / np.maximum(ew0, 1.0)
+                            emu1 = (esum - ecsum) / np.maximum(ew1, 1.0)
+                            ebetween = np.where(
+                                evalid, ew0 * ew1 * (emu0 - emu1) ** 2, -1.0)
+                            out["otsu2"] = float(
+                                ec[int(np.argmax(ebetween))])
+                        # v3.81: the envelope-count ladder — 24 rungs from
+                        # otsu1 up to 0.98×hi (multiplicative spacing), the
+                        # count at each rung straight off the SAME 257-bin
+                        # histogram (cumulative from the top). Bin resolution
+                        # (hi-lo)/256 is far finer than any visual level
+                        # difference.
+                        cum_ge = total - np.concatenate(
+                            ([0.0], np.cumsum(hist)[:-1]))
+                        # cum_ge[i] = voxels with value ≥ edges[i]
+                        lo_i = int(np.searchsorted(edges, otsu1, side="right")) - 1
+                        hi_i = len(edges) - 1
+                        lo_i = max(0, min(lo_i, hi_i - 1))
+                        if hi_i - lo_i >= 4:
+                            idx = np.unique(np.linspace(
+                                lo_i, hi_i, 24).round().astype(int))
+                            levels = [float(edges[i]) for i in idx]
+                            counts = [float(cum_ge[i]) for i in idx]
+                            if counts[0] > counts[-1]:
+                                out["env_levels"] = levels
+                                out["env_counts"] = counts
             except Exception:
                 pass
             return out
@@ -827,6 +886,13 @@ def main(session):
                         # this flag is now informational only (kept so
                         # older pages still ping cleanly).
                         "vollevel": True,
+                        # v3.81: /volstats now also carries otsu2 (the
+                        # second Otsu over the envelope — the protein/
+                        # detergent-phase split behind the new auto display
+                        # level) and env_levels/env_counts (the envelope-
+                        # count ladder behind per-map reference-matched
+                        # levels). Older pages ignore the extra keys.
+                        "vollevel2": True,
                         "cacheDir": staging_dir,
                         "cached": sum(1 for _ in _cache_entries()),
                         "volumes": sum(1 for m in ui_run(lambda: list(session.models.list()))

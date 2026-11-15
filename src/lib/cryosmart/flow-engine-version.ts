@@ -698,5 +698,48 @@
  * the level at all. The relay's suggested_level walk is removed
  * (extra keys from old relays are ignored); the level select offers
  * 0.25×max（推荐）/ 手动倍数, stored classic settings map to auto.
+ *
+ * v3.81 bump reason (round-41 “level取得还是不好，还是会看到胶束，
+ * 截图角度还是top view，不是side view” — the delivered P283_J55 deck
+ * was STILL all top views with speckle + free micelles): THREE fixes.
+ * (1) 截图 level — v3.80's literal 0.25×max landed inside the noise/
+ * micelle band because a map's max is a SINGLE hot spike (noise on raw
+ * ab-initio volumes, detergent heads on the reference) and every
+ * max-ratio rule inherits its position. The chain is now
+ * SELF-CALIBRATING: the reference takes min(0.25×max, 0.85×otsu₂)
+ * (otsu₂ = the SECOND Otsu over the envelope = the protein/detergent
+ * split, so hot-detergent maps drop into the protein window while
+ * normal maps keep the long-accepted 0.25×max), and every other map
+ * picks the level whose above-level voxel COUNT matches the reference
+ * at its chosen level (same particle ⇒ same envelope mass — a noisy
+ * map's matched level rises above its noise floor BY CONSTRUCTION, so
+ * the speckle and the free-micelle snowballs are gone whatever its max
+ * was). relay /volstats gains otsu2 + env_levels/env_counts (ping
+ * "vollevel2"); old relays degrade to 0.25×max with an upgrade hint.
+ * (2) level 预览 — a new 「预览 level（渲染参考图）」 button renders the
+ * reference in ChimeraX at a ladder of candidate levels (auto + 0.06–
+ * 0.5×max) and lets the user PICK with their own eyes before the
+ * multi-minute run; the pick feeds back as 自动/手动×max (class maps
+ * still count-match to it). Four straight rounds rejected every blind
+ * rule — the preview ends the guessing.
+ * (3) 膜视图朝向 — the v3.77–80 oblateness GATE (λmin/λmid < 0.75) is
+ * REMOVED: on the delivered deck the reference's envelope at the
+ * too-low 0.25×max carried protein-column + noise + micelle mass, read
+ * “globular”, and silently discarded the membrane view the user had
+ * selected — the coverage ladder then delivered its face-down pick
+ * (the exact round-41 top view). Selecting 膜蛋白视图=自动 IS the
+ * membrane statement now; the ratio is logged as diagnostics. The v3.80
+ * bbox “wide band” probe criterion is replaced by the silhouette's 2D
+ * second-moment ANISOTROPY vs a TOP-BASELINE probe (the camera looking
+ * straight down the PCA normal — guaranteed face-on): a side candidate
+ * must beat the baseline by 1.06× or clear 1.15 absolute, which works
+ * for column+disk particles (TMEM175's side silhouette is NOT a wide
+ * band) and survives stray speckle (second moments barely move; a bbox
+ * jumps). Every probe now RE-FRAMES with bare `view` (a camera swap
+ * could strand the old framing and render an empty probe — the exact
+ * silent verification failure v3.80 shipped). When the probes cannot
+ * distinguish (near-isotropic silhouette) the DOCUMENTED camera is
+ * applied anyway with an honest log line — the coverage face-down pick
+ * is never silently delivered for a membrane run again.
  */
-export const FLOW_ENGINE_VERSION = "3.80";
+export const FLOW_ENGINE_VERSION = "3.81";

@@ -46,9 +46,11 @@ import {
   bridgeDeliverFile,
   deliverFlippedMap,
   stagedMapFilename,
+  previewReferenceLevels,
   type FlowTransport,
   type MapRender,
   type ReferenceHandVerdict,
+  type LevelPreviewItem,
 } from "@/lib/cryosmart/chimerax-bridge";
 import {
   buildFlowFigureModel,
@@ -603,6 +605,22 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   const [membraneFlip, setMembraneFlip] = useState(false);
   const [levelMode, setLevelMode] = useState<"auto" | "classic" | "manual">("auto");
   const [levelRatio, setLevelRatio] = useState("0.12");
+  /* v3.81 (round-41 “level取得还是不好”): the reference-level PREVIEW —
+   * four straight rounds rejected every blind level rule (mean+2.5σ /
+   * envelope-25% / 0.25×max — each failed on a different map family,
+   * because a map's max is a single hot spike and no max-ratio rule can
+   * land in the protein window for every map). The preview renders the
+   * REFERENCE at a ladder of candidate levels in ChimeraX (the same
+   * probe machinery the run uses) and lets the user pick with their own
+   * eyes; the pick feeds back as the manual ratio (the reference then
+   * anchors the envelope-count match for every other map). */
+  const [levelPreviewBusy, setLevelPreviewBusy] = useState(false);
+  const [levelPreviewError, setLevelPreviewError] = useState<string | null>(null);
+  /** Items + their object URLs (revoked on the next preview / generate). */
+  const [levelPreviewItems, setLevelPreviewItems] = useState<Array<LevelPreviewItem & { url: string | null }> | null>(null);
+  /** The picked item's id (`<kind>:<ratio>`) — highlighted in the grid. */
+  const [levelPreviewPicked, setLevelPreviewPicked] = useState<string | null>(null);
+  const levelPreviewUrlsRef = useRef<string[]>([]);
   /* v3.72 (round-31 交付文件下载): the DELIVERY settings — the 交付目录 on
    *  the ChimeraX machine (D:\Lijing\Tigr\Tigr\data) + the file-name base
    *  auto-derived from it ("Tigr" — the directory ABOVE the data dir);
@@ -1077,6 +1095,143 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
     },
     [],
   );
+
+  /** v3.81 (round-41 “level取得还是不好”): render the REFERENCE map at a
+   * ladder of candidate display levels inside ChimeraX (the same probe
+   * machinery the run uses — real saves, real level changes) so the user
+   * can pick the level BEFORE the multi-minute run. Non-destructive:
+   * currently-open volumes are hidden + restored, the preview model is
+   * closed, and the pick feeds back as the level select's auto/manual
+   * value (the reference level then anchors the envelope-count match
+   * every other map's level follows). */
+  const runLevelPreview = useCallback(async () => {
+    if (step.busy || levelPreviewBusy) return;
+    if (mode === "demo" || !summary) {
+      toast.error("请先完成 Smart Capture 与 Trace Lineage — level 预览需要参考地图");
+      return;
+    }
+    setLevelPreviewError(null);
+    setLevelPreviewBusy(true);
+    try {
+      let model: FlowFigureModel = buildFlowFigureModel(summary, {
+        maxGroups: effectiveMaxGroups,
+        simplified,
+        minimal: flowMode === "minimal",
+        classificationMiddles: flowMode !== "manual",
+      });
+      if (manual) model = applyManualSelection(model, (uid) => manualSel[uid] !== false);
+      const uniqueMaps = figureMapSources(model);
+      const refKey = model.referenceKey;
+      const refItem = refKey ? uniqueMaps.get(refKey) : undefined;
+      if (!refItem) throw new Error("参考地图缺失 — 无法预览 level");
+      let transport = bridge;
+      if (!transport) transport = await probeBridge(false);
+      if (!transport || transport.kind !== "relay" || !transport.canFetchFiles) {
+        throw new Error(
+          `level 预览需要可回传截图的 relay 桥${transport ? `（当前是 ${transport.kind === "relay" ? "relay（无截图回传）" : "官方 REST 通道"}` : "（未连接）"} — 请先在 ChimeraX 运行桥脚本并连接`,
+        );
+      }
+      /* the remembered 下载目录 re-application mirrors the generate flow
+       * (a ChimeraX restart resets the relay's cache dir). */
+      if (transport.canSetCacheDir) {
+        let remembered: string | null = null;
+        try {
+          remembered = window.localStorage.getItem("cryoflow.mapCacheDir");
+        } catch {}
+        if (remembered && remembered.trim() && remembered.trim() !== transport.cacheDir) {
+          const applied = await applyCacheDir(remembered, transport);
+          if (applied) transport = applied;
+        }
+      }
+      /* the reference source: persistent cache first, then the relay's
+       * own /fetch download — DIRECT url first, then the app-proxy url
+       * (credentials attached server-side; the same ladder the generate
+       * flow walks, so an intranet CryoSmart that 401s direct downloads
+       * still previews). The cache NAME always derives from the item's
+       * own downloadUrl, so every rung converges on one file and the
+       * next run hits the cache. */
+      let src: string | null = null;
+      const cacheHit = transport.canCache
+        ? await bridgeStagedLookup(transport, stagedMapFilename(refItem.key, refItem.downloadUrl))
+        : null;
+      if (cacheHit) {
+        src = cacheHit.path;
+        pushLog(`level 预览: 参考图 ${refItem.key} 已在本地缓存 — 直接打开`);
+      }
+      let fetchErr: string | null = null;
+      if (!src && transport.canFetchMaps) {
+        const run = await relayFetchToCache(transport, refItem.key, refItem, refItem.downloadUrl, pushLog);
+        if (run.path) {
+          src = run.path;
+        } else {
+          fetchErr = run.error;
+          /* the app-proxy rung (the generate flow's fallback when the
+           * direct intranet download 401s). */
+          const reachable = session ? await probeCryosmartReachable(session) : false;
+          if (session && reachable) {
+            const proxyUrl = buildProxyAbsoluteUrl(session, refItem.downloadUrl, { origin: window.location.origin, timeoutMs: 300_000 });
+            if (proxyUrl) {
+              const proxied = await relayFetchToCache(transport, refItem.key, refItem, proxyUrl, pushLog);
+              if (proxied.path) {
+                src = proxied.path;
+                fetchErr = null;
+              } else {
+                fetchErr = proxied.error ?? fetchErr;
+              }
+            }
+          } else if (!session) {
+            fetchErr = `${fetchErr ?? ""}；且会话缺失（无法构建代理下载）`;
+          } else {
+            fetchErr = `${fetchErr ?? ""}；且应用服务器无法连接 CryoSmart（代理下载不可用）`;
+          }
+        }
+      }
+      if (!src) {
+        throw new Error(
+          `参考地图获取失败（${fetchErr ? `下载失败: ${fetchErr.slice(0, 160)}` : "不在本地缓存，且当前桥脚本无 /fetch 下载"}）— 请先完整生成一次（地图会写入缓存），或在 ChimeraX 重新 open 一次 relay.py 后重试`,
+        );
+      }
+      pushLog(`level 预览: 打开 ${src}，逐个候选 level 渲染参考图…`);
+      const res = await previewReferenceLevels(transport, src, { onLog: pushLog });
+      levelPreviewUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+      levelPreviewUrlsRef.current = [];
+      const items = res.items.map((it) => {
+        const url = it.png ? URL.createObjectURL(new Blob([it.png as BlobPart], { type: "image/png" })) : null;
+        if (url) levelPreviewUrlsRef.current.push(url);
+        return { ...it, url };
+      });
+      if (!items.length) throw new Error("没有可用的候选 level（渲染均失败）");
+      setLevelPreviewItems(items);
+      const autoItem = items.find((it) => it.kind === "auto") ?? null;
+      setLevelPreviewPicked(autoItem ? `auto:${autoItem.ratio.toFixed(3)}` : null);
+      if (autoItem) setLevelMode("auto");
+      toast.success(`level 预览完成 — ${items.length} 个候选，点击缩略图选择`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLevelPreviewError(msg);
+      toast.error(`level 预览失败: ${msg}`);
+    } finally {
+      setLevelPreviewBusy(false);
+    }
+  }, [step.busy, levelPreviewBusy, mode, summary, session, bridge, probeBridge, applyCacheDir, relayFetchToCache, pushLog, effectiveMaxGroups, simplified, flowMode, manual, manualSel]);
+
+  /** v3.81: the user's pick from the preview grid — feeds the pick back
+   * into the level select (auto / manual ratio) so the very next 生成
+   * uses it; the class maps follow by envelope-count matching either
+   * way. */
+  const pickLevelPreview = useCallback((it: LevelPreviewItem & { url: string | null }) => {
+    setLevelPreviewPicked(`${it.kind}:${it.ratio.toFixed(3)}`);
+    if (it.kind === "auto") {
+      setLevelMode("auto");
+      toast.success("已选自动 level — 参考图取 min(0.25×max, 0.85×otsu₂)，其余各图按参考包络匹配");
+    } else {
+      setLevelMode("manual");
+      setLevelRatio(it.ratio.toFixed(2));
+      toast.success(
+        `已选 level ${it.ratio.toFixed(2)}×max — 生成时参考图用该 level，其余各图按参考包络计数匹配（包络大小与参考一致）`,
+      );
+    }
+  }, []);
 
   /** v3.72 (round-31 “给参考pdb的部分可以直接拖动pdb进去”): a dropped or
    *  picked reference-anchor file (.pdb/.ent/.cif/.mmcif model or a
@@ -1711,10 +1866,13 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   : undefined,
           // v3.77 (round-37): the membrane-protein view orientation + the
           // screenshot display-level policy from the ChimeraX panel. 膜视图
-          // lays the detergent disk flat in the screen XY plane (density
+          // stands the detergent disk in the screen XZ plane (density
           // PCA on the reference) with an optional 180° face flip; the
-          // level policy rides displayLevelFor inside the engine (fit
-          // levels stay 0.25×max — only the screenshot contour changes).
+          // level policy rides displayLevelFor inside the engine (v3.81:
+          // the reference anchors min(0.25×max, 0.85×otsu₂) or the
+          // manual/preview ratio, every other map matches its envelope
+          // count — fit levels stay 0.25×max, only the screenshot contour
+          // changes).
           membraneView: { mode: membraneView, flip: membraneFlip },
           contourLevel:
             levelMode === "manual"
@@ -2700,7 +2858,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * stay 0.25×max — only the screenshot contour changes). */}
             <div
               className="rounded-lg border border-slate-200 bg-white/85 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
-              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（密度 PCA 检测膜法线 → 按文档化相机矩阵定向，渲染探针验证剪影呈水平条带后生效，失败自动降级为 turn 网格扫描），并按 0.25×max/手动策略设定截图等值面 level"
+              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（密度 PCA 检测膜法线 → 按文档化相机矩阵定向，渲染探针对比侧视/俯视剪影各向异性验证后生效，失败自动降级为 turn 网格扫描；探针无法区分时按文档相机直连）· 截图 level：参考图取 min(0.25×max, 0.85×otsu₂)（或手动/预览选择），其余各图按参考包络计数匹配"
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
@@ -2736,8 +2894,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="auto">0.25×max（推荐）</SelectItem>
-                    <SelectItem value="manual">手动倍数 ×max</SelectItem>
+                    <SelectItem value="auto">自动 · min(0.25×max, 0.85×otsu₂)（推荐）</SelectItem>
+                    <SelectItem value="manual">手动倍数 ×max（锚定参考图）</SelectItem>
                   </SelectContent>
                 </Select>
                 {levelMode === "manual" && (
@@ -2746,20 +2904,70 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     onChange={(e) => setLevelRatio(e.target.value)}
                     inputMode="decimal"
                     placeholder="0.12"
-                    aria-label="手动 level 倍数（各图 max 的倍数，0.01–0.9）"
+                    aria-label="手动 level 倍数（参考图 max 的倍数，0.01–0.9）"
                     className="h-7 w-24 rounded-md border-slate-300 bg-white px-2 font-mono text-[10.5px] text-slate-700 focus-visible:ring-teal-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                   />
                 )}
+                <button
+                  type="button"
+                  onClick={runLevelPreview}
+                  disabled={step.busy || levelPreviewBusy}
+                  className="inline-flex h-7 items-center gap-1 rounded-md border border-teal-300 bg-teal-50 px-2 text-[10.5px] font-medium text-teal-700 transition hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-teal-800 dark:bg-teal-950/40 dark:text-teal-300 dark:hover:bg-teal-900/40"
+                  title="在 ChimeraX 里把参考图按一梯候选 level 逐个渲染成缩略图 — 点选后生成时即用该 level（推荐先预览再生成，避免生成后再调 level 重新等待）"
+                >
+                  {levelPreviewBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Gauge className="h-3 w-3" />}
+                  预览 level（渲染参考图）
+                </button>
               </div>
+              {(levelPreviewBusy || levelPreviewError || levelPreviewItems) && (
+                <div className="mt-1.5 pl-5">
+                  {levelPreviewError && (
+                    <p className="text-[10px] text-rose-600 dark:text-rose-400">预览失败: {levelPreviewError}</p>
+                  )}
+                  {levelPreviewBusy && (
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400">正在 ChimeraX 中逐个候选 level 渲染参考图…</p>
+                  )}
+                  {levelPreviewItems && (
+                    <div className="flex flex-wrap gap-1.5" data-testid="level-preview-grid">
+                      {levelPreviewItems.map((it) => {
+                        const id = `${it.kind}:${it.ratio.toFixed(3)}`;
+                        const picked = levelPreviewPicked === id;
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => pickLevelPreview(it)}
+                            title={`${it.rule}${it.level != null ? ` · level ${it.level.toFixed(4)}` : ""}${it.kind === "auto" ? "（自动推荐）" : ""} — 点击选用`}
+                            className={`group flex w-[76px] flex-col items-center gap-0.5 rounded-md border p-1 transition ${
+                              picked
+                                ? "border-teal-500 bg-teal-50 ring-1 ring-teal-400 dark:border-teal-500 dark:bg-teal-950/50"
+                                : "border-slate-200 bg-white hover:border-teal-300 hover:bg-teal-50/50 dark:border-slate-700 dark:bg-slate-900 dark:hover:border-teal-700"
+                            }`}
+                          >
+                            {it.url ? (
+                              <img src={it.url} alt={`参考图 level 预览 ${it.rule}`} className="h-[58px] w-[68px] rounded-sm bg-slate-100 object-contain dark:bg-slate-800" data-testid="level-preview-thumb" />
+                            ) : (
+                              <span className="flex h-[58px] w-[68px] items-center justify-center rounded-sm bg-slate-100 text-[9px] text-slate-400 dark:bg-slate-800">渲染失败</span>
+                            )}
+                            <span className="w-full truncate text-center text-[9px] leading-tight text-slate-600 dark:text-slate-300" data-testid="level-preview-label">
+                              {it.kind === "auto" ? "自动" : `${it.ratio.toFixed(2)}×`}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
               <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {membraneView === "auto"
                   ? bridge && bridge.kind === "relay" && !bridge.canMembrane
-                    ? "对参考图做密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），按文档化相机矩阵把膜法线竖直、盘长轴水平取向，并用渲染探针验证剪影呈水平条带后才生效（不达标自动改用 turn 网格扫描）— 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。当前桥脚本较旧（无 /membrane 端点）：本次会直接用探针扫描定位膜平面（结果相近）；在 ChimeraX 重新 open 一次 relay.py 可获得精确 PCA 取向。"
-                    : "对参考图做密度加权 PCA（蛋白+去垢剂整体呈扁盘状，最小方差主轴即膜法线），按文档化相机矩阵把膜法线竖直、盘长轴水平取向，并用渲染探针验证剪影呈水平条带后才生效（不达标自动改用 turn 网格扫描）— 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（同一 map 结果可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。"
+                    ? "对参考图做密度加权 PCA（最小方差主轴即膜法线），按文档化 12 数相机矩阵把膜法线竖直、盘长轴水平取向，并用渲染探针对比侧视/俯视剪影的各向异性验证后生效（不达标自动改用 turn 网格扫描）— 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。当前桥脚本较旧（无 /membrane 端点）：本次会直接用探针扫描定位膜平面（结果相近）；在 ChimeraX 重新 open 一次 relay.py 可获得精确 PCA 取向。不再设扁率门槛 — 已选膜蛋白视图即按膜蛋白处理（扁率仅作日志诊断）。"
+                    : "对参考图做密度加权 PCA（最小方差主轴即膜法线），按文档化 12 数相机矩阵把膜法线竖直、盘长轴水平取向，并用渲染探针对比侧视与俯视基线的剪影各向异性验证后生效（不达标自动改用 turn 网格扫描；探针无法区分时按文档相机直连并注明）— 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（同一 map 结果可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。不再设扁率门槛 — 已选膜蛋白视图即按膜蛋白处理（扁率仅作日志诊断）。"
                   : "关闭膜视图：沿用基准 + 90° 覆盖率评分择优视角（v3.76 行为，适合可溶性蛋白）。"}
                 {levelMode === "auto"
-                  ? " 截图 level（v3.80）：直接取各图最大密度的 25%（0.25×max，你提议的方案）— level 过高时等值面只包住高密度的去垢剂外壳，看不到内部穿膜 helix；降到 max 的 25% 能显出内部细节。与对齐拟合阈值一致（也恒为 0.25×max）；每张图的 level 都会写进运行日志，旧桥脚本无需更新即可生效。"
-                  : " 手动 level：按各图 max 的倍数设定（0.01–0.9），对齐拟合阈值不受影响（恒为 0.25×max）。"}
+                  ? " 截图 level（v3.81）：参考图取 min(0.25×max, 0.85×otsu₂)（otsu₂ = 信封内二次 Otsu，蛋白/去垢剂分界 — 去垢剂偏热的地图会自动降入蛋白区间；普通地图保持长期沿用的 0.25×max），其余各图按参考包络计数匹配 level（包络大小与参考一致 — 噪点图的 max 常是噪声尖峰，任何 max 比例都会落进噪声带，计数匹配自动抬到包络处，不再满屏斑点/游离胶束）。建议点「预览 level」看实际效果后再生；旧桥（无 otsu₂/包络阶梯）退回 0.25×max 并在日志提示升级。"
+                  : " 手动 level：倍数 ×max 锚定参考图（0.01–0.9），其余各图按参考包络计数匹配（无阶梯的旧桥才直接用倍数）；对齐拟合阈值不受影响（恒为 0.25×max）。"}
               </p>
             </div>
 
