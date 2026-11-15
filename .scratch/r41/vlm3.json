@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "1. **Yes** — a row of 7 thumbnail tiles labeled 自动, 0.06×, 0.10×, 0.15×, 0.25×, 0.35×, 0.50× appears under the 截图 level control (each with a gray placeholder circle).\n\n2. **Yes, the first one (自动)** is highlighted with a teal border/ring.\n\n3. **Yes** — a teal-outlined button labeled “预览 level（渲染参考图）” sits next to the 截图 level dropdown.\n\n4. **No obvious layout problems** in the main panel — no overlapping or cut-off text. Only minor notes: the bottom card (交付文件) is clipped by the viewport (normal scroll behavior), and the header area has some faded/low-contrast text near the title, but nothing overlapping or broken.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1794749863,
+  "id": "20261115213739b06fb34c0c2148c7",
+  "model": "glm-5.3-flash",
+  "object": "chat.completion",
+  "request_id": "20261115213739b06fb34c0c2148c7",
+  "usage": {
+    "completion_tokens": 183,
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "prompt_tokens": 1110,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 1293
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "1. image1：3D密度图渲染；斜侧视角（可见跨膜延伸方向，非正对圆盘）；等值面较干净、无噪点；level合适（偏光滑，略低分辨率感）；横向宽椭球形。\n2. image2：3D密度图渲染；斜侧视角；较干净、少量小碎块；level合适；横向宽椭球形。\n3. image3：3D密度图渲染；斜侧/顶部偏侧视角；等值面干净但表面细节破碎（分辨率较高）；level合适；横向宽椭球形。\n4. image4：3D密度图渲染；斜侧视角；基本干净、周围有少量小噪点碎块（轻微speckle/可能少量胶束残余）；level合适；横向宽椭球形。\n5. image5：3D密度图渲染；斜侧视角；干净、少量碎块；level合适；横向宽椭球形。\n6. image6：3D密度图渲染；两个颗粒的侧视渲染（两个分立的密度团，可能是2类构象/颗粒并列展示）；等值面干净，但可见分离的小碎块 blob（周围散在噪声小块）；level合适略低（碎块偏多）；近方形画面内含两个纵向/斜向柱状体。\n7. image7：3D密度图渲染；斜侧视角；干净、表面细节丰富（分辨率高）；level合适；横向宽椭球形。\n8. image8：3D密度图渲染；斜侧视角；布满噪点雪花（严重speckle，阈值过低/信噪比低）；横向宽椭球形。\n9. image9：3D密度图渲染；斜侧视角；布满噪点雪花（speckle严重，level过低）；横向宽椭球形。\n10. image10：3D密度图渲染；顶部视角（看到圆形盘状轮廓，似膜平面圆盘/胶束盘）；布满噪点雪花+外围散在噪点；level过低（噪点严重）；圆盘状。\n11. image11：3D密度图渲染；顶部/斜视视角；布满噪点雪花、边缘不规则外伸（噪点 blob 多）；level过低；近方形/横向不规则团块。",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1794790323,
+  "id": "202611160851501820cbc2dbb9481b",
+  "model": "glm-5.3-flash",
+  "object": "chat.completion",
+  "request_id": "202611160851501820cbc2dbb9481b",
+  "usage": {
+    "completion_tokens": 479,
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "prompt_tokens": 2611,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 3090
+  }
+}
