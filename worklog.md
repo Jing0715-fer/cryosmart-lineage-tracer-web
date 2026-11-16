@@ -2478,3 +2478,37 @@ Work Log:
 Stage Summary:
 - 交付的 {base}.volume.fsc.png 现在优先由 fsc.xml 重绘（内嵌文本 → 捕获 URL → 构造 download_result_file 路径，逐级尝试、逐级记录），按网页同款横版比例 516×303 的 2 倍（1032×606）出图；只有当所有 XML 来源都失败时才退回候选图/原始近方图（日志注明 比例异常）。
 - 用户侧动作：刷新页面（徽标 v3.83）重新生成即可；运行日志会显示 FSC 曲线由 <来源> 按网页版横版比例 516×303 重绘。无需重新 open relay.py。
+
+---
+Task ID: 40 (v3.84)
+Agent: main (Z.ai Code)
+Task: User round-44 feedback: "上一轮的判断我感觉不对，这两张图的来源不同，应该第一个窄的是job卡片中的预览图，后一个是job详情中的job log中的图" — the user CORRECTED the round-43 forensics: the narrow delivered picture is the JOB CARD's preview thumbnail (a ui_tile asset), the normal-ratio one is the image in the job 详情页's JOB LOG — a REAL captured log image, not a client-side re-render.
+
+Work Log:
+- ROOT CAUSE: the round-43 ladder trusted the wrong order twice — (a) the FSC matcher ranked candidates by NAME only, so the card preview ("fsc_1_FSC.png"/"FSC", rank 0) tied the log image AND ui_tile assets sit earlier in imageAssets()'s push order (ui_tile → output_group → log images), and (b) v3.83 hoisted the fsc.xml re-draw ABOVE every real image. When the capture lacked the refine job's logs, the card preview won the first slot, failed the ratio gate, and rode the "off-ratio beats missing" fallback into the 交付目录.
+- workflow-figure.ts: new shared helpers plotSourceTier (log_image/image_log = 0, output_group = 1, ui_tile card preview = 2) + fscCurveNameRank (main-curve-first within a tier) + plotImageUrl (moved from the card, window-guarded); FlowFigureModel gains fscLogImageUrls — the fsc-carrying refine node's captured JOB-LOG FSC image URLs, main-curve-first, card previews never qualify.
+- flow-figure-card.tsx (1) SOURCE-TIERED LADDER: buildDeliveryPlan sorts every plot's candidates by SOURCE first (job log → output group → card preview last, name ranking only within a tier) and stamps each URL with a provenance label (job log 原图 / 输出组预览 / job 卡片预览 / 构造地址).
+- flow-figure-card.tsx (2) DELIVERY ORDER: the plotKind branch walks rung 1 = the captured JOB-LOG images (shape + light checked, honest 未捕获 job log 原图 note when absent) → rung 2 = the fsc.xml re-draw at the webpage's 1032×606 (FSC only) → rung 3 = the remaining candidates (output-group → constructed pseudo-fileid → card preview LAST) → rung 4 = the first LIGHT off-ratio candidate; every run-log line names the source. The walk/probe/shape helpers (fetchPlotImageBytes / probePngBytes / plotShapeOk / PLOT_LIGHT_MIN_LUM) are hoisted to module level (a plotState holder defeats TS's closure narrowing).
+- flow-figure-card.tsx (3) PPT FSC PANEL: 附 FSC 曲线 prefers the SAME real job-log image (model.fscLogImageUrls, light + shape checked) and only re-draws from the fsc.xml when none passes — the panel and the delivered png now agree.
+- VERIFICATION: tsc clean (skills/ pre-exists); eslint clean (the 6 scripts/*.cjs pre-exist); offline sort assertion — a same-named ui_tile card preview can never outrank a log image; page renders 引擎 v3.84 with zero console/page errors (agent-browser).
+
+Stage Summary:
+- FSC/Guinier/角度分布 交付图现在优先取 job 详情页 log 中的原图（用户的 正常比例 参照），未捕获时才由 fsc.xml 按网页横版比例重绘，job 卡片的窄预览图永远排在最后；运行日志逐行标注每张图的来源。
+
+---
+Task ID: 41 (v3.85)
+Agent: main (Z.ai Code)
+Task: User round-45 feedback: "好像这个level的问题更加严重了，是数据调整的方向反了？参考这个脚本中计算map level的方式改进一下" + auto_color_locres.py — the level problem got WORSE; the user suspects the adjustment DIRECTION is reversed and asks to follow their script's map-level rule.
+
+Work Log:
+- FORENSICS (VLM on the delivered P283_J55_workflow (3).pptx renders): most maps read level-TOO-LOW (snow speckle + free micelle blobs), one too-high (sponge) — the v3.82 knee's bottom-up sweep took the LOWEST rung passing its fragmentation bar and then refined DOWNWARD (mid between the dirty lower rung and the clean one), i.e. it optimised TOWARD the noise floor — the exact reverse of the expert workflow; its frag metric (foreground pixels outside the main component) also under-counted visually-prominent micelles (a dozen blobs ≈ 3–5% of pixels → "clean").
+- chimerax-bridge.ts (1) THE SCRIPT RULE: new constants SCRIPT_LEVEL_RATIO = 0.15 + DUST_SIZE_A = 8.08 straight out of auto_color_locres.py (`level = em_map.data.full_matrix().max() * 0.15` + `surface dust #id size 8.08`); autoLevelFor (the non-probe fallback) is now the script rule VERBATIM — the v3.79–81 min(0.25×max, 0.85×otsu₂) histogram clamps are deleted; the reference's last-ditch default is 0.15×max too. Alignment FIT levels stay at the tuned 0.25×max.
+- chimerax-bridge.ts (2) DUST EVERYWHERE: `surface dust #id size 8.08` rides EVERY display-level application — kneeLevelFor's probes (so the probe measures exactly what the screenshot shows), the reference's pre-view re-level, the per-map screenshot application (re-issued after the final `volume level`), setDisplayLevel (manual mode included) and previewReferenceLevels (the 预览 level thumbnails show the dusted look).
+- chimerax-bridge.ts (3) ANCHOR-FIRST KNEE: kneeLevelFor probes the ANCHOR 0.15×max (dusted) FIRST — clean → done (rule: 脚本规则 0.15×max + surface dust 8.08 Å（探针验证通过…）); dirty → probe the remaining LEVEL_KNEE_RATIOS ladder and pick the clean rung CLOSEST to the anchor (up when the dirt was noise, down when the anchor hollowed the particle — never the lowest clean rung, never the old downward refinement into the dirty band); nothing clean → minimum-frag rung (tie → closer to the anchor) with the honest ⚠ warning. The LEVEL_KNEE_RATIOS comment is rewritten for the new semantics.
+- flow-figure-card.tsx: level select reads 自动 · 脚本规则 0.15×max + dust 清理（推荐）; the help text + membrane-view tooltip describe the v3.85 chain (锚点 + dust + 就近调整); the manual help notes dust rides manual levels too.
+- mock (report-e2e): dustCommands counter (regex `^surface dust #\d+ size 8\.08`) + dust_commands in /flow-e2e/relay-stats.
+- VERIFICATION: tsc clean; eslint clean (6 pre-existing scripts/*.cjs); FULL BROWSER E2E against the mock relay (v382-e2e-prep lineage, 9 jobs): 参考图截图 level 0.1500（脚本规则 0.15×max + surface dust 8.08 Å（探针验证通过：碎片率 0.0%，主体覆盖 39.5%））, every map (J9/volume, J7/volume_class_0/1/2) anchors at 0.1500 with ZERO ladder walks (_knee_ saves: exactly 5, all _*_0.1500.png), dust_commands = 10, PPTX generated, zero page/console errors on a fresh reload (the one chimerax-bridge parse error in the console was an intermediate-edit HMR artifact — cleared and re-verified clean).
+
+Stage Summary:
+- 截图 level 改为您的 auto_color_locres.py 脚本规则：全矩阵最大值 × 0.15 + surface dust 8.08 Å 清理小碎块，逐图渲染探针验证；锚点仍有碎片则就近上调、主体镂空则就近下调（不再从最低档向上扫、也不再向噪声带精调 — 这就是"方向反了"的根源）。对齐拟合阈值不受影响（恒 0.25×max）。
+- 用户侧动作：刷新页面（徽标 v3.85）重新生成即可；无需重新 open relay.py（dust/锚点全部页面侧下发，旧桥完整可用）。

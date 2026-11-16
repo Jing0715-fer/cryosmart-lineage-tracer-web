@@ -1,0 +1,93 @@
+  /* ---- v3.82 → v3.85 (round-45 “好像这个level的问题更加严重了，是数据
+   *  调整的方向反了？参考这个脚本中计算map level的方式改进一下”):
+   *  the DISPLAY level ANCHORS at the user's auto_color_locres.py rule —
+   *  full-matrix max × 0.15 with `surface dust size 8.08` cleaning the
+   *  small disconnected junk — and a render probe VERIFIES it. The v3.82
+   *  knee swept the ladder bottom-up and took the LOWEST “clean” rung
+   *  (plus a refinement probe DOWNWARD, back into the dirty band): it
+   *  optimised toward the noise floor — the exact reverse of the expert
+   *  workflow — and its frag metric (foreground pixels outside the main
+   *  component) under-counted visually-prominent micelles, so the
+   *  round-44 deck came back speckled on most maps. v3.85 order:
+   *    1. probe the ANCHOR 0.15×max (dusted) — clean → done (the
+   *       expected case: the script's own combo on the user's maps);
+   *    2. anchor dirty → probe the remaining ladder rungs (dusted) and
+   *       pick the clean rung CLOSEST to the anchor — UP when the dirt
+   *       was noise (most maps), DOWN when the anchor hollowed the
+   *       particle; never the lowest clean rung, never a refinement
+   *       back toward the dirty band;
+   *    3. nothing clean even with dust → the minimum-frag rung (tie →
+   *       closer to the anchor) with an honest warning. ---- */
+  const kneeLevelFor = async (
+    id: number,
+    stats: BridgeVolStats | null,
+    tag: string,
+  ): Promise<{ level: number; rule: string } | null> => {
+    if (!stats || !Number.isFinite(stats.max) || stats.max <= 0) return null;
+    const max = stats.max;
+    type Rung = { level: number; ratio: number; s: RenderShape | null };
+    const rungs: Rung[] = [];
+    const probeLevel = async (level: number): Promise<RenderShape | null> => {
+      await exec(t, `volume #${id} level ${level.toFixed(4)} step ${STEP}`, opts, true);
+      /* v3.85: the script's dust cleanup — the probe must measure EXACTLY
+       * what the screenshot will show (dust hides the disconnected bits,
+       * so the frag metric judges the DUSTED render, not the raw one). */
+      await exec(t, `surface dust #${id} size ${DUST_SIZE_A}`, opts, true);
+      await exec(t, "wait 1", opts, true);
+      await exec(t, "view", opts, true);
+      await exec(t, "wait 1", opts, true);
+      return renderProbe(`_knee_${tag}_${level.toFixed(4)}.png`);
+    };
+    const note = (r: Rung, extra = "") =>
+      r.s
+        ? `  level ${(r.level / max).toFixed(3)}×max${extra}: 碎片率 ${(r.s.frag * 100).toFixed(1)}% · 主体覆盖 ${(r.s.mainCov * 100).toFixed(1)}%${
+            r.s.frag > KNEE_FRAG_MAX ? "（斑点/游离胶束未清）" : ""
+          }`
+        : "";
+    /* rung 1 — the SCRIPT anchor, probed FIRST (with dust) */
+    const anchorLevel = max * SCRIPT_LEVEL_RATIO;
+    const anchorShape = await probeLevel(anchorLevel);
+    const anchorRung: Rung = { level: anchorLevel, ratio: SCRIPT_LEVEL_RATIO, s: anchorShape };
+    rungs.push(anchorRung);
+    if (anchorShape) log(note(anchorRung, `（脚本锚点 · surface dust ${DUST_SIZE_A} Å）`));
+    if (anchorShape && anchorShape.frag <= KNEE_FRAG_MAX) {
+      return {
+        level: anchorLevel,
+        rule: `脚本规则 0.15×max + surface dust ${DUST_SIZE_A} Å（探针验证通过：碎片率 ${(anchorShape.frag * 100).toFixed(1)}%，主体覆盖 ${(anchorShape.mainCov * 100).toFixed(1)}%）`,
+      };
+    }
+    /* rung 2 — the anchor was dirty: probe the rest of the ladder
+     * (dusted) and pick the clean rung CLOSEST to the anchor. */
+    for (const ratio of LEVEL_KNEE_RATIOS) {
+      if (threw(opts.signal)) break;
+      if (Math.abs(ratio - SCRIPT_LEVEL_RATIO) < 0.02) continue; // anchor already probed
+      const level = max * ratio;
+      const s = await probeLevel(level);
+      const r: Rung = { level, ratio, s };
+      rungs.push(r);
+      if (s) log(note(r));
+    }
+    const measured = rungs.filter((r) => r.s);
+    if (!measured.length) return null;
+    const bestMain = Math.max(...measured.map((r) => r.s!.mainCov));
+    const clean = (s: RenderShape) => s.frag <= KNEE_FRAG_MAX && s.mainCov >= KNEE_MAIN_MIN_FRAC * bestMain;
+    const dist = (r: Rung) => Math.abs(r.ratio - SCRIPT_LEVEL_RATIO);
+    const anchorFragTxt = anchorShape ? `${(anchorShape.frag * 100).toFixed(1)}%` : "未知";
+    const cleanRungs = measured.filter((r) => clean(r.s!));
+    if (cleanRungs.length) {
+      const pick = cleanRungs.reduce((a, b) => (dist(a) < dist(b) || (dist(a) === dist(b) && a.ratio > b.ratio) ? a : b));
+      return {
+        level: pick.level,
+        rule: `探针校验 ${pick.ratio.toFixed(2)}×max（锚点 0.15×max 处碎片率 ${anchorFragTxt} 未清 — 就近${pick.ratio > SCRIPT_LEVEL_RATIO ? "上调" : "下调"}）`,
+      };
+    }
+    /* rung 3 — nothing clean even with dust: the minimum-frag rung
+     * (tie → closer to the anchor), honestly logged. */
+    const fragOf = (r: Rung) => (r.s ? r.s.frag : Number.POSITIVE_INFINITY);
+    const pick = measured.reduce((a, b) => (fragOf(a) < fragOf(b) || (fragOf(a) === fragOf(b) && dist(a) <= dist(b)) ? a : b));
+    log(`  ⚠ 所有 level 档位均有碎片（最干净 ${(fragOf(pick) * 100).toFixed(1)}%）— 就近取最干净档，可改用手动 level`);
+    return {
+      level: pick.level,
+      rule: `最低碎片 ${(fragOf(pick) * 100).toFixed(1)}%（${pick.ratio.toFixed(2)}×max 档 · 锚点 0.15×max 亦未通过）`,
+    };
+  };

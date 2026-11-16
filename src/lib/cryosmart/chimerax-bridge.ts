@@ -1596,6 +1596,27 @@ async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
 /* ------------------------------------------------------------------ */
 
 const LEVEL_RATIO = 0.25;
+/** v3.85 (round-45 “好像这个level的问题更加严重了，是数据调整的方向反了？
+ *  参考这个脚本中计算map level的方式改进一下” — the user's own
+ *  auto_color_locres.py): the DISPLAY contour anchors at
+ *  em_map.data.full_matrix().max() × 0.15 with `surface dust size 8.08`
+ *  cleaning the small disconnected junk. The v3.82 knee swept the ladder
+ *  BOTTOM-UP and took the LOWEST "clean" rung (+ a refinement probe
+ *  DOWNWARD, back toward the dirty band) — i.e. it optimised toward the
+ *  noise floor, the exact reverse of the expert workflow, and its frag
+ *  metric (share of foreground pixels outside the main component)
+ *  under-counted visually-prominent micelles → the round-44 deck came
+ *  back speckled on most maps. v3.85: anchor at the script's 0.15×max,
+ *  dust the surface, VERIFY with a render probe, and adjust only in the
+ *  right direction (fragmented → the clean rung closest to the anchor,
+ *  searching UP; hollow → closest BELOW) — never back into the dirty
+ *  band. Alignment FIT levels stay at the tuned 0.25×max (LEVEL_RATIO). */
+const SCRIPT_LEVEL_RATIO = 0.15;
+/** v3.85: the dust size straight out of auto_color_locres.py
+ *  (`surface dust #<id> size 8.08`) — hides disconnected surface bits
+ *  smaller than this; re-issued after every level change so the probes
+ *  measure exactly what the screenshots will show. */
+const DUST_SIZE_A = 8.08;
 const STEP = 1;
 const CHIRALITY_EPSILON = 0.01;
 /** v3.67 multi-scale lowpass ladder — ÅNGSTRÖM units (`volume gaussian
@@ -1656,11 +1677,15 @@ const STANDING_SCAN_NEED = 0.08;
  * gets its OWN orientation assist (its fitmap alignment landed off-axis —
  * the delivered J9/J48 ab-initio obliques). */
 const STANDING_ASSIST_TRIGGER = 0.05;
-/** v3.82: the per-map level KNEE ladder (×max, log-spaced) — every rung
- * is RENDERED and measured (fragmentation + main coverage); the knee is
- * the LOWEST clean level. Ratios reach 0.9 because a noise-spike max can
- * push every map-specific histogram rule into the noise band (the
- * delivered J48 snowballs sat at 0.25×max below their noise floor). */
+/** v3.82: the level KNEE ladder (×max, log-spaced) — v3.85 (round-45):
+ *  probed only AFTER the script anchor 0.15×max (auto_color_locres.py)
+ *  fails its verification; the pick is the clean rung CLOSEST to the
+ *  anchor. The old bottom-up “lowest clean” sweep (+ the downward
+ *  refinement) optimised toward the noise floor — the reverse of the
+ *  expert workflow (see kneeLevelFor). Ratios reach 0.9 because a
+ *  noise-spike max can push every map-specific histogram rule into the
+ *  noise band (the delivered J48 snowballs sat at 0.25×max below their
+ *  noise floor). */
 const LEVEL_KNEE_RATIOS = [0.05, 0.08, 0.12, 0.18, 0.26, 0.36, 0.5, 0.7, 0.9];
 /** v3.82: the knee cleanliness bars — fragmentation (1 − main/foreground)
  * ≤ KNEE_FRAG_MAX kills snowball speckle AND free micelle blobs (they are
@@ -1802,30 +1827,19 @@ function envelopeCountAt(stats: BridgeVolStats, level: number): number | null {
   return ct[ct.length - 1];
 }
 
-/** v3.81: the map's OWN auto rule — min(0.25×max, 0.85×otsu2), clamped to
- * [max(otsu, 3%·max), 90%·max]. Falls back to the literal 0.25×max when
- * otsu2 is missing (old relay / degenerate envelope). */
+/** v3.81 → v3.85 (round-45): the map's OWN auto rule is now the
+ * user's auto_color_locres.py rule VERBATIM — full-matrix max × 0.15
+ * (`em_map.data.full_matrix().max() * 0.15`). The v3.79–81
+ * min(0.25×max, 0.85×otsu₂) clamp is gone — the `surface dust` cleanup
+ * handles the small disconnected junk those histogram rules were
+ * fighting, and every max-ratio fight was really a fight against one
+ * hot spike that the dust now hides. */
 function autoLevelFor(stats: BridgeVolStats): DisplayLevelChoice | null {
   if (!Number.isFinite(stats.max) || stats.max <= 0) return null;
-  const quarter = stats.max * LEVEL_RATIO;
-  if (
-    stats.otsu2 != null &&
-    Number.isFinite(stats.otsu2) &&
-    stats.otsu2 > 0 &&
-    stats.otsu != null &&
-    Number.isFinite(stats.otsu)
-  ) {
-    const floor = Math.max(stats.otsu, stats.max * 0.03);
-    const level = Math.max(Math.min(quarter, 0.85 * stats.otsu2), Math.min(floor, stats.max * 0.9));
-    return {
-      level,
-      rule:
-        level === quarter
-          ? "自动 · 0.25×max（otsu₂ 较高，未压低 level）"
-          : "自动 · min(0.25×max, 0.85×otsu₂)",
-    };
-  }
-  return { level: quarter, rule: "0.25×max（桥脚本较旧，无 otsu₂ — 建议 ChimeraX 重新 open relay.py）" };
+  return {
+    level: stats.max * SCRIPT_LEVEL_RATIO,
+    rule: "0.15×max（auto_color_locres 脚本规则）",
+  };
 }
 
 function displayLevelFor(
@@ -2479,6 +2493,9 @@ export async function renderFigureMaps(
     const lvl = displayLevelById.get(id);
     if (lvl == null) return;
     await exec(t, `volume #${id} level ${lvl.toFixed(4)} step ${STEP}`, opts, true);
+    /* v3.85: the script's dust cleanup rides EVERY display level — the
+     * screenshots must never show the small disconnected junk. */
+    await exec(t, `surface dust #${id} size ${DUST_SIZE_A}`, opts, true);
   };
   /** v3.77: the membrane-view outcome, surfaced through the result. */
   let membraneReport: MembraneViewReport | null = null;
@@ -2537,16 +2554,26 @@ export async function renderFigureMaps(
     return renderProbe(name);
   };
 
-  /* ---- v3.82 (round-42 “level取得还是不好”): the level KNEE — render
-   * the model at a ladder of levels, measure FRAGMENTATION (snowball
-   * speckle AND free micelle blobs are disconnected components — the
-   * exact round-41/42 胶束 complaint) plus the main component's coverage
-   * (a too-high level hollows the particle into a spongy core), and take
-   * the LOWEST clean level. Every blind histogram rule (max-ratio, the
-   * two Otsu variants, count-matching) inherited the position of one
-   * hot spike and delivered snowballs (J48), a sponge (J41 class 3) and
-   * a fuzzy belt-on reference on the real P283 maps — the render itself
-   * is the only honest oracle. ---- */
+  /* ---- v3.82 → v3.85 (round-45 “好像这个level的问题更加严重了，是数据
+   *  调整的方向反了？参考这个脚本中计算map level的方式改进一下”):
+   *  the DISPLAY level ANCHORS at the user's auto_color_locres.py rule —
+   *  full-matrix max × 0.15 with `surface dust size 8.08` cleaning the
+   *  small disconnected junk — and a render probe VERIFIES it. The v3.82
+   *  knee swept the ladder bottom-up and took the LOWEST “clean” rung
+   *  (plus a refinement probe DOWNWARD, back into the dirty band): it
+   *  optimised toward the noise floor — the exact reverse of the expert
+   *  workflow — and its frag metric (foreground pixels outside the main
+   *  component) under-counted visually-prominent micelles, so the
+   *  round-44 deck came back speckled on most maps. v3.85 order:
+   *    1. probe the ANCHOR 0.15×max (dusted) — clean → done (the
+   *       expected case: the script's own combo on the user's maps);
+   *    2. anchor dirty → probe the remaining ladder rungs (dusted) and
+   *       pick the clean rung CLOSEST to the anchor — UP when the dirt
+   *       was noise (most maps), DOWN when the anchor hollowed the
+   *       particle; never the lowest clean rung, never a refinement
+   *       back toward the dirty band;
+   *    3. nothing clean even with dust → the minimum-frag rung (tie →
+   *       closer to the anchor) with an honest warning. ---- */
   const kneeLevelFor = async (
     id: number,
     stats: BridgeVolStats | null,
@@ -2558,50 +2585,66 @@ export async function renderFigureMaps(
     const rungs: Rung[] = [];
     const probeLevel = async (level: number): Promise<RenderShape | null> => {
       await exec(t, `volume #${id} level ${level.toFixed(4)} step ${STEP}`, opts, true);
+      /* v3.85: the script's dust cleanup — the probe must measure EXACTLY
+       * what the screenshot will show (dust hides the disconnected bits,
+       * so the frag metric judges the DUSTED render, not the raw one). */
+      await exec(t, `surface dust #${id} size ${DUST_SIZE_A}`, opts, true);
       await exec(t, "wait 1", opts, true);
       await exec(t, "view", opts, true);
       await exec(t, "wait 1", opts, true);
       return renderProbe(`_knee_${tag}_${level.toFixed(4)}.png`);
     };
+    const note = (r: Rung, extra = "") =>
+      r.s
+        ? `  level ${(r.level / max).toFixed(3)}×max${extra}: 碎片率 ${(r.s.frag * 100).toFixed(1)}% · 主体覆盖 ${(r.s.mainCov * 100).toFixed(1)}%${
+            r.s.frag > KNEE_FRAG_MAX ? "（斑点/游离胶束未清）" : ""
+          }`
+        : "";
+    /* rung 1 — the SCRIPT anchor, probed FIRST (with dust) */
+    const anchorLevel = max * SCRIPT_LEVEL_RATIO;
+    const anchorShape = await probeLevel(anchorLevel);
+    const anchorRung: Rung = { level: anchorLevel, ratio: SCRIPT_LEVEL_RATIO, s: anchorShape };
+    rungs.push(anchorRung);
+    if (anchorShape) log(note(anchorRung, `（脚本锚点 · surface dust ${DUST_SIZE_A} Å）`));
+    if (anchorShape && anchorShape.frag <= KNEE_FRAG_MAX) {
+      return {
+        level: anchorLevel,
+        rule: `脚本规则 0.15×max + surface dust ${DUST_SIZE_A} Å（探针验证通过：碎片率 ${(anchorShape.frag * 100).toFixed(1)}%，主体覆盖 ${(anchorShape.mainCov * 100).toFixed(1)}%）`,
+      };
+    }
+    /* rung 2 — the anchor was dirty: probe the rest of the ladder
+     * (dusted) and pick the clean rung CLOSEST to the anchor. */
     for (const ratio of LEVEL_KNEE_RATIOS) {
       if (threw(opts.signal)) break;
+      if (Math.abs(ratio - SCRIPT_LEVEL_RATIO) < 0.02) continue; // anchor already probed
       const level = max * ratio;
       const s = await probeLevel(level);
-      rungs.push({ level, ratio, s });
-      if (s) {
-        log(
-          `  level ${ratio.toFixed(2)}×max: 碎片率 ${(s.frag * 100).toFixed(1)}% · 主体覆盖 ${(s.mainCov * 100).toFixed(1)}%${
-            s.frag > KNEE_FRAG_MAX ? "（斑点/游离胶束未清）" : ""
-          }`,
-        );
-      }
+      const r: Rung = { level, ratio, s };
+      rungs.push(r);
+      if (s) log(note(r));
     }
     const measured = rungs.filter((r) => r.s);
     if (!measured.length) return null;
     const bestMain = Math.max(...measured.map((r) => r.s!.mainCov));
     const clean = (s: RenderShape) => s.frag <= KNEE_FRAG_MAX && s.mainCov >= KNEE_MAIN_MIN_FRAC * bestMain;
-    const firstCleanIdx = rungs.findIndex((r) => r.s && clean(r.s));
-    if (firstCleanIdx > 0) {
-      /* one refinement probe halfway to the previous (dirty) rung */
-      const lo = rungs[firstCleanIdx - 1].level;
-      const hi = rungs[firstCleanIdx].level;
-      const mid = (lo + hi) / 2;
-      const s = await probeLevel(mid);
-      if (s && clean(s)) {
-        log(`  level 拐点精调 ${(mid / max).toFixed(3)}×max: 碎片率 ${(s.frag * 100).toFixed(1)}% · 主体覆盖 ${(s.mainCov * 100).toFixed(1)}%`);
-        return {
-          level: mid,
-          rule: `渲染探针 · 无噪点拐点（碎片率 ${(s.frag * 100).toFixed(1)}% ≤ ${(KNEE_FRAG_MAX * 100).toFixed(0)}%，主体覆盖 ${(s.mainCov * 100).toFixed(1)}%）`,
-        };
-      }
+    const dist = (r: Rung) => Math.abs(r.ratio - SCRIPT_LEVEL_RATIO);
+    const anchorFragTxt = anchorShape ? `${(anchorShape.frag * 100).toFixed(1)}%` : "未知";
+    const cleanRungs = measured.filter((r) => clean(r.s!));
+    if (cleanRungs.length) {
+      const pick = cleanRungs.reduce((a, b) => (dist(a) < dist(b) || (dist(a) === dist(b) && a.ratio > b.ratio) ? a : b));
+      return {
+        level: pick.level,
+        rule: `探针校验 ${pick.ratio.toFixed(2)}×max（锚点 0.15×max 处碎片率 ${anchorFragTxt} 未清 — 就近${pick.ratio > SCRIPT_LEVEL_RATIO ? "上调" : "下调"}）`,
+      };
     }
-    const pick = firstCleanIdx >= 0 ? rungs[firstCleanIdx] : measured.reduce((a, b) => ((a.s!.frag <= b.s!.frag) ? a : b));
-    if (firstCleanIdx < 0) {
-      log(`  ⚠ 所有 level 档位均有碎片（最低碎片率 ${(pick.s!.frag * 100).toFixed(1)}%）— 取最干净档，可改用手动 level`);
-    }
+    /* rung 3 — nothing clean even with dust: the minimum-frag rung
+     * (tie → closer to the anchor), honestly logged. */
+    const fragOf = (r: Rung) => (r.s ? r.s.frag : Number.POSITIVE_INFINITY);
+    const pick = measured.reduce((a, b) => (fragOf(a) < fragOf(b) || (fragOf(a) === fragOf(b) && dist(a) <= dist(b)) ? a : b));
+    log(`  ⚠ 所有 level 档位均有碎片（最干净 ${(fragOf(pick) * 100).toFixed(1)}%）— 就近取最干净档，可改用手动 level`);
     return {
       level: pick.level,
-      rule: `渲染探针 · ${firstCleanIdx >= 0 ? "无噪点拐点" : `最低碎片 ${(pick.s!.frag * 100).toFixed(1)}%`}（${pick.ratio.toFixed(2)}×max 档）`,
+      rule: `最低碎片 ${(fragOf(pick) * 100).toFixed(1)}%（${pick.ratio.toFixed(2)}×max 档 · 锚点 0.15×max 亦未通过）`,
     };
   };
 
@@ -2741,10 +2784,10 @@ export async function renderFigureMaps(
       }
     }
     if (refDisplayLevel == null) {
-      /* no probes / no stats: the v3.81 histogram chain (non-probe
-       * fallback — REST transports and volstats hiccups). */
+      /* no probes / no stats: the v3.85 script rule (non-probe fallback —
+       * REST transports and volstats hiccups). */
       const refDisplayChoice = displayLevelFor(refDispStats, contourPolicy);
-      refDisplayLevel = refDisplayChoice?.level ?? refLevel ?? 0.25 * (refMax ?? 1);
+      refDisplayLevel = refDisplayChoice?.level ?? refLevel ?? 0.15 * (refMax ?? 1);
       if (refDisplayChoice) log(`参考图截图 level ${refDisplayChoice.level.toFixed(4)}（${refDisplayChoice.rule}）`);
     }
     displayLevelById.set(refId, refDisplayLevel);
@@ -2756,6 +2799,9 @@ export async function renderFigureMaps(
       }
     }
     await exec(t, `volume #${refId} level ${refDisplayLevel.toFixed(4)} step ${STEP}`, opts, true);
+    /* v3.85: the script's dust cleanup — the reference's membrane probes
+     * and its screenshot must both measure/show the DUSTED surface. */
+    await exec(t, `surface dust #${refId} size ${DUST_SIZE_A}`, opts, true);
 
     /* ---- 2b. the membrane side view. v3.82 chain, every step probe-
      * verified, no relay upgrade REQUIRED:
@@ -3957,6 +4003,11 @@ export async function renderFigureMaps(
         const knee = await kneeLevelFor(showId, stats, safeKeyPart(r.key.replace(/\//g, "__")));
         if (knee) {
           await exec(t, `volume #${showId} level ${knee.level.toFixed(4)} step ${STEP}`, opts, true);
+          /* v3.85: re-issue the dust after the final level application —
+           * the knee's probe already dusted, but a fresh `volume level`
+           * recomputes the surface, so the dust rides along again
+           * (deterministic, cheap). */
+          await exec(t, `surface dust #${showId} size ${DUST_SIZE_A}`, opts, true);
           log(`  ${r.key}: 截图 level ${knee.level.toFixed(4)}（${knee.rule}）`);
         } else {
           await setDisplayLevel(showId);
@@ -4233,6 +4284,8 @@ export async function previewReferenceLevels(
       if (opts.signal?.aborted) break;
       const c = candidates[i];
       await ex(`volume #${id} level ${c.level.toFixed(4)} step ${STEP}`);
+      /* v3.85: preview what the screenshots would show — dusted. */
+      await ex(`surface dust #${id} size ${DUST_SIZE_A}`);
       /* a deterministic, level-comparable framing for every candidate */
       await ex("view orient");
       await ex("wait 1");

@@ -2977,7 +2977,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * stay 0.25×max — only the screenshot contour changes). */}
             <div
               className="rounded-lg border border-slate-200 bg-white/85 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
-              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（胶束带 PCA（新桥）/站立度渲染探针验证（任何桥可用）定向，失败自动降级为 turn 网格扫描 + 滚转对齐盘长轴）· 截图 level：逐图渲染探针找无噪点/不镂空的最低档（无斑点、无游离胶束团）"
+              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（胶束带 PCA（新桥）/站立度渲染探针验证（任何桥可用）定向，失败自动降级为 turn 网格扫描 + 滚转对齐盘长轴）· 截图 level：默认脚本规则 0.15×max + surface dust 清理，探针验证后就近调整"
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
@@ -3013,7 +3013,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="auto">自动 · 逐图渲染探针择优（推荐）</SelectItem>
+                    <SelectItem value="auto">自动 · 脚本规则 0.15×max + dust 清理（推荐）</SelectItem>
                     <SelectItem value="manual">手动倍数 ×max（全部各图）</SelectItem>
                   </SelectContent>
                 </Select>
@@ -3083,8 +3083,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   ? "膜蛋白侧视定向（v3.82）：优先用胶束带 PCA（新桥 /membrane2：三相分割后对每个密度相带单独 PCA — 去垢剂带是扁平圆环，其最小方差主轴即膜法线，对「大头部+跨膜柱」颗粒（如 TMEM175，整体 PCA 近各向同性）依然可靠）；每个候选相机都用渲染探针按「站立度」（上下质量不对称）验证后才生效，不达标自动降级 turn 网格扫描 + 滚转对齐盘长轴（纯探针、旧桥也完整可用，无需升级）。每张分类图在导出时还会按自身密度重新校验立正 — fitmap 对齐落在制外轴上的图会自动按自身密度立正并在日志注明。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。"
                   : "关闭膜视图：沿用基准 + 90° 覆盖率评分择优视角（v3.76 行为，适合可溶性蛋白）。"}
                 {levelMode === "auto"
-                  ? " 截图 level（v3.82）：每张图都在导出时逐档渲染探针（0.05→0.9×max 阶梯），取「无孤立噪点/游离胶束团且主体不镂空」的最低档 — 斑点雪花和游离胶束是不连通碎片、阈值过高则主体海绵化，都直接在渲染上测得，不再依赖任何盲猜的直方图规则；运行日志会列出每张图的逐档测量值。可选「预览 level」先看参考图效果；手动倍数则全部各图直接用倍数 ×max。"
-                  : " 手动 level：倍数 ×max 直接应用于所有各图（0.01–0.9，专家模式）；对齐拟合阈值不受影响（恒为 0.25×max）。"}
+                  ? " 截图 level（v3.85，按您的 auto_color_locres.py 脚本规则）：每张图默认取全矩阵最大值 × 0.15，并执行 surface dust 8.08 Å 清理小碎块/游离斑点；随后逐图渲染探针验证 — 锚点处仍有碎片则就近上调，主体镂空则就近下调（不再从最低档向上扫、也不再向噪声带内精调）；运行日志会列出逐档测量值。可选「预览 level」先看参考图效果；手动倍数则全部各图直接用倍数 ×max（同样带 dust 清理）。"
+                  : " 手动 level：倍数 ×max 直接应用于所有各图（0.01–0.9，专家模式），截图同样执行 surface dust 8.08 Å 清理小碎块；对齐拟合阈值不受影响（恒为 0.25×max）。"}
               </p>
             </div>
 

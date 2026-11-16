@@ -964,6 +964,9 @@ const relayState = {
    * probe renders are LEVEL-keyed (snow < 0.12, sponge > 0.5, clean in
    * between), exactly the knee ladder's decision surface. */
   modelLevels: new Map<number, number>(),
+  /** v3.85 E2E: `surface dust #N size 8.08` commands received (the
+   * auto_color_locres.py cleanup riding every display level). */
+  dustCommands: 0,
   /** v3.82 E2E drill: "" (current relay: /membrane + /membrane2 + flags),
    * "old" (pre-3.82 relay: no /membrane2, flag off — the page must fall
    * to the legacy envelope camera then the standing scan), "nomembrane"
@@ -1009,6 +1012,7 @@ function resetRelayState() {
   relayState.viewY = 0;
   relayState.camDir = 0;
   relayState.modelLevels.clear();
+  relayState.dustCommands = 0;
   relayState.relayMode = "";
   relayState.camReject = false;
   relayState.cameraAccepts = 0;
@@ -1051,6 +1055,7 @@ function relayStats() {
     save_transparent_bg: relayState.saveTransparentBg,
     save_opaque_bg: relayState.saveOpaqueBg,
     set_bgcolor_commands: relayState.setBgColorCommands,
+    dust_commands: relayState.dustCommands,
     // v3.55: leftover/own-model cleanup observability.
     close_ids_closed: [...relayState.closedIds],
     close_all_commands: relayState.closeAllCommands,
@@ -1096,6 +1101,11 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   const volLevelMatch = /^volume\s+#(\d+(?:\.\d+)?)\s+level\s+(-?[\d.eE+]+)\b/i.exec(command);
   if (volLevelMatch) {
     relayState.modelLevels.set(parseInt(volLevelMatch[1], 10), Number(volLevelMatch[2]));
+  }
+  // v3.85: count the script-rule dust cleanup (`surface dust #N size 8.08`)
+  // — the E2E asserts it rides every display-level application.
+  if (/^surface\s+dust\s+#\d+\s+size\s+8\.08\b/i.test(command)) {
+    relayState.dustCommands += 1;
   }
 
   // v3.53: track the on-screen model (drives per-class disc colors on
