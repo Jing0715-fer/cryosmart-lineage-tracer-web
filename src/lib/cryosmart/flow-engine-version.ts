@@ -785,5 +785,28 @@
  * standing scan), rolled to match the reference's up-side, logged
  * honestly (the fitmap correlation stays the record of fit quality);
  * each map is also re-framed so it fills the frame.
+ *
+ * v3.83 bump reason (round-43 “为何目前输出的fsc图比例不正常，宽度很窄”
+ * — the delivered TMEM175.volume.fsc.png was the job folder's ORIGINAL
+ * near-square 361×380 server-side matplotlib render, while the user's
+ * webpage download of the SAME plot is a wide 516×303): the webpage
+ * renders its FSC plot CLIENT-SIDE from the fsc.xml at 516×303 (RGB, no
+ * metadata, different tick sampling — an independent render, NOT a
+ * resize), so no URL can fetch a correctly-proportioned png — but the
+ * v3.79 re-draw, which reproduces exactly that proportion from the XML,
+ * only ran when the capture had EMBEDDED the xml TEXT; this lineage's
+ * refine node carried a URL-ONLY fsc_xml, so the re-draw was skipped,
+ * every image candidate failed the ratio gate (361×380 → w/h 0.95 <
+ * 1.0), and the “off-ratio beats missing” fallback delivered the
+ * near-square original. Fixes: (1) the re-draw's XML now rides a LADDER
+ * — embedded text → captured fsc_xml.url (data: or CryoSmart http) →
+ * the constructed download_result_file path (the same rungs that
+ * deliver the .xml file itself, so any source that served the xml can
+ * now feed the png re-draw); (2) the re-draw targets the WEBPAGE's
+ * landscape ratio — 1032×606 = 2×516×303 — instead of the old 4:3
+ * (1200×900), and the PPT's optional FSC panel uses the same size; (3)
+ * every rung's failure is logged per-source (下载失败 / 非XML内容 /
+ * 解析失败 / 暂存失败 / 写入失败), and the near-square original stays
+ * only as the last-resort fallback with its honest 比例异常 warning.
  */
-export const FLOW_ENGINE_VERSION = "3.82";
+export const FLOW_ENGINE_VERSION = "3.83";

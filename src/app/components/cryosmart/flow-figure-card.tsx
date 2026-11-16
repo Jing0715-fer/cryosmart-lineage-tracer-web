@@ -188,7 +188,7 @@ function triggerDownload(href: string, filename: string) {
  *  the delivery loop can verify the downloaded image's SHAPE (the FSC
  *  curve once delivered as a squeezed-narrow thumbnail — a wrong-ratio or
  *  tiny candidate is now skipped in favour of the next rung / a re-drawn
- *  4:3 FSC from the captured xml). */
+ *  webpage-ratio FSC from the fsc.xml ladder). */
 interface DeliverFileSpec {
   /** Delivery basename, e.g. "Tigr.volume.map_sharp.mrc". */
   filename: string;
@@ -212,10 +212,20 @@ interface DeliverFileSpec {
    *  delivery loop page-side fetches + SHAPE-CHECKS plot images (min width
    *  and landscape ratio per kind) instead of trusting the relay ladder. */
   plotKind?: "fsc" | "guinier" | "orientation";
-  /** v3.76: the refine job's captured FSC-XML text — the LAST-resort
-   *  re-draw source for the FSC plot when every image candidate fails the
-   *  shape check (rendered at the original plot's 4:3 landscape ratio). */
+  /** v3.76 → v3.83: the refine job's captured FSC-XML text — ONE re-draw
+   *  source for the FSC plot (the embedded capture, zero network). */
   fscXmlText?: string;
+  /** v3.83 (round-43 “fsc图比例不正常，宽度很窄”): URL rungs that may serve
+   *  the refine job's fsc.xml — the captured fsc_xml.url (data: URI or a
+   *  CryoSmart http URL), then the constructed download_result_file path.
+   *  The v3.79 re-draw ran ONLY on the embedded text; this lineage's
+   *  refine node carried a URL-only fsc_xml, so the delivered png fell
+   *  through to the off-ratio fallback — the job folder's ORIGINAL
+   *  near-square (361×380) server-side matplotlib render, while the
+   *  webpage re-renders the SAME curve client-side at a wide 516×303.
+   *  The re-draw now fetches the XML through these rungs too and draws
+   *  at the webpage's landscape ratio (1032×606 = 2×516×303). */
+  fscXmlUrls?: string[];
 }
 
 /** The per-file delivery outcome shown in the result panel. */
@@ -515,6 +525,16 @@ function buildDeliveryPlan(
     },
   ];
   const fscXmlText = refineNode.fsc_xml?.xml?.trim() ? refineNode.fsc_xml.xml : undefined;
+  /* v3.83: the FSC re-draw's URL ladder — the captured fsc_xml.url (data:
+   *  or CryoSmart http) then the constructed download_result_file path
+   *  (the SAME rungs the fsc.xml file item delivers through, so whatever
+   *  served the .xml file can now also feed the .png re-draw). */
+  const fscXmlUrls: string[] = [];
+  {
+    const u = String(refineNode.fsc_xml?.url || "");
+    if (/^(https?:|data:)/i.test(u)) fscXmlUrls.push(u);
+    fscXmlUrls.push(constructed("fsc.xml"));
+  }
   for (const e of plotEntries) {
     const candidates = images.filter((im) => e.match(im));
     // v3.76: main-curve-first ordering for the FSC ladder.
@@ -534,6 +554,7 @@ function buildDeliveryPlan(
       urls,
       plotKind: e.plotKind,
       fscXmlText: e.plotKind === "fsc" ? fscXmlText : undefined,
+      fscXmlUrls: e.plotKind === "fsc" ? fscXmlUrls : undefined,
     });
   }
 
@@ -1929,7 +1950,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       if (includeFsc && mode !== "demo") {
         setStep((s) => ({ ...s, phase: "绘制 FSC 曲线", pct: 82 }));
         const xml = await fetchFscXmlText(model.fscXml, session);
-        const png = await fscPng(xml, summary?.micrograph_pixel_size_A ?? null);
+        /* v3.83: the panel rides the SAME landscape ratio as the delivered
+         * png — 1032×606 = 2× the CryoSmart webpage's 516×303 plot (the
+         * slot is contain-fitted by the image's natural ratio). */
+        const png = await fscPng(xml, summary?.micrograph_pixel_size_A ?? null, { width: 1032, height: 606 });
         if (png) {
           images.set("__fsc__", png);
           model.groups.push([{ uid: "FSC", label: "FSC", stats: [], mapKey: null, map: null, imageUrl: "__fsc__" }]);
@@ -2257,41 +2281,70 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                  * SHAPE-CHECKED before delivery — the wrong-ratio FSC
                  * thumbnail that used to land in the 交付目录 is skipped in
                  * favour of the next rung (and, as the last resort for the
-                 * FSC curve, a 4:3 re-draw from the captured fsc.xml). A
-                 * decodable-but-suspicious candidate is still remembered:
-                 * when nothing better exists it is delivered anyway — a
-                 * plot with an off ratio beats a missing file. */
+                 * FSC curve, a webpage-ratio re-draw from the fsc.xml
+                 * ladder). A decodable-but-suspicious candidate is still
+                 * remembered: when nothing better exists it is delivered
+                 * anyway — a plot with an off ratio beats a missing file. */
                 if (item.plotKind) {
                   const shapeNotes: string[] = [];
                   let fallback: { bytes: Uint8Array; url: string; dim: { w: number; h: number }; meanLum: number } | null = null;
                   let delivered = false;
-                  /* v3.79 (round-39 “这个fsc图还是不对啊，反而变得更错了” —
-                   * the delivered TMEM175.volume.fsc.png turned out to be a
-                   * 2047×497 matplotlib MAP-SLICE strip, not an FSC curve):
-                   * when the captured fsc.xml text is aboard, RE-DRAW the
-                   * curve from the XML FIRST — our own 4:3 publication-style
-                   * render (correct data, correct ratio, deterministic)
-                   * instead of trusting whatever *fsc*-named PNG the job
-                   * folder / capture ladder surfaces. The image candidates
-                   * below only run when the XML parse/draw/deliver fails. */
-                  if (item.plotKind === "fsc" && item.fscXmlText) {
-                    const png = await fscPng(item.fscXmlText, summary?.micrograph_pixel_size_A ?? null, { width: 1200, height: 900 });
-                    if (png) {
-                      const staged = await stageViaRelay(transport, item.cacheKey, "fsc-redraw", png, pushLog, item.cacheExt);
-                      if (staged) {
-                        const r = await bridgeDeliverFile(transport, { src: staged, dst });
-                        if (r.ok) {
-                          pushLog(`  ✓ ${item.filename}（FSC 曲线由 fsc.xml 按原图 4:3 比例重绘 · 优先采用，不采信来源不明的候选图 · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
-                          outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
-                          delivered = true;
-                        } else {
-                          shapeNotes.push(`fsc.xml 重绘写入失败（${r.error ?? "未知"}）— 改试图像候选`);
-                        }
-                      } else {
-                        shapeNotes.push("fsc.xml 重绘暂存失败 — 改试图像候选");
+                  /* v3.79 → v3.83 (round-39 “这个fsc图还是不对啊，反而变得更
+                   * 错了” delivered a matplotlib MAP-SLICE strip / round-43
+                   * “fsc图比例不正常，宽度很窄” delivered the job folder's
+                   * ORIGINAL near-square 361×380 fsc png): the FSC curve is
+                   * RE-DRAWN from the fsc.xml BEFORE trusting any
+                   * *fsc*-named PNG — the CryoSmart WEBPAGE renders its FSC
+                   * plot CLIENT-SIDE from the same XML at a wide 516×303
+                   * (the user's “正常比例” download), while the job
+                   * folder's stored png is a NEAR-SQUARE server-side
+                   * matplotlib figure that no URL can fetch in the webpage
+                   * proportion. v3.79 only re-drew when the capture had
+                   * EMBEDDED the xml text (a URL-only fsc_xml fell straight
+                   * through to the off-ratio original); the XML now rides a
+                   * LADDER — embedded text → captured fsc_xml.url (data: or
+                   * CryoSmart http) → the constructed download_result_file
+                   * path — and is drawn at the webpage's landscape ratio
+                   * (1032×606 = 2×516×303). The image candidates below
+                   * only run when EVERY XML source fails to
+                   * parse/draw/deliver. */
+                  if (item.plotKind === "fsc") {
+                    const xmlSources: Array<{ text: string; src: string }> = item.fscXmlText
+                      ? [{ text: item.fscXmlText, src: "内嵌 fsc.xml" }]
+                      : [];
+                    for (const u of item.fscXmlUrls ?? []) {
+                      const bytes = await fetchPlotBytes(u);
+                      const text = bytes ? new TextDecoder().decode(bytes) : "";
+                      const shortU = /^data:/i.test(u) ? "fsc.xml(data:URL)" : u.replace(/^https?:\/\/[^\/]+/, "");
+                      if (!bytes) {
+                        shapeNotes.push(`fsc.xml ${shortU}: 下载失败`);
+                        continue;
                       }
-                    } else {
-                      shapeNotes.push("fsc.xml 解析失败（无曲线数据）— 改试图像候选");
+                      if (!text || !/^\s*<\?xml|^\s*</.test(text)) {
+                        shapeNotes.push(`fsc.xml ${shortU}: 非XML内容`);
+                        continue;
+                      }
+                      if (!xmlSources.some((c) => c.text === text)) xmlSources.push({ text, src: shortU });
+                    }
+                    for (const src of xmlSources) {
+                      const png = await fscPng(src.text, summary?.micrograph_pixel_size_A ?? null, { width: 1032, height: 606 });
+                      if (!png) {
+                        shapeNotes.push(`fsc.xml（${src.src}）解析失败（无曲线数据）— 改试下一来源`);
+                        continue;
+                      }
+                      const staged = await stageViaRelay(transport, item.cacheKey, "fsc-redraw", png, pushLog, item.cacheExt);
+                      if (!staged) {
+                        shapeNotes.push(`fsc.xml（${src.src}）重绘暂存失败 — 改试下一来源`);
+                        continue;
+                      }
+                      const r = await bridgeDeliverFile(transport, { src: staged, dst });
+                      if (r.ok) {
+                        pushLog(`  ✓ ${item.filename}（FSC 曲线由 ${src.src} 按网页版横版比例 516×303 重绘 · 优先采用，不采信来源不明的候选图 · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                        outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                        delivered = true;
+                        break;
+                      }
+                      shapeNotes.push(`fsc.xml（${src.src}）重绘写入失败（${r.error ?? "未知"}）— 改试下一来源`);
                     }
                   }
                   /* v3.76 (round-36 “图片格式的fsc曲线比例和原图不一样…

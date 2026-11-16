@@ -2462,3 +2462,19 @@ Stage Summary:
 - level：每张图（含参考图）导出时逐档渲染探针（0.05→0.9×max），取「无孤立噪点/游离胶束团（碎片率≤8%）且主体不镂空（覆盖≥45%×最优档）」的最低档 — 斑点/胶束团是不连通碎片、海绵化直接在渲染上测得，不再依赖任何盲猜的直方图规则或桥端点；运行日志列出每张图的逐档测量值；手动倍数直接用于全部各图。
 - 角度：胶束带 PCA（新桥 /membrane2，可选加速）→ 整体 PCA 相机 → 纯探针站立度扫描（turn 网格 + 减半细化 + 滚转对齐盘长轴）→ 文档相机直连 → 覆盖率，全部由渲染探针按「站立度」验证；每张分类图导出时重新校验立正，fitmap 落偏的图自动按自身密度立正并对齐参考图朝向（日志注明）。
 - 用户侧动作：刷新页面（徽标 v3.82）重新生成即可 — 本次修复不要求重新 open relay.py（旧桥自动走探针扫描路径，效果相同）；若在 ChimeraX 重新 open 一次 relay.py 可获得胶束带 PCA 直连（更快更稳，日志会显示 胶束带检测）。若朝上的不是包外区，勾选「上下翻转 180°」。
+
+---
+Task ID: 39 (v3.83)
+Agent: main (Z.ai Code)
+Task: User round-43 feedback: "为何目前输出的fsc图比例不正常，宽度很窄，第二张图才是网页中下载的正常比例的图" — the delivered TMEM175.volume.fsc.png is a near-square 361×380 matplotlib figure while the user's webpage download of the SAME plot is a wide 516×303.
+
+Work Log:
+- FORENSICS: pixel/metadata comparison of the two uploads — the delivered file carries "Software: Matplotlib version3.3.1" at figsize 3.61×3.80 in (a SERVER-side render stored in the CryoSmart job folder; RGBA, content fills 95%+ of the frame so it is genuinely near-square, not margin-cropped), while the webpage download is RGB with NO metadata and DIFFERENT x-tick sampling (13/6.5/4.3/3.2… vs 10/5.2/3.4/2.6…) — an INDEPENDENT client-side render from the fsc.xml data at 516×303, not a resize. No URL can fetch a webpage-proportioned png; the v3.79 re-draw (which reproduces exactly that proportion from the XML) is the only mechanism — but it only ran when the capture had EMBEDDED the xml TEXT, and this lineage's refine node carried a URL-ONLY fsc_xml: the re-draw was skipped, every image candidate failed the ratio gate (361×380 → w/h 0.95 < 1.0), and the "off-ratio beats missing" fallback delivered the near-square original (the log's 仅有比例异常的原图 已按原图交付 line).
+- flow-figure-card.tsx (1) XML LADDER: the FSC re-draw's source is now a LADDER — embedded fscXmlText → captured fsc_xml.url (data: URI or CryoSmart http) → the constructed download_result_file path (buildDeliveryPlan populates the new DeliverFileSpec.fscXmlUrls with the SAME rungs the fsc.xml FILE item delivers through, so any source that ever served the .xml can now feed the .png re-draw). Each rung is fetched page-side (fetchPlotBytes — data:/same-origin direct, CryoSmart URLs via cryoSmartBytes), decoded, XML-sniffed (/^\s*<\?xml|^\s*</), deduped by text, and its failure logged per-source (下载失败 / 非XML内容 / 解析失败 / 暂存失败 / 写入失败). The image-candidate walk only runs when EVERY XML source fails.
+- flow-figure-card.tsx (2) WEBPAGE RATIO: the re-draw now targets 1032×606 = 2×516×303 (the webpage's landscape proportion, the user's 正常比例) instead of the old 4:3 1200×900; the PPT's optional FSC panel uses the same size (the pptx slot is contain-fitted by the image's natural ratio, so no layout impact). The near-square job-folder original remains only as the last-resort off-ratio fallback with its honest warning.
+- workflow-figure.ts: fscPng doc rewritten (4:3 → webpage ratio rationale).
+- VERIFICATION: tsc clean (the skills/ error pre-exists); eslint clean on all three changed files; dev server hot-reloaded — /api/cryosmart/flow-figure/version serves 3.83, page renders with zero console/page errors, 引擎 v3.83 badge + 附 FSC 曲线 toggle + 生成流程图 PPTX all present (agent-browser).
+
+Stage Summary:
+- 交付的 {base}.volume.fsc.png 现在优先由 fsc.xml 重绘（内嵌文本 → 捕获 URL → 构造 download_result_file 路径，逐级尝试、逐级记录），按网页同款横版比例 516×303 的 2 倍（1032×606）出图；只有当所有 XML 来源都失败时才退回候选图/原始近方图（日志注明 比例异常）。
+- 用户侧动作：刷新页面（徽标 v3.83）重新生成即可；运行日志会显示 FSC 曲线由 <来源> 按网页版横版比例 516×303 重绘。无需重新 open relay.py。

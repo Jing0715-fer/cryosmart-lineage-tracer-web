@@ -1897,10 +1897,14 @@ export function parseFscAny(raw: string, pixelSizeA?: number | null): { curves: 
 
 /** Render the FSC curves to a PNG (null when no curves / no DOM).
  *  v3.76 (round-36 “图片格式的fsc曲线比例和原图不一样…宽度很窄”): an
- *  optional size passthrough — the delivery fallback re-renders the FSC at
- *  the ORIGINAL plot's ~4:3 landscape ratio (CryoSPARC renders FSC at
- *  6×4.5 in) instead of the slide-panel's 16:9, so a re-drawn delivery
- *  file never comes out looking squeezed-narrow. */
+ *  optional size passthrough so a re-drawn delivery file never comes out
+ *  looking squeezed-narrow. v3.83 (round-43 “fsc图比例不正常，宽度很窄”):
+ *  every caller now targets the WEBPAGE's landscape proportion — the
+ *  CryoSmart page renders its FSC plot client-side from this same XML at
+ *  516×303, so both the delivered png and the PPT panel draw at
+ *  1032×606 = 2×516×303 (the job folder's stored *fsc.png is a
+ *  near-square server-side matplotlib figure — the round-43 delivered
+ *  361×380 — and can never match the webpage ratio; the re-draw can). */
 export async function fscPng(
   raw: string | null,
   pixelSizeA?: number | null,
