@@ -1215,20 +1215,19 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
     }
   }, [step.busy, levelPreviewBusy, mode, summary, session, bridge, probeBridge, applyCacheDir, relayFetchToCache, pushLog, effectiveMaxGroups, simplified, flowMode, manual, manualSel]);
 
-  /** v3.81: the user's pick from the preview grid — feeds the pick back
-   * into the level select (auto / manual ratio) so the very next 生成
-   * uses it; the class maps follow by envelope-count matching either
-   * way. */
+  /** v3.81→v3.82: the user's pick from the preview grid — feeds the pick
+   * back into the level select (auto / manual ratio) so the very next
+   * 生成 uses it. */
   const pickLevelPreview = useCallback((it: LevelPreviewItem & { url: string | null }) => {
     setLevelPreviewPicked(`${it.kind}:${it.ratio.toFixed(3)}`);
     if (it.kind === "auto") {
       setLevelMode("auto");
-      toast.success("已选自动 level — 参考图取 min(0.25×max, 0.85×otsu₂)，其余各图按参考包络匹配");
+      toast.success("已选自动 level — 每张图在导出时逐档渲染探针，取无噪点/不镂空的最低档");
     } else {
       setLevelMode("manual");
       setLevelRatio(it.ratio.toFixed(2));
       toast.success(
-        `已选 level ${it.ratio.toFixed(2)}×max — 生成时参考图用该 level，其余各图按参考包络计数匹配（包络大小与参考一致）`,
+        `已选 level ${it.ratio.toFixed(2)}×max — 生成时全部各图直接用该倍数（专家模式）`,
       );
     }
   }, []);
@@ -2858,7 +2857,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * stay 0.25×max — only the screenshot contour changes). */}
             <div
               className="rounded-lg border border-slate-200 bg-white/85 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
-              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（密度 PCA 检测膜法线 → 按文档化相机矩阵定向，渲染探针对比侧视/俯视剪影各向异性验证后生效，失败自动降级为 turn 网格扫描；探针无法区分时按文档相机直连）· 截图 level：参考图取 min(0.25×max, 0.85×otsu₂)（或手动/预览选择），其余各图按参考包络计数匹配"
+              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（胶束带 PCA（新桥）/站立度渲染探针验证（任何桥可用）定向，失败自动降级为 turn 网格扫描 + 滚转对齐盘长轴）· 截图 level：逐图渲染探针找无噪点/不镂空的最低档（无斑点、无游离胶束团）"
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
@@ -2894,8 +2893,8 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="auto">自动 · min(0.25×max, 0.85×otsu₂)（推荐）</SelectItem>
-                    <SelectItem value="manual">手动倍数 ×max（锚定参考图）</SelectItem>
+                    <SelectItem value="auto">自动 · 逐图渲染探针择优（推荐）</SelectItem>
+                    <SelectItem value="manual">手动倍数 ×max（全部各图）</SelectItem>
                   </SelectContent>
                 </Select>
                 {levelMode === "manual" && (
@@ -2961,13 +2960,11 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               )}
               <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {membraneView === "auto"
-                  ? bridge && bridge.kind === "relay" && !bridge.canMembrane
-                    ? "对参考图做密度加权 PCA（最小方差主轴即膜法线），按文档化 12 数相机矩阵把膜法线竖直、盘长轴水平取向，并用渲染探针对比侧视/俯视剪影的各向异性验证后生效（不达标自动改用 turn 网格扫描）— 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。当前桥脚本较旧（无 /membrane 端点）：本次会直接用探针扫描定位膜平面（结果相近）；在 ChimeraX 重新 open 一次 relay.py 可获得精确 PCA 取向。不再设扁率门槛 — 已选膜蛋白视图即按膜蛋白处理（扁率仅作日志诊断）。"
-                    : "对参考图做密度加权 PCA（最小方差主轴即膜法线），按文档化 12 数相机矩阵把膜法线竖直、盘长轴水平取向，并用渲染探针对比侧视与俯视基线的剪影各向异性验证后生效（不达标自动改用 turn 网格扫描；探针无法区分时按文档相机直连并注明）— 去垢剂盘立于画面 XZ 平面（侧视时去垢剂带呈水平条带围绕蛋白，穿膜 helix 竖直可见；包内区朝下、包外区朝上）。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（同一 map 结果可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。不再设扁率门槛 — 已选膜蛋白视图即按膜蛋白处理（扁率仅作日志诊断）。"
+                  ? "膜蛋白侧视定向（v3.82）：优先用胶束带 PCA（新桥 /membrane2：三相分割后对每个密度相带单独 PCA — 去垢剂带是扁平圆环，其最小方差主轴即膜法线，对「大头部+跨膜柱」颗粒（如 TMEM175，整体 PCA 近各向同性）依然可靠）；每个候选相机都用渲染探针按「站立度」（上下质量不对称）验证后才生效，不达标自动降级 turn 网格扫描 + 滚转对齐盘长轴（纯探针、旧桥也完整可用，无需升级）。每张分类图在导出时还会按自身密度重新校验立正 — fitmap 对齐落在制外轴上的图会自动按自身密度立正并在日志注明。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。"
                   : "关闭膜视图：沿用基准 + 90° 覆盖率评分择优视角（v3.76 行为，适合可溶性蛋白）。"}
                 {levelMode === "auto"
-                  ? " 截图 level（v3.81）：参考图取 min(0.25×max, 0.85×otsu₂)（otsu₂ = 信封内二次 Otsu，蛋白/去垢剂分界 — 去垢剂偏热的地图会自动降入蛋白区间；普通地图保持长期沿用的 0.25×max），其余各图按参考包络计数匹配 level（包络大小与参考一致 — 噪点图的 max 常是噪声尖峰，任何 max 比例都会落进噪声带，计数匹配自动抬到包络处，不再满屏斑点/游离胶束）。建议点「预览 level」看实际效果后再生；旧桥（无 otsu₂/包络阶梯）退回 0.25×max 并在日志提示升级。"
-                  : " 手动 level：倍数 ×max 锚定参考图（0.01–0.9），其余各图按参考包络计数匹配（无阶梯的旧桥才直接用倍数）；对齐拟合阈值不受影响（恒为 0.25×max）。"}
+                  ? " 截图 level（v3.82）：每张图都在导出时逐档渲染探针（0.05→0.9×max 阶梯），取「无孤立噪点/游离胶束团且主体不镂空」的最低档 — 斑点雪花和游离胶束是不连通碎片、阈值过高则主体海绵化，都直接在渲染上测得，不再依赖任何盲猜的直方图规则；运行日志会列出每张图的逐档测量值。可选「预览 level」先看参考图效果；手动倍数则全部各图直接用倍数 ×max。"
+                  : " 手动 level：倍数 ×max 直接应用于所有各图（0.01–0.9，专家模式）；对齐拟合阈值不受影响（恒为 0.25×max）。"}
               </p>
             </div>
 

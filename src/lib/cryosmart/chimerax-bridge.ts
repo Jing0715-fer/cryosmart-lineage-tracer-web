@@ -304,6 +304,14 @@ export interface FlowTransport {
    *  Otsu key. Relays without it fall back to the 90° coverage view with
    *  an upgrade hint. */
   canMembrane?: boolean;
+  /** v3.82: relay-only — the bridge script advertises GET /membrane2 (the
+   *  3-phase density split + per-band PCAs — the detergent-BELT torus is
+   *  the orientation feature that survives on column+disk particles like
+   *  TMEM175 where the whole-envelope PCA reads near-isotropic). Relays
+   *  without it simply skip the band cameras — the probe-only standing
+   *  scan still finds the side view, so THIS flag is an accelerator, not
+   *  a requirement. */
+  canMembrane2?: boolean;
   /** v3.50: which save rung last produced a /file-fetchable PNG — cached
    *  per transport so later saves go straight to the working shape. */
   saveMode?: SaveMode;
@@ -373,10 +381,10 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
           logs.push(`relay ${host}:${port} → HTTP ${res.status}`);
           continue;
         }
-        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean; membrane?: boolean };
+        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean; membrane?: boolean; membrane2?: boolean };
         if (data?.ok) {
           logs.push(
-            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""}${data.cachedir_set ? ", 可自定义目录" : ""}${data.deliver ? ", 交付下载" : ""}${data.membrane ? ", 膜法线检测" : ""})`,
+            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""}${data.cachedir_set ? ", 可自定义目录" : ""}${data.deliver ? ", 交付下载" : ""}${data.membrane ? ", 膜法线检测" : ""}${data.membrane2 ? ", 胶束带检测" : ""})`,
           );
           return {
             transport: {
@@ -393,6 +401,7 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
               canSetCacheDir: !!data.cachedir_set,
               canDeliver: !!data.deliver,
               canMembrane: !!data.membrane,
+              canMembrane2: !!data.membrane2,
             },
             logs,
           };
@@ -646,6 +655,116 @@ export async function bridgeMembraneAxis(
       count: typeof data.count === "number" ? data.count : 0,
       total: typeof data.total === "number" ? data.total : 0,
     };
+  } catch {
+    return null;
+  }
+}
+
+/** v3.82: one density band from the relay's 3-phase split (GET /membrane2) —
+ * a contiguous value window plus the band's own PCA. The detergent BELT is a
+ * flat torus living in ONE band (whichever phase it is — the belt can be
+ * hotter OR colder than the protein); its smallest-variance principal axis
+ * IS the membrane normal whatever the particle's overall shape, which is
+ * exactly what the whole-envelope /membrane PCA loses on a column+disk
+ * particle like TMEM175 (head + transmembrane column read near-isotropic
+ * together). `ratio` (λmin/λmid) is the band's OBLATENESS — a torus/disk
+ * band sits far below 1; a band that mostly caught protein mass sits near
+ * 1 and is not trusted as an orientation source. */
+export interface MembraneBand {
+  /** "mid" (between the two splits) or "high" (above the upper split). */
+  name: string;
+  /** Band value window [lo, hi). */
+  lo: number;
+  hi: number;
+  normal: [number, number, number];
+  ea: [number, number, number];
+  eb: [number, number, number];
+  /** λmin/λmid of THIS band's PCA — the oblateness confidence. */
+  ratio: number;
+  count: number;
+}
+
+/** v3.82: the /membrane2 reply — the 3-phase split levels, every band's
+ * PCA (sorted by the page), and the legacy whole-envelope PCA (computed at
+ * the solvent split) for diagnostics / the old fallback path. */
+export interface Membrane2Reply {
+  envelope: MembraneAxis | null;
+  bands: MembraneBand[];
+  /** The two split levels [solvent|mid, mid|high], when computable. */
+  splits: [number, number] | null;
+}
+
+/** v3.82: the 3-phase split + per-band PCAs (relay GET /membrane2). Null on
+ * any failure (old relay 404 / endpoint error / malformed reply) — callers
+ * degrade to the probe-only standing scan, which needs NO relay support. */
+export async function bridgeMembrane2(
+  t: FlowTransport,
+  modelId: number,
+): Promise<Membrane2Reply | null> {
+  if (t.kind !== "relay") return null;
+  try {
+    const res = await fetchWithTimeout(
+      `${t.base}/membrane2?id=${modelId}`,
+      { method: "GET" },
+      180_000,
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      ok?: boolean;
+      bands?: Array<Record<string, unknown>>;
+      envelope?: Record<string, unknown>;
+      splits?: unknown;
+    };
+    if (!data?.ok || !Array.isArray(data.bands)) return null;
+    const unitVec = (v: unknown): [number, number, number] | null => {
+      if (!Array.isArray(v) || v.length !== 3) return null;
+      const a = v.map(Number);
+      if (a.some((x) => !Number.isFinite(x))) return null;
+      const len = Math.hypot(a[0], a[1], a[2]);
+      return len > 1e-9 ? [a[0] / len, a[1] / len, a[2] / len] : null;
+    };
+    const bands: MembraneBand[] = [];
+    for (const b of data.bands) {
+      const normal = unitVec(b.normal);
+      const ea = unitVec(b.ea);
+      const eb = unitVec(b.eb);
+      const ratio = Number(b.ratio);
+      const lo = Number(b.lo);
+      const hi = Number(b.hi);
+      if (!normal || !ea || !eb || !Number.isFinite(ratio) || !Number.isFinite(lo) || !Number.isFinite(hi)) continue;
+      bands.push({
+        name: String(b.name ?? "band"),
+        lo,
+        hi,
+        normal,
+        ea,
+        eb,
+        ratio,
+        count: Number(b.count) || 0,
+      });
+    }
+    let envelope: MembraneAxis | null = null;
+    if (data.envelope && typeof data.envelope.ratio === "number") {
+      const normal = unitVec(data.envelope.normal);
+      const ea = unitVec(data.envelope.ea);
+      const eb = unitVec(data.envelope.eb);
+      if (normal && ea && eb) {
+        envelope = {
+          ok: true,
+          normal,
+          ea,
+          eb,
+          ratio: Number(data.envelope.ratio),
+          count: Number(data.envelope.count) || 0,
+          total: Number(data.envelope.total) || 0,
+        };
+      }
+    }
+    let splits: [number, number] | null = null;
+    if (Array.isArray(data.splits) && data.splits.length === 2 && data.splits.every((x) => typeof x === "number")) {
+      splits = [Number(data.splits[0]), Number(data.splits[1])];
+    }
+    return { envelope, bands, splits };
   } catch {
     return null;
   }
@@ -1342,19 +1461,39 @@ async function thumbnailCoverageScore(png: Uint8Array): Promise<number> {
   return total ? (total - bgCount) / total : 0;
 }
 
-/** v3.80→v3.81 (round-40/41 膜视图探针): the foreground silhouette's shape
- * metrics from a probe thumbnail — the 2D second-moment ANISOTROPY
- * (sqrt(λmax/λmin) of the foreground mask's coordinate covariance) as
- * the PRIMARY discriminator, plus the v3.80 bbox aspect and coverage
- * for the log. A flattened particle (membrane protein + detergent disk)
- * viewed ALONG its normal is nearly isotropic (aniso ≈ 1); viewed from
- * the side it is elongated (aniso well above 1) — WHATEVER the exact
- * silhouette (the v3.80 bbox-aspect "wide band" rule assumed a band,
- * which a column+disk particle like TMEM175 never produces, and a
- * couple of stray speckle blobs could swing the bbox wildly while the
- * second moments barely move). Returns null when the browser canvas is
- * unavailable. */
-async function silhouetteShape(png: Uint8Array): Promise<{ aniso: number; aspect: number; coverage: number } | null> {
+/** v3.82 (round-42 角度/level 探针闭环): everything the page needs to judge
+ * a probe render, measured on the REAL pixels browser-side:
+ *   - connected-component labelling of the foreground (downsampled when the
+ *     thumbnail is large): the MAIN component is the particle;
+ *   - `frag` — the FRAGMENTATION: 1 − mainArea/totalForeground. A snowball
+ *     render (level below the noise floor) and free-micelle blobs read HIGH
+ *     whatever the map's max was — the level KNEE picks the lowest level
+ *     whose fragmentation is clean, replacing every blind histogram rule
+ *     (max-ratio / Otsu variants all inherit a single hot spike's position);
+ *   - `mainCov` — the main component's coverage of the canvas (a too-high
+ *     level shrinks the particle to a spongy core → the knee's sponge guard);
+ *   - `standing` — the main component's mass-centroid offset from its own
+ *     bbox centre along the VERTICAL, normalized by its height (positive =
+ *     mass toward the top). A membrane protein standing in the side view is
+ *     vertically ASYMMETRIC (head/belt mass at one end — the belt alone can
+ *     outweigh the whole protein on detergent-heavy particles like P283's
+ *     TMEM175); face-down (top view) and lying views read ≈ 0. This is the
+ *     primary side-view discriminator for the scan — anisotropy alone
+ *     maximises the LONG axis HORIZONTAL (a lying view, exactly the v3.81
+ *     failure);
+ *   - `aniso`/`aspect` of the MAIN component only (stray blobs no longer
+ *     swing the second moments).
+ * Returns null when the browser canvas is unavailable. */
+export interface RenderShape {
+  aniso: number;
+  aspect: number;
+  coverage: number;
+  frag: number;
+  mainCov: number;
+  standing: number;
+}
+
+async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
   if (typeof createImageBitmap === "undefined" || typeof document === "undefined") return null;
   const blob = new Blob([png as BlobPart], { type: "image/png" });
   const bmp = await createImageBitmap(blob);
@@ -1366,54 +1505,89 @@ async function silhouetteShape(png: Uint8Array): Promise<{ aniso: number; aspect
   ctx.drawImage(bmp, 0, 0);
   const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const bg = cornerBg(data, width, height);
-  let minX = width;
-  let minY = height;
-  let maxX = -1;
-  let maxY = -1;
+  /* downsample the foreground mask when the probe is big (the knee/roll
+   * probes render 320px; 160 is plenty for component shape metrics and
+   * keeps the labelling cheap). */
+  const stride = Math.max(1, Math.ceil(Math.max(width, height) / 160));
+  const mw = Math.floor(width / stride);
+  const mh = Math.floor(height / stride);
+  const mask = new Uint8Array(mw * mh);
   let fg = 0;
-  let sx = 0;
-  let sy = 0;
-  let sxx = 0;
-  let syy = 0;
-  let sxy = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4;
+  for (let y = 0; y < mh; y++) {
+    for (let x = 0; x < mw; x++) {
+      const sx = x * stride + ((stride / 2) | 0);
+      const sy = y * stride + ((stride / 2) | 0);
+      const i = (Math.min(sy, height - 1) * width + Math.min(sx, width - 1)) * 4;
       const isBg =
         data[i + 3] <= 10 ||
         (Math.abs(data[i] - bg[0]) <= 25 &&
           Math.abs(data[i + 1] - bg[1]) <= 25 &&
           Math.abs(data[i + 2] - bg[2]) <= 25);
-      if (isBg) continue;
-      fg++;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-      sx += x;
-      sy += y;
-      sxx += x * x;
-      syy += y * y;
-      sxy += x * y;
+      if (!isBg) {
+        mask[y * mw + x] = 1;
+        fg++;
+      }
     }
   }
-  if (maxX < minX || maxY < minY || fg < 16) return { aniso: 1, aspect: 0, coverage: 0 };
-  const n = fg;
-  const mx = sx / n;
-  const my = sy / n;
-  const vxx = Math.max(sxx / n - mx * mx, 1e-9);
-  const vyy = Math.max(syy / n - my * my, 1e-9);
-  const vxy = sxy / n - mx * my;
-  // 2x2 symmetric eigenvalues
+  if (fg < 16) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0 };
+  /* connected components (4-neighbour BFS, iterative stack) */
+  const labels = new Int32Array(mw * mh).fill(-1);
+  const comps: Array<{ area: number; minX: number; minY: number; maxX: number; maxY: number; sx: number; sy: number; sxx: number; syy: number; sxy: number }> = [];
+  const stack: number[] = [];
+  for (let p = 0; p < mask.length; p++) {
+    if (!mask[p] || labels[p] >= 0) continue;
+    const id = comps.length;
+    const c = { area: 0, minX: mw, minY: mh, maxX: -1, maxY: -1, sx: 0, sy: 0, sxx: 0, syy: 0, sxy: 0 };
+    stack.push(p);
+    labels[p] = id;
+    while (stack.length) {
+      const q = stack.pop() as number;
+      const qx = q % mw;
+      const qy = (q / mw) | 0;
+      c.area++;
+      if (qx < c.minX) c.minX = qx;
+      if (qx > c.maxX) c.maxX = qx;
+      if (qy < c.minY) c.minY = qy;
+      if (qy > c.maxY) c.maxY = qy;
+      c.sx += qx;
+      c.sy += qy;
+      c.sxx += qx * qx;
+      c.syy += qy * qy;
+      c.sxy += qx * qy;
+      if (qx > 0 && mask[q - 1] && labels[q - 1] < 0) { labels[q - 1] = id; stack.push(q - 1); }
+      if (qx < mw - 1 && mask[q + 1] && labels[q + 1] < 0) { labels[q + 1] = id; stack.push(q + 1); }
+      if (qy > 0 && mask[q - mw] && labels[q - mw] < 0) { labels[q - mw] = id; stack.push(q - mw); }
+      if (qy < mh - 1 && mask[q + mw] && labels[q + mw] < 0) { labels[q + mw] = id; stack.push(q + mw); }
+    }
+    comps.push(c);
+  }
+  if (!comps.length) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0 };
+  let main = comps[0];
+  for (const c of comps) if (c.area > main.area) main = c;
+  const frag = Math.max(0, 1 - main.area / fg);
+  const n = main.area;
+  const mx = main.sx / n;
+  const my = main.sy / n;
+  const vxx = Math.max(main.sxx / n - mx * mx, 1e-9);
+  const vyy = Math.max(main.syy / n - my * my, 1e-9);
+  const vxy = main.sxy / n - mx * my;
   const tr = vxx + vyy;
   const det = vxx * vyy - vxy * vxy;
-  const disc = Math.sqrt(Math.max(tr * tr / 4 - det, 0));
+  const disc = Math.sqrt(Math.max((tr * tr) / 4 - det, 0));
   const lMax = tr / 2 + disc;
   const lMin = Math.max(tr / 2 - disc, 1e-9);
+  const bw = main.maxX - main.minX + 1;
+  const bh = main.maxY - main.minY + 1;
+  /* screen y grows DOWNWARD: mass above the bbox centre → my < centre →
+   * standing > 0 means "heavy end up". */
+  const standing = bh > 1 ? ((main.minY + main.maxY + 1) / 2 - my) / bh : 0;
   return {
     aniso: Math.sqrt(Math.max(lMax, 1e-9) / lMin),
-    aspect: (maxX - minX + 1) / (maxY - minY + 1),
-    coverage: fg / (width * height),
+    aspect: bw / bh,
+    coverage: fg / (mw * mh),
+    frag,
+    mainCov: main.area / (mw * mh),
+    standing,
   };
 }
 
@@ -1464,6 +1638,37 @@ const MEMBRANE_ANISO_REL = 1.06;
  * laxer — the scan grid quantises to ~11°; anything this low falls back
  * with a clear log). */
 const MEMBRANE_SCAN_MIN_ANISO = 1.1;
+/** v3.82 (round-42 “角度和level还是不对”): the STANDING thresholds — the
+ * mass-centroid vertical offset (measureRender.standing) of a standing
+ * membrane particle (head/belt asymmetric along the normal) is the
+ * PRIMARY side-view signal, because anisotropy alone maximises the long
+ * axis HORIZONTAL (the lying view — the delivered v3.81 failure on
+ * TMEM175: big soluble head + belt-heavy transmembrane half read
+ * near-isotropic at the too-low level, the PCA normal was arbitrary, and
+ * the aniso-vs-top probes could not tell the oblique camera from a side
+ * view). STANDING_ACCEPT gates the direct camera candidates;
+ * STANDING_SCAN_NEED gates the turn-grid scan winner (the grid quantises
+ * to ~11°). Both sit well under the ≈0.10–0.20 a clean standing mushroom
+ * reads and far above the ≈0.02 a face-down disc reads. */
+const STANDING_ACCEPT = 0.06;
+const STANDING_SCAN_NEED = 0.08;
+/** v3.82: a class map whose render at the shared camera reads below this
+ * gets its OWN orientation assist (its fitmap alignment landed off-axis —
+ * the delivered J9/J48 ab-initio obliques). */
+const STANDING_ASSIST_TRIGGER = 0.05;
+/** v3.82: the per-map level KNEE ladder (×max, log-spaced) — every rung
+ * is RENDERED and measured (fragmentation + main coverage); the knee is
+ * the LOWEST clean level. Ratios reach 0.9 because a noise-spike max can
+ * push every map-specific histogram rule into the noise band (the
+ * delivered J48 snowballs sat at 0.25×max below their noise floor). */
+const LEVEL_KNEE_RATIOS = [0.05, 0.08, 0.12, 0.18, 0.26, 0.36, 0.5, 0.7, 0.9];
+/** v3.82: the knee cleanliness bars — fragmentation (1 − main/foreground)
+ * ≤ KNEE_FRAG_MAX kills snowball speckle AND free micelle blobs (they are
+ * disconnected components); mainCov ≥ KNEE_MAIN_MIN_FRAC × the ladder's
+ * best kills the sponge regime (a too-high level hollows the particle
+ * into a small porous core — the delivered J41-class3 sponge). */
+const KNEE_FRAG_MAX = 0.08;
+const KNEE_MAIN_MIN_FRAC = 0.45;
 /** v3.80: the scan grids — coarse elevation × azimuth about the screen
  * axes (named-axis `turn x/y` only, valid on every ChimeraX build; the
  * ±-symmetric elevation set makes the undocumented turn DIRECTION
@@ -1472,6 +1677,11 @@ const MEMBRANE_SCAN_MIN_ANISO = 1.1;
  * under ψ → ψ+180°. */
 const MEMBRANE_SCAN_ELEVATIONS = [0, 45, 90, -45, -90];
 const MEMBRANE_SCAN_AZIMUTHS = [0, 45, 90, 135];
+/** v3.82: the in-plane ROLL refinement grid (named `turn z` from the
+ * standing winner) — the disk's LONG in-plane axis should end up
+ * horizontal (round-38 “去垢剂盘放在xz平面”); the roll maximises the
+ * silhouette's width aspect. */
+const ROLL_SCAN_ANGLES = [0, 30, 60, 90, -30, -60, -90];
 /** v3.66: random placements for the global fitmap search's FIRST
  * round — covers arbitrary rotations (90°/any tilt), the pose space the
  * fixed 180°-pre-turn candidates of v3.63 could never reach. v3.68:
@@ -1592,34 +1802,6 @@ function envelopeCountAt(stats: BridgeVolStats, level: number): number | null {
   return ct[ct.length - 1];
 }
 
-/** v3.81: the level whose above-level count matches `target` on this map's
- * own ladder (monotone: counts fall as levels rise). Prefers the HIGHER
- * bracketing level when the target falls between rungs (slightly smaller
- * envelope rather than speckle). Clamped to ≥ otsu — never below the
- * solvent/signal split, so a count target larger than this map's whole
- * envelope can never drag the level into the noise band. */
-function matchLevelForCount(stats: BridgeVolStats, target: number, floor: number): number | null {
-  const lv = stats.envLevels;
-  const ct = stats.envCounts;
-  if (!lv || !ct || lv.length !== ct.length || lv.length < 2 || !(target > 0)) return null;
-  // counts decreasing: find the first rung whose count is <= target
-  let j = ct.findIndex((c) => c <= target);
-  if (j === -1) return Math.max(lv[lv.length - 1], floor); // target above even the top rung's count → highest rung
-  if (j === 0) return Math.max(lv[0], floor); // target ≥ envelope count → ladder floor (≈ otsu)
-  const l0 = lv[j - 1];
-  const l1 = lv[j];
-  const c0 = ct[j - 1];
-  const c1 = ct[j];
-  let level: number;
-  if (c0 > 0 && c1 > 0 && c0 !== c1) {
-    const t = Math.log(c0 / target) / Math.log(c0 / c1); // log-count interpolation
-    level = l0 + Math.min(Math.max(t, 0), 1) * (l1 - l0);
-  } else {
-    level = l1;
-  }
-  return Math.max(Math.min(level, stats.max * 0.9), Math.max(floor, lv[0]));
-}
-
 /** v3.81: the map's OWN auto rule — min(0.25×max, 0.85×otsu2), clamped to
  * [max(otsu, 3%·max), 90%·max]. Falls back to the literal 0.25×max when
  * otsu2 is missing (old relay / degenerate envelope). */
@@ -1654,38 +1836,20 @@ function displayLevelFor(
   if (!stats || !Number.isFinite(stats.max) || stats.max <= 0) return null;
   if (policy.mode === "manual") {
     /* clamped to the documented manual range (UI placeholder 0.01–0.9).
-     * v3.81: with a reference anchor + this map's ladder, the class maps
-     * still COUNT-MATCH (the manual ratio anchors the REFERENCE; the
-     * others follow its envelope mass) — the ratio applies directly only
-     * without a ladder (old relays keep the v3.80 semantics). */
+     * v3.82: the ratio applies DIRECTLY to every map (v3.80 semantics) —
+     * the v3.81 experiment anchored the class maps by envelope-count
+     * matching, and on the delivered P283 deck that delivered a sponge
+     * (J41 class 3) and snowballs (J48): map value scalings differ, so a
+     * matched count lands at the wrong level. The probe knee (auto mode)
+     * is the calibrated path; manual is the expert override. */
     const ratio = Math.min(Math.max(Number.isFinite(policy.ratio) ? policy.ratio : LEVEL_RATIO, 0.01), 0.9);
-    if (refAnchor && refAnchor.count != null && refAnchor.count > 0) {
-      const floor = stats.otsu != null && Number.isFinite(stats.otsu) ? stats.otsu : stats.max * 0.03;
-      const matched = matchLevelForCount(stats, refAnchor.count, floor);
-      if (matched != null) {
-        return {
-          level: matched,
-          rule: `参考包络匹配 ${Math.round(refAnchor.count).toLocaleString("en-US")}（手动参考 ${ratio}×max）`,
-          matchedCount: refAnchor.count,
-        };
-      }
-    }
     return { level: stats.max * ratio, rule: `手动 ${ratio}×max` };
   }
   /* auto AND classic (the classic option stays accepted so stored
-   * settings keep working): count-match to the reference's envelope when
-   * both ladders exist, else the map's own auto rule. */
-  if (refAnchor && refAnchor.count != null && refAnchor.count > 0) {
-    const floor = stats.otsu != null && Number.isFinite(stats.otsu) ? stats.otsu : stats.max * 0.03;
-    const matched = matchLevelForCount(stats, refAnchor.count, floor);
-    if (matched != null) {
-      return {
-        level: matched,
-        rule: `参考包络匹配 ${Math.round(refAnchor.count).toLocaleString("en-US")}`,
-        matchedCount: refAnchor.count,
-      };
-    }
-  }
+   * settings keep working): NON-PROBE fallback only (REST transport /
+   * volstats hiccup) — on probe-capable transports the rendered knee
+   * decides. Falls back to the map's own v3.81 auto rule. */
+  void refAnchor;
   return autoLevelFor(stats);
 }
 
@@ -1898,6 +2062,13 @@ export interface MembraneViewReport {
   ratio: number | null;
   /** The detected membrane normal (scene frame, reference grid axes). */
   normal: [number, number, number] | null;
+  /** v3.82: how the applied orientation was found/verified (the run log
+   * line suffix — "胶束带 PCA 直连 · 站立度 0.14" / "turn 网格扫描 · 站立度
+   * 0.12" / "文档相机直连（探针无法区分）" …). */
+  via?: string;
+  /** v3.82: the applied orientation's STANDING score (mass-centroid
+   * vertical offset of the verified render) — null when unmeasured. */
+  standing?: number;
   /** Human-readable summary for the run log / result panel. */
   note: string;
 }
@@ -2280,21 +2451,29 @@ export async function renderFigureMaps(
     }
   }
 
-  /* ---- 2. standardise the view: v3.77 membrane plane (PCA) first, then
-   * the 90° coverage ladder as the fallback (or when membrane mode is
-   * off — the right choice for soluble proteins). ---- */
+  /* ---- 2. standardise the view: v3.82 probe-closed loop — the
+   * reference's DISPLAY level is picked from RENDERED knees (fragmentation
+   * + sponge guards on real probe pixels), the membrane side view from
+   * belt-band PCA (new relay) or a probe-only STANDING turn-scan that
+   * works on EVERY relay since v3.50, both verified by rendered probes;
+   * the 90° coverage ladder stays for membrane mode off (the right
+   * choice for soluble proteins). ---- */
   let view = { desc: "base", x: 0, y: 0, score: 0 };
   /** v3.77: per-model DISPLAY contour levels — recorded when each model's
    * stats are fetched, applied right before ITS screenshot. The FIT
    * levels stay at the tuned 0.25×max; only the visible contour rides the
-   * contourLevel policy. */
+   * contourLevel policy. v3.82: on probe-capable transports in auto mode
+   * these are only a FALLBACK — the per-map knee (rendered + measured at
+   * export time) is the primary. */
   const displayLevelById = new Map<number, number>();
   const contourPolicy: ContourLevelPolicy = opts.contourLevel ?? { mode: "auto" };
+  /** v3.82: per-model /volstats recorded at open time — the screenshot
+   * loop's knee ladder needs each map's max without re-fetching. */
+  const statsById = new Map<number, BridgeVolStats | null>();
   /** v3.81: the reference's display level + its above-level envelope
-   * count — the anchor every other map's level matches (same particle
-   * ⇒ same envelope mass). Set during the view phase; null when the
-   * relay predates the envelope ladder (each map then uses its own
-   * auto rule). */
+   * count — DIAGNOSTICS ONLY under v3.82 (the probe knee decides levels;
+   * the count-matching experiment of round-41 delivered sponges and
+   * snowballs on the real P283 maps). */
   let refAnchor: LevelAnchor | null = null;
   const setDisplayLevel = async (id: number): Promise<void> => {
     const lvl = displayLevelById.get(id);
@@ -2303,234 +2482,357 @@ export async function renderFigureMaps(
   };
   /** v3.77: the membrane-view outcome, surfaced through the result. */
   let membraneReport: MembraneViewReport | null = null;
-  if (t.canFetchFiles && t.workdir) {
+  /** v3.82: probe capability (relay transport with PNG return) — gates the
+   * knee ladders, the standing probes and the per-map orientation assist. */
+  const probeCapable = !!(t.canFetchFiles && t.workdir);
+  /** v3.82: auto mode + probes → levels come from rendered knees. */
+  const kneeMode = probeCapable && contourPolicy.mode !== "manual";
+  /** v3.82: re-apply the run's SHARED view (membrane camera command or
+   * coverage-ladder turns) — every map's screenshot starts from it; a map
+   * whose own standing probe fails gets its own orientation instead. */
+  let applySharedView: (() => Promise<void>) | null = null;
+  /** v3.82: the reference render's STANDING sign at the final orientation
+   * (+1 heavy end up / −1 heavy end down) — per-map assists roll 180° to
+   * MATCH it so the whole figure shows the same end up. */
+  let refStandingSign: number | null = null;
+  /* ---- v3.82 (round-42) PROBE MACHINERY — hoisted to the run scope so
+   * BOTH the view phase (reference level knee + membrane orientation)
+   * and the screenshot loop (per-map knees + per-map standing assists)
+   * share one implementation. No relay endpoint is required beyond
+   * save+fetch (present since v3.50) — the round-39/40/41 chains all
+   * depended on relay-side keys the user's ChimeraX never got. ---- */
+  /* ---- v3.82 shared probe machinery: render + measure (no camera
+   * assumptions — works on any relay with save+fetch, i.e. every relay
+   * since v3.50; the round-39/40/41 chains all depended on relay-side
+   * keys the user's ChimeraX apparently never got). ---- */
+  const renderProbe = async (name: string): Promise<RenderShape | null> => {
+    try {
+      const bytes = await saveAndFetchPng(
+        t,
+        name,
+        { width: THUMB_SIZE, height: THUMB_SIZE, supersample: 1 },
+        (c) => exec(t, c, opts, true),
+        log,
+      );
+      return await measureRender(bytes);
+    } catch (err) {
+      log(`  探针 ${name}: 缩略图获取失败 — ${logSnippet(String(err), 120)}`);
+      return null;
+    }
+  };
+  /** one orientation probe: restore the base view, apply the candidate,
+   * RE-FRAME (bare `view` — translate/zoom/clip only, never rotates; a
+   * camera swap can strand the previous framing and render an
+   * empty/off-centre probe — the silent verification failure v3.80
+   * shipped), render and measure. */
+  const probeOrientation = async (
+    name: string,
+    apply: () => Promise<boolean>,
+  ): Promise<RenderShape | null> => {
+    await exec(t, "view _cfbase", opts, true);
+    if (!(await apply())) return null;
+    await exec(t, "wait 1", opts, true);
+    await exec(t, "view", opts, true);
+    await exec(t, "wait 1", opts, true);
+    return renderProbe(name);
+  };
+
+  /* ---- v3.82 (round-42 “level取得还是不好”): the level KNEE — render
+   * the model at a ladder of levels, measure FRAGMENTATION (snowball
+   * speckle AND free micelle blobs are disconnected components — the
+   * exact round-41/42 胶束 complaint) plus the main component's coverage
+   * (a too-high level hollows the particle into a spongy core), and take
+   * the LOWEST clean level. Every blind histogram rule (max-ratio, the
+   * two Otsu variants, count-matching) inherited the position of one
+   * hot spike and delivered snowballs (J48), a sponge (J41 class 3) and
+   * a fuzzy belt-on reference on the real P283 maps — the render itself
+   * is the only honest oracle. ---- */
+  const kneeLevelFor = async (
+    id: number,
+    stats: BridgeVolStats | null,
+    tag: string,
+  ): Promise<{ level: number; rule: string } | null> => {
+    if (!stats || !Number.isFinite(stats.max) || stats.max <= 0) return null;
+    const max = stats.max;
+    type Rung = { level: number; ratio: number; s: RenderShape | null };
+    const rungs: Rung[] = [];
+    const probeLevel = async (level: number): Promise<RenderShape | null> => {
+      await exec(t, `volume #${id} level ${level.toFixed(4)} step ${STEP}`, opts, true);
+      await exec(t, "wait 1", opts, true);
+      await exec(t, "view", opts, true);
+      await exec(t, "wait 1", opts, true);
+      return renderProbe(`_knee_${tag}_${level.toFixed(4)}.png`);
+    };
+    for (const ratio of LEVEL_KNEE_RATIOS) {
+      if (threw(opts.signal)) break;
+      const level = max * ratio;
+      const s = await probeLevel(level);
+      rungs.push({ level, ratio, s });
+      if (s) {
+        log(
+          `  level ${ratio.toFixed(2)}×max: 碎片率 ${(s.frag * 100).toFixed(1)}% · 主体覆盖 ${(s.mainCov * 100).toFixed(1)}%${
+            s.frag > KNEE_FRAG_MAX ? "（斑点/游离胶束未清）" : ""
+          }`,
+        );
+      }
+    }
+    const measured = rungs.filter((r) => r.s);
+    if (!measured.length) return null;
+    const bestMain = Math.max(...measured.map((r) => r.s!.mainCov));
+    const clean = (s: RenderShape) => s.frag <= KNEE_FRAG_MAX && s.mainCov >= KNEE_MAIN_MIN_FRAC * bestMain;
+    const firstCleanIdx = rungs.findIndex((r) => r.s && clean(r.s));
+    if (firstCleanIdx > 0) {
+      /* one refinement probe halfway to the previous (dirty) rung */
+      const lo = rungs[firstCleanIdx - 1].level;
+      const hi = rungs[firstCleanIdx].level;
+      const mid = (lo + hi) / 2;
+      const s = await probeLevel(mid);
+      if (s && clean(s)) {
+        log(`  level 拐点精调 ${(mid / max).toFixed(3)}×max: 碎片率 ${(s.frag * 100).toFixed(1)}% · 主体覆盖 ${(s.mainCov * 100).toFixed(1)}%`);
+        return {
+          level: mid,
+          rule: `渲染探针 · 无噪点拐点（碎片率 ${(s.frag * 100).toFixed(1)}% ≤ ${(KNEE_FRAG_MAX * 100).toFixed(0)}%，主体覆盖 ${(s.mainCov * 100).toFixed(1)}%）`,
+        };
+      }
+    }
+    const pick = firstCleanIdx >= 0 ? rungs[firstCleanIdx] : measured.reduce((a, b) => ((a.s!.frag <= b.s!.frag) ? a : b));
+    if (firstCleanIdx < 0) {
+      log(`  ⚠ 所有 level 档位均有碎片（最低碎片率 ${(pick.s!.frag * 100).toFixed(1)}%）— 取最干净档，可改用手动 level`);
+    }
+    return {
+      level: pick.level,
+      rule: `渲染探针 · ${firstCleanIdx >= 0 ? "无噪点拐点" : `最低碎片 ${(pick.s!.frag * 100).toFixed(1)}%`}（${pick.ratio.toFixed(2)}×max 档）`,
+    };
+  };
+
+  /** v3.82: the STANDING scan — turn x/y grid + two halving
+   * refinements maximising |standing| (the vertical mass asymmetry),
+   * then an azimuth roll refinement maximising the silhouette WIDTH
+   * (the disk's long axis horizontal, round-38). Falls back to the
+   * v3.81 anisotropy criterion when the particle is too symmetric to
+   * stand (an oblate disk reads standing ≈ 0 from every angle but
+   * anisotropy still peaks edge-on). Probe-only: needs no relay
+   * endpoint at all. */
+  const scanForStanding = async (
+    why: string,
+    tag: string,
+    topAnisoParam: number | null,
+  ): Promise<{ x: number; y: number; standing: number; via: string } | null> => {
+    log(`膜平面扫描（${why}）: 基准视角起 turn x/y 网格（目标：站立度 = 上下质量不对称最大）+ 两轮减半细化 + 滚转对齐盘长轴`);
+    type Cell = { x: number; y: number; standing: number; aniso: number; aspect: number };
+    /* object wrapper — `let best` assigned only inside the closure defeats
+     * TS's control-flow narrowing (the v3.80 scan used the same trick). */
+    const bestBox: { cell: Cell | null } = { cell: null };
+    const tryCell = async (x: number, y: number, cellTag: string): Promise<void> => {
+      if (threw(opts.signal)) return;
+      const s = await probeOrientation(`_mprobe_${tag}${cellTag}.png`, async () => {
+        if (x) await exec(t, `turn x ${x}`, opts, true);
+        if (y) await exec(t, `turn y ${y}`, opts, true);
+        return true;
+      });
+      if (!s) return;
+      log(`  扫描格 x=${x}° y=${y}°: 站立度 ${s.standing >= 0 ? "+" : ""}${s.standing.toFixed(3)} · 各向异性 ${s.aniso.toFixed(2)}`);
+      const cur = bestBox.cell;
+      if (!cur || Math.abs(s.standing) > Math.abs(cur.standing)) {
+        bestBox.cell = { x, y, standing: s.standing, aniso: s.aniso, aspect: s.aspect };
+      }
+    };
+    for (const x of MEMBRANE_SCAN_ELEVATIONS) {
+      for (const y of MEMBRANE_SCAN_AZIMUTHS) {
+        await tryCell(x, y, `g${x}_${y}`);
+      }
+    }
+    for (const step of [22.5, 11.25]) {
+      if (!bestBox.cell || threw(opts.signal)) break;
+      const cx = bestBox.cell.x;
+      const cy = bestBox.cell.y;
+      for (const [dx, dy] of [[step, 0], [-step, 0], [0, step], [0, -step]] as const) {
+        await tryCell(cx + dx, cy + dy, `r${String(step).replace(".", "_")}_${dx}_${dy}`);
+      }
+    }
+    const winner = bestBox.cell;
+    let viaStanding = true;
+    if (!winner) {
+      log("  扫描未获得任何可测探针");
+      return null;
+    }
+    if (Math.abs(winner.standing) < STANDING_SCAN_NEED) {
+      /* symmetric particle: standing is flat everywhere — the old
+       * anisotropy criterion still finds the edge-on (side) view. */
+      const anisoOk =
+        winner.aniso >= MEMBRANE_ANISO_ABS ||
+        (topAnisoParam != null && winner.aniso >= MEMBRANE_ANISO_REL * topAnisoParam && winner.aniso >= MEMBRANE_SCAN_MIN_ANISO);
+      if (!anisoOk) {
+        log(
+          `  扫描未找到侧视视角（最佳站立度 ${winner.standing.toFixed(3)} < ${STANDING_SCAN_NEED}，各向异性 ${winner.aniso.toFixed(2)} 亦未达标）`,
+        );
+        return null;
+      }
+      viaStanding = false;
+    }
+    /* roll refinement: at fixed elevation, extra azimuth spins the
+     * standing particle about its own (now vertical) axis — pick the
+     * azimuth whose silhouette is WIDEST (the disk/dimer long axis
+     * horizontal). */
+    let rollY = winner.y;
+    let rollAspect = winner.aspect;
+    for (const dy of [45, 90, 135, -45, -90, -135]) {
+      if (threw(opts.signal)) break;
+      const s = await probeOrientation(`_mprobe_${tag}roll${dy}.png`, async () => {
+        if (winner.x) await exec(t, `turn x ${winner.x}`, opts, true);
+        await exec(t, `turn y ${winner.y + dy}`, opts, true);
+        return true;
+      });
+      if (!s) continue;
+      log(`  滚转格 dy=${dy}°: 宽高比 ${s.aspect.toFixed(2)} · 站立度 ${s.standing >= 0 ? "+" : ""}${s.standing.toFixed(3)}`);
+      if (Math.abs(s.standing) >= STANDING_SCAN_NEED * 0.8 && s.aspect > rollAspect) {
+        rollAspect = s.aspect;
+        rollY = winner.y + dy;
+      }
+    }
+    await exec(t, "view _cfbase", opts, true);
+    if (winner.x) await exec(t, `turn x ${winner.x}`, opts, true);
+    await exec(t, `turn y ${rollY}`, opts, true);
+    await exec(t, "wait 1", opts, true);
+    await exec(t, "view", opts, true);
+    await exec(t, "wait 1", opts, true);
+    return {
+      x: winner.x,
+      y: rollY,
+      standing: winner.standing,
+      via: viaStanding
+        ? `turn 网格扫描 · 站立度 ${Math.abs(winner.standing).toFixed(2)}`
+        : `turn 网格扫描 · 各向异性 ${winner.aniso.toFixed(2)}（对称颗粒，站立度不可辨）`,
+    };
+  };
+
+
+  if (probeCapable) {
     /* v3.80 (round-40 “map的朝向还是不对”): the base view is made
      * DETERMINISTIC first — `view orient` aligns the scene axes with the
      * screen axes (X right, Y up, Z toward the viewer, per the view
      * command docs; like every view change it never touches model
      * positions, so the fitmap/matrix bookkeeping below is safe). The
-     * coverage ladder and the membrane scan now always start from the
-     * same known base instead of whatever an earlier run left behind. */
+     * coverage ladder, the membrane scan and every per-map assist now
+     * always start from the same known base. */
     await exec(t, "view orient", opts, true);
     await exec(t, "wait 1", opts, true);
     await exec(t, "view name _cfbase", opts, true);
     await exec(t, "wait 1", opts, true);
-    /* v3.77 → v3.81: the reference's DISPLAY level — the v3.81 chain:
-     * auto = min(0.25×max, 0.85×otsu2) (the second Otsu over the envelope
-     * = the protein/detergent split — on the hot-detergent P283 maps this
-     * drops the level into the protein window; on normal maps otsu2 is
-     * high and the long-accepted 0.25×max wins), manual = ratio×max, and
-     * the relay ladder's above-level COUNT at that level becomes the
-     * ANCHOR every other map's level matches (same particle ⇒ same
-     * envelope mass — an expert contours every map to the reference's
-     * size). Re-fetched for the CURRENT reference id (a hand-policy swap
-     * may have replaced the model with its z-flipped copy; a flip
-     * preserves the value distribution, but reading the live model is the
-     * honest thing). */
+
+    /* ---- 2a. the reference's DISPLAY level (the membrane probes below
+     * and every screenshot ride it). Manual mode keeps the user's ratio —
+     * the expert override, applied verbatim to every map (v3.80
+     * semantics; the round-41 count-matching anchor is gone). ---- */
     const refDispStats = await bridgeVolStats(t, refId);
-    const refDisplayChoice = displayLevelFor(refDispStats, contourPolicy);
-    const refDisplayLevel = refDisplayChoice?.level ?? refLevel;
-    if (refDisplayChoice && refDispStats) {
-      log(`参考图截图 level ${refDisplayChoice.level.toFixed(4)}（${refDisplayChoice.rule}）`);
-      const anchorCount = envelopeCountAt(refDispStats, refDisplayChoice.level);
-      if (anchorCount != null && anchorCount > 0) {
-        refAnchor = { level: refDisplayChoice.level, count: anchorCount };
-        log(
-          `参考包络计数 ${Math.round(anchorCount).toLocaleString("en-US")} 体素 ≥ level ${refDisplayChoice.level.toFixed(4)} — 其余各图将按同一包络大小匹配各自的 level（噪点图的 level 会自动抬到包络处，不再满屏斑点）`,
-        );
-      } else {
-        log("当前桥脚本无包络阶梯（/volstats env_levels，v3.81 桥新增）— 各图改按自身 min(0.25×max, 0.85×otsu₂) 规则取 level。建议在 ChimeraX 重新 open 一次 relay.py");
+    statsById.set(refId, refDispStats);
+    const refMax = refDispStats?.max ?? refStats?.max ?? null;
+    let refDisplayLevel: number | null = null;
+    if (contourPolicy.mode === "manual" && refMax) {
+      const ratio = Math.min(Math.max(Number.isFinite(contourPolicy.ratio) ? contourPolicy.ratio : LEVEL_RATIO, 0.01), 0.9);
+      refDisplayLevel = refMax * ratio;
+      log(`参考图截图 level ${refDisplayLevel.toFixed(4)}（手动 ${ratio}×max）`);
+    } else if (kneeMode && refDispStats) {
+      progress("参考图 level 探针（逐档渲染找无噪点拐点）", 8);
+      const knee = await kneeLevelFor(refId, refDispStats, "ref");
+      if (knee) {
+        refDisplayLevel = knee.level;
+        log(`参考图截图 level ${knee.level.toFixed(4)}（${knee.rule}）`);
       }
     }
-    if (refDisplayLevel != null) {
-      displayLevelById.set(refId, refDisplayLevel);
-      /* v3.80: contour the reference at the DISPLAY level NOW — the
-       * membrane probe thumbnails below must render the same envelope
-       * the screenshots will (the orientation verification rides on it). */
-      await exec(t, `volume #${refId} level ${refDisplayLevel.toFixed(4)} step ${STEP}`, opts, true);
+    if (refDisplayLevel == null) {
+      /* no probes / no stats: the v3.81 histogram chain (non-probe
+       * fallback — REST transports and volstats hiccups). */
+      const refDisplayChoice = displayLevelFor(refDispStats, contourPolicy);
+      refDisplayLevel = refDisplayChoice?.level ?? refLevel ?? 0.25 * (refMax ?? 1);
+      if (refDisplayChoice) log(`参考图截图 level ${refDisplayChoice.level.toFixed(4)}（${refDisplayChoice.rule}）`);
     }
+    displayLevelById.set(refId, refDisplayLevel);
+    if (refDispStats && refDisplayLevel != null) {
+      const anchorCount = envelopeCountAt(refDispStats, refDisplayLevel);
+      if (anchorCount != null && anchorCount > 0) {
+        refAnchor = { level: refDisplayLevel, count: anchorCount };
+        log(`参考包络计数 ${Math.round(anchorCount).toLocaleString("en-US")} 体素（诊断值 — v3.82 各图 level 由渲染探针逐图决定）`);
+      }
+    }
+    await exec(t, `volume #${refId} level ${refDisplayLevel.toFixed(4)} step ${STEP}`, opts, true);
+
+    /* ---- 2b. the membrane side view. v3.82 chain, every step probe-
+     * verified, no relay upgrade REQUIRED:
+     *   1. BELT-BAND cameras (/membrane2, relay ≥ v3.82): the detergent
+     *      belt is a flat torus in ONE density band whichever phase it is
+     *      — its PCA normal is the membrane normal even when the whole
+     *      particle reads isotropic (TMEM175's disease);
+     *   2. the legacy whole-envelope PCA camera (/membrane);
+     *   3. the STANDING turn-grid scan — pure probe renders, finds the
+     *      orientation whose vertical mass profile is most asymmetric
+     *      (head/belt at one end), then rolls the disk's long axis
+     *      horizontal;
+     *   4. the documented camera direct (honest log) when the commands
+     *      work but the probes cannot distinguish;
+     *   5. the 90° coverage ladder (membrane off). ---- */
     let membraneApplied = false;
     if (opts.membraneView?.mode === "auto") {
-      progress("膜平面检测（参考图密度 PCA · 去垢剂盘立 XZ 平面）", 9);
-      const mem = t.kind === "relay" && t.canMembrane
-        ? await bridgeMembraneAxis(t, refId, refDisplayLevel ?? refLevel ?? 0)
-        : null;
-      /** v3.81: the TOP-BASELINE probe's anisotropy — the camera looking
-       * straight down the PCA normal (guaranteed face-on; ≈1 for any
-       * flattened particle). Every side-view candidate must beat it (or
-       * clear the absolute bar), which self-calibrates the acceptance to
-       * the particle instead of assuming a band silhouette. null until
-       * measured / when its camera command is rejected. */
+      progress("膜蛋白侧视定向（胶束带 PCA + 渲染探针验证）", 9);
+      /** the face-on baseline's anisotropy for the axes source currently
+       * being tried (candidates may also clear the absolute bars). */
       let topAniso: number | null = null;
-
-      /* ---- v3.80→v3.81 probe machinery: restore the base view, apply a
-       * candidate orientation, RE-FRAME (bare `view` — translate/zoom/clip
-       * only, never rotates; a camera swap can strand the previous
-       * framing and render an empty/off-centre probe, which is exactly
-       * the kind of silent verification failure v3.80 shipped), render a
-       * small thumbnail and measure the silhouette's second-moment
-       * ANISOTROPY (plus the v3.80 bbox aspect for the log). Every
-       * orientation is VERIFIED by this probe — the undocumented
-       * rotation-direction conventions of turn/camera matrices can no
-       * longer silently deliver a wrong view. ---- */
-      const probeView = async (
-        name: string,
-        apply: () => Promise<boolean>,
-      ): Promise<{ aniso: number; aspect: number; coverage: number } | null> => {
-        await exec(t, "view _cfbase", opts, true);
-        if (!(await apply())) return null;
-        await exec(t, "wait 1", opts, true);
-        await exec(t, "view", opts, true);
-        await exec(t, "wait 1", opts, true);
-        try {
-          const bytes = await saveAndFetchPng(
-            t,
-            name,
-            { width: THUMB_SIZE, height: THUMB_SIZE, supersample: 1 },
-            (c) => exec(t, c, opts, true),
-            log,
-          );
-          return await silhouetteShape(bytes);
-        } catch (err) {
-          log(`  膜视图探针 ${name}: 缩略图获取失败 — ${logSnippet(String(err), 120)}`);
-          return null;
-        }
+      const accepts = (s: RenderShape | null): boolean => {
+        if (!s) return false;
+        if (Math.abs(s.standing) >= STANDING_ACCEPT) return true;
+        if (s.aniso >= MEMBRANE_ANISO_ABS) return true;
+        return topAniso != null && s.aniso >= MEMBRANE_ANISO_REL * topAniso && s.aniso >= MEMBRANE_SCAN_MIN_ANISO;
       };
-
-      /** v3.80→v3.81: the coarse-to-fine side-view hunt — NAMED-axis turns
-       * only (`turn x 30` / `turn y 45`, screen-frame axes per the turn
-       * command docs, valid on every ChimeraX build; the ±-symmetric
-       * elevation set makes the undocumented turn DIRECTION irrelevant).
-       * Needs only save+fetch — so even a relay WITHOUT /membrane (the
-       * round-39 “relay not re-opened” failure mode) still finds the side
-       * view empirically instead of silently rendering top-down. v3.81:
-       * the criterion is the silhouette ANISOTROPY (vs the top baseline
-       * when available) — the v3.80 bbox band rule needed a wide-band
-       * silhouette, which a column+disk particle never produces. */
-      const scanForBand = async (why: string): Promise<{ x: number; y: number; aniso: number } | null> => {
-        log(`膜平面扫描（${why}）: 基准视角起 turn x/y 网格 + 两轮减半细化，逐格渲染探针，选剪影最「扁长」的视角`);
-        type ScanCell = { x: number; y: number; aniso: number };
-        const best: { cell: ScanCell | null } = { cell: null };
-        const tryCell = async (x: number, y: number, tag: string): Promise<void> => {
-          if (threw(opts.signal)) return;
-          const r = await probeView(`_mprobe_${tag}.png`, async () => {
-            if (x) await exec(t, `turn x ${x}`, opts, true);
-            if (y) await exec(t, `turn y ${y}`, opts, true);
-            return true;
-          });
-          if (!r) return;
-          log(`  扫描格 x=${x}° y=${y}°: 剪影各向异性 ${r.aniso.toFixed(3)}（覆盖率 ${(r.coverage * 100).toFixed(1)}%）`);
-          if (!best.cell || r.aniso > best.cell.aniso) best.cell = { x, y, aniso: r.aniso };
-        };
-        for (const x of MEMBRANE_SCAN_ELEVATIONS) {
-          for (const y of MEMBRANE_SCAN_AZIMUTHS) {
-            await tryCell(x, y, `g${x}_${y}`);
+      /* the current camera TRANSLATION is KEPT (every probe re-frames
+       * with bare `view` anyway). Bare `view matrix` reports the camera
+       * as 12 comma-separated numbers, row-major 3×4, translation at
+       * indices 3/7/11 (view command docs). */
+      let camTrans: [number, number, number] = [0, 0, 0];
+      {
+        const vm = await exec(t, "view matrix", opts, true);
+        if (!vm.error) {
+          const m = /camera[^\d\-+]*((?:[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?[\s,]+){11}[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i.exec(vm.text);
+          if (m) {
+            const nums = m[1].match(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/g)?.map(Number) ?? [];
+            if (nums.length >= 12 && [3, 7, 11].every((i) => Number.isFinite(nums[i]))) {
+              camTrans = [nums[3], nums[7], nums[11]];
+            }
           }
         }
-        for (const step of [22.5, 11.25]) {
-          if (!best.cell || threw(opts.signal)) break;
-          const cx = best.cell.x;
-          const cy = best.cell.y;
-          for (const [dx, dy] of [[step, 0], [-step, 0], [0, step], [0, -step]] as const) {
-            await tryCell(cx + dx, cy + dy, `r${String(step).replace(".", "_")}_${dx}_${dy}`);
-          }
-        }
-        const winner = best.cell;
-        const need = Math.max(MEMBRANE_SCAN_MIN_ANISO, topAniso != null ? MEMBRANE_ANISO_REL * topAniso : 0);
-        if (!winner || winner.aniso < need) {
-          log(
-            `  扫描未找到侧视视角${winner ? `（最佳剪影各向异性 ${winner.aniso.toFixed(3)} < ${need.toFixed(3)}）` : ""}`,
-          );
-          return null;
-        }
-        /* probes leave the camera at the LAST cell — re-apply the winner */
-        await exec(t, "view _cfbase", opts, true);
-        if (winner.x) await exec(t, `turn x ${winner.x}`, opts, true);
-        if (winner.y) await exec(t, `turn y ${winner.y}`, opts, true);
-        await exec(t, "wait 1", opts, true);
-        await exec(t, "view", opts, true);
-        await exec(t, "wait 1", opts, true);
-        return winner;
-      };
-      if (mem) {
-        /* v3.78 (round-38 “之前说错了，应该是去垢剂盘放在xz平面”): the SIDE
-         * view — the detergent disk stands in the screen XZ plane: the
-         * membrane normal runs VERTICALLY on screen (the belt reads as a
-         * horizontal band, the transmembrane helices cross it vertically)
-         * and the disk's LONGEST in-plane principal axis (ea, λmax) runs
-         * horizontally. Which of ±n is 包外 (extracellular) cannot be
-         * derived from density alone — the default sign is deterministic
-         * (the normal's first significant component in map-frame Y/Z/X
-         * order is forced >= 0); `flip` flips the up side.
-         *
-         * v3.81 (round-41 “截图角度还是top view”): the v3.77–80 oblateness
-         * GATE IS GONE — on the delivered deck the reference's envelope
-         * at the too-low 0.25×max level carried protein-column + noise +
-         * micelle mass, read λmin/λmid ≥ 0.75 “globular”, and the run
-         * silently discarded the membrane view the user had asked for
-         * (the coverage ladder then picked the face-down view — the exact
-         * delivered top view). Selecting 膜蛋白视图=自动 IS the membrane
-         * statement; the ratio is logged as diagnostics only. The v3.80
-         * bbox “wide band” probe criterion is likewise replaced by the
-         * ANISOTROPY-vs-TOP-BASELINE comparison (a column+disk particle
-         * never produces a wide band). */
-        log(
-          `膜平面 PCA: 法线=(${mem.normal.map((v) => v.toFixed(3)).join(", ")}) 扁率 λmin/λmid=${mem.ratio.toFixed(3)}（诊断值 — 已选膜蛋白视图即按膜蛋白处理，不再设扁率门槛）`,
-        );
-        const scaleVec = (v: [number, number, number], s: number): [number, number, number] => [
-          v[0] * s,
-          v[1] * s,
-          v[2] * s,
-        ];
-        const crossVec = (
-          a: [number, number, number],
-          b: [number, number, number],
-        ): [number, number, number] => [
-          a[1] * b[2] - a[2] * b[1],
-          a[2] * b[0] - a[0] * b[2],
-          a[0] * b[1] - a[1] * b[0],
-        ];
-        let n: [number, number, number] = [...mem.normal];
-        /* deterministic default up side: the chosen +n points toward the
-         * map frame's +Y (then +Z, then +X) — same map, same side up. */
+      }
+      const scaleVec = (v: [number, number, number], s2: number): [number, number, number] => [
+        v[0] * s2,
+        v[1] * s2,
+        v[2] * s2,
+      ];
+      const crossVec = (
+        a: [number, number, number],
+        b: [number, number, number],
+      ): [number, number, number] => [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+      ];
+      /** build the side/top camera command from an axes source — the
+       * deterministic up side: the normal's first significant component in
+       * map-frame Y/Z/X order is forced >= 0 (same map, same side up);
+       * `flip` negates it (the user's 上下翻转 setting). */
+      const cameraCommands = (
+        src: { normal: [number, number, number]; ea: [number, number, number]; eb: [number, number, number] },
+      ): { side: string; sideT: string; top: string } => {
+        let n: [number, number, number] = [...src.normal];
         for (const i of [1, 2, 0] as const) {
           if (Math.abs(n[i]) > 1e-6) {
             if (n[i] < 0) n = scaleVec(n, -1);
             break;
           }
         }
-        if (opts.membraneView.flip) n = scaleVec(n, -1);
-        const xAxis = mem.ea; // disk long axis → horizontal on screen
-        const yAxis = n; // membrane normal → vertical (this side up)
-        const zRaw = crossVec(xAxis, yAxis); // toward viewer, unit (ea ⊥ n)
+        if (opts.membraneView?.flip) n = scaleVec(n, -1);
+        const xAxis = src.ea;
+        const yAxis = n;
+        const zRaw = crossVec(xAxis, yAxis);
         const zLen = Math.hypot(zRaw[0], zRaw[1], zRaw[2]);
         const zAxis: [number, number, number] = zLen > 1e-9 ? scaleVec(zRaw, 1 / zLen) : zRaw;
-        /* the current camera TRANSLATION is KEPT (every probe re-frames
-         * with bare `view` anyway — translate/zoom/clip only; the view
-         * command never rotates). Bare `view matrix` reports the camera
-         * as 12 comma-separated numbers, row-major 3×4, translation at
-         * indices 3/7/11 (view command docs). */
-        let camTrans: [number, number, number] = [0, 0, 0];
-        {
-          const vm = await exec(t, "view matrix", opts, true);
-          if (!vm.error) {
-            const m = /camera[^\d\-+]*((?:[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?[\s,]+){11}[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i.exec(vm.text);
-            if (m) {
-              const nums = m[1].match(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/g)?.map(Number) ?? [];
-              if (nums.length >= 12 && [3, 7, 11].every((i) => Number.isFinite(nums[i]))) {
-                camTrans = [nums[3], nums[7], nums[11]];
-              }
-            }
-          }
-        }
-        /* `view matrix camera` rotation COLUMNS = the camera axes in
-         * scene coordinates: [ea | n | ea×n] ⇒ ea appears RIGHT, n UP
-         * (this side), ea×n toward the viewer. The ROWS variant covers
-         * the opposite matrix-direction interpretation; the anisotropy
-         * probe decides which (if either) shows the flattening edge-on.
-         * The TOP camera ([ea | eb | n]) looks straight DOWN the normal
-         * — the guaranteed face-on baseline every candidate is judged
-         * against. */
         const rotCols: [number, number, number][] = [
           [xAxis[0], yAxis[0], zAxis[0]],
           [xAxis[1], yAxis[1], zAxis[1]],
@@ -2538,11 +2840,11 @@ export async function renderFigureMaps(
         ];
         const rotRows: [number, number, number][] = [xAxis, yAxis, zAxis];
         const rotTop: [number, number, number][] = [
-          [mem.ea[0], mem.eb[0], yAxis[0]],
-          [mem.ea[1], mem.eb[1], yAxis[1]],
-          [mem.ea[2], mem.eb[2], yAxis[2]],
+          [src.ea[0], src.eb[0], yAxis[0]],
+          [src.ea[1], src.eb[1], yAxis[1]],
+          [src.ea[2], src.eb[2], yAxis[2]],
         ];
-        const cameraCmd = (rot: [number, number, number][]): string =>
+        const fmt = (rot: [number, number, number][]): string =>
           `view matrix camera ${[
             rot[0][0], rot[0][1], rot[0][2], camTrans[0],
             rot[1][0], rot[1][1], rot[1][2], camTrans[1],
@@ -2550,150 +2852,188 @@ export async function renderFigureMaps(
           ]
             .map((v) => (Math.abs(v) < 5e-7 ? 0 : v).toFixed(6))
             .join(",")}`;
-        const tryCamera = async (label: string, cmd: string): Promise<{ aniso: number; aspect: number } | null> => {
-          const r = await probeView(`_mprobe_${label}.png`, async () => {
-            const res = await exec(t, cmd, opts, true);
-            if (res.error) {
-              log(`  膜视图 ${label}: 相机命令被拒 — ${logSnippet(res.error, 140)}`);
-              return false;
-            }
-            return true;
-          });
-          if (!r) return null;
-          log(
-            `  膜视图 ${label} 探针: 剪影各向异性 ${r.aniso.toFixed(3)}（宽高比 ${r.aspect.toFixed(2)} · 覆盖率 ${(r.coverage * 100).toFixed(1)}%）`,
-          );
-          return { aniso: r.aniso, aspect: r.aspect };
-        };
-        /* the face-on baseline first (a rejected/erroring command just
-         * leaves topAniso null — the candidates then need the absolute
-         * bar). */
-        const topR = await tryCamera("top", cameraCmd(rotTop));
-        topAniso = topR?.aniso ?? null;
-        /** v3.81 acceptance: beat the face-on baseline (or clear the
-         * absolute bar) — self-calibrated per particle, no band shape
-         * assumed. */
-        const accepts = (a: number | null): boolean => {
-          if (a == null) return false;
-          if (a >= MEMBRANE_ANISO_ABS) return true;
-          return topAniso != null && a >= MEMBRANE_ANISO_REL * topAniso && a >= MEMBRANE_SCAN_MIN_ANISO;
-        };
-        let via = "";
-        let aniso = 0;
-        let camOk = false;
-        const a1 = await tryCamera("cam", cameraCmd(rotCols));
-        camOk = a1 != null;
-        let a2: { aniso: number; aspect: number } | null = null;
-        if (accepts(a1?.aniso ?? null)) {
-          via = topAniso != null ? `文档 12 数相机矩阵直连 · 探针验证（各向异性 ${a1!.aniso.toFixed(2)} vs 俯视 ${topAniso.toFixed(2)}）` : "文档 12 数相机矩阵直连 · 探针验证（俯视基线不可用，按绝对阈值）";
-          aniso = a1!.aniso;
-        } else {
-          a2 = await tryCamera("camT", cameraCmd(rotRows));
-          if (accepts(a2?.aniso ?? null)) {
-            via = topAniso != null ? `相机矩阵转置候选 · 探针验证（各向异性 ${a2!.aniso.toFixed(2)} vs 俯视 ${topAniso.toFixed(2)}）` : "相机矩阵转置候选 · 探针验证（俯视基线不可用，按绝对阈值）";
-            aniso = a2!.aniso;
-          } else {
-            const scan = await scanForBand("精确相机探针未呈侧视剪影");
-            if (scan) {
-              via = `turn 网格扫描（x=${scan.x}°, y=${scan.y}° · 各向异性 ${scan.aniso.toFixed(2)}${topAniso != null ? ` vs 俯视 ${topAniso.toFixed(2)}` : ""}）`;
-              aniso = scan.aniso;
-              /* the scan finds the PLANE — which side ends up up is
-               * arbitrary, so the flip toggle rolls 180° about the
-               * screen X axis (both signs of 180° are the same roll). */
-              if (opts.membraneView.flip) {
-                await exec(t, "turn x 180", opts, true);
-                await exec(t, "wait 1", opts, true);
-              }
-            }
+        return { side: fmt(rotCols), sideT: fmt(rotRows), top: fmt(rotTop) };
+      };
+      const tryCamera = async (
+        label: string,
+        cmd: string,
+      ): Promise<{ s: RenderShape | null; rejected: boolean }> => {
+        const s = await probeOrientation(`_mprobe_${label}.png`, async () => {
+          const res = await exec(t, cmd, opts, true);
+          if (res.error) {
+            log(`  膜视图 ${label}: 相机命令被拒 — ${logSnippet(res.error, 140)}`);
+            return false;
           }
-        }
-        if (!via && camOk) {
-          /* v3.81: the documented camera COMMAND WORKED but the probes
-           * could not distinguish the views (a near-isotropic particle —
-           * or renders too degraded to measure). The user asked for the
-           * membrane view; applying the DOCUMENTED camera is strictly
-           * better than silently delivering the coverage face-down pick
-           * (the round-38/39/40/41 failure). Logged honestly. */
-          await exec(t, "view _cfbase", opts, true);
-          await exec(t, cameraCmd(rotCols), opts, true);
-          await exec(t, "wait 1", opts, true);
-          via = "文档 12 数相机矩阵直连（探针无法区分 — 剪影近各向同性，按文档约定取向）";
-          aniso = Math.max(a1?.aniso ?? 0, a2?.aniso ?? 0);
-        }
-        if (via) {
-          /* re-frame: translate/zoom/clip only — rotation preserved */
-          await exec(t, "view", opts, true);
-          await exec(t, "wait 1", opts, true);
-          membraneApplied = true;
-          view = {
-            desc: `膜侧面视图${opts.membraneView.flip ? " · 翻转" : ""}`,
-            x: 0,
-            y: 0,
-            score: mem.ratio,
-          };
-          membraneReport = {
-            applied: true,
-            ratio: mem.ratio,
-            normal: mem.normal,
-            note: `去垢剂盘已立于画面 XZ 平面（${via}；膜法线=(${mem.normal
-              .map((v) => v.toFixed(3))
-              .join(", ")})，盘长轴水平，扁率 λmin/λmid=${mem.ratio.toFixed(3)}（诊断值），阈值体素 ${mem.count}/${mem.total}）${
-              opts.membraneView.flip ? "，并按设置上下翻转 180°（另一面朝上）" : ""
-            }`,
-          };
+          return true;
+        });
+        if (s) {
           log(
-            `膜视图 ✓: ${membraneReport.note}；默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（可复现）— 密度无法判断包内/包外，若朝上的不是包外区，在「膜蛋白视图」勾选「上下翻转 180°」后重新生成`,
+            `  膜视图 ${label} 探针: 站立度 ${s.standing >= 0 ? "+" : ""}${s.standing.toFixed(3)} · 各向异性 ${s.aniso.toFixed(2)} · 宽高比 ${s.aspect.toFixed(2)} · 碎片率 ${(s.frag * 100).toFixed(1)}%`,
+          );
+        }
+        return { s, rejected: s == null };
+      };
+      /* ---- the candidate axes sources, most trustworthy first ---- */
+      const mem2 = t.canMembrane2 ? await bridgeMembrane2(t, refId) : null;
+      const bands = (mem2?.bands ?? [])
+        .filter((b) => b.count >= 64 && b.ratio > 0 && b.ratio < 1)
+        .sort((a, b) => a.ratio - b.ratio);
+      if (mem2) {
+        if (bands.length) {
+          log(
+            `胶束带检测: ${bands
+              .map((b) => `${b.name} 相带 [${b.lo.toFixed(3)}, ${b.lo < b.hi ? b.hi.toFixed(3) : "max"}] 扁率 ${b.ratio.toFixed(2)}（${Math.round(b.count).toLocaleString("en-US")} 体素）`)
+              .join(" · ")}${mem2.splits ? ` — 三相分割 ${mem2.splits.map((v) => v.toFixed(3)).join(" / ")}` : ""}`,
           );
         } else {
-          await exec(t, "view _cfbase", opts, true);
-          const hi = Math.max(a1?.aniso ?? 0, a2?.aniso ?? 0);
-          log(
-            `⚠ 膜视图不可用: 相机命令被拒且网格扫描未达标（探针最高各向异性 ${hi.toFixed(3)}）— 退回覆盖率择优视角。请确认 ChimeraX 版本支持 view matrix camera（1.13+）或已重新 open relay.py`,
-          );
-          membraneReport = {
-            applied: false,
-            ratio: mem.ratio,
-            normal: mem.normal,
-            note: `相机命令被拒且扫描未检出侧视剪影（探针最高各向异性 ${hi.toFixed(3)}）— 未应用膜取向，已退回覆盖率择优`,
-          };
+          log("胶束带检测: 无可用密度相带（信封过小或分割退化）— 改用整体 PCA / 站立度扫描");
         }
-      } else {
-        /* v3.80 (round-40): no /membrane (old relay not re-opened, or the
-         * endpoint failed) — the turn-grid scan needs only save+fetch,
-         * so the side view is now hunted EMPIRICALLY instead of
-         * silently falling back to the top-down coverage view (the
-         * exact round-38/39 delivered failure). */
-        const why = t.kind === "relay" && !t.canMembrane
-          ? "当前桥脚本较旧（无 /membrane 端点）"
-          : "膜法线检测失败（/membrane 无响应或返回异常）";
-        const scan = await scanForBand(`${why}，改用渲染探针扫描`);
+      } else if (t.canMembrane) {
+        log("当前桥脚本无 /membrane2（胶束带检测，v3.82 桥新增）— 先试整体 PCA 相机，站立度扫描全程可用（无需升级桥）");
+      }
+      /* legacy envelope PCA — needed as a candidate source on OLD relays
+       * and as a secondary source on new ones. */
+      const envSrc = mem2?.envelope ?? (t.canMembrane ? await bridgeMembraneAxis(t, refId, refDisplayLevel ?? refLevel ?? 0) : null);
+      const sources: Array<{ label: string; src: { normal: [number, number, number]; ea: [number, number, number]; eb: [number, number, number] }; ratio: number; band: MembraneBand | null }> = [];
+      for (const b of bands.slice(0, 2)) {
+        sources.push({ label: `band-${b.name}`, src: { normal: b.normal, ea: b.ea, eb: b.eb }, ratio: b.ratio, band: b });
+      }
+      if (envSrc) sources.push({ label: "env", src: { normal: envSrc.normal, ea: envSrc.ea, eb: envSrc.eb }, ratio: envSrc.ratio, band: null });
+      let via = "";
+      let viaStanding: number | null = null;
+      let viaRatio: number | null = null;
+      let viaNormal: [number, number, number] | null = null;
+      let sharedCamCmd: string | null = null;
+      let camOk = false;
+      let bandNote = "";
+      /** v3.82: the scan winner's turns (the shared view for scan-found
+       * orientations — re-applied per map). */
+      let scanTurns: { x: number; y: number } | null = null;
+      for (const source of sources) {
+        const cmds = cameraCommands(source.src);
+        /* the face-on baseline for THIS source (rejected command → null;
+         * candidates then need the absolute bars). */
+        const topR = await tryCamera(`${source.label}top`, cmds.top);
+        const prevTop = topAniso;
+        topAniso = topR.s?.aniso ?? null;
+        if (topR.s) {
+          log(`  膜视图 ${source.label} 俯视基线: 站立度 ${topR.s.standing >= 0 ? "+" : ""}${topR.s.standing.toFixed(3)} · 各向异性 ${topR.s.aniso.toFixed(2)}`);
+        }
+        const a1 = await tryCamera(`${source.label}cam`, cmds.side);
+        camOk = camOk || !a1.rejected;
+        if (accepts(a1.s)) {
+          via = `${source.label} 相机直连 · 探针验证（站立度 ${Math.abs(a1.s!.standing).toFixed(2)}${topAniso != null ? ` vs 俯视 ${Math.abs(topR.s!.standing).toFixed(2)}` : ""}）`;
+          viaStanding = a1.s!.standing;
+          viaRatio = source.ratio;
+          viaNormal = source.src.normal;
+          sharedCamCmd = cmds.side;
+          bandNote = source.band ? `胶束${source.band.name}相带 PCA（扁率 ${source.band.ratio.toFixed(2)}）` : `整体 PCA（λmin/λmid=${source.ratio.toFixed(2)}，诊断值）`;
+          break;
+        }
+        const a2 = await tryCamera(`${source.label}camT`, cmds.sideT);
+        camOk = camOk || !a2.rejected;
+        if (accepts(a2.s)) {
+          via = `${source.label} 相机转置候选 · 探针验证（站立度 ${Math.abs(a2.s!.standing).toFixed(2)}）`;
+          viaStanding = a2.s!.standing;
+          viaRatio = source.ratio;
+          viaNormal = source.src.normal;
+          sharedCamCmd = cmds.sideT;
+          bandNote = source.band ? `胶束${source.band.name}相带 PCA（扁率 ${source.band.ratio.toFixed(2)}）` : `整体 PCA（λmin/λmid=${source.ratio.toFixed(2)}，诊断值）`;
+          break;
+        }
+        topAniso = prevTop;
+      }
+      if (!via) {
+        const scan = await scanForStanding("精确相机探针未呈站立侧视剪影", "s", topAniso);
         if (scan) {
-          if (opts.membraneView.flip) {
+          via = scan.via;
+          viaStanding = scan.standing;
+          viaRatio = envSrc?.ratio ?? null;
+          viaNormal = envSrc?.normal ?? null;
+          bandNote = "探针网格扫描（无需桥端点）";
+          scanTurns = { x: scan.x, y: scan.y };
+          if (opts.membraneView?.flip) {
             await exec(t, "turn x 180", opts, true);
             await exec(t, "wait 1", opts, true);
+            viaStanding = -viaStanding;
           }
-          await exec(t, "view", opts, true);
-          await exec(t, "wait 1", opts, true);
-          membraneApplied = true;
-          view = {
-            desc: `膜侧面视图（扫描）${opts.membraneView.flip ? " · 翻转" : ""}`,
-            x: scan.x,
-            y: scan.y,
-            score: scan.aniso,
-          };
-          membraneReport = {
-            applied: true,
-            ratio: null,
-            normal: null,
-            note: `去垢剂盘立于画面 XZ 平面（${why}，由渲染探针网格扫描定位 — 最佳剪影各向异性 ${scan.aniso.toFixed(2)}，x=${scan.x}° y=${scan.y}°）${
-              opts.membraneView.flip ? "，并按设置上下翻转 180°" : ""
-            }`,
-          };
-          log(`膜视图 ✓（扫描）: ${membraneReport.note}；在 ChimeraX 重新 open 一次 relay.py 后可获得精确 PCA 法线取向（无需扫描）`);
-        } else {
-          log(`膜视图不可用: ${why}，且网格扫描未找到侧视视角 — 退回覆盖率择优视角`);
-          membraneReport = { applied: false, ratio: null, normal: null, note: `${why}；扫描亦未检出侧视剪影 — 覆盖率择优` };
         }
+      }
+      if (!via && camOk && sharedCamCmd == null) {
+        /* v3.81 semantics, kept as the last camera resort: the documented
+         * camera COMMAND WORKED but no probe could distinguish the views
+         * (a near-isotropic particle at this level). Applying the
+         * documented camera is still better than the coverage face-down
+         * pick — logged honestly. */
+        const src = sources[0];
+        if (src) {
+          const cmds = cameraCommands(src.src);
+          await exec(t, "view _cfbase", opts, true);
+          const res = await exec(t, cmds.side, opts, true);
+          if (!res.error) {
+            await exec(t, "wait 1", opts, true);
+            sharedCamCmd = cmds.side;
+            via = "文档相机直连（探针无法区分 — 剪影近各向同性，按文档约定取向）";
+            viaStanding = null;
+            viaRatio = src.ratio;
+            viaNormal = src.src.normal;
+            bandNote = src.band ? `胶束${src.band.name}相带 PCA（扁率 ${src.band.ratio.toFixed(2)}）` : "整体 PCA（诊断值）";
+          }
+        }
+      }
+      if (via) {
+        /* re-frame: translate/zoom/clip only — rotation preserved */
+        if (sharedCamCmd) {
+          const cmd = sharedCamCmd;
+          applySharedView = async () => {
+            await exec(t, "view _cfbase", opts, true);
+            await exec(t, cmd, opts, true);
+          };
+          await exec(t, "view _cfbase", opts, true);
+          await exec(t, cmd, opts, true);
+        } else if (scanTurns) {
+          const turns = scanTurns;
+          applySharedView = async () => {
+            await exec(t, "view _cfbase", opts, true);
+            if (turns.x) await exec(t, `turn x ${turns.x}`, opts, true);
+            await exec(t, `turn y ${turns.y}`, opts, true);
+          };
+        }
+        await exec(t, "view", opts, true);
+        await exec(t, "wait 1", opts, true);
+        membraneApplied = true;
+        view = {
+          desc: `膜侧面视图${opts.membraneView?.flip ? " · 翻转" : ""}`,
+          x: scanTurns?.x ?? 0,
+          y: scanTurns?.y ?? 0,
+          score: viaRatio ?? 0,
+        };
+        /* the final orientation's standing sign — per-map assists match it. */
+        if (viaStanding != null) refStandingSign = Math.sign(viaStanding) || 1;
+        membraneReport = {
+          applied: true,
+          ratio: viaRatio,
+          normal: viaNormal,
+          via,
+          standing: viaStanding ?? undefined,
+          note: `去垢剂盘立于画面 XZ 平面（${via}；${bandNote}）${
+            opts.membraneView?.flip ? "，并按设置上下翻转 180°（另一面朝上）" : ""
+          }`,
+        };
+        log(
+          `膜视图 ✓: ${membraneReport.note}；默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（可复现）— 密度无法判断包内/包外，若朝上的不是包外区，在「膜蛋白视图」勾选「上下翻转 180°」后重新生成`,
+        );
+      } else {
+        await exec(t, "view _cfbase", opts, true);
+        log(
+          "⚠ 膜视图不可用: 相机命令被拒且网格扫描未找到站立/侧视剪影 — 退回覆盖率择优视角。请确认 ChimeraX 版本支持 view matrix camera（1.13+）",
+        );
+        membraneReport = {
+          applied: false,
+          ratio: envSrc?.ratio ?? null,
+          normal: envSrc?.normal ?? null,
+          note: "相机命令被拒且扫描未检出站立/侧视剪影 — 未应用膜取向，已退回覆盖率择优",
+        };
       }
     }
     if (!membraneApplied) {
@@ -2743,6 +3083,11 @@ export async function renderFigureMaps(
       if (view.y) await exec(t, `turn y ${view.y}`, opts, true);
       await exec(t, "wait 1", opts, true);
       log(`最佳视角: ${view.desc} (X=${view.x}°, Y=${view.y}°, 覆盖率 ${view.score.toFixed(4)})`);
+      applySharedView = async () => {
+        await exec(t, "view _cfbase", opts, true);
+        if (view.x) await exec(t, `turn x ${view.x}`, opts, true);
+        if (view.y) await exec(t, `turn y ${view.y}`, opts, true);
+      };
     }
   } else {
     log("当前传输不支持文件回传 — 使用基准视角（对齐/手性诊断仍有效）");
@@ -3130,17 +3475,19 @@ export async function renderFigureMaps(
         openIds.add(origId);
         const stats = await bridgeVolStats(t, origId);
         const level = stats ? stats.max * LEVEL_RATIO : refLevel;
-        /* v3.77 → v3.81: the DISPLAY level for this map's screenshot —
-         * v3.81 matches the REFERENCE's envelope count (same particle ⇒
-         * same above-level mass; a noisy map's level rises above its
-         * noise floor by construction), falling back to the map's own
-         * min(0.25×max, 0.85×otsu₂) rule (see displayLevelFor). The fit
-         * level above stays 0.25×max; the screenshot loop applies the
-         * display level right before rendering. */
-        const mapDisplayChoice = displayLevelFor(stats, contourPolicy, refAnchor);
-        if (mapDisplayChoice) {
-          displayLevelById.set(origId, mapDisplayChoice.level);
-          log(`  ${req.key}: 截图 level ${mapDisplayChoice.level.toFixed(4)}（${mapDisplayChoice.rule}）`);
+        /* v3.77 → v3.82: the DISPLAY level for this map's screenshot. In
+         * kneeMode (auto + probes) the level is decided AT EXPORT TIME by
+         * the rendered knee ladder — nothing to preselect here. Otherwise
+         * (manual / REST) the policy rule records it now. The fit level
+         * below stays 0.25×max; only the visible contour rides the
+         * policy. */
+        statsById.set(origId, stats);
+        if (!kneeMode) {
+          const mapDisplayChoice = displayLevelFor(stats, contourPolicy, refAnchor);
+          if (mapDisplayChoice) {
+            displayLevelById.set(origId, mapDisplayChoice.level);
+            log(`  ${req.key}: 截图 level ${mapDisplayChoice.level.toFixed(4)}（${mapDisplayChoice.rule}）`);
+          }
         }
         if (level != null) {
           await exec(t, `volume #${origId} level ${level.toFixed(4)} step ${STEP}`, opts, true);
@@ -3190,11 +3537,15 @@ export async function renderFigureMaps(
           openIds.add(flipId);
           const stats2 = await bridgeVolStats(t, flipId);
           const level2 = stats2 ? stats2.max * LEVEL_RATIO : refLevel;
-          /* v3.77 → v3.81: display level for the flipped hand's screenshot
+          /* v3.77 → v3.82: display level for the flipped hand's screenshot
            * (same policy as the original — the flip preserves the value
-           * distribution, so the two levels coincide). */
-          const flipDisplayChoice = displayLevelFor(stats2, contourPolicy, refAnchor);
-          if (flipDisplayChoice) displayLevelById.set(flipId, flipDisplayChoice.level);
+           * distribution, so the two levels coincide; kneeMode decides at
+           * export time). */
+          statsById.set(flipId, stats2);
+          if (!kneeMode) {
+            const flipDisplayChoice = displayLevelFor(stats2, contourPolicy, refAnchor);
+            if (flipDisplayChoice) displayLevelById.set(flipId, flipDisplayChoice.level);
+          }
           if (level2 != null) {
             await exec(t, `volume #${flipId} level ${level2.toFixed(4)} step ${STEP}`, opts, true);
           }
@@ -3577,7 +3928,8 @@ export async function renderFigureMaps(
   refMaskF = null;
   refMaskFull = null;
 
-  /* ---- 4. screenshots ---- */
+  /* ---- 4. screenshots — v3.82: per-map level KNEE + per-map orientation
+   * assist + per-map re-framing, before the same 1600×1200 export. ---- */
   if (t.canFetchFiles && t.workdir) {
     const shotTargets = renders.filter((r) => r.modelId != null);
     const shotTotal = Math.max(1, shotTargets.length);
@@ -3592,13 +3944,123 @@ export async function renderFigureMaps(
       const showId = r.modelId;
       if (showId == null) continue;
       await exec(t, `show #${showId} models`, opts, true);
-      /* v3.77 (round-37 “level不能太高，要不看到都是去垢剂…”): re-level to
-       * the DISPLAY contour (auto Otsu envelope / classic / manual). The
-       * fit levels (0.25×max) carried the ALIGNMENT; the screenshot shows
-       * the membrane-friendly contour, so on a detergent-peaked map the
-       * surface wraps the protein + belt envelope (helix detail visible
-       * inside the ring) instead of only the micelle disk. */
-      await setDisplayLevel(showId);
+      /* v3.82 (a): the per-map level KNEE — this map's own ladder of
+       * rendered probes (fragmentation kills snowball speckle and the
+       * free micelle blobs; the main-coverage floor kills the sponge).
+       * The round-41/42 delivered deck had J48 snowballs and a J41
+       * sponge at the same "0.25×max" rule: every map's noise floor sits
+       * at a different place, so every map gets its own rendered knee.
+       * Manual mode / non-probe transports keep the precomputed policy
+       * level (setDisplayLevel). */
+      if (kneeMode) {
+        const stats = statsById.get(showId) ?? (await bridgeVolStats(t, showId));
+        const knee = await kneeLevelFor(showId, stats, safeKeyPart(r.key.replace(/\//g, "__")));
+        if (knee) {
+          await exec(t, `volume #${showId} level ${knee.level.toFixed(4)} step ${STEP}`, opts, true);
+          log(`  ${r.key}: 截图 level ${knee.level.toFixed(4)}（${knee.rule}）`);
+        } else {
+          await setDisplayLevel(showId);
+        }
+      } else {
+        await setDisplayLevel(showId);
+      }
+      await exec(t, "wait 1", opts, true);
+      /* v3.82 (b): the orientation — re-derive the run's shared view
+       * (the previous map's assist may have moved the camera), then
+       * VERIFY this map actually stands in it; a map whose fitmap
+       * alignment landed off-axis (the delivered J9/J48 ab-initio
+       * obliques) gets its OWN side view (band camera / standing scan)
+       * for its screenshot, logged honestly — the alignment correlation
+       * in the log stays the honest record of the fit quality. */
+      if (applySharedView) await applySharedView();
+      if (opts.membraneView?.mode === "auto") {
+        await exec(t, "wait 1", opts, true);
+        await exec(t, "view", opts, true);
+        await exec(t, "wait 1", opts, true);
+        const check = await renderProbe(`_view_${safeKeyPart(r.key.replace(/\//g, "__"))}.png`);
+        if (check && Math.abs(check.standing) < STANDING_ASSIST_TRIGGER) {
+          log(`  ${r.key}: 共享视角下站立度 ${check.standing.toFixed(3)} 偏低 — 尝试按本图自身密度立正`);
+          let assisted = false;
+          /* assist path 1: this map's own belt-band camera (/membrane2) */
+          if (t.canMembrane2) {
+            const m2 = await bridgeMembrane2(t, showId);
+            const band = (m2?.bands ?? [])
+              .filter((b) => b.count >= 64 && b.ratio > 0 && b.ratio < 1)
+              .sort((a, b) => a.ratio - b.ratio)[0];
+            if (band) {
+              /* camera with the deterministic up-side; roll 180° afterwards
+               * when the standing sign contradicts the reference's. */
+              let n: [number, number, number] = [...band.normal];
+              for (const i of [1, 2, 0] as const) {
+                if (Math.abs(n[i]) > 1e-6) {
+                  if (n[i] < 0) n = [n[0] * -1, n[1] * -1, n[2] * -1];
+                  break;
+                }
+              }
+              const xAxis = band.ea;
+              const zRaw: [number, number, number] = [
+                xAxis[1] * n[2] - xAxis[2] * n[1],
+                xAxis[2] * n[0] - xAxis[0] * n[2],
+                xAxis[0] * n[1] - xAxis[1] * n[0],
+              ];
+              const zLen = Math.hypot(zRaw[0], zRaw[1], zRaw[2]);
+              const zAxis: [number, number, number] = zLen > 1e-9 ? [zRaw[0] / zLen, zRaw[1] / zLen, zRaw[2] / zLen] : zRaw;
+              /* the current camera translation, as in the view phase */
+              let camTrans: [number, number, number] = [0, 0, 0];
+              const vm = await exec(t, "view matrix", opts, true);
+              if (!vm.error) {
+                const m = /camera[^\d\-+]*((?:[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?[\s,]+){11}[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i.exec(vm.text);
+                if (m) {
+                  const nums = m[1].match(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/g)?.map(Number) ?? [];
+                  if (nums.length >= 12 && [3, 7, 11].every((i) => Number.isFinite(nums[i]))) {
+                    camTrans = [nums[3], nums[7], nums[11]];
+                  }
+                }
+              }
+              const camCmd = `view matrix camera ${[
+                xAxis[0], n[0], zAxis[0], camTrans[0],
+                xAxis[1], n[1], zAxis[1], camTrans[1],
+                xAxis[2], n[2], zAxis[2], camTrans[2],
+              ]
+                .map((v) => (Math.abs(v) < 5e-7 ? 0 : v).toFixed(6))
+                .join(",")}`;
+              const probe = await probeOrientation(`_mprobe_assist_${safeKeyPart(r.key.replace(/\//g, "__"))}.png`, async () => {
+                const res = await exec(t, camCmd, opts, true);
+                return !res.error;
+              });
+              if (probe && Math.abs(probe.standing) >= STANDING_ACCEPT) {
+                if (refStandingSign != null && Math.sign(probe.standing) !== refStandingSign) {
+                  await exec(t, "turn x 180", opts, true);
+                  await exec(t, "wait 1", opts, true);
+                }
+                assisted = true;
+                log(`  ${r.key}: ✓ 已按本图胶束带 PCA 立正（站立度 ${Math.abs(probe.standing).toFixed(2)}${refStandingSign != null && Math.sign(probe.standing) !== refStandingSign ? "，并翻转对齐参考图朝向" : ""}）— 与参考帧存在姿态差异（fitmap 相关性见上）`);
+              }
+            }
+          }
+          /* assist path 2: this map's own standing scan (probe-only) */
+          if (!assisted) {
+            const scan = await scanForStanding("共享视角未立正，按本图扫描", `a_${safeKeyPart(r.key.replace(/\//g, "__"))}_`, null);
+            if (scan) {
+              if (refStandingSign != null && Math.sign(scan.standing) !== refStandingSign) {
+                await exec(t, "turn x 180", opts, true);
+                await exec(t, "wait 1", opts, true);
+              }
+              assisted = true;
+              log(`  ${r.key}: ✓ 已按本图站立度扫描立正（${scan.via}${refStandingSign != null && Math.sign(scan.standing) !== refStandingSign ? "，并翻转对齐参考图朝向" : ""}）— 与参考帧存在姿态差异（fitmap 相关性见上）`);
+            } else {
+              log(`  ${r.key}: ⚠ 本图亦无法立正（颗粒过对称或信噪比低）— 保持共享视角`);
+            }
+          }
+        } else if (check) {
+          log(`  ${r.key}: 站立度 ${check.standing >= 0 ? "+" : ""}${check.standing.toFixed(3)} ✓（共享侧视）`);
+        }
+      }
+      /* v3.82 (c): re-frame per map — bare `view` fits the DISPLAYED
+       * model (translate/zoom/clip only, never rotates), so each map
+       * fills the frame instead of riding the reference's framing (a
+       * wide hetero class used to risk clipping). */
+      await exec(t, "view", opts, true);
       await exec(t, "wait 1", opts, true);
       const name = `render_${safeKeyPart(r.key.replace(/\//g, "__"))}.png`;
       // v3.48: plain `save <png-path> …` — see the thumbnail note above; the

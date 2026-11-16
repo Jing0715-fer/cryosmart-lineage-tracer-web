@@ -258,6 +258,12 @@ const server = Bun.serve({
       // transpose candidate to the turn-grid scan (probe-verified).
       const camReject = sp.get("membrane") === "camreject";
       relayState.camReject = camReject;
+      // v3.82 E2E drills: ?relay=old (pre-3.82 relay — no /membrane2, the
+      // page must run the legacy envelope camera then the probe-only
+      // standing scan) / ?relay=nomembrane (pre-3.77 relay — neither
+      // endpoint; the standing scan is the only orientation source).
+      const relayMode = sp.get("relay") || "";
+      relayState.relayMode = relayMode === "old" || relayMode === "nomembrane" ? relayMode : "";
       return Response.json({
         ok: true,
         http_blocked: blockHttp,
@@ -266,6 +272,7 @@ const server = Bun.serve({
         workdir: relayState.workdir,
         corr: relayState.corrOverride,
         cam_reject: camReject,
+        relay_mode: relayState.relayMode,
       });
     }
     if (pathname === "/flow-e2e/relay-stats") {
@@ -663,50 +670,38 @@ function discPng(rgb: [number, number, number]): Uint8Array {
   DISC_PNG_CACHE.set(key, withIdat);
   return withIdat;
 }
-/** The render the mock serves for a save: transparent bg + the shown
- * model's volume-color (grey when nothing is on screen / uncolored). */
-function mockRenderPng(): Uint8Array {
-  const rgb =
-    (relayState.shownModel != null && relayState.modelColors.get(relayState.shownModel)) ||
-    ([178, 178, 178] as [number, number, number]);
-  return discPng(rgb as [number, number, number]);
-}
-
-/* ---- v3.80→v3.81: the membrane-view probe renders ---------------- */
-/* A horizontal BAND (the detergent disk standing in the screen XZ plane
- * with the membrane normal vertical — the SIDE view the page wants: 2D
- * second-moment anisotropy sqrt(λmax/λmin) ≈ 2.67, far above the 1.15
- * absolute bar / 1.06× the top baseline) vs the round DISC (face-down
- * view, anisotropy ≈ 1.0 — also what the TOP-BASELINE camera gets, and
- * what the transpose hedge leaves armed). The page measures these real
- * PNG bytes browser-side (silhouetteShape), so the E2E exercises the
- * actual probe-verification decision path. */
-const BAND_PNG_CACHE = new Map<string, Uint8Array>();
-function bandPng(rgb: [number, number, number]): Uint8Array {
-  const key = rgb.join(",");
-  const cached = BAND_PNG_CACHE.get(key);
-  if (cached) return cached;
+/* ---- v3.82: the probe-render family — the page now closes the loop on
+ * REAL rendered pixels (measureRender: fragmentation / main coverage /
+ * standing), so the mock arms a full level×orientation repertoire:
+ *   snow    — level below the noise floor: dozens of disconnected specks
+ *             (fragmentation ≈ 0.95 → the knee ladder must climb);
+ *   sponge  — level too high: one tiny porous core (main coverage ≪ the
+ *             ladder's best → the knee's sponge guard rejects);
+ *   clean   — 0.12–0.5×max: the standing MUSHROOM when the camera shows
+ *             the side view (head ellipse on top, belt band, column
+ *             below → standing ≈ +0.12; flipped camera/turns → mirrored
+ *             head-down variant, standing ≈ −0.12), the round DISC
+ *             otherwise (standing ≈ 0.02, aniso ≈ 1.0);
+ *   rollOk  — at the standing elevation, azimuth ≡ 0 (mod 180) renders
+ *             the WIDE mushroom (aspect 1.5 — the disk's long axis
+ *             horizontal), other azimuths the NARROW one (aspect 0.9) so
+ *             the roll refinement has a real optimum to find. ---- */
+function drawShape(
+  rgb: [number, number, number],
+  painter: (set: (x: number, y: number) => void) => void,
+): Uint8Array {
   const size = 96;
-  const half = 18; // band half-height → rows [30, 66)
   const raw = new Uint8Array(size * (size * 4 + 1));
-  for (let y = 0; y < size; y++) {
-    const row = y * (size * 4 + 1);
-    raw[row] = 0; // filter: none
-    for (let x = 0; x < size; x++) {
-      const i = row + 1 + x * 4;
-      if (y >= size / 2 - half && y < size / 2 + half) {
-        raw[i] = rgb[0];
-        raw[i + 1] = rgb[1];
-        raw[i + 2] = rgb[2];
-        raw[i + 3] = 255;
-      } else {
-        raw[i] = 0;
-        raw[i + 1] = 0;
-        raw[i + 2] = 0;
-        raw[i + 3] = 0;
-      }
-    }
-  }
+  for (let y = 0; y < size; y++) raw[y * (size * 4 + 1)] = 0; // filter: none
+  const set = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= size || y >= size) return;
+    const i = y * (size * 4 + 1) + 1 + x * 4;
+    raw[i] = rgb[0];
+    raw[i + 1] = rgb[1];
+    raw[i + 2] = rgb[2];
+    raw[i + 3] = 255;
+  };
+  painter(set);
   const ihdr = new Uint8Array(13);
   const dv = new DataView(ihdr.buffer);
   dv.setUint32(0, size);
@@ -723,8 +718,126 @@ function bandPng(rgb: [number, number, number]): Uint8Array {
   withIdat.set(pngChunk("IDAT", new Uint8Array(idat)), off);
   off += 12 + idat.length;
   withIdat.set(pngChunk("IEND", new Uint8Array(0)), off);
-  BAND_PNG_CACHE.set(key, withIdat);
   return withIdat;
+}
+
+const SHAPE_PNG_CACHE = new Map<string, Uint8Array>();
+function shapePng(kind: string, rgb: [number, number, number]): Uint8Array {
+  const key = `${kind}:${rgb.join(",")}`;
+  const cached = SHAPE_PNG_CACHE.get(key);
+  if (cached) return cached;
+  let out: Uint8Array;
+  if (kind === "snow") {
+    out = drawShape(rgb, (set) => {
+      // 42 scattered specks (r≈2.2px) — fragmentation ≈ 1 − 15/650 ≈ 0.98
+      let seed = 12345;
+      const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+      for (let k = 0; k < 42; k++) {
+        const cx = 10 + rnd() * 76;
+        const cy = 10 + rnd() * 76;
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            if (dx * dx + dy * dy <= 5) set(Math.round(cx + dx), Math.round(cy + dy));
+          }
+        }
+      }
+    });
+  } else if (kind === "sponge") {
+    out = drawShape(rgb, (set) => {
+      // a tiny ring (r 11–13) — one small main component
+      for (let y = 0; y < 96; y++) {
+        for (let x = 0; x < 96; x++) {
+          const d = Math.hypot(x - 48, y - 48);
+          if (d >= 11 && d <= 13) set(x, y);
+        }
+      }
+    });
+  } else {
+    // mushroomUp / mushroomDown / mushroomWide / mushroomNarrow — the
+    // standing membrane particle: a mass-heavy head ellipse at one end +
+    // a THIN LONG column + belt band at the other (the long thin tail is
+    // what pushes the mass centroid ≈0.14 of the silhouette height away
+    // from the bbox centre — measureRender.standing's signal; a stubby
+    // column reads only ≈0.04 and would fail STANDING_ACCEPT).
+    const down = kind === "mushroomDown";
+    const wide = kind === "mushroomWide";
+    const narrow = kind === "mushroomNarrow";
+    const headRx = wide ? 40 : narrow ? 20 : 30;
+    out = drawShape(rgb, (set) => {
+      const headCy = down ? 74 : 22;
+      const headRy = 14;
+      /* the down variant is the EXACT mirror of up about y=48 (belt
+       * 56..66 → 30..40, column 36..88 → 8..60) so |standing| matches. */
+      const beltY0 = down ? 30 : 56;
+      const beltY1 = beltY0 + 10;
+      const colX0 = 44;
+      const colX1 = 52;
+      const colY0 = down ? 8 : 36;
+      const colY1 = down ? 60 : 88;
+      for (let y = 0; y < 96; y++) {
+        for (let x = 0; x < 96; x++) {
+          const ex = (x - 48) / headRx;
+          const ey = (y - headCy) / headRy;
+          if (ex * ex + ey * ey <= 1) {
+            set(x, y);
+            continue;
+          }
+          const inBelt = y >= beltY0 && y < beltY1 && Math.abs(x - 48) <= (wide ? 36 : narrow ? 20 : 26);
+          const inCol = x >= colX0 && x < colX1 && y >= Math.min(colY0, colY1) && y < Math.max(colY0, colY1);
+          if (inBelt || inCol) set(x, y);
+        }
+      }
+    });
+  }
+  SHAPE_PNG_CACHE.set(key, out);
+  return out;
+}
+
+/** The render the mock serves for a save: transparent bg + the shown
+ * model's volume-color (grey when nothing is on screen / uncolored). */
+function mockRenderPng(): Uint8Array {
+  const rgb =
+    (relayState.shownModel != null && relayState.modelColors.get(relayState.shownModel)) ||
+    ([178, 178, 178] as [number, number, number]);
+  return discPng(rgb as [number, number, number]);
+}
+
+/** v3.82: the probe renders (every `_`-prefixed save) — driven by the
+ * CURRENT per-model display level (snow below 0.12×max, sponge above
+ * 0.5) and the standing/roll camera state (mushroom vs disc, wide vs
+ * narrow). This is what the page's measureRender actually scores. */
+function probeRenderPng(name: string): Uint8Array | null {
+  if (!name.startsWith("_")) return null;
+  const rgb: [number, number, number] =
+    (relayState.shownModel != null && relayState.modelColors.get(relayState.shownModel)) ||
+    [178, 178, 178];
+  const level =
+    relayState.shownModel != null ? relayState.modelLevels.get(relayState.shownModel) ?? 0.25 : 0.25;
+  if (level < 0.12) return shapePng("snow", rgb as [number, number, number]);
+  if (level > 0.5) return shapePng("sponge", rgb as [number, number, number]);
+  const st = standingState();
+  if (st === 0) return discPng(rgb as [number, number, number]);
+  if (st < 0) return shapePng("mushroomDown", rgb as [number, number, number]);
+  return shapePng(rollOkState() ? "mushroomWide" : "mushroomUp", rgb as [number, number, number]);
+}
+
+/** v3.82: is the current camera a STANDING side view? +1 head-up, −1
+ * head-down, 0 not standing. The camera forms (view matrix camera with
+ * the expected rotation — default up / flip down) set it directly; the
+ * turn drills stand at viewX ≈ 90 (up) or ≈ 270 (a `turn x 180` flip). */
+function standingState(): 0 | 1 | -1 {
+  if (relayState.camDir === 1 || relayState.camDir === -1) return relayState.camDir;
+  const x = ((relayState.viewX % 360) + 360) % 360;
+  if (Math.abs(x - 90) < 1e-6) return 1;
+  if (Math.abs(x - 270) < 1e-6) return -1;
+  return 0;
+}
+
+/** v3.82: at a standing elevation, is the azimuth aligned with the
+ * disk's long axis (y ≡ 0 mod 180)? — the roll refinement's optimum. */
+function rollOkState(): boolean {
+  const y = ((relayState.viewY % 180) + 180) % 180;
+  return y < 5 || y > 175;
 }
 
 /* v3.80: the expected `view matrix camera` ROTATIONS for the mock's fixed
@@ -742,18 +855,6 @@ const EXPECTED_CAM_ROT_FLIP = [
   [-0.894427, -0.333333, 0.298143],
   [0.0, -0.666667, -0.745356],
 ];
-
-/** v3.80→v3.81: `_mprobe_*.png` saves render the BAND (side view — the
- * current camera is the expected membrane orientation / drill cell) vs
- * the DISC (face-down / top baseline / transpose hedge); every other
- * save keeps the old model-color render. */
-function probeRenderPng(name: string): Uint8Array | null {
-  if (!name.startsWith("_mprobe_")) return null;
-  const rgb: [number, number, number] =
-    (relayState.shownModel != null && relayState.modelColors.get(relayState.shownModel)) ||
-    [178, 178, 178];
-  return relayState.bandArmed ? bandPng(rgb as [number, number, number]) : discPng(rgb as [number, number, number]);
-}
 
 /** Minimal plausible MRC2014 volume (8³ float32 + 1024-byte header). */
 function mrcBytes(seedSource: string): Uint8Array {
@@ -850,14 +951,25 @@ const relayState = {
   /** v3.68 E2E: what `measure correlation` reports (reset ?corr=N). */
   corrOverride: 0.42,
   /** v3.80 E2E: accumulated NAMED-axis turn state (view _cfbase / view
-   * orient / view matrix camera reset it) — drives the band/disc probe
-   * renders for the membrane-view scan drill. */
+   * orient / view matrix camera reset it) — drives the standing/roll
+   * probe renders for the membrane-view scan drill. */
   viewX: 0,
   viewY: 0,
-  /** v3.80 E2E: is the CURRENT view the band (side) orientation? Set by
-   * an expected `view matrix camera` rotation or by the drill cell
-   * (turn x 90 + turn y 90); `_mprobe_*.png` saves render band vs disc. */
-  bandArmed: false,
+  /** v3.82 E2E: the CURRENT camera's standing state, set by an expected
+   * `view matrix camera` rotation (+1 default up / −1 flip; 0 anything
+   * else — the disc render). The turn state above drives the drills
+   * (viewX ≈ 90 stands up, ≈ 270 = a `turn x 180` flip). */
+  camDir: 0 as 0 | 1 | -1,
+  /** v3.82 E2E: per-model display level from `volume #N level X` — the
+   * probe renders are LEVEL-keyed (snow < 0.12, sponge > 0.5, clean in
+   * between), exactly the knee ladder's decision surface. */
+  modelLevels: new Map<number, number>(),
+  /** v3.82 E2E drill: "" (current relay: /membrane + /membrane2 + flags),
+   * "old" (pre-3.82 relay: no /membrane2, flag off — the page must fall
+   * to the legacy envelope camera then the standing scan), "nomembrane"
+   * (pre-3.77 relay: neither endpoint — the standing scan is the ONLY
+   * orientation source left). */
+  relayMode: "" as "" | "old" | "nomembrane",
   /** v3.80 E2E drill: /flow-e2e/reset?membrane=camreject — every `view
    * matrix camera` errors, so the page must fall through transpose →
    * turn-grid scan (the round-39 silent-failure path, now recoverable). */
@@ -895,7 +1007,9 @@ function resetRelayState() {
   relayState.corrOverride = 0.42;
   relayState.viewX = 0;
   relayState.viewY = 0;
-  relayState.bandArmed = false;
+  relayState.camDir = 0;
+  relayState.modelLevels.clear();
+  relayState.relayMode = "";
   relayState.camReject = false;
   relayState.cameraAccepts = 0;
   relayState.cameraRejects = 0;
@@ -976,6 +1090,14 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       }
     }
   }
+  // v3.82: track the per-model DISPLAY level (`volume #N level X step 1`)
+  // — the probe renders are level-keyed (snow / clean / sponge), which is
+  // exactly what the page's knee ladder walks.
+  const volLevelMatch = /^volume\s+#(\d+(?:\.\d+)?)\s+level\s+(-?[\d.eE+]+)\b/i.exec(command);
+  if (volLevelMatch) {
+    relayState.modelLevels.set(parseInt(volLevelMatch[1], 10), Number(volLevelMatch[2]));
+  }
+
   // v3.53: track the on-screen model (drives per-class disc colors on
   // save) and tripwire the retired `set bgColor` command.
   const showMatch = /^show\s+#(\d+)\s+models/i.exec(command);
@@ -1027,6 +1149,9 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       }
       const id = relayNextModelId();
       relayState.models.set(id, { url });
+      // v3.82: a newly opened model DISPLAYS by default (ChimeraX
+      // semantics) — the probe renders are level-keyed per shown model.
+      relayState.shownModel = id;
       relayState.opens.push({ url, status: 200, modelId: id, idless: false, local: true });
       return {
         text: `Opened ${staged.name}, grid size 8,8,8, grid spacing 1.25,1.25,1.25 on 1 model (id #${id})`,
@@ -1050,6 +1175,8 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       const bytes = new Uint8Array(await res.arrayBuffer());
       const id = relayNextModelId();
       relayState.models.set(id, { url });
+      // v3.82: a newly opened model DISPLAYS by default.
+      relayState.shownModel = id;
       const idless = /\/J497\./.test(url);
       relayState.opens.push({ url, status: res.status, modelId: id, idless });
       if (idless) {
@@ -1084,6 +1211,8 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       const id = parseInt(m[1], 10);
       if (relayState.models.has(id)) relayState.closedIds.push(id);
       relayState.models.delete(id);
+      // v3.82: closing the shown model leaves nothing displayed.
+      if (relayState.shownModel === id) relayState.shownModel = null;
     }
     return { text: "", error: null };
   }
@@ -1211,25 +1340,25 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       error: null,
     };
   }
-  // v3.80: view-state tracking for the membrane probe renders — `view
+  // v3.80→v3.82: view-state tracking for the probe renders — `view
   // orient` (deterministic base) and `view _cfbase` (restore) both reset
-  // the accumulated turn state and disarm the band.
+  // the accumulated turn state and the camera's standing direction.
   if (/^view\s+orient$/i.test(command) || /^view\s+_cfbase$/i.test(command)) {
     relayState.viewX = 0;
     relayState.viewY = 0;
-    relayState.bandArmed = false;
+    relayState.camDir = 0;
     return { text: "", error: null };
   }
-  // v3.80: NAMED-axis turns (the membrane scan uses only these — `turn
-  // x 90`, `turn y 45`, `turn x -22.5` …). The accumulated state drives
-  // the drill's band cell (x=90, y=90 — the disk seen edge-on).
+  // v3.80→v3.82: NAMED-axis turns (the membrane scan uses only these —
+  // `turn x 90`, `turn y 45`, `turn x -22.5` …). The accumulated state
+  // drives the drill renders: viewX ≈ 90 stands the mushroom up (≈ 270 =
+  // a `turn x 180` flip, head-down); the azimuth decides the roll variant.
   const namedTurnMatch = /^turn\s+([xyz])\s+(-?\d+(?:\.\d+)?)$/i.exec(command);
   if (namedTurnMatch) {
     const deg = Number(namedTurnMatch[2]);
     if (namedTurnMatch[1].toLowerCase() === "x") relayState.viewX += deg;
     else relayState.viewY += deg;
-    relayState.bandArmed =
-      Math.abs(relayState.viewX - 90) < 1e-6 && Math.abs(relayState.viewY - 90) < 1e-6;
+    relayState.camDir = 0;
     return { text: "", error: null };
   }
   // v3.79 contract guard: `view matrix camera` REQUIRES 12 (or 16)
@@ -1268,8 +1397,15 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
     ];
     const closeTo = (want: number[][]) =>
       want.every((row, i) => row.every((v, j) => Math.abs(rot[i][j] - v) < 1e-4));
-    relayState.bandArmed = closeTo(EXPECTED_CAM_ROT_DEFAULT) || closeTo(EXPECTED_CAM_ROT_FLIP);
-    if (relayState.bandArmed) relayState.cameraAccepts += 1;
+    /* v3.82: the expected rotation arms the STANDING mushroom probe
+     * (camDir +1 head-up; the flip rotation −1 head-down); anything else
+     * (the transpose hedge, the top baseline, a band camera built from a
+     * different axes source) leaves the disc armed — the page's
+     * measureRender.standing decides acceptance on real pixels. */
+    if (closeTo(EXPECTED_CAM_ROT_DEFAULT)) relayState.camDir = 1;
+    else if (closeTo(EXPECTED_CAM_ROT_FLIP)) relayState.camDir = -1;
+    else relayState.camDir = 0;
+    if (relayState.camDir !== 0) relayState.cameraAccepts += 1;
     relayState.viewX = 0;
     relayState.viewY = 0;
     return { text: "", error: null };
@@ -1337,7 +1473,8 @@ const relayServer = Bun.serve({
           // PCA endpoint behind the 膜蛋白视图 (detergent disk standing in
           // the screen XZ plane, v3.78). Without the flag the page treats
           // this relay as legacy and falls back to the coverage view.
-          membrane: true,
+          // v3.82 ?relay=nomembrane drill: pre-3.77 relay — neither flag.
+          membrane: relayState.relayMode !== "nomembrane",
           // v3.79: mirrors relay.py's /volstats suggested_level key (the
           // top-25%-of-envelope display threshold).
           vollevel: true,
@@ -1345,6 +1482,10 @@ const relayServer = Bun.serve({
           // env_counts (the envelope ladder behind the count-matched
           // display levels + the level preview).
           vollevel2: true,
+          // v3.82: mirrors relay.py's GET /membrane2 (the 3-phase split +
+          // per-band PCAs). Drills: ?relay=old drops it (pre-3.82 relay);
+          // ?relay=nomembrane drops BOTH membrane flags (pre-3.77).
+          membrane2: relayState.relayMode === "",
           cacheDir: relayState.cacheDir,
           cached: relayState.staged.size,
           volumes: relayState.models.size,
@@ -1553,26 +1694,16 @@ const relayServer = Bun.serve({
         // protein + detergent micelle): smallest-variance principal axis
         // n = (2,1,2)/3 IS the membrane normal, ea = (1,-2,0)/√5 is the
         // disk's LONG in-plane axis, eb = n × ea completes the
-        // right-handed triad (ea × eb = n), and λmin/λmid = 0.42 is now
-        // DIAGNOSTICS ONLY (the v3.81 page removed the oblateness gate).
-        // Expected page behavior (v3.81 documented-camera path):
-        //   1. TOP BASELINE — one 12-number `view matrix camera` with
-        //      rotation COLUMNS [ea | eb | n] (looking straight down the
-        //      normal): the mock leaves the DISC armed (aniso ≈ 1.0).
-        //   2. default (sign rule: n's map-frame +Y component ≥ 0 → keep):
-        //     view matrix camera 0.447214,0.666667,-0.596285,0.000000,
-        //       -0.894427,0.333333,-0.298143,0.000000,
-        //       0.000000,0.666667,0.745356,0.000000
-        //     → mock arms the BAND probe png (_mprobe_cam.png, aniso
-        //       ≈ 2.67 ≥ 1.15) → accepted, NO transpose/scan.
-        //   flip (other membrane side up — n negated):
-        //     view matrix camera 0.447214,-0.666667,0.596285,0.000000,
-        //       -0.894427,-0.333333,0.298143,0.000000,
-        //       0.000000,-0.666667,-0.745356,0.000000
-        //   drill ?membrane=camreject: every camera command errors → the
-        //     page must fall to the turn-grid scan; the mock arms the
-        //     band ONLY at (turn x 90, turn y 90) so the scan converges
-        //     there and re-applies it.
+        // right-handed triad (ea × eb = n). v3.82: the ratio is 0.95 —
+        // the whole-envelope PCA reads NEAR-ISOTROPIC on a column+disk
+        // particle like TMEM175 (the round-41/42 delivered failure), so
+        // the page must not trust it blindly; its camera is still tried
+        // as a candidate and the mock arms the standing mushroom for the
+        // exact expected rotation — the PROBE decides.
+        // ?relay=nomembrane drill: 404 (pre-3.77 relay).
+        if (relayState.relayMode === "nomembrane") {
+          return reply(404, { error: "unknown route (pre-3.77 relay drill)" });
+        }
         const mid = u.searchParams.get("id") || "";
         if (!mid) return reply(400, { error: "missing id" });
         if (!relayState.models.has(Number(mid))) {
@@ -1583,10 +1714,69 @@ const relayServer = Bun.serve({
           normal: [0.666667, 0.333333, 0.666667],
           ea: [0.447214, -0.894427, 0.0],
           eb: [0.596285, 0.298142, -0.745356],
-          ratio: 0.42,
-          lambdas: [0.42, 1.0, 1.05],
+          ratio: 0.95,
+          lambdas: [0.95, 1.0, 1.05],
           count: 120000,
           total: 512000,
+        });
+      }
+      if (u.pathname === "/membrane2") {
+        // v3.82 E2E: mirrors relay.py's GET /membrane2 — the 3-phase
+        // split + per-band PCAs. The mock's particle is a HOT-BELT one
+        // (the P283 regime): the "high" band IS the detergent belt (a
+        // flat torus, oblateness 0.30, normal (2,1,2)/3) and the "mid"
+        // band mostly caught protein mass (oblateness 0.99 — not
+        // trusted). The page tries the most oblate band first; its
+        // camera command matches EXPECTED_CAM_ROT_DEFAULT so the probe
+        // arms the standing mushroom (head up; flip drill arms
+        // head-down). The envelope rides along with ratio 0.95 —
+        // near-isotropic, the honest TMEM175 diagnostic.
+        // ?relay=old / ?relay=nomembrane drills: 404 (pre-3.82 relay).
+        if (relayState.relayMode !== "") {
+          return reply(404, { error: `unknown route (${relayState.relayMode} relay drill)` });
+        }
+        const mid = u.searchParams.get("id") || "";
+        if (!mid) return reply(400, { error: "missing id" });
+        if (!relayState.models.has(Number(mid))) {
+          return reply(404, { error: `model #${mid} not found` });
+        }
+        return reply(200, {
+          ok: true,
+          splits: [0.18, 0.54],
+          bands: [
+            {
+              name: "mid",
+              lo: 0.18,
+              hi: 0.54,
+              normal: [0.57735, 0.57735, 0.57735],
+              ea: [0.7071, -0.7071, 0.0],
+              eb: [0.40825, 0.40825, -0.8165],
+              ratio: 0.99,
+              lambdas: [0.99, 1.0, 1.6],
+              count: 140000,
+            },
+            {
+              name: "high",
+              lo: 0.54,
+              hi: 1.0,
+              normal: [0.666667, 0.333333, 0.666667],
+              ea: [0.447214, -0.894427, 0.0],
+              eb: [0.596285, 0.298142, -0.745356],
+              ratio: 0.3,
+              lambdas: [0.3, 1.0, 1.05],
+              count: 90000,
+            },
+          ],
+          envelope: {
+            ok: true,
+            normal: [0.666667, 0.333333, 0.666667],
+            ea: [0.447214, -0.894427, 0.0],
+            eb: [0.596285, 0.298142, -0.745356],
+            ratio: 0.95,
+            lambdas: [0.95, 1.0, 1.05],
+            count: 250000,
+            total: 512000,
+          },
         });
       }
       if (u.pathname === "/file") {

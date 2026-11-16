@@ -91,6 +91,17 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         包内区朝下、包外区朝上。v3.78 修正：盘立在 XZ
                         平面而非平铺 XY 平面 — 端点本身与取向无关，
                         旧桥无需重载）。
+      GET  /membrane2?id= v3.82 胶束带检测（三相分割 + 逐带 PCA）：
+                        全直方图 2 级 Otsu 分出 溶剂/中/高 三个密度相，
+                        每个相带各自做密度加权 PCA 并带扁率置信度
+                        （λmin/λmid — 圆环/圆盘带远小于 1，混入蛋白质量
+                        的相带接近 1）。去垢剂带是一个扁平圆环，无论它
+                        比蛋白更热还是更冷，它所在相带的最小方差主轴
+                        就是膜法线 — 对「柱+盘」颗粒（如 TMEM175：大
+                        可溶头 + 跨膜柱，整体 PCA 近各向同性，v3.77 端
+                        点在这类样品上给出任意法线）依然可靠。网页对
+                        每个候选相机都会渲染探针验证，旧桥自动退回纯
+                        探针站立度扫描 — 本端点是加速器而非必需项。
       GET  /nextid      下一个空闲 model id（volume flip 需要）
       GET  /volumes    当前已打开的 volume 模型清单（id + 名称）。
                         v3.55：流程图网页在截图前先经此清单精确关闭
@@ -420,6 +431,153 @@ def main(session):
                 "lambdas": [lam_min, lam_mid, lam_max],
                 "count": count,
                 "total": int(mat.size),
+            }
+        return ui_run(f)
+
+    def membrane_bands(model_id):
+        """v3.82 (round-42): the detergent-BELT torus detector — the 3-phase
+        density split + one PCA per band (see the /membrane2 route comment
+        for the full rationale). The belt is a flat torus in ONE band; its
+        smallest-variance principal axis is the membrane normal whatever
+        the particle's overall shape. Bands whose PCA reads near-isotropic
+        (λmin/λmid ≈ 1) mostly caught protein mass and carry a low
+        oblateness confidence — the page probe-verifies every candidate
+        and falls back to the standing scan, so a wrong band can never
+        poison the orientation silently."""
+        def f():
+            import numpy as np
+            target = None
+            for m in session.models.list():
+                if str(getattr(m, "id_string", "")) == str(model_id):
+                    target = m
+                    break
+            if target is None:
+                raise RuntimeError("model #%s not found" % model_id)
+            mat = np.asarray(target.data.full_matrix(), dtype=np.float64)
+            if mat.size == 0:
+                raise RuntimeError("empty grid")
+            lo = float(mat.min())
+            hi = float(mat.max())
+            if hi <= lo:
+                raise RuntimeError("degenerate value range")
+            edges = np.linspace(lo, hi, 257)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            hist, _ = np.histogram(mat, bins=edges)
+            hist = hist.astype(np.float64)
+            total = float(hist.sum())
+            if total <= 0:
+                raise RuntimeError("empty histogram")
+
+            def band_pca(mask, name, blo, bhi):
+                count = int(mask.sum())
+                if count < 64:
+                    return None
+                kk, jj, ii = np.nonzero(mask)
+                vals = mat[kk, jj, ii]
+                w = np.maximum(vals - blo, 0.0)
+                sw = float(w.sum())
+                if sw <= 0:
+                    w = np.ones(count, dtype=np.float64)
+                    sw = float(count)
+                coords = np.vstack([ii, jj, kk]).astype(np.float64)
+                mu = (coords * w).sum(axis=1) / sw
+                d = coords - mu[:, None]
+                cov = (d * w) @ d.T / sw
+                evals, evecs = np.linalg.eigh(cov)
+                if evals[1] <= 0:
+                    return None
+                n = evecs[:, 0]
+                ea = evecs[:, 2]
+                eb = evecs[:, 1]
+                if float(np.dot(np.cross(ea, eb), n)) < 0:
+                    eb = -eb
+                return {
+                    "name": name,
+                    "lo": float(blo),
+                    "hi": float(bhi),
+                    "normal": [float(v) for v in n],
+                    "ea": [float(v) for v in ea],
+                    "eb": [float(v) for v in eb],
+                    "ratio": float(evals[0] / evals[1]),
+                    "lambdas": [float(v) for v in evals],
+                    "count": count,
+                }
+
+            # 2-level Otsu over the FULL histogram — three phases
+            # (solvent / mid / high), vectorised over all (t1 < t2) bin
+            # pairs with cumulative sums (256 bins → ~32k pairs, cheap).
+            w0 = np.cumsum(hist)                      # voxels ≤ t
+            csum = np.cumsum(hist * centers)           # value-mass ≤ t
+            sum_all = float(csum[-1])
+            nb = len(centers)
+            best = (-1.0, None, None)
+            # mu(i, j) computations vectorised per i over j > i
+            for i in range(nb - 2):
+                wi = w0[i]
+                if wi <= 0:
+                    continue
+                wj = w0[i + 1:] - wi                  # mid-class weight per j
+                wk = total - w0[i + 1:]               # high-class weight per j
+                valid = (wj > 0) & (wk > 0)
+                if not valid.any():
+                    continue
+                mu_i = csum[i] / wi
+                cj = csum[i + 1:] - csum[i]
+                ck = sum_all - csum[i + 1:]
+                mu_j = cj / np.maximum(wj, 1.0)
+                mu_k = ck / np.maximum(wk, 1.0)
+                between = wi * wj * (mu_i - mu_j) ** 2 + wj * wk * (mu_j - mu_k) ** 2 + wi * wk * (mu_i - mu_k) ** 2
+                between = np.where(valid, between, -1.0)
+                jrel = int(np.argmax(between))
+                if between[jrel] > best[0]:
+                    best = (float(between[jrel]), i, i + 1 + jrel)
+            bands = []
+            splits = None
+            if best[1] is not None and best[2] is not None:
+                t1 = float(centers[best[1]])
+                t2 = float(centers[best[2]])
+                if t2 > t1 and t1 > lo:
+                    splits = [t1, t2]
+                    mid_mask = (mat >= t1) & (mat < t2)
+                    high_mask = mat >= t2
+                    for mask, name, blo, bhi in (
+                        (mid_mask, "mid", t1, t2),
+                        (high_mask, "high", t2, hi),
+                    ):
+                        b = band_pca(mask, name, blo, bhi)
+                        if b:
+                            bands.append(b)
+            # the legacy envelope PCA (above the solvent split otsu₁) for
+            # diagnostics / the old fallback path.
+            envelope = None
+            try:
+                w0b = np.cumsum(hist)
+                w1b = total - w0b
+                validb = (w0b > 0) & (w1b > 0)
+                mu0b = csum / np.maximum(w0b, 1.0)
+                mu1b = (sum_all - csum) / np.maximum(w1b, 1.0)
+                betweenb = np.where(validb, w0b * w1b * (mu0b - mu1b) ** 2, -1.0)
+                otsu1 = float(centers[int(np.argmax(betweenb))])
+                env_mask = mat >= otsu1
+                e = band_pca(env_mask, "envelope", otsu1, hi)
+                if e:
+                    envelope = {
+                        "ok": True,
+                        "normal": e["normal"],
+                        "ea": e["ea"],
+                        "eb": e["eb"],
+                        "ratio": e["ratio"],
+                        "lambdas": e["lambdas"],
+                        "count": e["count"],
+                        "total": int(mat.size),
+                    }
+            except Exception:
+                envelope = None
+            return {
+                "ok": True,
+                "splits": splits,
+                "bands": bands,
+                "envelope": envelope,
             }
         return ui_run(f)
 
@@ -893,6 +1051,14 @@ def main(session):
                         # count ladder behind per-map reference-matched
                         # levels). Older pages ignore the extra keys.
                         "vollevel2": True,
+                        # v3.82: GET /membrane2 exists — the 3-phase density
+                        # split + per-band PCAs (the detergent-BELT torus is
+                        # the orientation feature that survives on
+                        # column+disk particles where the whole-envelope
+                        # PCA reads near-isotropic). Older pages ignore
+                        # the flag; newer pages degrade to the probe-only
+                        # standing scan without it.
+                        "membrane2": True,
                         "cacheDir": staging_dir,
                         "cached": sum(1 for _ in _cache_entries()),
                         "volumes": sum(1 for m in ui_run(lambda: list(session.models.list()))
@@ -960,6 +1126,37 @@ def main(session):
                         lvl = None
                     try:
                         self._reply(200, membrane_axis(model_id, lvl))
+                    except Exception as exc:  # noqa: BLE001
+                        self._reply(500, {"error": str(exc)})
+                    return
+                if r.path == "/membrane2":
+                    # v3.82 (round-42 “角度和level还是不对”): ?id=<model> —
+                    # the detergent-BELT torus detector. The whole-envelope
+                    # PCA above fails on a column+disk particle (TMEM175's
+                    # head + transmembrane column read near-isotropic
+                    # together, so the smallest-variance axis is arbitrary
+                    # — the delivered round-41 side view was a random
+                    # oblique). The detergent belt, however, is a FLAT
+                    # TORUS living in ONE density band whichever phase it
+                    # is (belt hotter OR colder than the protein): its own
+                    # PCA's smallest-variance axis IS the membrane normal.
+                    # This endpoint: (1) a 2-level Otsu splits the full
+                    # histogram into three phases (solvent / mid / high);
+                    # (2) each band gets its own density-weighted PCA with
+                    # an oblateness confidence (λmin/λmid — a torus sits
+                    # far below 1; a band that mostly caught protein mass
+                    # sits near 1 and is not trusted); (3) the legacy
+                    # envelope PCA (above the solvent split) rides along
+                    # for diagnostics. The page probe-verifies every
+                    # candidate anyway, and degrades to the probe-only
+                    # standing scan on old relays — this endpoint is an
+                    # ACCELERATOR, not a requirement.
+                    model_id = (q.get("id") or [""])[0]
+                    if not model_id:
+                        self._reply(400, {"error": "missing id"})
+                        return
+                    try:
+                        self._reply(200, membrane_bands(model_id))
                     except Exception as exc:  # noqa: BLE001
                         self._reply(500, {"error": str(exc)})
                     return

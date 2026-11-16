@@ -741,5 +741,49 @@
  * distinguish (near-isotropic silhouette) the DOCUMENTED camera is
  * applied anyway with an honest log line — the coverage face-down pick
  * is never silently delivered for a membrane run again.
+ *
+ * v3.82 bump reason (round-42 “感觉角度和level还是不对” — VLM forensics on
+ * the delivered CryoSmart_P283_J55_workflow (2).pptx: ALL 11 renders are
+ * OBLIQUE (none a side view), the J48 ab-initio trio are snowballs, the
+ * J41 class-3 is a sponge, the reference is fuzzy with the belt + stray
+ * blobs): the round-41 chain was still ALL BLIND HISTOGRAM RULES + PCA
+ * TRUST. THREE root-cause fixes, all closing the loop on RENDERED PIXELS
+ * (probe renders + browser-side measurement — works on EVERY relay since
+ * v3.50, so no relay re-open is REQUIRED for this fix):
+ * (1) 截图 level — the LEVEL KNEE: per map, a 9-rung ladder (0.05→0.9×max)
+ * is RENDERED and measured (connected-component FRAGMENTATION kills
+ * snowball speckle AND free micelle blobs — they are disconnected
+ * components, the round-41/42 「胶束」 complaint; the main component's
+ * coverage floor kills the sponge regime); the knee is the LOWEST clean
+ * level. Every blind rule (max-ratio / Otsu variants / the round-41
+ * count-matching, which assumed equal map scalings and delivered the
+ * sponge + snowballs) is retired to a non-probe fallback; manual mode is
+ * the direct expert override (ratio×max on every map).
+ * (2) 膜视朝向 — the STANDING signal + the BELT-BAND PCA. The whole-
+ * envelope PCA reads near-isotropic on a column+disk particle (TMEM175:
+ * big soluble head + belt-heavy TM half), so its smallest-variance axis
+ * — and thus the v3.77–81 camera — was arbitrary (the delivered obliques;
+ * the aniso-vs-top probes could not tell, and the documented-camera-
+ * direct fallback applied the wrong orientation). Now: relay /membrane2
+ * (v3.82 bridge, optional) splits the histogram into THREE phases and
+ * PCAs each BAND — the detergent belt is a flat torus in one band
+ * whichever phase it is, and its normal IS the membrane normal
+ * (synthetic check: oblateness 0.147, normal exactly on-axis while the
+ * envelope reads 0.955); and every candidate is PROBE-VERIFIED by the
+ * render's STANDING score (the mass-centroid vertical offset — a
+ * standing membrane particle is vertically asymmetric: head at one end,
+ * belt at the other; anisotropy alone maximised the long axis
+ * HORIZONTAL, a lying view). When no camera candidate stands (old relay
+ * / symmetric particle), a probe-only STANDING turn-grid scan finds it
+ * (elevation×azimuth + halving refinement + an azimuth ROLL pass that
+ * maximises the silhouette width — the disk's long axis horizontal,
+ * round-38), falling back to the anisotropy criterion for oblate
+ * symmetric particles, then the documented camera, then coverage.
+ * (3) 逐图立正 — every class map is re-checked AT ITS OWN SCREENSHOT: a
+ * map whose fitmap alignment landed off-axis (the delivered J9/J48
+ * obliques) gets its OWN orientation (its belt-band camera, else its own
+ * standing scan), rolled to match the reference's up-side, logged
+ * honestly (the fitmap correlation stays the record of fit quality);
+ * each map is also re-framed so it fills the frame.
  */
-export const FLOW_ENGINE_VERSION = "3.81";
+export const FLOW_ENGINE_VERSION = "3.82";
