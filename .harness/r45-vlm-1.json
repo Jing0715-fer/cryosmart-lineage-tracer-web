@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "1. **(A)** 主体连续饱满，但周围散布大量游离小碎块/胶束状斑点，说明阈值偏低引入噪声碎片。\n2. **(A)** 主体尚完整，但四周有多处小碎块斑点，阈值略低。\n3. **(A)** 主体饱满但表面长出许多钉状凸起且伴随不少游离碎块，阈值偏低导致噪声呈刺状溢出。\n4. **(C)** 主体连续、轮廓清晰，仅有少量小碎块，整体阈值基本合适（或略偏低）。\n5. **(B)** 表面严重破碎海绵化，碎裂成大量小块和凸起，主体镂空，阈值过高。\n\n**总结：整体偏向阈值过低（1–3 均为 A 类表现），仅第 5 张明显过高，第 4 张合适。**",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1794814831,
+  "id": "20261116154026ca3d7ec4e75348ff",
+  "model": "glm-5.3-flash",
+  "object": "chat.completion",
+  "request_id": "20261116154026ca3d7ec4e75348ff",
+  "usage": {
+    "completion_tokens": 186,
+    "completion_tokens_details": {
+      "reasoning_tokens": 185
+    },
+    "prompt_tokens": 2254,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 2440
+  }
+}

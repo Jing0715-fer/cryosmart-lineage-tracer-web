@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "1. **C** — 主体连续饱满，轮廓清晰，仅有极少量游离小点，阈值基本合适。\n2. **A** — 整体呈雪花/噪点状，全是细碎颗粒，无连续主体，阈值过低。\n3. **A** — 弥散颗粒状斑点，主体未连通，噪声碎块大量出现，阈值过低。\n4. **A** — 满屏胶束状小碎块，边缘更散，缺乏连续表面，阈值过低。\n5. **C** — 主体连续完整、表面细节清晰饱满，阈值合适。\n\n**总结**：整体偏向阈值过低（A 为主，3/5 张），主要问题是噪声小碎块过多、主体不连续。",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1794814844,
+  "id": "20261116154036b8f5e12500e34988",
+  "model": "glm-5.3-flash",
+  "object": "chat.completion",
+  "request_id": "20261116154036b8f5e12500e34988",
+  "usage": {
+    "completion_tokens": 158,
+    "completion_tokens_details": {
+      "reasoning_tokens": 157
+    },
+    "prompt_tokens": 1933,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 2091
+  }
+}
