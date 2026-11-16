@@ -194,6 +194,16 @@ export interface FlowFigureModel {
   referenceKey: string | null;
   referenceItem: FlowFigureItem | null;
   fscXml: { xml?: string; url?: string; name?: string } | null;
+  /** v3.84 (round-44 “第一个窄的是job卡片中的预览图，后一个是job详情中
+   *  的 job log 中的图”): the refine job's JOB-LOG FSC image URLs —
+   *  captured log_image / image_log assets (what the job 详情页's log
+   *  shows and what the user downloads from the webpage, the 正常比例
+   *  reference), main-curve-first. The PPT panel AND the 交付目录's
+   *  {base}.volume.fsc.png prefer these REAL log images over the
+   *  fsc.xml re-draw; the job CARD preview (ui_tile — the narrow
+   *  near-square thumbnail the round-43 delivery mistakenly shipped)
+   *  never enters this list. */
+  fscLogImageUrls?: string[];
   warnings: string[];
   projectLabel: string;
   /** v3.62: per-GAP omitted-stage notes: omissions[i] lists the stages
@@ -1199,6 +1209,26 @@ export function buildFlowFigureModel(
     ? { xml: fscNode.fsc_xml.xml, url: fscNode.fsc_xml.url, name: fscNode.fsc_xml.name }
     : null;
 
+  /* v3.84 (round-44): the FSC plot's JOB-LOG image candidates — the
+   * fsc-carrying refine node's captured log images only (kind
+   * log_image / image_log; the job CARD preview ui_tile is exactly the
+   * wrong-ratio picture and never qualifies), main-curve-first so the
+   * "FSC" entry outranks per-iteration / half-map variants. */
+  const fscLogImageUrls: string[] = [];
+  if (fscNode) {
+    const fscLogs = (fscNode.images || []).filter(
+      (im) =>
+        (im.kind === "log_image" || im.kind === "image_log") &&
+        /fsc/i.test(String(im.name || "")) &&
+        !/xml/i.test(String(im.name || "")),
+    );
+    fscLogs.sort((a, b) => fscCurveNameRank(a) - fscCurveNameRank(b));
+    for (const im of fscLogs) {
+      const u = plotImageUrl(im);
+      if (u && !fscLogImageUrls.includes(u)) fscLogImageUrls.push(u);
+    }
+  }
+
   const projectLabel = `${summary.project_uid || "P"} / ${summary.start_uid || "J"}`;
 
   if (!folded.length) warnings.push("谱系中未找到可用于流程图的阶段（无 volume map 且无 2D 选择步骤）。");
@@ -1210,6 +1240,7 @@ export function buildFlowFigureModel(
     referenceKey,
     referenceItem,
     fscXml,
+    fscLogImageUrls,
     warnings,
     projectLabel,
     /* v3.62: 极简 only — undefined for every other build (the spread in
@@ -1886,6 +1917,58 @@ export async function fetchFscXmlText(
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* v3.84 (round-44) plot-candidate source ranking                       */
+/* ------------------------------------------------------------------ */
+
+/** v3.84 (round-44 “第一个窄的是job卡片中的预览图，后一个是job详情中的
+ *  job log 中的图”): plot candidates are ranked by SOURCE first — the
+ *  JOB LOG image (kind log_image / image_log — what the job 详情页's
+ *  log section shows and what the user downloads from the webpage, the
+ *  正常比例 reference) is the authoritative picture; output-group
+ *  previews come next; the job CARD preview (ui_tile — the narrow
+ *  near-square thumbnail the round-43 delivery shipped) is LAST and can
+ *  never outrank a log image. Name ranking (main curve first) only
+ *  orders candidates WITHIN a tier. */
+export function plotSourceTier(im: ImageAsset): number {
+  if (im.kind === "log_image" || im.kind === "image_log") return 0;
+  if (im.kind === "output_group") return 1;
+  return 2; // ui_tile — the job card preview
+}
+
+/** v3.84: main-curve-first name ranking for FSC candidates (lower =
+ *  better) — "FSC" / "fsc_1_FSC.png" is the MAIN curve; per-iteration
+ *  and half-map variants rank lower. */
+export function fscCurveNameRank(im: ImageAsset): number {
+  const low = String(im.name || "").trim().toLowerCase();
+  if (/^fsc(\.png)?$/.test(low) || /^fsc_?1_?fsc\.png$/.test(low)) return 0;
+  if (/^fsc/.test(low)) return 1;
+  if (/fsc/.test(low)) return 2;
+  return 3;
+}
+
+/** v3.84 (moved from flow-figure-card so the model builder can collect
+ *  log-image URLs too): the fetchable URL of a captured plot image —
+ *  http(s) first, then a same-origin path absolutised against the page
+ *  origin, then an inline data: URI. Null when nothing usable. */
+export function plotImageUrl(im: ImageAsset): string | null {
+  const url = String(im.url || "");
+  const src = String(im.src || "");
+  for (const cand of [url, src]) {
+    if (/^https?:\/\//i.test(cand)) return cand;
+  }
+  if (src.startsWith("/")) {
+    try {
+      if (typeof window === "undefined") return null;
+      return `${window.location.origin}${src}`;
+    } catch {
+      return null;
+    }
+  }
+  if (/^data:/i.test(src) || /^data:/i.test(url)) return src || url;
+  return null;
+}
+
 /** Parse FSC from XML, falling back to the plain-text two-column parser. */
 export function parseFscAny(raw: string, pixelSizeA?: number | null): { curves: FscCurve[]; warnings: string[] } {
   const xmlResult = parseFscXml(raw, { pixelSizeA: pixelSizeA ?? null });
@@ -1899,12 +1982,12 @@ export function parseFscAny(raw: string, pixelSizeA?: number | null): { curves: 
  *  v3.76 (round-36 “图片格式的fsc曲线比例和原图不一样…宽度很窄”): an
  *  optional size passthrough so a re-drawn delivery file never comes out
  *  looking squeezed-narrow. v3.83 (round-43 “fsc图比例不正常，宽度很窄”):
- *  every caller now targets the WEBPAGE's landscape proportion — the
- *  CryoSmart page renders its FSC plot client-side from this same XML at
- *  516×303, so both the delivered png and the PPT panel draw at
- *  1032×606 = 2×516×303 (the job folder's stored *fsc.png is a
- *  near-square server-side matplotlib figure — the round-43 delivered
- *  361×380 — and can never match the webpage ratio; the re-draw can). */
+ *  every caller targets the WEBPAGE's landscape proportion — 1032×606 =
+ *  2×516×303. v3.84 (round-44): the re-draw is now the FALLBACK — the
+ *  REAL job-log image (FlowFigureModel.fscLogImageUrls, the user's
+ *  网页中下载的正常比例 reference) is preferred wherever one was
+ *  captured; the re-draw only runs when no log image passes the shape
+ *  checks. */
 export async function fscPng(
   raw: string | null,
   pixelSizeA?: number | null,

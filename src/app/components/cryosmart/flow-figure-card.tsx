@@ -62,6 +62,9 @@ import {
   uniformLetterbox,
   figureFootnote,
   figureMapSources,
+  plotImageUrl,
+  plotSourceTier,
+  fscCurveNameRank,
   type FlowFigureModel,
 } from "@/lib/cryosmart/workflow-figure";
 import { buildWorkflowPptx } from "@/lib/cryosmart/workflow-pptx";
@@ -224,8 +227,23 @@ interface DeliverFileSpec {
    *  near-square (361×380) server-side matplotlib render, while the
    *  webpage re-renders the SAME curve client-side at a wide 516×303.
    *  The re-draw now fetches the XML through these rungs too and draws
-   *  at the webpage's landscape ratio (1032×606 = 2×516×303). */
+   *  at the webpage's landscape ratio (1032×606 = 2×516×303).
+   *  v3.84 (round-44 “第一个窄的是job卡片中的预览图，后一个是job详情
+   *  中的 job log 中的图”): the re-draw is no longer the FIRST choice —
+   *  the REAL job-log image (logImageUrls below) is tried first; the
+   *  re-draw only runs when no log image passes. */
   fscXmlUrls?: string[];
+  /** v3.84 (round-44): job-LOG image candidate URLs (kind log_image /
+   *  image_log, main-curve-first) — tried BEFORE the fsc.xml re-draw and
+   *  every other candidate. The job 详情页's log image is the user's
+   *  正常比例 reference (what the webpage shows / what they download);
+   *  the job CARD preview (ui_tile) that the round-43 delivery shipped
+   *  is the WRONG source and rides `urls` LAST. */
+  logImageUrls?: string[];
+  /** v3.84: provenance label per candidate URL (job log 原图 / 输出组预览 /
+   *  job 卡片预览 / 构造地址) so every run-log line names WHERE a picture
+   * came from. */
+  urlLabels?: Record<string, string>;
 }
 
 /** The per-file delivery outcome shown in the result panel. */
@@ -302,25 +320,87 @@ function findVolumeAsset(
   return volume.find(match) ?? maps.find(match) ?? null;
 }
 
-/** v3.72: a plot image's fetchable URL from a LineageNode's captured
- *  images — absolute http(s) first, then a same-origin /api/… src (the
- *  relay machine can reach the app origin — it fetched relay.py from
- *  there), data: URLs last (fetched page-side, no relay fetch possible). */
-function plotImageUrl(im: ImageAsset): string | null {
-  const url = String(im.url || "");
-  const src = String(im.src || "");
-  for (const cand of [url, src]) {
-    if (/^https?:\/\//i.test(cand)) return cand;
-  }
-  if (src.startsWith("/")) {
+/** v3.72 → v3.84: a plot image's fetchable URL lives in workflow-figure's
+ *  plotImageUrl (shared with the model builder's fscLogImageUrls). */
+
+/** v3.79: plot candidates must sit on a LIGHT background
+ *  (RELION/cryoSPARC/our re-draw are white); a dark image is a map render /
+ *  slice strip, never a curve plot. v3.84: hoisted to module level — both
+ *  the delivery loop and the PPT's FSC panel use it. */
+const PLOT_LIGHT_MIN_LUM = 110;
+
+/** v3.76 → v3.84 (hoisted): per-kind expected plot shape — the FSC curve
+ *  is a LANDSCAPE plot (the job log's 516×303 ≈ 1.7:1; a squeezed narrow
+ *  thumbnail OR an absurdly wide multi-panel strip is the wrong picture —
+ *  round-39 delivered a 2047×497 matplotlib slice strip that passed the
+ *  old w/h ≥ 1.05 check), Guinier is mildly landscape, the orientation
+ *  distribution is roughly square (circular polar plot). */
+function plotShapeOk(kind: "fsc" | "guinier" | "orientation", w: number, h: number): boolean {
+  if (kind === "fsc") return w >= 360 && h >= 220 && w / h >= 1.0 && w / h <= 2.5;
+  if (kind === "guinier") return w >= 300 && w / h >= 0.85;
+  return w >= 300 && w / h >= 0.55;
+}
+
+/** v3.79 → v3.84 (hoisted): decode PNG bytes → dimensions + mean
+ *  luminance (48×48 alpha-aware canvas downsample; null when the bytes
+ *  are not an image — an HTML 401/404 page, a truncated download…). */
+async function probePngBytes(bytes: Uint8Array): Promise<{ w: number; h: number; meanLum: number } | null> {
+  try {
+    const bmp = await createImageBitmap(new Blob([bytes as BlobPart], { type: "image/png" }));
+    const dims = { w: bmp.width, h: bmp.height };
+    let meanLum = 255;
     try {
-      return `${window.location.origin}${src}`;
+      const S = 48;
+      const cv = document.createElement("canvas");
+      cv.width = S;
+      cv.height = S;
+      const cctx = cv.getContext("2d");
+      if (cctx) {
+        cctx.drawImage(bmp, 0, 0, S, S);
+        const px = cctx.getImageData(0, 0, S, S).data;
+        let sum = 0;
+        let cnt = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i + 3] > 8) {
+            sum += 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+            cnt += 1;
+          }
+        }
+        if (cnt > 0) meanLum = sum / cnt;
+      }
     } catch {
-      return null;
+      /* sampling failed — dims alone still work */
     }
+    bmp.close();
+    return { ...dims, meanLum };
+  } catch {
+    return null;
   }
-  if (/^data:/i.test(src) || /^data:/i.test(url)) return src || url;
-  return null;
+}
+
+/** v3.76 → v3.84 (hoisted): page-side byte fetch for PLOT images — data:
+ *  URIs and same-origin URLs fetch directly, real CryoSmart URLs ride
+ *  cryoSmartBytes (app proxy + session credentials). Returns null instead
+ *  of throwing so callers just walk to the next candidate. */
+async function fetchPlotImageBytes(
+  url: string,
+  session: Parameters<typeof cryoSmartBytes>[0],
+): Promise<Uint8Array | null> {
+  try {
+    if (/^data:/i.test(url)) {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) return null;
+      return new Uint8Array(await res.arrayBuffer());
+    }
+    if (typeof window !== "undefined" && url.startsWith(window.location.origin)) {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) return null;
+      return new Uint8Array(await res.arrayBuffer());
+    }
+    return await cryoSmartBytes(session, url, { timeoutMs: 300_000 });
+  } catch {
+    return null;
+  }
 }
 
 /** v3.72 (round-31 交付文件下载): build the DELIVERY plan — the final
@@ -478,17 +558,18 @@ function buildDeliveryPlan(
    *  that used to win the first slot and deliver a wrong-ratio picture.
    *  Every plot spec also carries its plotKind; the delivery loop
    *  page-side downloads + shape-checks each candidate before writing it
-   *  into the 交付目录. */
+   *  into the 交付目录.
+   *  v3.84 (round-44 “第一个窄的是job卡片中的预览图，后一个是job详情中
+   *  的 job log 中的图”): candidates are now ranked by SOURCE FIRST —
+   *  job-log images (log_image / image_log) ahead of output-group
+   *  previews, with the job CARD preview (ui_tile) LAST. The round-43
+   *  delivery shipped the narrow near-square CARD preview because name
+   *  ranking alone let it share rank 0 with the log image AND the
+   *  ui_tile assets sit earlier in the images array; a log image can
+   *  never lose to a card preview now. Every URL also carries a
+   *  provenance label so the run log names WHERE each picture came
+   *  from. */
   const images = refineNode.images || [];
-  /** Rank a captured image for plot candidacy (lower = better; 99 = no). */
-  const fscRank = (im: ImageAsset): number => {
-    const n = String(im.name || "").trim();
-    const low = n.toLowerCase();
-    if (/^fsc(\.png)?$/.test(low) || /^fsc_?1_?fsc\.png$/.test(low)) return 0;
-    if (/^fsc/.test(low)) return 1;
-    if (/fsc/.test(low)) return 2;
-    return 99;
-  };
   const plotEntries: Array<{
     label: string;
     filename: string;
@@ -504,7 +585,7 @@ function buildDeliveryPlan(
       cacheExt: "png",
       plotKind: "fsc",
       match: (im) => /fsc/i.test(String(im.name || "")) && !/xml/i.test(String(im.name || "")),
-      ranked: fscRank,
+      ranked: fscCurveNameRank,
       constructedUrl: `${baseUrl}/api/log_image/fsc_1_FSC.png`,
     },
     {
@@ -537,14 +618,29 @@ function buildDeliveryPlan(
   }
   for (const e of plotEntries) {
     const candidates = images.filter((im) => e.match(im));
-    // v3.76: main-curve-first ordering for the FSC ladder.
-    if (e.ranked) candidates.sort((a, b) => e.ranked!(a) - e.ranked!(b));
-    const urls: string[] = [];
+    /* v3.84: SOURCE-tiered ordering — job-log images first (within a
+     * tier the v3.76 name ranking still applies, main curve first),
+     * output-group previews next, the job CARD preview (ui_tile) last.
+     * The log image can never lose to a same-named card preview. */
+    candidates.sort(
+      (a, b) => plotSourceTier(a) - plotSourceTier(b) || (e.ranked ? e.ranked(a) - e.ranked(b) : 0),
+    );
+    const logImageUrls: string[] = [];
+    const restUrls: string[] = [];
+    const urlLabels: Record<string, string> = {};
     for (const im of candidates) {
       const u = plotImageUrl(im);
-      if (u && !urls.includes(u)) urls.push(u);
+      if (!u || [...logImageUrls, ...restUrls].includes(u)) continue;
+      const isLog = im.kind === "log_image" || im.kind === "image_log";
+      urlLabels[u] = isLog
+        ? "job log 原图"
+        : im.kind === "output_group"
+          ? "输出组预览"
+          : "job 卡片预览";
+      (isLog ? logImageUrls : restUrls).push(u);
     }
-    urls.push(e.constructedUrl);
+    urlLabels[e.constructedUrl] = "构造地址";
+    const urls = [...logImageUrls, ...restUrls, e.constructedUrl];
     items.push({
       filename: e.filename,
       label: e.label,
@@ -552,6 +648,8 @@ function buildDeliveryPlan(
       cacheKey: `deliver_${refineNode.uid}_${e.cacheExt}`,
       cacheExt: e.cacheExt,
       urls,
+      logImageUrls,
+      urlLabels,
       plotKind: e.plotKind,
       fscXmlText: e.plotKind === "fsc" ? fscXmlText : undefined,
       fscXmlUrls: e.plotKind === "fsc" ? fscXmlUrls : undefined,
@@ -1948,17 +2046,40 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
 
       /* optional FSC panel */
       if (includeFsc && mode !== "demo") {
-        setStep((s) => ({ ...s, phase: "绘制 FSC 曲线", pct: 82 }));
-        const xml = await fetchFscXmlText(model.fscXml, session);
-        /* v3.83: the panel rides the SAME landscape ratio as the delivered
-         * png — 1032×606 = 2× the CryoSmart webpage's 516×303 plot (the
-         * slot is contain-fitted by the image's natural ratio). */
-        const png = await fscPng(xml, summary?.micrograph_pixel_size_A ?? null, { width: 1032, height: 606 });
-        if (png) {
-          images.set("__fsc__", png);
+        setStep((s) => ({ ...s, phase: "准备 FSC 曲线", pct: 82 }));
+        /* v3.84 (round-44 “第一个窄的是job卡片中的预览图，后一个是job详情
+         * 中的 job log 中的图”): the panel prefers the REAL job-log image
+         * (model.fscLogImageUrls — the picture the job 详情页's log shows,
+         * the user's 正常比例 reference) over the fsc.xml re-draw. The
+         * re-draw (v3.83's 1032×606 = 2× the webpage's 516×303, contain-
+         * fitted by natural ratio) stays the substitute when no log image
+         * passes the light + shape checks. */
+        let fscPlaced = false;
+        for (const url of model.fscLogImageUrls ?? []) {
+          const bytes = await fetchPlotImageBytes(url, session);
+          if (!bytes) continue;
+          const dim = await probePngBytes(bytes);
+          if (!dim || dim.meanLum < PLOT_LIGHT_MIN_LUM || !plotShapeOk("fsc", dim.w, dim.h)) continue;
+          images.set("__fsc__", bytes);
           model.groups.push([{ uid: "FSC", label: "FSC", stats: [], mapKey: null, map: null, imageUrl: "__fsc__" }]);
-        } else {
-          pushLog("⚠ 未能解析 FSC XML（缺少曲线数据）");
+          pushLog(`✓ FSC 曲线面板使用 job log 原图（${dim.w}×${dim.h}）`);
+          fscPlaced = true;
+          break;
+        }
+        if (!fscPlaced) {
+          setStep((s) => ({ ...s, phase: "绘制 FSC 曲线", pct: 82 }));
+          const xml = await fetchFscXmlText(model.fscXml, session);
+          /* v3.83: the panel rides the SAME landscape ratio as the delivered
+           * png — 1032×606 = 2× the CryoSmart webpage's 516×303 plot (the
+           * slot is contain-fitted by the image's natural ratio). */
+          const png = await fscPng(xml, summary?.micrograph_pixel_size_A ?? null, { width: 1032, height: 606 });
+          if (png) {
+            images.set("__fsc__", png);
+            model.groups.push([{ uid: "FSC", label: "FSC", stats: [], mapKey: null, map: null, imageUrl: "__fsc__" }]);
+            pushLog(model.fscLogImageUrls?.length ? "⚠ job log 原图未通过比例/底色校验 — FSC 面板改由 fsc.xml 按网页版横版比例重绘" : "FSC 面板未捕获 job log 原图 — 已由 fsc.xml 按网页版横版比例重绘");
+          } else {
+            pushLog("⚠ 未能解析 FSC XML（缺少曲线数据）— FSC 面板未生成");
+          }
         }
       }
 
@@ -2151,85 +2272,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               }
             };
             let done = 0;
-            /* v3.76 (round-36): page-side byte fetch for the PLOT ladder —
-             * data: URIs and same-origin proxy URLs fetch directly, real
-             * CryoSmart URLs ride cryoSmartBytes (app proxy + session
-             * credentials). Returns null instead of throwing so the caller
-             * just walks to the next candidate. */
-            const fetchPlotBytes = async (url: string): Promise<Uint8Array | null> => {
-              try {
-                if (/^data:/i.test(url)) {
-                  const res = await fetch(url, { cache: "no-store" });
-                  if (!res.ok) return null;
-                  return new Uint8Array(await res.arrayBuffer());
-                }
-                if (url.startsWith(window.location.origin)) {
-                  const res = await fetch(url, { cache: "no-store" });
-                  if (!res.ok) return null;
-                  return new Uint8Array(await res.arrayBuffer());
-                }
-                return await cryoSmartBytes(session, url, { timeoutMs: 300_000 });
-              } catch {
-                return null;
-              }
-            };
-            /** Decode a PNG's dimensions (null when the bytes are not an
-             *  image — an HTML 401/404 page, a truncated download…). */
-            const pngProbe = async (bytes: Uint8Array): Promise<{ w: number; h: number; meanLum: number } | null> => {
-              try {
-                const bmp = await createImageBitmap(new Blob([bytes as BlobPart], { type: "image/png" }));
-                const dims = { w: bmp.width, h: bmp.height };
-                /* v3.79: mean luminance over an alpha-aware 48×48 downsample
-                 *  — PLOTS (RELION/cryoSPARC/our fsc.xml re-draw) sit on a
-                 *  WHITE background; map renders and matplotlib slice strips
-                 *  that sneak into job folders under *fsc* names are
-                 *  near-black. Best-effort: on any sampling failure the
-                 *  probe still returns the dimensions. */
-                let meanLum = 255;
-                try {
-                  const S = 48;
-                  const cv = document.createElement("canvas");
-                  cv.width = S;
-                  cv.height = S;
-                  const cctx = cv.getContext("2d");
-                  if (cctx) {
-                    cctx.drawImage(bmp, 0, 0, S, S);
-                    const px = cctx.getImageData(0, 0, S, S).data;
-                    let sum = 0;
-                    let cnt = 0;
-                    for (let i = 0; i < px.length; i += 4) {
-                      if (px[i + 3] > 8) {
-                        sum += 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
-                        cnt += 1;
-                      }
-                    }
-                    if (cnt > 0) meanLum = sum / cnt;
-                  }
-                } catch {
-                  /* sampling failed — dims alone still work */
-                }
-                bmp.close();
-                return { ...dims, meanLum };
-              } catch {
-                return null;
-              }
-            };
-            /** v3.76 → v3.79: per-kind expected plot shape — the FSC curve
-             * is a LANDSCAPE plot (RELION/cryoSPARC ~4:3–3:2; a squeezed
-             * narrow thumbnail OR an absurdly wide multi-panel strip is
-             * the wrong picture — round-39 delivered a 2047×497 matplotlib
-             * slice strip that passed the old w/h ≥ 1.05 check), Guinier
-             * is mildly landscape, the orientation distribution is
-             * roughly square (circular polar plot). */
-            const plotShapeOk = (kind: "fsc" | "guinier" | "orientation", w: number, h: number): boolean => {
-              if (kind === "fsc") return w >= 360 && h >= 220 && w / h >= 1.0 && w / h <= 2.5;
-              if (kind === "guinier") return w >= 300 && w / h >= 0.85;
-              return w >= 300 && w / h >= 0.55;
-            };
-            /** v3.79: plot candidates must sit on a LIGHT background
-             * (RELION/cryoSPARC/our re-draw are white); a dark image is a
-             * map render / slice strip, never a curve plot. */
-            const PLOT_LIGHT_MIN_LUM = 110;
+            /* v3.84: the plot fetch/probe/shape helpers are hoisted to module
+             *  level (fetchPlotImageBytes / probePngBytes / plotShapeOk /
+             *  PLOT_LIGHT_MIN_LUM) — the PPT's FSC panel uses them too.
+             *  Thin aliases keep the loop below unchanged. */
+            const fetchPlotBytes = (url: string): Promise<Uint8Array | null> => fetchPlotImageBytes(url, session);
+            const pngProbe = probePngBytes;
             /** v3.76: decode base64 back to bytes (the embedded fsc.xml
              * text's stage+src fallback needs raw bytes for /stage). */
             const b64ToBytes = (b64: string): Uint8Array => {
@@ -2276,39 +2324,97 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   pushLog(`  ⚠ ${item.filename} 内嵌数据暂存失败 — 继续尝试下载来源`);
                   /* fall through to the URL ladder below */
                 }
-                /* v3.76 (round-36 “图片格式的fsc曲线比例和原图不一样…
-                 * 宽度很窄”): PLOT files are fetched PAGE-SIDE and
-                 * SHAPE-CHECKED before delivery — the wrong-ratio FSC
-                 * thumbnail that used to land in the 交付目录 is skipped in
-                 * favour of the next rung (and, as the last resort for the
-                 * FSC curve, a webpage-ratio re-draw from the fsc.xml
-                 * ladder). A decodable-but-suspicious candidate is still
-                 * remembered: when nothing better exists it is delivered
-                 * anyway — a plot with an off ratio beats a missing file. */
+                /* v3.76 → v3.84 (round-44 “第一个窄的是job卡片中的预览图，
+                 * 后一个是job详情中的 job log 中的图”): PLOT files are
+                 * fetched PAGE-SIDE and SHAPE+LIGHT-CHECKED before
+                 * delivery, in SOURCE order:
+                 *   rung 1 — the JOB-LOG image (logImageUrls — the picture
+                 *      the job 详情页's log shows, the user's 正常比例
+                 *      reference, preferred over every synthetic source);
+                 *   rung 2 — the fsc.xml re-draw at the webpage's landscape
+                 *      ratio (FSC only; runs when no log image was captured
+                 *      or none passed the checks);
+                 *   rung 3 — the remaining candidates (output-group preview
+                 *      → constructed pseudo-fileid → job CARD preview
+                 *      last: the narrow near-square ui_tile thumbnail the
+                 *      round-43 delivery shipped is exactly the wrong
+                 *      source and can never beat a log image);
+                 *   rung 4 — the first LIGHT decodable off-ratio candidate:
+                 *      an off-ratio plot still beats a missing file (a DARK
+                 *      one never is — wrong file, not wrong ratio).
+                 * Every run-log line names the candidate's SOURCE (job log
+                 * 原图 / 输出组预览 / job 卡片预览 / 构造地址) so the user
+                 * can see exactly which picture was delivered and why. */
                 if (item.plotKind) {
                   const shapeNotes: string[] = [];
-                  let fallback: { bytes: Uint8Array; url: string; dim: { w: number; h: number }; meanLum: number } | null = null;
-                  let delivered = false;
-                  /* v3.79 → v3.83 (round-39 “这个fsc图还是不对啊，反而变得更
-                   * 错了” delivered a matplotlib MAP-SLICE strip / round-43
-                   * “fsc图比例不正常，宽度很窄” delivered the job folder's
-                   * ORIGINAL near-square 361×380 fsc png): the FSC curve is
-                   * RE-DRAWN from the fsc.xml BEFORE trusting any
-                   * *fsc*-named PNG — the CryoSmart WEBPAGE renders its FSC
-                   * plot CLIENT-SIDE from the same XML at a wide 516×303
-                   * (the user's “正常比例” download), while the job
-                   * folder's stored png is a NEAR-SQUARE server-side
-                   * matplotlib figure that no URL can fetch in the webpage
-                   * proportion. v3.79 only re-drew when the capture had
-                   * EMBEDDED the xml text (a URL-only fsc_xml fell straight
-                   * through to the off-ratio original); the XML now rides a
-                   * LADDER — embedded text → captured fsc_xml.url (data: or
-                   * CryoSmart http) → the constructed download_result_file
-                   * path — and is drawn at the webpage's landscape ratio
-                   * (1032×606 = 2×516×303). The image candidates below
-                   * only run when EVERY XML source fails to
-                   * parse/draw/deliver. */
-                  if (item.plotKind === "fsc") {
+                  /* v3.84: the walk closure mutates this holder — a plain
+                   * `let` would be narrowed to its `null` initializer by
+                   * TS's flow analysis (closure assignments are invisible
+                   * to it), property writes stay honest. */
+                  const plotState: {
+                    fallback: { bytes: Uint8Array; url: string; dim: { w: number; h: number }; meanLum: number; label: string } | null;
+                    delivered: boolean;
+                  } = { fallback: null, delivered: false };
+                  const srcLabel = (url: string): string => item.urlLabels?.[url] ?? "候选图";
+                  const shortUrl = (url: string): string =>
+                    /^data:/i.test(url) ? "data:URI" : url.replace(/^https?:\/\/[^/]+/, "");
+                  /** Walk candidate URLs: fetch → decode → light + shape
+                   *  check → stage + deliver. The first LIGHT off-ratio
+                   *  candidate is remembered as the last-resort fallback. */
+                  const walkCandidates = async (urls: string[]): Promise<void> => {
+                    for (const url of urls) {
+                      const bytes = await fetchPlotBytes(url);
+                      if (!bytes) {
+                        shapeNotes.push(`${srcLabel(url)} ${shortUrl(url)}: 下载失败`);
+                        continue;
+                      }
+                      const dim = await pngProbe(bytes);
+                      if (!dim) {
+                        shapeNotes.push(`${srcLabel(url)} ${shortUrl(url)}: 非图片内容`);
+                        continue;
+                      }
+                      if (dim.meanLum < PLOT_LIGHT_MIN_LUM) {
+                        shapeNotes.push(
+                          `${srcLabel(url)} ${shortUrl(url)}: ${dim.w}×${dim.h} 深色背景（亮度 ${dim.meanLum.toFixed(0)}）— 疑似地图截图/切片图而非曲线图，跳过`,
+                        );
+                        continue;
+                      }
+                      if (!plotShapeOk(item.plotKind!, dim.w, dim.h)) {
+                        if (!plotState.fallback) plotState.fallback = { bytes, url, dim: { w: dim.w, h: dim.h }, meanLum: dim.meanLum, label: srcLabel(url) };
+                        shapeNotes.push(`${srcLabel(url)} ${shortUrl(url)}: ${dim.w}×${dim.h} 比例异常`);
+                        continue;
+                      }
+                      const staged = await stageViaRelay(transport, item.cacheKey, url, bytes, pushLog, item.cacheExt);
+                      if (!staged) {
+                        shapeNotes.push(`${srcLabel(url)} ${shortUrl(url)}: 暂存失败`);
+                        continue;
+                      }
+                      const r = await bridgeDeliverFile(transport, { src: staged, dst });
+                      if (r.ok) {
+                        pushLog(`  ✓ ${item.filename}（${item.label} · ${srcLabel(url)} ${dim.w}×${dim.h} · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                        outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                        plotState.delivered = true;
+                        return;
+                      }
+                      shapeNotes.push(`${srcLabel(url)} ${shortUrl(url)}: 写入失败`);
+                    }
+                  };
+                  /* rung 1 — the JOB-LOG image (the user's reference
+                   * source; an honest note when the capture never loaded
+                   * this job's logs). */
+                  if (item.logImageUrls?.length) {
+                    await walkCandidates(item.logImageUrls);
+                  } else {
+                    shapeNotes.push("未捕获 job log 原图（采集时该 job 的日志未加载或无对应图片）");
+                  }
+                  /* rung 2 — the fsc.xml re-draw at the webpage's landscape
+                   * ratio. The XML rides a ladder (embedded text → captured
+                   * fsc_xml.url → the constructed download_result_file path)
+                   * — v3.79 only re-drew on the embedded text; v3.83 widened
+                   * it to every rung; v3.84 demoted it below the REAL job
+                   * log image (round-44: the log image is the authoritative
+                   * picture, the re-draw is the substitute). */
+                  if (!plotState.delivered && item.plotKind === "fsc") {
                     const xmlSources: Array<{ text: string; src: string }> = item.fscXmlText
                       ? [{ text: item.fscXmlText, src: "内嵌 fsc.xml" }]
                       : [];
@@ -2339,75 +2445,36 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                       }
                       const r = await bridgeDeliverFile(transport, { src: staged, dst });
                       if (r.ok) {
-                        pushLog(`  ✓ ${item.filename}（FSC 曲线由 ${src.src} 按网页版横版比例 516×303 重绘 · 优先采用，不采信来源不明的候选图 · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                        pushLog(`  ✓ ${item.filename}（FSC 曲线由 ${src.src} 按网页版横版比例 516×303 重绘 — 未捕获 job log 原图时的替代方案 · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
                         outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
-                        delivered = true;
+                        plotState.delivered = true;
                         break;
                       }
                       shapeNotes.push(`fsc.xml（${src.src}）重绘写入失败（${r.error ?? "未知"}）— 改试下一来源`);
                     }
                   }
-                  /* v3.76 (round-36 “图片格式的fsc曲线比例和原图不一样…
-                   * 宽度很窄”) → v3.79: PLOT files are fetched PAGE-SIDE and
-                   * SHAPE+BACKGROUND-CHECKED before delivery — a squeezed
-                   * narrow thumbnail, an absurdly wide multi-panel strip, or
-                   * a DARK image (map render / slice strip posing as a
-                   * curve) is skipped in favour of the next rung. A
-                   * decodable LIGHT candidate with an off ratio is still
-                   * remembered: when nothing better exists it is delivered
-                   * anyway — an off-ratio plot beats a missing file; a
-                   * DARK one never is (it is the wrong file, not the
-                   * wrong ratio). */
-                  for (const url of delivered ? [] : item.urls) {
-                    const bytes = await fetchPlotBytes(url);
-                    if (!bytes) {
-                      shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 下载失败`);
-                      continue;
-                    }
-                    const dim = await pngProbe(bytes);
-                    if (!dim) {
-                      shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 非图片内容`);
-                      continue;
-                    }
-                    if (dim.meanLum < PLOT_LIGHT_MIN_LUM) {
-                      shapeNotes.push(
-                        `${url.replace(/^https?:\/\/[^/]+/, "")}: ${dim.w}×${dim.h} 深色背景（亮度 ${dim.meanLum.toFixed(0)}）— 疑似地图截图/切片图而非曲线图，跳过`,
-                      );
-                      continue;
-                    }
-                    if (!plotShapeOk(item.plotKind, dim.w, dim.h)) {
-                      if (!fallback) fallback = { bytes, url, dim: { w: dim.w, h: dim.h }, meanLum: dim.meanLum };
-                      shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: ${dim.w}×${dim.h} 比例异常`);
-                      continue;
-                    }
-                    const staged = await stageViaRelay(transport, item.cacheKey, url, bytes, pushLog, item.cacheExt);
-                    if (!staged) {
-                      shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 暂存失败`);
-                      continue;
-                    }
-                    const r = await bridgeDeliverFile(transport, { src: staged, dst });
-                    if (r.ok) {
-                      pushLog(`  ✓ ${item.filename}（${item.label} · ${dim.w}×${dim.h} · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
-                      outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
-                      delivered = true;
-                      break;
-                    }
-                    shapeNotes.push(`${url.replace(/^https?:\/\/[^/]+/, "")}: 写入失败`);
+                  /* rung 3 — the remaining candidates (output-group preview
+                   * → constructed pseudo-fileid → job CARD preview last). */
+                  if (!plotState.delivered) {
+                    const tried = new Set(item.logImageUrls ?? []);
+                    await walkCandidates(item.urls.filter((u) => !tried.has(u)));
                   }
-                  /* Nothing shape-approved — deliver the first LIGHT,
-                   * decodable candidate rather than nothing at all. */
-                  if (!delivered && fallback) {
-                    const staged = await stageViaRelay(transport, item.cacheKey, fallback.url, fallback.bytes, pushLog, item.cacheExt);
+                  /* rung 4 — nothing shape-approved: deliver the first
+                   * LIGHT decodable candidate rather than nothing at all,
+                   * naming its source honestly. */
+                  if (!plotState.delivered && plotState.fallback) {
+                    const fb = plotState.fallback;
+                    const staged = await stageViaRelay(transport, item.cacheKey, fb.url, fb.bytes, pushLog, item.cacheExt);
                     if (staged) {
                       const r = await bridgeDeliverFile(transport, { src: staged, dst });
                       if (r.ok) {
-                        pushLog(`  ⚠ ${item.filename}（${item.label}）仅有比例异常的原图（${fallback.dim.w}×${fallback.dim.h}）— 已按原图交付`);
+                        pushLog(`  ⚠ ${item.filename}（${item.label}）仅有比例异常的${fb.label}（${fb.dim.w}×${fb.dim.h}）— 已按原图交付`);
                         outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
-                        delivered = true;
+                        plotState.delivered = true;
                       }
                     }
                   }
-                  if (!delivered) throw new Error(`所有来源均失败（${shapeNotes.join("；").slice(0, 200)}）`);
+                  if (!plotState.delivered) throw new Error(`所有来源均失败（${shapeNotes.join("；").slice(0, 200)}）`);
                   continue;
                 }
                 if (!item.urls.length) throw new Error("无可用下载来源");
@@ -3110,7 +3177,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {bridge?.kind === "relay" && !bridge.canDeliver
                   ? "当前桥脚本无 /deliver（旧版 relay.py）— 在 ChimeraX 重新运行一次 relay.py 后即可自动交付。"
-                  : "生成流程图后自动把最终结果下载到该目录（地图 .mrc 先入本地缓存再复制，重复生成不重复下载；FSC 曲线优先由 fsc.xml 按原图 4:3 比例重绘、不采信来源不明的同名候选图；Guinier/角度分布图会校验比例与底色，深色（疑似地图截图）或比例异常的候选自动跳过）；若最终 job 为 DeepEMhancer，则交付其上游 refine job 的这些文件并额外输出 map-DeepEMhancer.mrc；所有 map 按参考手性判定纠正（镜像 → ChimeraX z-flip 翻正后保存）。目录与前缀会记住。"}
+                  : "生成流程图后自动把最终结果下载到该目录（地图 .mrc 先入本地缓存再复制，重复生成不重复下载；FSC 曲线优先取 job 详情页 log 中的原图（即网页中显示/下载的正常比例图），未捕获时才由 fsc.xml 按网页版横版比例重绘，job 卡片上的窄预览图永远排在最后且日志注明来源；Guinier/角度分布图同样优先 job log 原图并校验比例与底色，深色（疑似地图截图）或比例异常的候选自动跳过）；若最终 job 为 DeepEMhancer，则交付其上游 refine job 的这些文件并额外输出 map-DeepEMhancer.mrc；所有 map 按参考手性判定纠正（镜像 → ChimeraX z-flip 翻正后保存）。目录与前缀会记住。"}
               </p>
             </div>
             {!bridge && (
@@ -3374,7 +3441,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">交付</span>
               <span>
                 填写「<b>交付文件</b>」目录后，每次生成自动把最终结果下载到 ChimeraX 机器的该目录：
-                <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp.mrc"}</code> 等（unsharp / sharp / half A / half B 地图均带 .mrc 后缀；FSC 曲线优先由 fsc.xml 按原图 4:3 比例重绘、不采信来源不明的同名候选图；Guinier / 角度分布图下载前校验比例、尺寸与底色，深色（疑似地图截图）或比例异常的候选自动跳过；fsc.xml 内嵌数据直达失败时自动改经本地暂存写入；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer.mrc）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
+                <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp.mrc"}</code> 等（unsharp / sharp / half A / half B 地图均带 .mrc 后缀；FSC 曲线优先取 job 详情页 log 中的原图（即网页中显示/下载的正常比例图），未捕获时才由 fsc.xml 按网页版横版比例重绘，job 卡片上的窄预览图永远排在最后且日志注明来源；Guinier / 角度分布图同样优先 job log 原图，下载前校验比例、尺寸与底色，深色（疑似地图截图）或比例异常的候选自动跳过；fsc.xml 内嵌数据直达失败时自动改经本地暂存写入；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer.mrc）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
               </span>
             </li>
           </ul>

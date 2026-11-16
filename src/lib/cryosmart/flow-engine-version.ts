@@ -808,5 +808,34 @@
  * every rung's failure is logged per-source (下载失败 / 非XML内容 /
  * 解析失败 / 暂存失败 / 写入失败), and the near-square original stays
  * only as the last-resort fallback with its honest 比例异常 warning.
+ *
+ * v3.84 bump reason (round-44 “上一轮的判断我感觉不对，这两张图的来源
+ * 不同，应该第一个窄的是job卡片中的预览图，后一个是job详情中的 job
+ * log 中的图” — the user CORRECTED the round-43 forensics: the two
+ * compared pictures are different FILES in the CryoSmart app — the
+ * narrow near-square one is the JOB CARD's preview thumbnail (a ui_tile
+ * asset), the wide normal-ratio one is the image shown in the job
+ * 详情页's JOB LOG, i.e. a REAL captured log image, not a client-side
+ * re-render). The round-43 ladder therefore trusted the wrong order:
+ * its name-based ranking let the card preview share rank 0 with the log
+ * image (ui_tile assets also sit earlier in the images array), and the
+ * v3.83 re-draw was hoisted ABOVE every real image. Fixes: (1) plot
+ * candidates are now ranked by SOURCE first — job-log images
+ * (log_image / image_log) before output-group previews, with the job
+ * CARD preview (ui_tile) LAST; a log image can never lose to a
+ * same-named card preview (plotSourceTier + fscCurveNameRank, shared
+ * with the model builder); (2) the delivered {base}.volume.fsc.png now
+ * walks rung 1 = the captured JOB-LOG image (shape + light checked),
+ * rung 2 = the fsc.xml re-draw at the webpage's 1032×606, rung 3 = the
+ * remaining candidates (output-group → constructed pseudo-fileid →
+ * card preview last), rung 4 = the first LIGHT off-ratio candidate —
+ * with the honest per-source note 未捕获 job log 原图 when the capture
+ * never loaded the job's logs; (3) every run-log line names the
+ * candidate's SOURCE (job log 原图 / 输出组预览 / job 卡片预览 /
+ * 构造地址) so the user can see exactly which picture was delivered
+ * and why; (4) the PPT's optional FSC panel prefers the same REAL
+ * job-log image (FlowFigureModel.fscLogImageUrls) and only re-draws
+ * from the fsc.xml when no log image passes the light + shape checks;
+ * (5) Guinier / orientation plots ride the same source-tiered ladder.
  */
-export const FLOW_ENGINE_VERSION = "3.83";
+export const FLOW_ENGINE_VERSION = "3.84";
