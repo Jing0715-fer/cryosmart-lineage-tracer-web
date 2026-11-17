@@ -255,6 +255,15 @@ interface DeliverFileSpec {
    *  server's original file instead. Walked FIRST among the non-log
    *  candidates (after the fsc.xml re-draw for FSC). */
   resultFileUrl?: string;
+  /** v3.88 (round-48 “fsc图虽成功，但是比例不对，不是log中的fsc图”): the
+   *  FSC bytes THIS run already fetched for the HTML report's FSC panel
+   *  (the job-log image, or the fsc.xml re-draw at the webpage's landscape
+   *  ratio) — the report embeds exactly these, so delivering them keeps
+   *  交付文件 and 报告 the same picture. Tried after the refine job's own
+   *  log image, ahead of every network rung (zero network, immune to the
+   *  credential expiry that shrank the round-48 fsc.png to a 0.0 MB
+   *  wrong-ratio card preview). */
+  reportBytes?: Uint8Array;
 }
 
 /** The per-file delivery outcome shown in the result panel. */
@@ -429,6 +438,7 @@ function buildDeliveryPlan(
   summary: LineageSummary,
   model: FlowFigureModel,
   base: string,
+  extras: { fscReportBytes?: Uint8Array | null } = {},
 ): { refineUid: string | null; deepemUid: string | null; items: DeliverFileSpec[]; notes: string[] } {
   const notes: string[] = [];
   const items: DeliverFileSpec[] = [];
@@ -580,7 +590,22 @@ function buildDeliveryPlan(
    *  never lose to a card preview now. Every URL also carries a
    *  provenance label so the run log names WHERE each picture came
    *  from. */
-  const images = refineNode.images || [];
+  /* v3.88 (round-48 “fsc.png 0.0 MB 比例不对 / guinier_plot、
+   *  orientation_distribution、fsc.xml 失败 — 而 html 报告（含图片版）
+   *  里明明有 log 的图”): the plot candidate pool now scans the WHOLE
+   *  lineage, not just the refine job. The capture's log images live on
+   *  whichever job's logs the user had open in CryoSmart when Smart
+   *  Capture ran (the report's FSC panel already reads them through the
+   *  fsc-carrying node — that is why the REPORT showed the right curves
+   *  while the DELIVERY looked only at the refine node, found nothing,
+   *  and fell through the 401ing constructed URLs to a 0.0 MB wrong-ratio
+   *  fallback). Refine-job images still rank FIRST inside every source
+   *  tier; data: URI candidates need no network and survive credential
+   *  expiry (only the maps ride the relay's own cache). */
+  const poolNodes: LineageNode[] = [refineNode];
+  for (const n of summary.nodes || []) {
+    if (n && n.uid !== refineNode.uid) poolNodes.push(n);
+  }
   const plotEntries: Array<{
     label: string;
     filename: string;
@@ -624,30 +649,46 @@ function buildDeliveryPlan(
       resultSuffix: "orientation_distribution.png",
     },
   ];
-  const fscXmlText = refineNode.fsc_xml?.xml?.trim() ? refineNode.fsc_xml.xml : undefined;
-  /* v3.83: the FSC re-draw's URL ladder — the captured fsc_xml.url (data:
-   *  or CryoSmart http) then the constructed download_result_file path
-   *  (the SAME rungs the fsc.xml file item delivers through, so whatever
-   *  served the .xml file can now also feed the .png re-draw). */
+  /* v3.88: the fsc.xml sources scan the pool too — the FIRST node with
+   *  embedded TEXT (refine job first) rides dataBase64 (zero network; the
+   *  round-48 fsc.xml 失败 was a URL-only refine node whose http rungs all
+   *  401'd while another node carried the text); every captured fsc_xml
+   *  URL feeds the re-draw ladder, the constructed path rides LAST. */
+  let fscXmlText: string | undefined;
   const fscXmlUrls: string[] = [];
-  {
-    const u = String(refineNode.fsc_xml?.url || "");
-    if (/^(https?:|data:)/i.test(u)) fscXmlUrls.push(u);
-    fscXmlUrls.push(constructed("fsc.xml"));
+  for (const n of poolNodes) {
+    const fx = n.fsc_xml ?? null;
+    if (fx?.xml && fx.xml.trim() && fscXmlText === undefined) fscXmlText = fx.xml;
+    const u = String(fx?.url || "");
+    if (/^(https?:|data:)/i.test(u) && !fscXmlUrls.includes(u)) fscXmlUrls.push(u);
   }
+  fscXmlUrls.push(constructed("fsc.xml"));
   for (const e of plotEntries) {
-    const candidates = images.filter((im) => e.match(im));
+    /* v3.88: the candidate pool — the refine job's own images first,
+     *  then every other node's (the capture's log images live on whichever
+     *  job's logs were open in CryoSmart; the report reads them the same
+     *  way through the fsc-carrying node). */
+    const candidates: Array<{ im: ImageAsset; refineFirst: number }> = [];
+    for (const n of poolNodes) {
+      for (const im of n.images || []) {
+        if (e.match(im)) candidates.push({ im, refineFirst: n.uid === refineNode.uid ? 0 : 1 });
+      }
+    }
     /* v3.84: SOURCE-tiered ordering — job-log images first (within a
      * tier the v3.76 name ranking still applies, main curve first),
      * output-group previews next, the job CARD preview (ui_tile) last.
-     * The log image can never lose to a same-named card preview. */
+     * The log image can never lose to a same-named card preview.
+     * v3.88: refine-job images win ties inside every tier. */
     candidates.sort(
-      (a, b) => plotSourceTier(a) - plotSourceTier(b) || (e.ranked ? e.ranked(a) - e.ranked(b) : 0),
+      (a, b) =>
+        plotSourceTier(a.im) - plotSourceTier(b.im) ||
+        a.refineFirst - b.refineFirst ||
+        (e.ranked ? e.ranked(a.im) - e.ranked(b.im) : 0),
     );
     const logImageUrls: string[] = [];
     const restUrls: string[] = [];
     const urlLabels: Record<string, string> = {};
-    for (const im of candidates) {
+    for (const { im } of candidates) {
       const u = plotImageUrl(im);
       if (!u || [...logImageUrls, ...restUrls].includes(u)) continue;
       const isLog = im.kind === "log_image" || im.kind === "image_log";
@@ -678,6 +719,9 @@ function buildDeliveryPlan(
       resultFileUrl,
       fscXmlText: e.plotKind === "fsc" ? fscXmlText : undefined,
       fscXmlUrls: e.plotKind === "fsc" ? fscXmlUrls : undefined,
+      /* v3.88: the report panel's own bytes — the SAME picture the HTML
+       *  report embeds, zero network. */
+      reportBytes: e.plotKind === "fsc" ? (extras.fscReportBytes ?? undefined) : undefined,
     });
   }
 
@@ -688,9 +732,12 @@ function buildDeliveryPlan(
    *  volume/fsc.xml path ride `urls` as backups even when the text is
    *  embedded, and the delivery loop falls back to staging the embedded
    *  bytes as a local cache file (relay {src} copy) when a direct
-   *  data_base64 write is refused by an older relay. */
+   *  data_base64 write is refused by an older relay.
+   *  v3.88 (round-48 “TMEM175.volume.fsc.xml 失败”): the text and the URL
+   *  rungs scan the whole pool — the refine node's own fsc_xml is often
+   *  URL-only (every http rung 401'd in the round-48 run) while another
+   *  node carries the embedded text the report's FSC panel used. */
   {
-    const fsc = refineNode.fsc_xml ?? null;
     const spec: DeliverFileSpec = {
       filename: `${base}.volume.fsc.xml`,
       label: "FSC XML",
@@ -699,10 +746,12 @@ function buildDeliveryPlan(
       cacheExt: "xml",
       urls: [],
     };
-    if (fsc?.xml && fsc.xml.trim()) {
-      spec.dataBase64 = toBase64(fsc.xml);
+    if (fscXmlText) {
+      spec.dataBase64 = toBase64(fscXmlText);
     }
-    if (fsc?.url && /^https?:\/\//i.test(fsc.url)) spec.urls.push(fsc.url);
+    for (const u of fscXmlUrls) {
+      if (/^https?:\/\//i.test(u) && !spec.urls.includes(u)) spec.urls.push(u);
+    }
     spec.urls.push(constructed("fsc.xml"));
     items.push(spec);
   }
@@ -2288,7 +2337,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           setStep((s) => ({ ...s, phase: "下载交付文件", pct: 92 }));
           pushLog(`交付文件: 目录 ${dir} · 前缀 ${base} — 生成完成后自动写入（若最终 job 为 DeepEMhancer，则取其上游 refine job 的文件 + DeepEMhancer 输出 map）`);
           try {
-            const plan = buildDeliveryPlan(summary, model, base);
+            const plan = buildDeliveryPlan(summary, model, base, {
+              /* v3.88: the FSC bytes the run already holds for the report's
+               *  panel (the "__fsc__" entry — the job-log image or the
+               *  fsc.xml re-draw) ride the delivery as a zero-network rung. */
+              fscReportBytes: images.get("__fsc__") ?? null,
+            });
             for (const n of plan.notes) pushLog(`  · ${n}`);
             /* v3.74: flip on EITHER mirrored verdict — `flipped` (the
              * reference became its z-flipped copy in-figure) OR the new
@@ -2489,11 +2543,37 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   };
                   /* rung 1 — the JOB-LOG image (the user's reference
                    * source; an honest note when the capture never loaded
-                   * this job's logs). */
+                   * this job's logs). v3.88: the pool now scans the whole
+                   * lineage, so a log image captured on ANY job's logs
+                   * (refine job's own first) rides this rung. */
                   if (item.logImageUrls?.length) {
                     await walkCandidates(item.logImageUrls);
                   } else {
-                    shapeNotes.push("未捕获 job log 原图（采集时该 job 的日志未加载或无对应图片）");
+                    shapeNotes.push("未捕获 job log 原图（采集时各 job 的日志均未加载对应图片）");
+                  }
+                  /* v3.88 rung 1.5 — the REPORT's own bytes (FSC): the
+                   *  picture THIS run already fetched/verified for the HTML
+                   *  report's FSC panel (the job-log image, or the fsc.xml
+                   *  re-draw at the webpage's landscape ratio). Zero
+                   *  network — immune to the credential expiry that shrank
+                   *  the round-48 fsc.png to a 0.0 MB wrong-ratio card
+                   *  preview — and guaranteed the same curve the report
+                   *  shows. */
+                  if (!plotState.delivered && item.reportBytes) {
+                    const dim = await pngProbe(item.reportBytes);
+                    if (dim && dim.meanLum >= PLOT_LIGHT_MIN_LUM && plotShapeOk(item.plotKind!, dim.w, dim.h)) {
+                      const staged = await stageViaRelay(transport, item.cacheKey, "report-fsc", item.reportBytes, pushLog, item.cacheExt);
+                      if (staged) {
+                        const r = await bridgeDeliverFile(transport, { src: staged, dst });
+                        if (r.ok) {
+                          pushLog(`  ✓ ${item.filename}（${item.label} · 与 HTML 报告 FSC 面板同源 ${dim.w}×${dim.h} · ${fmtSize(r.size ?? 0)}）→ ${dst}`);
+                          outcomes.push({ filename: item.filename, label: item.label, ok: true, size: r.size });
+                          plotState.delivered = true;
+                        }
+                      }
+                    } else if (dim) {
+                      shapeNotes.push(`报告 FSC 面板图 ${dim.w}×${dim.h} 未过比例/底色校验`);
+                    }
                   }
                   /* rung 2 — the fsc.xml re-draw at the webpage's landscape
                    * ratio. The XML rides a ladder (embedded text → captured

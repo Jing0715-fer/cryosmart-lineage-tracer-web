@@ -2815,30 +2815,39 @@ export async function renderFigureMaps(
     const belt = beltLevelFrom(m2, stats);
     let anchorLevel = Number.isFinite(belt.anchor) && belt.anchor > 0 ? belt.anchor : max * SCRIPT_LEVEL_RATIO;
     /* v3.87 (round-47 “目前最终map的level选的0.25倍，但是前面的map目前
-     * 也都是0.25吗？感觉可能需要优化一下”): NO-SPLIT maps (old relay —
-     * no /membrane2) anchor at the REFERENCE's final probe-verified display
-     * RATIO instead of the flat script 0.15×max. Same-pipeline maps share
-     * their histogram character (sharpening, noise floor), so the level the
-     * reference just PROVED clean is the best prior for every upstream
-     * class map — the exact per-map 倍率 chaining the user asked for. The
-     * ladder + render probes still verify and walk when the anchor misses
-     * (a map whose own noise floor sits elsewhere adjusts to its own
-     * cleanest rung near the reference's). */
+     * 也都是0.25吗？感觉可能需要优化一下”) → v3.88 (round-48 “中间过程
+     * 的map还是受到了胶束影响？”): EVERY non-reference map now floors its
+     * display anchor at the REFERENCE's final probe-verified display RATIO
+     * — v3.87 only did this for no-split maps (old relay), so on a
+     * /membrane2 relay each intermediate kept its OWN anchor and the
+     * delivered round-48 deck still showed micelle-fused blobs (J9's
+     * solid ball, J41-4's flat detergent ellipsoid) and J48 snow at
+     * levels the reference had long left behind. Same-pipeline maps share
+     * their histogram character, so the level the reference PROVED clean
+     * is the per-map 倍率链 floor; a map whose own protein band sits
+     * HIGHER keeps its own anchor (max, never min). The ladder + render
+     * probes still verify, and a rung BELOW the floor only wins when no
+     * rung at/above it is clean (a genuinely fainter protein — the
+     * sponge bar would reject an over-levelled pick anyway). */
     let refRatioRule: string | null = null;
-    if (belt.t1 == null && belt.t2 == null && tag !== "ref" && refId != null) {
+    let refRatioFloor: number | null = null;
+    if (tag !== "ref" && refId != null) {
       const refLvl = displayLevelById.get(refId) ?? null;
       const refSt = statsById.get(refId) ?? null;
       if (refLvl != null && refSt && Number.isFinite(refSt.max) && refSt.max > 0) {
         const r = Math.min(Math.max(refLvl / refSt.max, ANCHOR_MIN_RATIO), ANCHOR_MAX_RATIO);
-        if (Math.abs(r - SCRIPT_LEVEL_RATIO) > 0.01) {
+        refRatioFloor = r;
+        if (anchorLevel < max * r - 1e-9) {
           anchorLevel = max * r;
-          refRatioRule = `参考图倍率 ${r.toFixed(3)}×max（同流程管线锚点 · 无三相分割时的旧桥退化）`;
+          refRatioRule = `参考图倍率 ${r.toFixed(3)}×max 下限（本图自身锚点更低 — 中间图与最终图同倍率链，胶束包络/噪声相带不进截图）`;
+        } else {
+          refRatioRule = `本图锚点已达 ${belt.t1 != null ? "蛋白/胶束分割" : "脚本"}水平（≥ 参考图倍率 ${r.toFixed(3)}×max — 保留本图锚点）`;
         }
       }
     }
     const anchorRatio = anchorLevel / max;
     if (belt.t1 != null && belt.t2 != null) {
-      log(`  三相分割: t1=${belt.t1.toFixed(4)}（噪声底）· t2=${belt.t2.toFixed(4)}（${belt.beltBand ? `胶束=${belt.beltBand} 相带（扁率 ${belt.beltRatio?.toFixed(2)}）` : "无胶束相带"}）→ 锚点 ${anchorRatio.toFixed(3)}×max`);
+      log(`  三相分割: t1=${belt.t1.toFixed(4)}（噪声底）· t2=${belt.t2.toFixed(4)}（${belt.beltBand ? `胶束=${belt.beltBand} 相带（扁率 ${belt.beltRatio?.toFixed(2)}）` : "无胶束相带"}）→ 锚点 ${anchorRatio.toFixed(3)}×max${refRatioRule ? ` · ${refRatioRule}` : ""}`);
     } else {
       log(`  三相分割不可用（${belt.anchorRule}）→ 锚点 ${anchorRatio.toFixed(3)}×max${refRatioRule ? ` · ${refRatioRule}` : ""}`);
     }
@@ -2910,16 +2919,33 @@ export async function renderFigureMaps(
             : "主体覆盖偏低";
     const cleanRungs = measured.filter((r) => cleanShape(r.s!, bestMain));
     if (cleanRungs.length) {
-      const pick = cleanRungs.reduce((a, b) => (dist(a) < dist(b) || (dist(a) === dist(b) && a.ratio > b.ratio) ? a : b));
+      /* v3.88: rungs BELOW the reference-ratio floor only qualify when
+       * nothing at/above it is clean — a connected protein+micelle blob
+       * passes the frag/holes bars, so the floor (not just the bars) is
+       * what keeps the detergent envelope out of the intermediates. */
+      const atOrAboveFloor = cleanRungs.filter(
+        (r) => refRatioFloor == null || r.ratio >= refRatioFloor - 0.005,
+      );
+      const pool = atOrAboveFloor.length ? atOrAboveFloor : cleanRungs;
+      const pick = pool.reduce((a, b) => (dist(a) < dist(b) || (dist(a) === dist(b) && a.ratio > b.ratio) ? a : b));
+      const floorNote =
+        refRatioFloor == null
+          ? ""
+          : pick.ratio + 1e-9 >= refRatioFloor
+            ? ` · ≥参考图倍率 ${refRatioFloor.toFixed(3)}×max`
+            : ` · 低于参考图倍率 ${refRatioFloor.toFixed(3)}×max（该下限以上无干净档位）`;
       return {
         level: pick.level,
-        rule: `探针校验 ${pick.ratio.toFixed(2)}×max（锚点 ${anchorRatio.toFixed(3)}×max 处${anchorWhy}未清 — 就近${pick.ratio > anchorRatio ? "上调" : "下调"}）`,
+        rule: `探针校验 ${pick.ratio.toFixed(2)}×max（锚点 ${anchorRatio.toFixed(3)}×max 处${anchorWhy}未清 — 就近${pick.ratio > anchorRatio ? "上调" : "下调"}${floorNote}）`,
       };
     }
     /* rung 3 — nothing clean even with dust: the minimum-frag rung
-     * (tie → closer to the anchor), honestly logged. */
+     * (tie → closer to the anchor), honestly logged. v3.88: prefer rungs
+     * at/above the reference floor (same pool rule as rung 2). */
     const dirtOf = (r: Rung) => (r.s ? r.s.frag + Math.min(r.s.holes, 50) * 0.004 : Number.POSITIVE_INFINITY);
-    const pick = measured.reduce((a, b) => (dirtOf(a) < dirtOf(b) || (dirtOf(a) === dirtOf(b) && dist(a) <= dist(b)) ? a : b));
+    const floorPool = measured.filter((r) => refRatioFloor == null || r.ratio >= refRatioFloor - 0.005);
+    const dirtPool = floorPool.length ? floorPool : measured;
+    const pick = dirtPool.reduce((a, b) => (dirtOf(a) < dirtOf(b) || (dirtOf(a) === dirtOf(b) && dist(a) <= dist(b)) ? a : b));
     log(`  ⚠ 所有 level 档位均有碎片/镂空（最干净 碎片 ${(pick.s ? (pick.s.frag * 100).toFixed(1) : "—")}% / 孔洞 ${pick.s?.holes ?? "—"}）— 就近取最干净档，可改用手动 level`);
     return {
       level: pick.level,

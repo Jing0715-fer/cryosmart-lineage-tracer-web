@@ -198,6 +198,24 @@ const server = Bun.serve({
       // Any HTTP status proves reachability for probeCryosmartReachable.
       return new Response("mock cryosmart", { status: 404 });
     }
+    /* v3.88 round-48: plain /api/log_image/<fileid> — the route the ui_tile
+     * previews and captured log images load through (J6's class_averages
+     * montage for the 极简 2D head). Class-average-ish names get the
+     * montage grid; anything else gets a plot. */
+    if (pathname.startsWith("/api/log_image/") && !pathname.includes("/download_result_file/")) {
+      const fid = decodeURIComponent(pathname.slice("/api/log_image/".length));
+      const bytes = /class_averages|templates?|classes|montage|2d/i.test(fid)
+        ? montagePng(640, 480)
+        : plotPng(516, 303, "fsc");
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": "image/png",
+          "Content-Length": String(bytes.byteLength),
+          "Cache-Control": "no-store",
+        },
+      });
+    }
     if (pathname.startsWith("/api/log_image/download_result_file/")) {
       const cookie = req.headers.get("Cookie") || "";
       if (!cookie.includes("session=e2e-cookie")) {
@@ -1012,6 +1030,70 @@ function plotPng(w: number, h: number, kind: string): Uint8Array {
   PLOT_PNG_CACHE.set(key, withIdat);
   return withIdat;
 }
+/** v3.88 round-48 E2E: a 2D class-averages MONTAGE png — a grid of
+ *  dark-gray protein-blob silhouettes on white (the J6 class_averages
+ *  ui_tile the 极简 head row renders). */
+function montagePng(w: number, h: number): Uint8Array {
+  const key = `montage:${w}x${h}`;
+  const cached = PLOT_PNG_CACHE.get(key);
+  if (cached) return cached;
+  const raw = new Uint8Array(h * (w * 3 + 1));
+  const set = (x: number, y: number, r: number, g: number, b: number) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return;
+    const i = y * (w * 3 + 1) + 1 + x * 3;
+    raw[i] = r;
+    raw[i + 1] = g;
+    raw[i + 2] = b;
+  };
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) set(x, y, 255, 255, 255);
+  const cols = 5;
+  const rows = 4;
+  const cw = Math.floor(w / cols);
+  const ch = Math.floor(h / rows);
+  for (let gy = 0; gy < rows; gy++) {
+    for (let gx = 0; gx < cols; gx++) {
+      const cx = gx * cw + cw / 2;
+      const cy = gy * ch + ch / 2;
+      const rad = Math.min(cw, ch) * 0.3;
+      for (let y = 0; y < ch; y++) {
+        for (let x = 0; x < cw; x++) {
+          const px = gx * cw + x;
+          const py = gy * ch + y;
+          const dx = (x - cw / 2) / (rad * (gy % 2 ? 1.25 : 0.8));
+          const dy = (y - ch / 2) / rad;
+          const d = dx * dx + dy * dy;
+          if (d < 1) {
+            const g = Math.round(150 - 60 * Math.sqrt(d));
+            set(px, py, g, g, g);
+          }
+        }
+      }
+      void cx;
+      void cy;
+    }
+  }
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, w);
+  dv.setUint32(4, h);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const head = new Uint8Array(8 + 25);
+  let off = 0;
+  head.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], off);
+  off += 8;
+  head.set(pngChunk("IHDR", ihdr), off);
+  off += 25;
+  const idat = deflateSync(raw);
+  const out = new Uint8Array(off + 12 + idat.length + 12);
+  out.set(head.subarray(0, off), 0);
+  out.set(pngChunk("IDAT", new Uint8Array(idat)), off);
+  off += 12 + idat.length;
+  out.set(pngChunk("IEND", new Uint8Array(0)), off);
+  PLOT_PNG_CACHE.set(key, out);
+  return out;
+}
+
 function fscXmlBytes(): Uint8Array {
   const res: string[] = [];
   const corr: string[] = [];

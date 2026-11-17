@@ -922,5 +922,56 @@
  * (probed first: “fitmap #N inMap #N metric correlation envelope true”,
  * the moving map sampled only above its contour; the reference side is
  * why our threshold-set-0 masked clones exist at all).
+ *
+ * v3.88 bump reason (round-48 “极简模式选择的job还是不太合适，第一个分类
+ * 的job一定要是用最多particle进行分类的job…多份平行…颗粒加起来 / map
+ * 的align还是存在问题，中间过程的map还是受到了胶束影响？ / 交付文件里
+ * fsc.png 0.0 MB 比例不对、guinier/orientation/fsc.xml 失败”):
+ * forensics on the delivered P283_J55_workflow (7).pptx (极简) — (A) the
+ * deck opened at J9 ab-initio (504,371 particles) while the lineage's
+ * REAL biggest classification was J6 class_2D at 2,860,632 — the 极简
+ * first-row scan only compared the merged N× rows' ENTRY counts (the
+ * 4× Hetero row read J12's 202,743), never the ancestry, so the 2D
+ * classification + selection that set the funnel's scale never showed
+ * and the 筛选比例 was unreadable; (B) the J41/J48/J55 renders were
+ * byte-equivalent to the round-47 (6) deck's (same poses, ~3% smaller
+ * content) — proof the v3.87 no-split rungs never fired, i.e. the
+ * user's relay HAS /membrane2 and the intermediates kept their OWN
+ * belt/noise anchors: J48 classes rendered as snowfields, J9 classes as
+ * protein+micelle fused solid balls, J41-4 as a flat detergent
+ * ellipsoid (a CONNECTED micelle envelope passes the frag/holes probe
+ * bars — only the level ratio can exclude it); (C) the delivered plot
+ * ladder only scanned the FINAL REFINE node's captured images — the
+ * log's FSC/Guinier/orientation images live on whichever job's logs
+ * were open during Smart Capture (the report reads them through the
+ * fsc-carrying node, which is exactly why the HTML report showed the
+ * right curves), and with every http rung 401ing (expired credential;
+ * only the maps rode the relay cache) fsc.png fell to rung 4's light
+ * off-ratio card preview (0.0 MB, wrong ratio) while guinier/
+ * orientation/fsc.xml failed outright. Fixes: (1) CLASSIFICATION CENSUS
+ * funnel head — every ancestor classification stage (hetero_refine /
+ * homo_abinit / class_3D AND class_2D) ranked by particles classified,
+ * with same-type same-reference shards sharing a downstream child
+ * SUMMED (the user's 多份平行 rule; different-reference parallel runs
+ * like J20/J21/J29/J32 never sum); the winner FORCES the first row — a
+ * class_2D winner inserts a 2D class-averages montage head row and the
+ * downstream select_2D's output PINS the earliest row whose entry
+ * matches it, so 分类 → 选择 (17.6%) → 重建 reads right off the deck;
+ * the omission mainline carries the head pair so the first gap note
+ * names the select_2D; (2) REF-RATIO DISPLAY FLOOR — every non-reference
+ * map's display anchor is floored at the reference's probe-verified
+ * display ratio (v3.87 did this only without a split), and the knee
+ * ladder only walks BELOW the floor when no at-or-above rung is clean
+ * (a connected protein+micelle blob passes frag/holes — the floor, not
+ * the bars, keeps the detergent envelope out of the intermediates);
+ * own anchors that already sit higher are kept; (3) DELIVERY PLOT POOL —
+ * the fsc.png/guinier/orientation candidates scan the WHOLE lineage
+ * (refine node's own images first inside every source tier, log images
+ * ahead of previews, data: URIs immune to credential expiry), fsc.xml
+ * takes the first EMBEDDED text from any node (dataBase64, zero
+ * network) with every captured fsc_xml URL as re-draw backup, and the
+ * run's already-fetched FSC panel bytes (“__fsc__”) ride as a
+ * zero-network rung that guarantees 交付文件 and HTML 报告 show the
+ * SAME curve.
  */
-export const FLOW_ENGINE_VERSION = "3.87";
+export const FLOW_ENGINE_VERSION = "3.88";

@@ -1,0 +1,29 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "确认，全部符合：\n\n1) ✅ 第一行为 2D classification，下方有 4×6 的 2D class averages 蒙太奇网格图（灰色椭圆），并标注 2,860,632 particles。\n2) ✅ 其下箭头旁标注 17.6% / 504,371 particles（附灰色小字 \"omitted: 1× 2D class selection\"）。\n3) ✅ 之后各行齐全：\n   - Ab-initio reconstruction：3 张图（灰、黄、青，各带粒子数 140,591 / 182,396 / 181,384），中间图有黑框；\n   - 4× Hetero refinement：4 张图（灰 83,644、黄 76,051、青 54,198、紫 416,605，紫色有黑框）；\n   - 第二次 Ab-initio reconstruction：3 张图（灰 187,655、黄 184,116、青 44,834，灰色有黑框）；\n   - Non-uniform refinement：1 张图。\n   所有图片均正常显示（实心圆形占位），无空框或破图。\n4) ✅ 底部最终行显示灰色圆 + 187,655 particles（箭头处标注 45.0% / 187,655 particles）。",
+        "reasoning_content": "All checks confirmed.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1794911102,
+  "id": "20261117182457fd2fecd5120b4f52",
+  "model": "glm-5.3-flash",
+  "object": "chat.completion",
+  "request_id": "20261117182457fd2fecd5120b4f52",
+  "usage": {
+    "completion_tokens": 308,
+    "completion_tokens_details": {
+      "reasoning_tokens": 4
+    },
+    "prompt_tokens": 1208,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 1516
+  }
+}

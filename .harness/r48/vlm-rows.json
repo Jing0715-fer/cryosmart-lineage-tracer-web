@@ -1,0 +1,29 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "**第1行**\n- 1-1（灰）：蛋白侧躺/斜置，无明显胶束环（可能被蛋白包裹/未见），阈值偏高偏实心（空洞少、表面平滑），裁切正常但左下有散落小密度。\n- 1-2（黄）：斜置略躺，无胶束环，阈值偏高、过实心（表面光滑、细节少），裁切正常。\n- 1-3（青）：斜置/近垂直，无胶束环，阈值偏高过浓、结构模糊，右侧略被裁切（贴边）。\n\n**第2行**\n- 2-1（灰）：近球形、朝向不明确（躺倒感），无胶束环，阈值偏高实心、孔洞过少，裁切正常。\n- 2-2（黄）：斜置，无胶束环，阈值偏高偏实，裁切正常。\n- 2-3（青）：斜置，**可见两个孤立胶束状小球**（右侧一个明显的独立球形密度，疑似 detergent 胶束），阈值偏高，右侧小球略贴边。\n- 2-4（紫蓝）：横躺扁球形，无胶束环，阈值偏高偏实心，裁切正常。\n\n**第3行**\n- 3-1（灰）：近顶视/躺倒，无胶束环，阈值偏低，边缘碎片雪花状噪声多（大量游离碎块），裁切正常。\n- 3-2（黄）：顶视躺倒，无胶束环，阈值偏低、边缘碎裂噪声明显，裁切正常。\n- 3-3（青）：躺倒/碎裂，无胶束环，阈值过高导致密度断裂成孤立碎块（结构不连续），裁切正常。\n\n**第4行**\n- 4-1（灰）：横躺（二聚体长轴水平，未直立），无胶束环，阈值合适略偏高、结构清晰连续，裁切正常、留白均匀。\n\n**总体建议**：第1、2行普遍阈值偏高过实心；第3行阈值不当（1、2偏低带噪声，3过高碎裂）；2-3 有疑似孤立胶束需检查；多数图朝向未调至直立，建议统一旋转到标准视角再截图。",
+        "reasoning_content": "Provide per-image assessment. Only one row visible? The images show one row each (row1: 3 images; row2: 4 images; row3: 3 images; row4: 1 image). Answer per row-image.",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1794907296,
+  "id": "20261117172115d64817ef196144fc",
+  "model": "glm-5.3-flash",
+  "object": "chat.completion",
+  "request_id": "20261117172115d64817ef196144fc",
+  "usage": {
+    "completion_tokens": 546,
+    "completion_tokens_details": {
+      "reasoning_tokens": 50
+    },
+    "prompt_tokens": 7301,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 7847
+  }
+}

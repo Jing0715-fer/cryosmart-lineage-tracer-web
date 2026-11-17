@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "# 幻灯片内容逐行描述\n\n## 第 1 行（顶部起始）\n- 标签：「6,647 Micrographs」→ 黑色箭头（上方标「Auto pick」）→「3,408,286 particles」\n- 无图片。\n\n## 第 2 行（Ab-initio reconstruction，第 1 次三维分类）\n- 标签上方：「Ab-initio reconstruction」，向下的箭头（由 3,408,286 particles 引出）。\n- 三张 map 缩略图，均为直立、可分辨的蛋白密度图，无噪声团、无胶束环：\n  1. **灰色** map：27.9%，140,591 particles\n  2. **黄色** map，带黑色选中框：36.2%，182,396 particles\n  3. **青色（cyan）** map：36%，181,384 particles\n- 选中黄色 map 继续向下，标注「40.2%，202,743 particles」，其下有灰色小字「omitted: 1× Hetero refinement  1× Ab-initio reconstruction」。\n- 向下箭头进入下一行。\n\n## 第 3 行（4× Hetero refinement）\n- 标签「4× Hetero refinement」，向下箭头。\n- 四张 map，均直立、密度细节较清晰，无噪声、无胶束环：\n  1. **灰色** map：13.3%，83,644 particles\n  2. **黄色** map：12.1%，76,051 particles\n  3. **青色** map（此处显示为两个相连的密度团，似二聚体形态）：8.6%，54,198 particles\n  4. **蓝紫色** map，带黑色选中框：66.1%，416,605 particles\n- 选中蓝紫色 map，向下标注「416,605 particles」，下有灰色小字「omitted: 1× Non-uniform refinement」。\n- 向下箭头。\n\n## 第 4 行（Ab-initio reconstruction，第 2 次）\n- 标签「Ab-initio reconstruction」，向下箭头。\n- 三张 map，**均呈噪声/颗粒碎块状（低分辨、雪花状），无清晰蛋白外形**：\n  1. **灰色**噪声状 map，带黑色选中框：45%，187,655 particles\n  2. **黄色**噪声状 map：44.2%，184,116 particles\n  3. **青色**噪声碎块状 map：10.8%，44,834 particles\n- 选中灰色 map，向下标注「45.0%，187,655 particles」，下有灰色小字「omitted: 1× Reconstruction」。\n\n## 第 5 行（Non-uniform refinement，最终结果）\n- 标签「Non-uniform refinement」，向下箭头。\n- 一张**灰色 map，直立、清晰可辨的蛋白密度结构**：187,655 particles。无选中框。\n\n## 空框/占位框/渲染失败\n- **没有**空框、占位框或渲染失败标记；所有框均为表示“选中该 class 进入下一步”的黑色实线选中框（共 4 个：Ab-initio 黄色、Hetero 蓝紫色、第二次 Ab-initio 灰色）。\n\n## 箭头连接关系总结\n- 顶部横向箭头：Micrographs →(Auto pick)→ Particles。\n- 之后全部为**垂直向下的单箭头**串联各步骤：Particles → Ab-initio → Hetero refinement（4×）→ Ab-initio → Non-uniform refinement → 最终 map。每次由被黑框选中的 class 携带粒子数向下传递，omitted 步骤以灰色小字标注在箭头/粒子数旁。",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1794906856,
+  "id": "20261117171404eda46a181dd74539",
+  "model": "glm-5.3-flash",
+  "object": "chat.completion",
+  "request_id": "20261117171404eda46a181dd74539",
+  "usage": {
+    "completion_tokens": 846,
+    "completion_tokens_details": {
+      "reasoning_tokens": 845
+    },
+    "prompt_tokens": 1036,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 1882
+  }
+}

@@ -322,6 +322,7 @@ export function jobTypeLabel(jobType: string): string {
     homo_abinit: "Ab-initio reconstruction",
     class_3D: "3D classification",
     class_2D: "2D classification",
+    class_2d: "2D classification",
     select_2D: "2D class selection",
     select_2d: "2D class selection",
     homo_reconstruct: "Reconstruction",
@@ -688,6 +689,109 @@ function select2dImage(node: LineageNode): ImageAsset | null {
   return loose ?? (node.images || [])[0] ?? null;
 }
 
+/** v3.88 (round-48): the 2D-CLASSIFICATION montage — a class_2D job's own
+ *  class-averages picture (the grid the job card / log shows). Name-ranked
+ *  over the generic first-image fallback so a picking plot or particles
+ *  montage can never stand in for the class averages. */
+function class2dImage(node: LineageNode): ImageAsset | null {
+  const imgs = node.images || [];
+  for (const re of [/class_?averages?/i, /^templates?$/i, /^classes$/i]) {
+    const hit = imgs.find((im) => re.test(String(im.name || "")));
+    if (hit) return hit;
+  }
+  const loose = imgs.find((im) => /templates?|classes|averages/i.test(String(im.name || "")));
+  return loose ?? imgs[0] ?? null;
+}
+
+/** v3.88 (round-48 “极简模式选择的job还是不太合适，第一个分类的job一定是
+ *  用最多particle进行分类的job，如果是所有job分成了多份平行进行分类，
+ *  且reference map相同，可以将多个job的颗粒加起来”): the CLASSIFICATION
+ *  CENSUS — every classification stage among the final job's ancestors,
+ *  each ranked by the particles it CLASSIFIED:
+ *  - classification families: hetero_refine / homo_abinit / class_3D (the
+ *    map families) AND class_2D (2D classification IS 分类 — the round-48
+ *    head for P283 was J6 class_2D with 2,860,632 particles, not the
+ *    504,371-particle ab-initio the old first-row scan picked);
+ *  - a stage that was SPLIT into parallel jobs classifying with the SAME
+ *    reference map (identical job type + identical volume-reference parent
+ *    set + a shared downstream child) counts as ONE stage whose particles
+ *    are the SUM of the shards — the user's exact “多份平行…颗粒加起来”
+ *    rule. Parallel runs on the SAME particles with DIFFERENT references
+ *    (P283's J20/J21/J29/J32) are NOT a split and never sum;
+ *  - a job's count = its own particle_count, else the sum of its class
+ *    splits (unknown counts rank last, never winning the head). */
+export interface ClassificationCensusStage {
+  /** Parallel same-reference shard uids (length 1 = a single job). */
+  uids: string[];
+  jobType: string;
+  /** Summed shard count (null when no shard carried a count). */
+  count: number | null;
+  /** class_2D family — renders as a 2D montage head, not a map row. */
+  is2d: boolean;
+  /** Min graph depth of the members — stage ordering upstream → final. */
+  depth: number;
+}
+
+export function classificationStageCensus(
+  summary: LineageSummary,
+  graph: ReturnType<typeof collectLineageGraph>,
+): ClassificationCensusStage[] {
+  const is2dType = (t: string) => /class_2d/i.test(t);
+  const candidates: Array<{ uid: string; jobType: string; is2d: boolean; count: number | null; volRefs: string[] }> = [];
+  for (const uid of graph.ancestorUids) {
+    const node = graph.byUid.get(uid);
+    if (!node) continue;
+    const t = String(node.job_type || "");
+    if (!isClassificationJobType(t) && !is2dType(t)) continue;
+    const splits = node.classes?.length
+      ? node.classes
+      : (summary.class_split_jobs || []).find((j) => j.uid === uid)?.classes ?? [];
+    const classSum = splits.reduce((s, c) => s + (c.particle_count ?? 0), 0);
+    const count =
+      node.particle_count != null && node.particle_count > 0
+        ? node.particle_count
+        : classSum > 0
+          ? classSum
+          : null;
+    const volRefs = [...(graph.volParentsOf.get(uid) || [])].sort();
+    candidates.push({ uid, jobType: t, is2d: is2dType(t), count, volRefs });
+  }
+  /* Group same-type candidates with IDENTICAL reference sets that share a
+   * downstream child into one summed stage (the parallel-split rule). */
+  const childrenOf = new Map<string, Set<string>>();
+  for (const e of summary.edges || []) {
+    if (!childrenOf.has(e.source)) childrenOf.set(e.source, new Set());
+    childrenOf.get(e.source)!.add(e.target);
+  }
+  const used = new Set<string>();
+  const stages: ClassificationCensusStage[] = [];
+  for (const a of candidates) {
+    if (used.has(a.uid)) continue;
+    const shards = [a];
+    used.add(a.uid);
+    for (const b of candidates) {
+      if (used.has(b.uid) || b.jobType !== a.jobType) continue;
+      if (b.volRefs.join("|") !== a.volRefs.join("|")) continue;
+      const ca = childrenOf.get(a.uid) ?? new Set<string>();
+      const cb = childrenOf.get(b.uid) ?? new Set<string>();
+      let sharedChild = false;
+      for (const c of ca) if (cb.has(c)) { sharedChild = true; break; }
+      if (!sharedChild) continue;
+      used.add(b.uid);
+      shards.push(b);
+    }
+    const counts = shards.map((s) => s.count).filter((v): v is number => v != null && v > 0);
+    stages.push({
+      uids: shards.map((s) => s.uid),
+      jobType: a.jobType,
+      count: counts.length ? counts.reduce((x, y) => x + y, 0) : null,
+      is2d: a.is2d,
+      depth: Math.min(...shards.map((s) => graph.depth.get(s.uid) ?? 0)),
+    });
+  }
+  return stages;
+}
+
 /* ------------------------------------------------------------------ */
 /* Model builders                                                      */
 /* ------------------------------------------------------------------ */
@@ -781,6 +885,10 @@ export function buildFlowFigureModel(
    *  for the per-gap omission notes. */
   const minimal = !!opts.minimal;
   let minimalMainline: Array<{ uid: string; label: string }> | null = null;
+  /* v3.88 (round-48): the census-chosen funnel head (see the minimal
+   *  branch below) — threaded to curateMinimalFlow past the N× merge. */
+  let forcedFirstUid: string | null = null;
+  let forcedSecondEntryCount: number | null = null;
   /* v3.73: the 标准/简化 omission-notes mainline — [select_2D?] + the
    *  volume spine ancestor→final (imports INCLUDED so a dropped import
    *  stage still gets named in its gap note). */
@@ -932,11 +1040,103 @@ export function buildFlowFigureModel(
       groups.push([itemFromNode(summary, S, { isFinal: S.uid === summary.start_uid, warnings })]);
       usedUids.add(S.uid);
     }
+    /* v3.88 (round-48 “第一个分类的job一定要是用最多particle进行分类的
+     *  job…多份平行…颗粒加起来”): the funnel HEAD = the classification
+     *  census winner over the WHOLE ancestor DAG — not whatever the spine
+     *  walk surfaced (P283's spine head was J9 ab-initio at 504,371 while
+     *  J6 class_2D classified 2,860,632 — the deck opened at the wrong
+     *  scale and the 2D selection ratio never appeared). A class_2D
+     *  winner inserts a 2D-montage head row; the selection hand-off (the
+     *  downstream select_2D) is remembered so the curation can PIN the
+     *  row whose entry equals the selection output (the ab-initio that
+     *  received the selected particles) — the 筛选比例 then reads right
+     *  off the deck (504,371 / 2,860,632 = 17.6%). */
+    const mainlineHeadPairs: Array<{ uid: string; label: string }> = [];
+    {
+      const census = classificationStageCensus(summary, graph);
+      const ranked = census
+        .filter((s) => s.count != null && s.count > 0)
+        .sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
+      const winner = ranked[0] ?? null;
+      if (winner && winner.count != null) {
+        const winnerNode = graph.byUid.get(winner.uids[0]) ?? null;
+        const nameOf = (uid: string) => graph.byUid.get(uid)?.uid ?? uid;
+        if (winner.is2d && winnerNode) {
+          /* the 2D-classification head — its own class-averages montage. */
+          const img = class2dImage(winnerNode);
+          const headStats = [`${fmtParticles(winner.count)} particles`];
+          if (winner.uids.length > 1) {
+            headStats.push(`${winner.uids.length} 个平行分类 job 颗粒合并`);
+          }
+          groups.unshift([
+            {
+              uid: winner.uids[0],
+              label: jobTypeLabel(winnerNode.job_type),
+              jobType: winnerNode.job_type,
+              stats: headStats,
+              mapKey: null,
+              map: null,
+              imageUrl: img ? img.url || img.src || null : null,
+              particleTotal: winner.count,
+            },
+          ]);
+          usedUids.add(winner.uids[0]);
+          forcedFirstUid = winner.uids[0];
+          mainlineHeadPairs.push({ uid: winner.uids[0], label: jobTypeLabel(winnerNode.job_type) });
+          /* the downstream selection (an ancestor select_2D picking from
+           * this classification) — its output count pins the row after
+           * the head so the selection ratio is READABLE on the deck. */
+          let selectNode: LineageNode | null = null;
+          for (const e of summary.edges || []) {
+            if (!winner.uids.includes(e.source) || e.input_type === "volume") continue;
+            const n = graph.byUid.get(e.target);
+            if (!n || !/select_2d/i.test(n.job_type || "")) continue;
+            if (!graph.ancestorUids.has(n.uid)) continue;
+            selectNode = n;
+            break;
+          }
+          if (selectNode) {
+            mainlineHeadPairs.push({ uid: selectNode.uid, label: jobTypeLabel(selectNode.job_type) });
+            const sel = selectNode.select_2d?.particles_selected ?? null;
+            if (sel != null && sel > 0) forcedSecondEntryCount = sel;
+          }
+          warnings.push(
+            `极简模式: 首行为全谱系分类普查中颗粒数最多的分类任务「${winner.uids[0]} ${jobTypeLabel(
+              winnerNode.job_type,
+            )} · ${fmtParticles(winner.count)} particles」${
+              winner.uids.length > 1
+                ? `（${winner.uids.map(nameOf).join(" + ")} ${winner.uids.length} 个同参考平行分类 job 颗粒合并）`
+                : ""
+            }— 2D 分类以 class averages 蒙太奇展示${
+              forcedSecondEntryCount != null
+                ? `，其后 2D 选择结果（${fmtParticles(forcedSecondEntryCount)} particles）由下一分类行入口读出`
+                : ""
+            }。`,
+          );
+        } else if (winnerNode) {
+          /* a map-bearing winner — force the funnel to open at its row
+           * (resolved through mergedInto at curation time). */
+          forcedFirstUid = winner.uids[0];
+          warnings.push(
+            `极简模式: 首行为全谱系分类普查中颗粒数最多的分类任务「${winner.uids[0]} ${jobTypeLabel(
+              winnerNode.job_type,
+            )} · ${fmtParticles(winner.count)} particles」${
+              winner.uids.length > 1 ? `（${winner.uids.map(nameOf).join(" + ")} 同参考平行分类 job 颗粒合并）` : ""
+            }— 其上游阶段不展示（颗粒数已计入顶部总数带）。`,
+          );
+        }
+      }
+    }
     /* v3.62 (round-21): snapshot the ORIGINAL curated mainline (uid +
      *  displayed label, ancestor → final) BEFORE the simplified passes —
      *  the per-gap omission notes below read it to name what each
-     *  displayed gap skips (简化 drops + row-cap drops alike). */
-    minimalMainline = stages.map((n) => ({ uid: n.uid, label: jobTypeLabel(n.job_type) }));
+     *  displayed gap skips (简化 drops + row-cap drops alike).
+     * v3.88: the 2D head pair (classification + selection) rides the
+     * HEAD so the first gap note names the select_2D it skips. */
+    minimalMainline = [
+      ...mainlineHeadPairs,
+      ...stages.map((n) => ({ uid: n.uid, label: jobTypeLabel(n.job_type) })),
+    ];
     const excludedImports = spineMapOrder.filter((n) => isImportSeed(n) && !stages.includes(n)).length;
     warnings.push(
       `极简模式: 已精选颗粒主线上的 ${renderStages.length} 个阶段 — 关键 job 逐个成行、按上下游顺序排列（连续同类型阶段将合并为一行「N×」标注；省略的步骤在图上以「N×」注明）` +
@@ -1096,8 +1296,14 @@ export function buildFlowFigureModel(
   // first+last mandatory and the middle filling from the END (closest to
   // the final map carries the resolution story) — the same selection
   // round-19 approved on the P96 chain, now on a cramp-free mainline.
+  // v3.88 (round-48): the census-chosen funnel head — resolved through
+  // mergedInto so a winner that sits INSIDE a merged “N×” row (not its
+  // rep) still pins that row as the funnel's opening classification.
   const folded = minimal
-    ? curateMinimalFlow(staged, maxGroups, warnings)
+    ? curateMinimalFlow(staged, maxGroups, warnings, {
+        firstUid: forcedFirstUid != null ? (mergedInto?.get(forcedFirstUid) ?? forcedFirstUid) : null,
+        secondEntryCount: forcedSecondEntryCount,
+      })
     : trimFlowGroups(staged, maxGroups, warnings);
 
   /* v3.62 (round-21 “省略的步骤可能需要写为几*hetero refine或几*abinitio
@@ -1374,10 +1580,17 @@ function trimFlowGroups(
  *  counts); the last row is never a first-row candidate (it must stay
  *  the funnel's end), and the earliest stage remains the fallback when
  *  no classification row carries a count. */
+/** v3.88 (round-48): the census-forced funnel head + the selection pin.
+ *  `firstUid` pins the opening row (the classification census winner,
+ *  already resolved through mergedInto); `secondEntryCount` pins the
+ *  earliest row whose entry matches a 2D head's downstream selection
+ *  output — the 筛选过程/筛选比例 the round-48 feedback asked to see
+ *  (504,371 of 2,860,632 = 17.6% reads right off the deck). */
 function curateMinimalFlow(
   groups: FlowFigureItem[][],
   maxGroups: number,
   warnings: string[],
+  forced?: { firstUid?: string | null; secondEntryCount?: number | null },
 ): FlowFigureItem[][] {
   const isClassRow = (g: FlowFigureItem[]) =>
     g.length > 0 && g.every((it) => isClassificationJobType(it.jobType));
@@ -1399,21 +1612,50 @@ function curateMinimalFlow(
   if (groups.length <= 2) return groups;
   const lastIdx = groups.length - 1;
   let firstIdx = 0;
-  let bestCount = -1;
-  for (let i = 0; i < lastIdx; i++) {
-    if (!isClassRow(groups[i])) continue;
-    const c = entryOf(groups[i]);
-    if (c != null && c > bestCount) {
-      bestCount = c;
-      firstIdx = i;
+  let firstForced = false;
+  if (forced?.firstUid != null) {
+    const gi = groups.findIndex((row) => row.some((it) => it.uid === forced.firstUid));
+    if (gi >= 0 && gi < lastIdx) {
+      firstIdx = gi;
+      firstForced = true;
+    }
+  }
+  if (!firstForced) {
+    let bestCount = -1;
+    for (let i = 0; i < lastIdx; i++) {
+      if (!isClassRow(groups[i])) continue;
+      const c = entryOf(groups[i]);
+      if (c != null && c > bestCount) {
+        bestCount = c;
+        firstIdx = i;
+      }
     }
   }
   const chosen = new Set<number>();
   chosen.add(firstIdx);
   chosen.add(lastIdx);
+  /* v3.88: the selection pin — the earliest row whose ENTRY equals the
+   *  2D selection's output (±2%) rides the mandatory set, so the deck
+   *  always shows the stage the selected particles entered (the funnel
+   *  reads 分类 → 选择 → 重建), whatever the backward fill would pick. */
+  let pinnedSecond: number | null = null;
+  if (forced?.secondEntryCount != null && forced.secondEntryCount > 0) {
+    for (let i = firstIdx + 1; i < lastIdx; i++) {
+      const e = entryOf(groups[i]);
+      if (e != null && Math.abs(e - forced.secondEntryCount) <= forced.secondEntryCount * 0.02) {
+        pinnedSecond = i;
+        chosen.add(i);
+        break;
+      }
+    }
+  }
   let classMiddles = 0;
   let nonClassMiddles = 0;
   for (let i = lastIdx - 1; i > firstIdx; i--) {
+    if (i === pinnedSecond) {
+      if (isClassRow(groups[i])) classMiddles += 1;
+      continue; // already mandatory
+    }
     if (isClassRow(groups[i])) {
       classMiddles += 1;
       if (chosen.size < maxGroups) chosen.add(i);
