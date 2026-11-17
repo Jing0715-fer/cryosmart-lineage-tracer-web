@@ -244,6 +244,17 @@ interface DeliverFileSpec {
    *  job 卡片预览 / 构造地址) so every run-log line names WHERE a picture
    * came from. */
   urlLabels?: Record<string, string>;
+  /** v3.86 (round-46 “TMEM175.volume.guinier_plot.png 失败 /
+   *  orientation_distribution.png 失败”): the constructed
+   *  download_result_file path for the plot's AUTHENTIC output-group file
+   *  (fsc.png / guinier_plot.png / orientation_distribution.png — the
+   *  same route that delivers the .mrc maps and the fsc.xml). The old
+   *  constructedUrl guessed a cryoSPARC LOG-IMAGE name
+   *  (guinier_1_Guinier_Plot.png) that 404s, and when the capture held no
+   *  matching image the whole ladder failed — this rung delivers the
+   *  server's original file instead. Walked FIRST among the non-log
+   *  candidates (after the fsc.xml re-draw for FSC). */
+  resultFileUrl?: string;
 }
 
 /** The per-file delivery outcome shown in the result panel. */
@@ -578,6 +589,11 @@ function buildDeliveryPlan(
     match: (im: ImageAsset) => boolean;
     ranked?: (im: ImageAsset) => number;
     constructedUrl: string;
+    /** v3.86: the plot's REAL output-group file name (the cryoSPARC volume
+     *  group ships fsc.png / guinier_plot.png / orientation_distribution.png
+     *  alongside the .mrc maps) — served by the same download_result_file
+     *  route that delivers the maps and the fsc.xml. */
+    resultSuffix: string;
   }> = [
     {
       label: "FSC 曲线图",
@@ -587,6 +603,7 @@ function buildDeliveryPlan(
       match: (im) => /fsc/i.test(String(im.name || "")) && !/xml/i.test(String(im.name || "")),
       ranked: fscCurveNameRank,
       constructedUrl: `${baseUrl}/api/log_image/fsc_1_FSC.png`,
+      resultSuffix: "fsc.png",
     },
     {
       label: "Guinier plot",
@@ -595,6 +612,7 @@ function buildDeliveryPlan(
       plotKind: "guinier",
       match: (im) => /guinier/i.test(String(im.name || im.log_text || "")),
       constructedUrl: `${baseUrl}/api/log_image/guinier_1_Guinier_Plot.png`,
+      resultSuffix: "guinier_plot.png",
     },
     {
       label: "角度分布图",
@@ -603,6 +621,7 @@ function buildDeliveryPlan(
       plotKind: "orientation",
       match: (im) => /orientation|direction|angular/i.test(String(im.name || im.log_text || "")),
       constructedUrl: `${baseUrl}/api/log_image/direction_distribution_1_Direction_Distribution.png`,
+      resultSuffix: "orientation_distribution.png",
     },
   ];
   const fscXmlText = refineNode.fsc_xml?.xml?.trim() ? refineNode.fsc_xml.xml : undefined;
@@ -640,6 +659,11 @@ function buildDeliveryPlan(
       (isLog ? logImageUrls : restUrls).push(u);
     }
     urlLabels[e.constructedUrl] = "构造地址";
+    /* v3.86: the AUTHENTIC output-group file through the proven
+     * download_result_file route — the rung that fixes the round-46
+     * guinier/orientation 失败 (the log-image name guesses 404). */
+    const resultFileUrl = constructed(e.resultSuffix);
+    urlLabels[resultFileUrl] = "构造结果文件（输出组原图）";
     const urls = [...logImageUrls, ...restUrls, e.constructedUrl];
     items.push({
       filename: e.filename,
@@ -651,6 +675,7 @@ function buildDeliveryPlan(
       logImageUrls,
       urlLabels,
       plotKind: e.plotKind,
+      resultFileUrl,
       fscXmlText: e.plotKind === "fsc" ? fscXmlText : undefined,
       fscXmlUrls: e.plotKind === "fsc" ? fscXmlUrls : undefined,
     });
@@ -2453,11 +2478,22 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                       shapeNotes.push(`fsc.xml（${src.src}）重绘写入失败（${r.error ?? "未知"}）— 改试下一来源`);
                     }
                   }
-                  /* rung 3 — the remaining candidates (output-group preview
-                   * → constructed pseudo-fileid → job CARD preview last). */
+                  /* rung 3 — the remaining candidates. v3.86: the
+                   * AUTHENTIC output-group file (download_result_file —
+                   * the same route that delivers the .mrc maps and the
+                   * fsc.xml) walks FIRST: the old log-image name guesses
+                   * (guinier_1_Guinier_Plot.png …) 404 and the round-46
+                   * delivery failed guinier/orientation outright when the
+                   * capture held no matching image. Then the captured
+                   * output-group previews → the job CARD preview last →
+                   * the log-image guess. */
                   if (!plotState.delivered) {
                     const tried = new Set(item.logImageUrls ?? []);
-                    await walkCandidates(item.urls.filter((u) => !tried.has(u)));
+                    const order = [
+                      ...(item.resultFileUrl ? [item.resultFileUrl] : []),
+                      ...item.urls.filter((u) => !tried.has(u) && u !== item.resultFileUrl),
+                    ];
+                    await walkCandidates(order);
                   }
                   /* rung 4 — nothing shape-approved: deliver the first
                    * LIGHT decodable candidate rather than nothing at all,
@@ -2977,7 +3013,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
              * stay 0.25×max — only the screenshot contour changes). */}
             <div
               className="rounded-lg border border-slate-200 bg-white/85 p-2.5 text-[11px] leading-relaxed text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
-              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（胶束带 PCA（新桥）/站立度渲染探针验证（任何桥可用）定向，失败自动降级为 turn 网格扫描 + 滚转对齐盘长轴）· 截图 level：默认脚本规则 0.15×max + surface dust 清理，探针验证后就近调整"
+              title="膜蛋白视图：把去垢剂盘立到画面 XZ 平面（胶束带 PCA（新桥）/站立度渲染探针验证（任何桥可用）定向，失败自动降级为 turn 网格扫描 + 滚转对齐盘长轴）· 截图 level：逐图胶束带自适应（三相分割 t1/t2 + 脚本 0.15×max 取高者）+ surface dust 清理，渲染探针验证后就近调整；对齐拟合目标同时按蛋白相带阈值去除胶束密度"
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-slate-700 dark:text-slate-200">
@@ -3013,7 +3049,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="auto">自动 · 脚本规则 0.15×max + dust 清理（推荐）</SelectItem>
+                    <SelectItem value="auto">自动 · 逐图胶束带自适应 level + dust（推荐）</SelectItem>
                     <SelectItem value="manual">手动倍数 ×max（全部各图）</SelectItem>
                   </SelectContent>
                 </Select>
@@ -3083,7 +3119,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                   ? "膜蛋白侧视定向（v3.82）：优先用胶束带 PCA（新桥 /membrane2：三相分割后对每个密度相带单独 PCA — 去垢剂带是扁平圆环，其最小方差主轴即膜法线，对「大头部+跨膜柱」颗粒（如 TMEM175，整体 PCA 近各向同性）依然可靠）；每个候选相机都用渲染探针按「站立度」（上下质量不对称）验证后才生效，不达标自动降级 turn 网格扫描 + 滚转对齐盘长轴（纯探针、旧桥也完整可用，无需升级）。每张分类图在导出时还会按自身密度重新校验立正 — fitmap 对齐落在制外轴上的图会自动按自身密度立正并在日志注明。默认朝上的一面按地图坐标 +Y/+Z/+X 首要分量确定（可复现）；若朝上的不是包外区，勾选「上下翻转 180°」后重新生成。"
                   : "关闭膜视图：沿用基准 + 90° 覆盖率评分择优视角（v3.76 行为，适合可溶性蛋白）。"}
                 {levelMode === "auto"
-                  ? " 截图 level（v3.85，按您的 auto_color_locres.py 脚本规则）：每张图默认取全矩阵最大值 × 0.15，并执行 surface dust 8.08 Å 清理小碎块/游离斑点；随后逐图渲染探针验证 — 锚点处仍有碎片则就近上调，主体镂空则就近下调（不再从最低档向上扫、也不再向噪声带内精调）；运行日志会列出逐档测量值。可选「预览 level」先看参考图效果；手动倍数则全部各图直接用倍数 ×max（同样带 dust 清理）。"
+                  ? " 截图 level（v3.86，逐图胶束带自适应 — 不同 map 自动得到不同倍率）：每张图用自身直方图三相分割（新桥 /membrane2）定锚点 — 胶束在中间相带时锚点取蛋白/胶束分界（隐去去垢剂），胶束更热或无胶束时锚点取 max(0.15×max, 噪声底 t1)（脚本规则仅在超过分割值时生效），并执行 surface dust 8.08 Å 清理；随后逐图渲染探针验证（碎片率 + 孔洞数 + 主体覆盖）— 锚点不干净则就近上调/下调。旧桥无三相分割时退回脚本规则 0.15×max + dust。对齐拟合目标同时按蛋白相带阈值把胶束密度置零（去除去垢剂后对齐 — 胶束-胶束重叠不再奖励任意旋转）。可选「预览 level」先看参考图效果；手动倍数则全部各图直接用倍数 ×max（同样带 dust 清理）。"
                   : " 手动 level：倍数 ×max 直接应用于所有各图（0.01–0.9，专家模式），截图同样执行 surface dust 8.08 Å 清理小碎块；对齐拟合阈值不受影响（恒为 0.25×max）。"}
               </p>
             </div>
@@ -3177,7 +3213,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <p className="mt-1 pl-5 text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
                 {bridge?.kind === "relay" && !bridge.canDeliver
                   ? "当前桥脚本无 /deliver（旧版 relay.py）— 在 ChimeraX 重新运行一次 relay.py 后即可自动交付。"
-                  : "生成流程图后自动把最终结果下载到该目录（地图 .mrc 先入本地缓存再复制，重复生成不重复下载；FSC 曲线优先取 job 详情页 log 中的原图（即网页中显示/下载的正常比例图），未捕获时才由 fsc.xml 按网页版横版比例重绘，job 卡片上的窄预览图永远排在最后且日志注明来源；Guinier/角度分布图同样优先 job log 原图并校验比例与底色，深色（疑似地图截图）或比例异常的候选自动跳过）；若最终 job 为 DeepEMhancer，则交付其上游 refine job 的这些文件并额外输出 map-DeepEMhancer.mrc；所有 map 按参考手性判定纠正（镜像 → ChimeraX z-flip 翻正后保存）。目录与前缀会记住。"}
+                  : "生成流程图后自动把最终结果下载到该目录（地图 .mrc 先入本地缓存再复制，重复生成不重复下载；FSC 曲线优先取 job 详情页 log 中的原图（即网页中显示/下载的正常比例图），未捕获时才由 fsc.xml 按网页版横版比例重绘，job 卡片上的窄预览图永远排在最后且日志注明来源；Guinier/角度分布图同样优先 job log 原图，未捕获时改取输出组同名结果文件（与 .mrc 同源的 download_result_file 原图），并校验比例与底色，深色（疑似地图截图）或比例异常的候选自动跳过）；若最终 job 为 DeepEMhancer，则交付其上游 refine job 的这些文件并额外输出 map-DeepEMhancer.mrc；所有 map 按参考手性判定纠正（镜像 → ChimeraX z-flip 翻正后保存）。目录与前缀会记住。"}
               </p>
             </div>
             {!bridge && (
@@ -3441,7 +3477,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               <span className="shrink-0 font-semibold text-slate-700 dark:text-slate-200">交付</span>
               <span>
                 填写「<b>交付文件</b>」目录后，每次生成自动把最终结果下载到 ChimeraX 机器的该目录：
-                <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp.mrc"}</code> 等（unsharp / sharp / half A / half B 地图均带 .mrc 后缀；FSC 曲线优先取 job 详情页 log 中的原图（即网页中显示/下载的正常比例图），未捕获时才由 fsc.xml 按网页版横版比例重绘，job 卡片上的窄预览图永远排在最后且日志注明来源；Guinier / 角度分布图同样优先 job log 原图，下载前校验比例、尺寸与底色，深色（疑似地图截图）或比例异常的候选自动跳过；fsc.xml 内嵌数据直达失败时自动改经本地暂存写入；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer.mrc）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
+                <code className="mx-0.5 font-mono text-[10px]">{(deliverBase.trim() || deriveBaseFromDir(deliverDir) || "Tigr") + ".volume.map_unsharp.mrc"}</code> 等（unsharp / sharp / half A / half B 地图均带 .mrc 后缀；FSC 曲线优先取 job 详情页 log 中的原图（即网页中显示/下载的正常比例图），未捕获时才由 fsc.xml 按网页版横版比例重绘，job 卡片上的窄预览图永远排在最后且日志注明来源；Guinier / 角度分布图同样优先 job log 原图，未捕获时改取输出组同名结果文件（与 .mrc 同源的 download_result_file 原图），下载前校验比例、尺寸与底色，深色（疑似地图截图）或比例异常的候选自动跳过；fsc.xml 内嵌数据直达失败时自动改经本地暂存写入；最终 job 为 DeepEMhancer 时取其上游 refine job 的文件并额外输出 map-DeepEMhancer.mrc）；<b>所有 map 按参考手性判定纠正</b> — 镜像数据经 ChimeraX z-flip 翻正后保存。
               </span>
             </li>
           </ul>

@@ -208,6 +208,38 @@ const server = Bun.serve({
           { status: 401 },
         );
       }
+      /* v3.86: the volume output group's PLOT / XML faces — the page's
+       * delivery ladder fetches {uid}.volume.fsc.png / guinier_plot.png /
+       * orientation_distribution.png / fsc.xml through this same route
+       * (the round-46 guinier/orientation 失败 fix), so the mock serves
+       * each kind at its webpage proportion instead of MRC bytes. */
+      const lower = pathname.toLowerCase();
+      if (lower.endsWith(".png")) {
+        const bytes = lower.endsWith("fsc.png")
+          ? plotPng(516, 303, "fsc")
+          : lower.endsWith("guinier_plot.png")
+            ? plotPng(480, 360, "guinier")
+            : plotPng(400, 400, "orientation");
+        return new Response(bytes, {
+          status: 200,
+          headers: {
+            "Content-Type": "image/png",
+            "Content-Length": String(bytes.byteLength),
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+      if (lower.endsWith(".xml")) {
+        const bytes = fscXmlBytes();
+        return new Response(bytes, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/xml",
+            "Content-Length": String(bytes.byteLength),
+            "Cache-Control": "no-store",
+          },
+        });
+      }
       const bytes = mrcBytes(pathname);
       return new Response(bytes, {
         status: 200,
@@ -264,6 +296,13 @@ const server = Bun.serve({
       // endpoint; the standing scan is the only orientation source).
       const relayMode = sp.get("relay") || "";
       relayState.relayMode = relayMode === "old" || relayMode === "nomembrane" ? relayMode : "";
+      // v3.86 E2E drill: ?belt=mid — the detergent belt swaps to the MID
+      // band (colder than protein; the classic hide-the-micelle regime):
+      // the display anchors at t2=0.54 (probe says sponge >0.5 → the knee
+      // must walk DOWN to the clean 0.5 rung) and the ALIGNMENT masks
+      // ride the protein-band boundary (0.5×max cap) instead of 0.125.
+      const beltMode = sp.get("belt") || "";
+      relayState.beltMode = beltMode === "mid" ? "mid" : "";
       return Response.json({
         ok: true,
         http_blocked: blockHttp,
@@ -273,6 +312,7 @@ const server = Bun.serve({
         corr: relayState.corrOverride,
         cam_reject: camReject,
         relay_mode: relayState.relayMode,
+        belt_mode: relayState.beltMode,
       });
     }
     if (pathname === "/flow-e2e/relay-stats") {
@@ -875,6 +915,75 @@ function mrcBytes(seedSource: string): Uint8Array {
   return buf;
 }
 
+/* ---- v3.86: the PLOT / XML faces of download_result_file — the volume
+ * output group ships fsc.png / guinier_plot.png /
+ * orientation_distribution.png / fsc.xml alongside the .mrc maps, and the
+ * page's plot ladder now fetches them through this same route (the round-46
+ * guinier/orientation 失败 fix). The mock serves matplotlib-style
+ * light-background plots at each kind's webpage proportion plus a
+ * list-style fsc.xml the page's tolerant parser can re-draw. ---- */
+const PLOT_PNG_CACHE = new Map<string, Uint8Array>();
+function plotPng(w: number, h: number, kind: string): Uint8Array {
+  const key = `${w}x${h}:${kind}`;
+  const cached = PLOT_PNG_CACHE.get(key);
+  if (cached) return cached;
+  const raw = new Uint8Array(h * (w * 3 + 1));
+  for (let y = 0; y < h; y++) raw[y * (w * 3 + 1)] = 0; // filter: none
+  const set = (x: number, y: number, r: number, g: number, b: number) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return;
+    const i = y * (w * 3 + 1) + 1 + x * 3;
+    raw[i] = r;
+    raw[i + 1] = g;
+    raw[i + 2] = b;
+  };
+  // white background
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) set(x, y, 255, 255, 255);
+  // axes (dark gray)
+  const ax = Math.floor(w * 0.12);
+  const ay = Math.floor(h * 0.85);
+  for (let y = Math.floor(h * 0.1); y <= ay; y++) for (let d = 0; d < 2; d++) set(ax + d, y, 60, 60, 60);
+  for (let x = ax; x < Math.floor(w * 0.94); x++) for (let d = 0; d < 2; d++) set(x, ay - d, 60, 60, 60);
+  // the curve (a decaying profile, kind-tinted)
+  const cr = kind === "fsc" ? [200, 30, 30] : kind === "guinier" ? [30, 30, 180] : [20, 130, 20];
+  const pts = 64;
+  for (let p = 0; p < pts; p++) {
+    const t = p / (pts - 1);
+    const fx = ax + t * (w * 0.78);
+    const decay = Math.exp(-3.2 * t) * (kind === "guinier" ? 1 : Math.cos(t * 9) * 0.08 + 0.92);
+    const fy = ay - decay * (h * 0.68);
+    for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) set(Math.round(fx) + dx, Math.round(fy) + dy, cr[0], cr[1], cr[2]);
+  }
+  const ihdr = new Uint8Array(13);
+  const dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, w);
+  dv.setUint32(4, h);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type RGB
+  const png = new Uint8Array(8 + 25 + 12 + 12);
+  let off = 0;
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], off); off += 8;
+  png.set(pngChunk("IHDR", ihdr), off); off += 25;
+  const idat = deflateSync(raw);
+  const withIdat = new Uint8Array(off + 12 + idat.length + 12);
+  withIdat.set(png.subarray(0, off), 0);
+  withIdat.set(pngChunk("IDAT", new Uint8Array(idat)), off);
+  off += 12 + idat.length;
+  withIdat.set(pngChunk("IEND", new Uint8Array(0)), off);
+  PLOT_PNG_CACHE.set(key, withIdat);
+  return withIdat;
+}
+function fscXmlBytes(): Uint8Array {
+  const res: string[] = [];
+  const corr: string[] = [];
+  for (let i = 0; i <= 40; i++) {
+    const t = i / 40;
+    res.push((0.02 + t * 0.18).toFixed(3));
+    corr.push((Math.exp(-9 * t * t)).toFixed(4));
+  }
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<fsc>\n  <resolution>${res.join(" ")}</resolution>\n  <correlation>${corr.join(" ")}</correlation>\n</fsc>\n`;
+  return new TextEncoder().encode(xml);
+}
+
 /* ---- mock relay state (mirrors ChimeraX model ids: max+1) ---------- */
 interface RelayOpenRecord {
   url: string;
@@ -973,6 +1082,18 @@ const relayState = {
    * (pre-3.77 relay: neither endpoint — the standing scan is the ONLY
    * orientation source left). */
   relayMode: "" as "" | "old" | "nomembrane",
+  /** v3.86 E2E drill: "" (default — the belt is the HIGH/hot band, the
+   * display anchors at max(0.15, t1=0.18) = 0.18 and the masks keep the
+   * classic 0.125×max) vs "mid" (the belt swaps to the MID band — the
+   * anchor rides t2=0.54, the probe renders sponge above 0.5 so the knee
+   * must walk DOWN to 0.5, and the alignment masks ride the
+   * protein-band boundary 0.5). */
+  beltMode: "" as "" | "mid",
+  /** v3.86 E2E: `volume threshold #N minimum X set 0` mask commands —
+   * with their levels (the belt=mid drill asserts the protein-band
+   * boundary replaced the flat 0.125×max). */
+  maskCommands: 0,
+  maskLevels: [] as number[],
   /** v3.80 E2E drill: /flow-e2e/reset?membrane=camreject — every `view
    * matrix camera` errors, so the page must fall through transpose →
    * turn-grid scan (the round-39 silent-failure path, now recoverable). */
@@ -1014,6 +1135,9 @@ function resetRelayState() {
   relayState.modelLevels.clear();
   relayState.dustCommands = 0;
   relayState.relayMode = "";
+  relayState.beltMode = "";
+  relayState.maskCommands = 0;
+  relayState.maskLevels = [];
   relayState.camReject = false;
   relayState.cameraAccepts = 0;
   relayState.cameraRejects = 0;
@@ -1056,6 +1180,10 @@ function relayStats() {
     save_opaque_bg: relayState.saveOpaqueBg,
     set_bgcolor_commands: relayState.setBgColorCommands,
     dust_commands: relayState.dustCommands,
+    // v3.86: the alignment noise-mask thresholds (belt=mid drill: the
+    // protein-band boundary 0.5 replaces the classic 0.125×max).
+    mask_commands: relayState.maskCommands,
+    mask_levels: relayState.maskLevels,
     // v3.55: leftover/own-model cleanup observability.
     close_ids_closed: [...relayState.closedIds],
     close_all_commands: relayState.closeAllCommands,
@@ -1106,6 +1234,14 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   // — the E2E asserts it rides every display-level application.
   if (/^surface\s+dust\s+#\d+\s+size\s+8\.08\b/i.test(command)) {
     relayState.dustCommands += 1;
+  }
+  // v3.86: track the NOISE-MASK threshold commands (`volume threshold #N
+  // minimum X set 0` — the alignment targets; the belt=mid drill asserts
+  // the protein-band boundary 0.5 replaced the classic 0.125×max).
+  const maskMatch = /^(?:volume|vop)\s+threshold\s+#\d+\s+minimum\s+(-?[\d.]+)\s+set\s+0\b/i.exec(command);
+  if (maskMatch) {
+    relayState.maskCommands += 1;
+    relayState.maskLevels.push(Number(maskMatch[1]));
   }
 
   // v3.53: track the on-screen model (drives per-class disc colors on
@@ -1233,6 +1369,30 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
     const next = flipMatch[3] ? parseInt(flipMatch[3], 10) : relayNextModelId();
     relayState.models.set(next, { url: src?.url || "flipped" });
     return { text: `volume flip: new model (id #${next})`, error: null };
+  }
+
+  // v3.86: register the σ-pyramid / noise-mask clones Chimera-style — the
+  // engine reserves their ids through /nextid and addresses them by it.
+  // Without registration the NEXT /nextid reuses the same id, so a later
+  // map open collides with the clone and the phase-3.5 clone cleanup
+  // (`close #<clone-id>`) closes a REAL map through the colliding id (the
+  // round-46 default drill lost J7/volume_class_0's /membrane2 exactly this
+  // way — the engine degraded gracefully to the script anchor, logged
+  // honestly, but the mock was not behaving like real ChimeraX).
+  const gaussClone = /^(?:volume|vop)\s+gaussian\s+#(\d+)\s+sDev\s+[\d.]+(?:\s+modelId\s+(\d+))?\s*$/i.exec(command)
+    ?? /^vgaussian\s+#(\d+)\s+(?:sDev|sigma)\s+[\d.]+(?:\s+modelId\s+(\d+))?\s*$/i.exec(command);
+  if (gaussClone) {
+    const src = relayState.models.get(parseInt(gaussClone[1], 10));
+    const next = gaussClone[2] ? parseInt(gaussClone[2], 10) : relayNextModelId();
+    relayState.models.set(next, { url: src ? `${src.url}#gauss` : "gaussian-clone" });
+    return { text: `made gaussian copy of model #${gaussClone[1]} (id #${next})`, error: null };
+  }
+  const threshClone = /^(?:volume|vop)\s+threshold\s+#(\d+)\s+minimum\s+-?[\d.]+\s+set\s+0(?:\s+modelId\s+(\d+))?\s*$/i.exec(command);
+  if (threshClone) {
+    const src = relayState.models.get(parseInt(threshClone[1], 10));
+    const next = threshClone[2] ? parseInt(threshClone[2], 10) : relayNextModelId();
+    relayState.models.set(next, { url: src ? `${src.url}#mask` : "threshold-clone" });
+    return { text: `made threshold copy of model #${threshClone[1]} (id #${next})`, error: null };
   }
 
   if (/^measure\s+correlation/i.test(command)) {
@@ -1750,6 +1910,15 @@ const relayServer = Bun.serve({
         if (!relayState.models.has(Number(mid))) {
           return reply(404, { error: `model #${mid} not found` });
         }
+        /* v3.86 ?belt=mid drill — the detergent belt swaps to the MID band
+         * (colder than protein, the classic hide-the-micelle regime):
+         * beltLevelFrom anchors the display at t2=0.54 (the probe renders
+         * sponge above 0.5, so the knee must walk DOWN to the clean 0.5
+         * rung) and the alignment masks ride the protein-band boundary
+         * min(0.54, 0.5×max) = 0.5 instead of the classic 0.125. The belt
+         * band keeps the SAME normal/axes (2,1,2)/3 etc. so the membrane
+         * camera chain and the standing probes behave identically. */
+        const beltMid = relayState.beltMode === "mid";
         return reply(200, {
           ok: true,
           splits: [0.18, 0.54],
@@ -1758,23 +1927,27 @@ const relayServer = Bun.serve({
               name: "mid",
               lo: 0.18,
               hi: 0.54,
-              normal: [0.57735, 0.57735, 0.57735],
-              ea: [0.7071, -0.7071, 0.0],
-              eb: [0.40825, 0.40825, -0.8165],
-              ratio: 0.99,
-              lambdas: [0.99, 1.0, 1.6],
-              count: 140000,
+              normal: beltMid
+                ? [0.666667, 0.333333, 0.666667]
+                : [0.57735, 0.57735, 0.57735],
+              ea: beltMid ? [0.447214, -0.894427, 0.0] : [0.7071, -0.7071, 0.0],
+              eb: beltMid ? [0.596285, 0.298142, -0.745356] : [0.40825, 0.40825, -0.8165],
+              ratio: beltMid ? 0.3 : 0.99,
+              lambdas: beltMid ? [0.3, 1.0, 1.05] : [0.99, 1.0, 1.6],
+              count: beltMid ? 90000 : 140000,
             },
             {
               name: "high",
               lo: 0.54,
               hi: 1.0,
-              normal: [0.666667, 0.333333, 0.666667],
-              ea: [0.447214, -0.894427, 0.0],
-              eb: [0.596285, 0.298142, -0.745356],
-              ratio: 0.3,
-              lambdas: [0.3, 1.0, 1.05],
-              count: 90000,
+              normal: beltMid
+                ? [0.57735, 0.57735, 0.57735]
+                : [0.666667, 0.333333, 0.666667],
+              ea: beltMid ? [0.7071, -0.7071, 0.0] : [0.447214, -0.894427, 0.0],
+              eb: beltMid ? [0.40825, 0.40825, -0.8165] : [0.596285, 0.298142, -0.745356],
+              ratio: beltMid ? 0.99 : 0.3,
+              lambdas: beltMid ? [0.99, 1.0, 1.6] : [0.3, 1.0, 1.05],
+              count: beltMid ? 140000 : 90000,
             },
           ],
           envelope: {

@@ -838,34 +838,42 @@
  * from the fsc.xml when no log image passes the light + shape checks;
  * (5) Guinier / orientation plots ride the same source-tiered ladder.
  *
- * v3.85 bump reason (round-45 “好像这个level的问题更加严重了，是数据
- * 调整的方向反了？参考这个脚本中计算map level的方式改进一下” +
- * auto_color_locres.py): VLM forensics on the delivered
- * P283_J55_workflow (3).pptx read most map renders as level-TOO-LOW
- * (snow speckle / free micelle blobs) and one as too-high (sponge) —
- * the v3.82 knee's bottom-up sweep took the LOWEST rung passing its
- * fragmentation bar and then refined DOWNWARD, back toward the dirty
- * band: it optimised toward the noise floor, the exact REVERSE of the
- * expert workflow, and its frag metric (foreground pixels outside the
- * main component) under-counted visually-prominent micelles. The fix
- * adopts the user's own auto_color_locres.py rule VERBATIM:
- * `level = em_map.data.full_matrix().max() * 0.15` plus
- * `surface dust #<id> size 8.08`. (1) DISPLAY levels anchor at
- * SCRIPT_LEVEL_RATIO 0.15×max (the v3.79–81 min(0.25×max, 0.85×otsu₂)
- * histogram clamps are deleted); (2) `surface dust 8.08 Å` rides EVERY
- * display-level application — knee probes, the reference re-level, the
- * per-map screenshot application, setDisplayLevel and the level
- * preview — so probes measure exactly what the screenshots show and
- * the small disconnected junk the frag metric under-counted is simply
- * not rendered; (3) kneeLevelFor is anchor-first: probe 0.15×max
- * (dusted) → clean → done; dirty → probe the ladder and pick the clean
- * rung CLOSEST to the anchor (up when the dirt was noise, down when
- * the anchor hollowed the particle — never the lowest clean rung,
- * never a refinement into the dirty band); nothing clean → the
- * minimum-frag rung (tie → closer to the anchor) with an honest
- * warning; (4) the non-probe fallback (REST transports / volstats
- * hiccups) and the last-ditch reference default are 0.15×max too;
- * (5) alignment FIT levels stay at the tuned 0.25×max — only the
- * visible contour changed.
+ * v3.86 bump reason (round-46 “角度和align还是存在一些问题，align是能
+ * 去掉去垢剂后进行吗？另外不同的map可能需要给不同的倍率才行” +
+ * the delivered file list with guinier_plot.png / orientation_
+ * distribution.png 失败): VLM forensics on the delivered
+ * P283_J55_workflow (5).pptx read the REFERENCE itself as a speckled
+ * cauliflower and every class map oblique/lying — the v3.85 fixed
+ * 0.15×max anchor sits BELOW the noise floor on sharpened maps (their
+ * max is a noise-boosted spike), the speckle is CONNECTED so the frag
+ * probe passed, and the orientation chain then fell to the anisotropy
+ * fallback which maximises the long axis HORIZONTAL (the lying view).
+ * The fix: (1) PER-MAP belt-band adaptive anchors (beltLevelFrom) —
+ * each map's OWN 3-phase otsu₂ split (/membrane2) decides its
+ * multiplier: belt in the mid band → anchor t2 (the classic
+ * raise-the-level-to-hide-the-micelle value), hot belt or no belt →
+ * max(0.15×max, t1) so the anchor always clears the noise floor; the
+ * script rule survives verbatim on clean maps (0.15×max ≥ t1) and as
+ * the old-relay fallback; (2) measureRender gains ENCLOSED-hole
+ * counting (flood-fill from the border — lace/sponge/noise-gap renders
+ * the frag bar could not see) plus boundary-roughness diagnostics, and
+ * the knee's clean bar requires holes ≤ 6; (3) ALIGNMENT DETERGENT
+ * REMOVAL (the user's ask): every noise-mask fit target (σ-coarse /
+ * σ-fine / full-resolution) is thresholded at its OWN model's
+ * protein-band boundary instead of the flat 0.125×max — the belt phase
+ * is zeroed out of the fitmap target so belt-on-belt overlap no longer
+ * rewards arbitrary in-plane rolls; hot-belt maps (belt hotter than
+ * protein — a threshold cannot hide it), old relays and degenerate
+ * splits keep the classic level, each logged honestly; (4) the
+ * reference's /membrane2 reply is fetched ONCE and reused by the level
+ * knee, the membrane cameras and the masks; (5) the level preview's
+ * first candidate is the belt-adaptive anchor; (6) PLOT DELIVERY: the
+ * guinier/orientation 失败 rooted in the constructed URL guessing a
+ * cryoSPARC log-IMAGE name that 404s — every plot ladder now carries
+ * the constructed download_result_file path for its AUTHENTIC
+ * output-group file (fsc.png / guinier_plot.png /
+ * orientation_distribution.png, the same route that delivers the .mrc
+ * maps and the fsc.xml), walked first among the non-log candidates
+ * after the fsc.xml re-draw.
  */
-export const FLOW_ENGINE_VERSION = "3.85";
+export const FLOW_ENGINE_VERSION = "3.86";

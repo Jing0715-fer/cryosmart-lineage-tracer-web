@@ -1491,6 +1491,19 @@ export interface RenderShape {
   frag: number;
   mainCov: number;
   standing: number;
+  /** v3.86: ENCLOSED background components inside the main component's
+   *  silhouette (flood-fill from the border; anything unreachable is a
+   *  hole). A clean protein surface reads 0–2 (a face-on torus/pore = 1);
+   *  a lace/sponge/cauliflower render at a level below its noise floor
+   *  reads many — the v3.85 frag metric could not see these (the speckle
+   *  is CONNECTED, so fragmentation stayed ≈0 on the delivered
+   *  cauliflower reference). */
+  holes: number;
+  /** v3.86: boundary roughness of the main component — the isoperimetric
+   *  ratio P²/(4π·A) (circle = 1, filled square ≈ 1.27, a wiggle-edged
+   *  noise silhouette ≫ 2.5). Diagnostics in the run log; NOT a gate
+   *  (legit concave silhouettes — head+column+belt — also read high). */
+  rough: number;
 }
 
 async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
@@ -1529,7 +1542,7 @@ async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
       }
     }
   }
-  if (fg < 16) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0 };
+  if (fg < 16) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0, holes: 0, rough: 0 };
   /* connected components (4-neighbour BFS, iterative stack) */
   const labels = new Int32Array(mw * mh).fill(-1);
   const comps: Array<{ area: number; minX: number; minY: number; maxX: number; maxY: number; sx: number; sy: number; sxx: number; syy: number; sxy: number }> = [];
@@ -1561,9 +1574,15 @@ async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
     }
     comps.push(c);
   }
-  if (!comps.length) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0 };
+  if (!comps.length) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0, holes: 0, rough: 0 };
   let main = comps[0];
-  for (const c of comps) if (c.area > main.area) main = c;
+  let mainLabel = 0;
+  for (let ci = 0; ci < comps.length; ci++) {
+    if (comps[ci].area > main.area) {
+      main = comps[ci];
+      mainLabel = ci;
+    }
+  }
   const frag = Math.max(0, 1 - main.area / fg);
   const n = main.area;
   const mx = main.sx / n;
@@ -1581,6 +1600,82 @@ async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
   /* screen y grows DOWNWARD: mass above the bbox centre → my < centre →
    * standing > 0 means "heavy end up". */
   const standing = bh > 1 ? ((main.minY + main.maxY + 1) / 2 - my) / bh : 0;
+  /* v3.86 (a): boundary roughness of the main component — perimeter =
+   *  its pixels with a 4-neighbour background pixel (or the canvas edge);
+   *  the isoperimetric ratio P²/(4π·A) (circle 1, square ≈1.27,
+   *  wiggle/noise edges ≫2.5). Diagnostics only — logged per knee rung. */
+  let perimeter = 0;
+  for (let y = main.minY; y <= main.maxY; y++) {
+    for (let x = main.minX; x <= main.maxX; x++) {
+      const p = y * mw + x;
+      if (labels[p] !== mainLabel) continue;
+      const bgNeighbor =
+        x === 0 || !mask[p - 1] || x === mw - 1 || !mask[p + 1] || y === 0 || !mask[p - mw] || y === mh - 1 || !mask[p + mw];
+      if (bgNeighbor) perimeter++;
+    }
+  }
+  const rough = perimeter > 0 && n > 0 ? (perimeter * perimeter) / (4 * Math.PI * n) : 0;
+  /* v3.86 (b): ENCLOSED holes — flood-fill the background from the border;
+   *  every background component NOT reached is a hole inside the
+   *  silhouette (sponge voids / noise gaps). */
+  const bgReach = new Uint8Array(mw * mh);
+  const bgStack: number[] = [];
+  for (let x = 0; x < mw; x++) {
+    for (const y of [0, mh - 1]) {
+      const p = y * mw + x;
+      if (!mask[p] && !bgReach[p]) {
+        bgReach[p] = 1;
+        bgStack.push(p);
+      }
+    }
+  }
+  for (let y = 0; y < mh; y++) {
+    for (const x of [0, mw - 1]) {
+      const p = y * mw + x;
+      if (!mask[p] && !bgReach[p]) {
+        bgReach[p] = 1;
+        bgStack.push(p);
+      }
+    }
+  }
+  while (bgStack.length) {
+    const q = bgStack.pop() as number;
+    const qx = q % mw;
+    const qy = (q / mw) | 0;
+    const push = (r: number) => {
+      if (!mask[r] && !bgReach[r]) {
+        bgReach[r] = 1;
+        bgStack.push(r);
+      }
+    };
+    if (qx > 0) push(q - 1);
+    if (qx < mw - 1) push(q + 1);
+    if (qy > 0) push(q - mw);
+    if (qy < mh - 1) push(q + mw);
+  }
+  let holes = 0;
+  const holeSeen = new Uint8Array(mw * mh);
+  for (let p = 0; p < mask.length; p++) {
+    if (mask[p] || bgReach[p] || holeSeen[p]) continue;
+    holes++;
+    const hStack: number[] = [p];
+    holeSeen[p] = 1;
+    while (hStack.length) {
+      const q = hStack.pop() as number;
+      const qx = q % mw;
+      const qy = (q / mw) | 0;
+      const push = (r: number) => {
+        if (!mask[r] && !bgReach[r] && !holeSeen[r]) {
+          holeSeen[r] = 1;
+          hStack.push(r);
+        }
+      };
+      if (qx > 0) push(q - 1);
+      if (qx < mw - 1) push(q + 1);
+      if (qy > 0) push(q - mw);
+      if (qy < mh - 1) push(q + mw);
+    }
+  }
   return {
     aniso: Math.sqrt(Math.max(lMax, 1e-9) / lMin),
     aspect: bw / bh,
@@ -1588,6 +1683,8 @@ async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
     frag,
     mainCov: main.area / (mw * mh),
     standing,
+    holes,
+    rough,
   };
 }
 
@@ -1694,6 +1791,37 @@ const LEVEL_KNEE_RATIOS = [0.05, 0.08, 0.12, 0.18, 0.26, 0.36, 0.5, 0.7, 0.9];
  * into a small porous core — the delivered J41-class3 sponge). */
 const KNEE_FRAG_MAX = 0.08;
 const KNEE_MAIN_MIN_FRAC = 0.45;
+/** v3.86 (round-46 “不同的map可能需要给不同的倍率才行”): the knee cleanliness
+ *  bar for ENCLOSED holes (measureRender.holes) — a clean protein surface
+ *  silhouette reads 0–2 (a face-on torus/pore = 1), a lace/sponge/noise-gap
+ *  render reads many. The v3.85 frag bar could not see these: the delivered
+ *  round-45 reference was a CONNECTED cauliflower at 0.15×max (below the
+ *  noise floor of a sharpened map) and passed every fragmentation check. */
+const KNEE_HOLE_MAX = 6;
+/** v3.86: the FAST-PATH main-coverage floor — the knee probes re-frame
+ *  with bare `view` (the silhouette fills the frame), so a healthy
+ *  particle reads ≫10% of the probe whatever its size; a degenerate
+ *  hollow/thin-shell render (the belt=mid drill's ring at 1.7%, a
+ *  too-high level on a sparse hot tail) reads ≪5%. Without this floor
+ *  the anchor fast-path accepted the drill's 0.54 ring (frag 0, holes 1)
+ *  and never walked to the clean 0.5 rung. */
+const KNEE_FAST_MAIN_MIN = 0.03;
+/** v3.86: band oblateness (λmin/λmid) at or below which a density band from
+ *  the relay's 3-phase split counts as the DETERGENT BELT (a flat torus);
+ *  a band that mostly caught protein mass sits near 1. */
+const BELT_OBLATE_MAX = 0.6;
+/** v3.86: sanity bars on the 3-phase splits — a solvent split above half
+ *  the max or a mid|high split above 0.9×max means otsu₂ degenerated on
+ *  this map's histogram (single-phase map, noise spike, …) and the split
+ *  must not drive anything. */
+const BELT_SPLIT_T1_MAX_RATIO = 0.5;
+const BELT_SPLIT_T2_MAX_RATIO = 0.9;
+/** v3.86: the display anchor's clamp (×max) and the ALIGNMENT mask cap —
+ *  the mask target must keep enough mass for fitmap to score, so a
+ *  protein-only threshold never rises above half the map's max. */
+const ANCHOR_MIN_RATIO = 0.02;
+const ANCHOR_MAX_RATIO = 0.9;
+const MASK_LEVEL_CAP_RATIO = 0.5;
 /** v3.80: the scan grids — coarse elevation × azimuth about the screen
  * axes (named-axis `turn x/y` only, valid on every ChimeraX build; the
  * ±-symmetric elevation set makes the undocumented turn DIRECTION
@@ -1865,6 +1993,107 @@ function displayLevelFor(
    * decides. Falls back to the map's own v3.81 auto rule. */
   void refAnchor;
   return autoLevelFor(stats);
+}
+
+/** v3.86 (round-46 “角度和align还是存在一些问题…另外不同的map可能需要
+ *  给不同的倍率才行”): the PER-MAP belt-band adaptive anchor, derived from
+ *  the map's OWN 3-phase histogram split (relay /membrane2, otsu₂ over the
+ *  full matrix). The fixed 0.15×max script rule delivered a CONNECTED
+ *  cauliflower on the sharpened reference (its max is a noise-boosted
+ *  spike, so 0.15×max sat BELOW the noise floor) while the frag probe
+ *  stayed ≈0 — a fixed multiplier cannot serve maps with different value
+ *  scalings. The split adapts per map:
+ *    - t1 = the solvent|signal boundary — nothing below it is signal;
+ *    - t2 = the mid|high boundary — when the detergent belt occupies the
+ *      MID band (colder than protein), t2 is the classic “raise the level
+ *      to hide the micelle” value: above it only protein renders;
+ *    - the OBLATE band (λmin/λmid ≤ BELT_OBLATE_MAX) identifies WHICH
+ *      phase the belt is in (a flat torus); when the belt is the HIGH
+ *      band (hot detergent) no threshold can hide it — anchor at the
+ *      noise floor t1 instead and say so honestly.
+ * `proteinLevel` (the belt-hiding threshold, capped at half-max) feeds
+ *  BOTH the display knee anchor and the ALIGNMENT mask targets (the
+ *  user's “align 去掉去垢剂后进行” — belt-phase density zeroed out of
+ *  the fitmap target so belt-on-belt overlap no longer rewards arbitrary
+ *  in-plane rolls). */
+export interface BeltLevelInfo {
+  /** [solvent|mid, mid|high] splits (absolute values) — null when the
+   *  split was missing or degenerate. */
+  t1: number | null;
+  t2: number | null;
+  /** which phase the oblate belt band sits in — null when no band is
+   *  oblate enough to be the belt. */
+  beltBand: "mid" | "high" | null;
+  beltRatio: number | null;
+  /** the protein-only threshold when the belt sits BELOW the protein
+   *  (belt = mid band): min(t2, MASK_LEVEL_CAP_RATIO×max). Null when the
+   *  belt is hotter than the protein or no belt was found. */
+  proteinLevel: number | null;
+  /** the DISPLAY anchor (absolute value; NaN when nothing is known —
+   *  callers fall back to their own rule). */
+  anchor: number;
+  /** the anchor's provenance for the run log. */
+  anchorRule: string;
+}
+
+/** v3.86: derive the belt-band anchor from a /membrane2 reply + the
+ *  model's own /volstats — pure, exported for the offline harness. */
+export function beltLevelFrom(
+  m2: Membrane2Reply | null,
+  stats: BridgeVolStats | null,
+): BeltLevelInfo {
+  const out: BeltLevelInfo = {
+    t1: null,
+    t2: null,
+    beltBand: null,
+    beltRatio: null,
+    proteinLevel: null,
+    anchor: NaN,
+    anchorRule: "",
+  };
+  const max = stats?.max ?? 0;
+  const script = max > 0 ? max * SCRIPT_LEVEL_RATIO : NaN;
+  if (!m2 || !m2.splits || max <= 0 || !Number.isFinite(max)) {
+    out.anchor = script;
+    out.anchorRule = "脚本规则 0.15×max（无三相分割 — 旧桥或信封过小）";
+    return out;
+  }
+  const [t1, t2] = m2.splits;
+  if (
+    !(t2 > t1) ||
+    !(t1 > 0) ||
+    t1 > max * BELT_SPLIT_T1_MAX_RATIO ||
+    t2 > max * BELT_SPLIT_T2_MAX_RATIO
+  ) {
+    out.anchor = script;
+    out.anchorRule = "脚本规则 0.15×max（三相分割退化 — 直方图无三相结构）";
+    return out;
+  }
+  out.t1 = t1;
+  out.t2 = t2;
+  const bands = (m2.bands ?? []).filter((b) => b.count >= 64);
+  const belt = bands.filter((b) => b.ratio > 0 && b.ratio <= BELT_OBLATE_MAX).sort((a, b) => a.ratio - b.ratio)[0] ?? null;
+  if (belt) {
+    out.beltBand = belt.name === "high" ? "high" : "mid";
+    out.beltRatio = belt.ratio;
+  }
+  if (belt && out.beltBand === "mid") {
+    /* belt colder than protein: t2 hides it (the classic micelle-hiding
+     * level), the script level kept when it already sits above t2. */
+    out.proteinLevel = Math.min(t2, max * MASK_LEVEL_CAP_RATIO);
+    out.anchor = Math.max(script, t2);
+    out.anchorRule = `胶束带自适应（三相分割 t1=${t1.toFixed(4)} / t2=${t2.toFixed(4)}；${belt.name} 相带扁率 ${belt.ratio.toFixed(2)} = 胶束 → 锚点 t2 隐去胶束）`;
+  } else if (belt && out.beltBand === "high") {
+    /* hot detergent: no threshold can hide the belt (protein would vanish
+     * first) — the anchor only clears the noise floor, honestly logged. */
+    out.anchor = Math.max(script, t1);
+    out.anchorRule = `噪声底自适应（三相分割 t1=${t1.toFixed(4)} / t2=${t2.toFixed(4)}；${belt.name} 相带扁率 ${belt.ratio.toFixed(2)} = 胶束且比蛋白更热 — 阈值无法隐去胶束，锚点过噪声底 t1）`;
+  } else {
+    out.anchor = Math.max(script, t1);
+    out.anchorRule = `噪声底自适应（三相分割 t1=${t1.toFixed(4)} / t2=${t2.toFixed(4)}；无扁率相带 → 锚点 max(0.15×max, t1) 过噪声底）`;
+  }
+  out.anchor = Math.min(Math.max(out.anchor, max * ANCHOR_MIN_RATIO), max * ANCHOR_MAX_RATIO);
+  return out;
 }
 
 export type ChiralityStatus = "consistent" | "corrected" | "ambiguous" | "unknown";
@@ -2554,33 +2783,43 @@ export async function renderFigureMaps(
     return renderProbe(name);
   };
 
-  /* ---- v3.82 → v3.85 (round-45 “好像这个level的问题更加严重了，是数据
-   *  调整的方向反了？参考这个脚本中计算map level的方式改进一下”):
-   *  the DISPLAY level ANCHORS at the user's auto_color_locres.py rule —
-   *  full-matrix max × 0.15 with `surface dust size 8.08` cleaning the
-   *  small disconnected junk — and a render probe VERIFIES it. The v3.82
-   *  knee swept the ladder bottom-up and took the LOWEST “clean” rung
-   *  (plus a refinement probe DOWNWARD, back into the dirty band): it
-   *  optimised toward the noise floor — the exact reverse of the expert
-   *  workflow — and its frag metric (foreground pixels outside the main
-   *  component) under-counted visually-prominent micelles, so the
-   *  round-44 deck came back speckled on most maps. v3.85 order:
-   *    1. probe the ANCHOR 0.15×max (dusted) — clean → done (the
-   *       expected case: the script's own combo on the user's maps);
-   *    2. anchor dirty → probe the remaining ladder rungs (dusted) and
-   *       pick the clean rung CLOSEST to the anchor — UP when the dirt
-   *       was noise (most maps), DOWN when the anchor hollowed the
-   *       particle; never the lowest clean rung, never a refinement
-   *       back toward the dirty band;
+  /* ---- v3.82 → v3.85 → v3.86 (round-46 “角度和align还是存在一些问题
+   *  …不同的map可能需要给不同的倍率才行”): the DISPLAY level anchors at
+   *  each map's OWN 3-phase histogram split (beltLevelFrom above — the
+   *  per-map “倍率”), dusts the surface, and a render probe VERIFIES it.
+   *  The v3.85 fixed 0.15×max anchor sits BELOW the noise floor on
+   *  sharpened/noisy maps (their max is a noise-boosted spike) and its
+   *  frag verification could not see the resulting CONNECTED cauliflower
+   *  — v3.86's anchor adapts per map (t2 hides a cold belt / t1 clears
+   *  the noise floor) and the probe gains the ENCLOSED-hole bar (lace /
+   *  sponge / noise-gap renders) plus boundary-roughness diagnostics.
+   *  Order:
+   *    1. anchor (belt-adaptive, dusted) — clean → done;
+   *    2. anchor dirty → probe the ladder rungs (dusted) and pick the
+   *       clean rung CLOSEST to the anchor — UP when the dirt was noise,
+   *       DOWN when the anchor hollowed the particle;
    *    3. nothing clean even with dust → the minimum-frag rung (tie →
    *       closer to the anchor) with an honest warning. ---- */
   const kneeLevelFor = async (
     id: number,
     stats: BridgeVolStats | null,
     tag: string,
+    m2In?: Membrane2Reply | null,
   ): Promise<{ level: number; rule: string } | null> => {
     if (!stats || !Number.isFinite(stats.max) || stats.max <= 0) return null;
     const max = stats.max;
+    /* v3.86: the per-map belt anchor — the caller may pass a pre-fetched
+     * /membrane2 reply (the reference fetches it once for level + cameras
+     * + alignment masks); every other map fetches its own here. */
+    const m2 = m2In !== undefined ? m2In : (t.canMembrane2 ? await bridgeMembrane2(t, id) : null);
+    const belt = beltLevelFrom(m2, stats);
+    const anchorLevel = Number.isFinite(belt.anchor) && belt.anchor > 0 ? belt.anchor : max * SCRIPT_LEVEL_RATIO;
+    const anchorRatio = anchorLevel / max;
+    if (belt.t1 != null && belt.t2 != null) {
+      log(`  三相分割: t1=${belt.t1.toFixed(4)}（噪声底）· t2=${belt.t2.toFixed(4)}（${belt.beltBand ? `胶束=${belt.beltBand} 相带（扁率 ${belt.beltRatio?.toFixed(2)}）` : "无胶束相带"}）→ 锚点 ${anchorRatio.toFixed(3)}×max`);
+    } else {
+      log(`  三相分割不可用（${belt.anchorRule}）→ 锚点 ${anchorRatio.toFixed(3)}×max`);
+    }
     type Rung = { level: number; ratio: number; s: RenderShape | null };
     const rungs: Rung[] = [];
     const probeLevel = async (level: number): Promise<RenderShape | null> => {
@@ -2596,27 +2835,38 @@ export async function renderFigureMaps(
     };
     const note = (r: Rung, extra = "") =>
       r.s
-        ? `  level ${(r.level / max).toFixed(3)}×max${extra}: 碎片率 ${(r.s.frag * 100).toFixed(1)}% · 主体覆盖 ${(r.s.mainCov * 100).toFixed(1)}%${
-            r.s.frag > KNEE_FRAG_MAX ? "（斑点/游离胶束未清）" : ""
+        ? `  level ${(r.level / max).toFixed(3)}×max${extra}: 碎片率 ${(r.s.frag * 100).toFixed(1)}% · 孔洞 ${r.s.holes} · 主体覆盖 ${(r.s.mainCov * 100).toFixed(1)}% · 边界粗糙度 ${r.s.rough.toFixed(2)}${
+            r.s.frag > KNEE_FRAG_MAX ? "（斑点/游离胶束未清）" : r.s.holes > KNEE_HOLE_MAX ? "（镂空/噪声间隙未清）" : ""
           }`
         : "";
-    /* rung 1 — the SCRIPT anchor, probed FIRST (with dust) */
-    const anchorLevel = max * SCRIPT_LEVEL_RATIO;
+    const cleanShape = (s: RenderShape, bestMain: number): boolean =>
+      s.frag <= KNEE_FRAG_MAX && s.holes <= KNEE_HOLE_MAX && s.mainCov >= KNEE_MAIN_MIN_FRAC * bestMain;
+    /* rung 1 — the v3.86 anchor, probed FIRST (with dust). The clean bar
+     * needs no ladder: frag ≤ bar AND holes ≤ bar AND the absolute
+     * mainCov floor (the probe re-frames, so a healthy particle always
+     * fills ≫3% of it — a degenerate hollow shell must trigger the walk,
+     * not ride the fast path; the ladder's RELATIVE 45%-of-best sponge
+     * bar only exists once the walk has run). */
     const anchorShape = await probeLevel(anchorLevel);
-    const anchorRung: Rung = { level: anchorLevel, ratio: SCRIPT_LEVEL_RATIO, s: anchorShape };
+    const anchorRung: Rung = { level: anchorLevel, ratio: anchorRatio, s: anchorShape };
     rungs.push(anchorRung);
-    if (anchorShape) log(note(anchorRung, `（脚本锚点 · surface dust ${DUST_SIZE_A} Å）`));
-    if (anchorShape && anchorShape.frag <= KNEE_FRAG_MAX) {
+    if (anchorShape) log(note(anchorRung, `（锚点 · surface dust ${DUST_SIZE_A} Å）`));
+    const anchorClean =
+      anchorShape != null &&
+      anchorShape.frag <= KNEE_FRAG_MAX &&
+      anchorShape.holes <= KNEE_HOLE_MAX &&
+      anchorShape.mainCov >= KNEE_FAST_MAIN_MIN;
+    if (anchorClean && anchorShape) {
       return {
         level: anchorLevel,
-        rule: `脚本规则 0.15×max + surface dust ${DUST_SIZE_A} Å（探针验证通过：碎片率 ${(anchorShape.frag * 100).toFixed(1)}%，主体覆盖 ${(anchorShape.mainCov * 100).toFixed(1)}%）`,
+        rule: `${belt.anchorRule} + surface dust ${DUST_SIZE_A} Å（探针验证通过：碎片率 ${(anchorShape.frag * 100).toFixed(1)}%，孔洞 ${anchorShape.holes}，主体覆盖 ${(anchorShape.mainCov * 100).toFixed(1)}%）`,
       };
     }
     /* rung 2 — the anchor was dirty: probe the rest of the ladder
      * (dusted) and pick the clean rung CLOSEST to the anchor. */
     for (const ratio of LEVEL_KNEE_RATIOS) {
       if (threw(opts.signal)) break;
-      if (Math.abs(ratio - SCRIPT_LEVEL_RATIO) < 0.02) continue; // anchor already probed
+      if (Math.abs(ratio - anchorRatio) < 0.015) continue; // anchor already probed
       const level = max * ratio;
       const s = await probeLevel(level);
       const r: Rung = { level, ratio, s };
@@ -2626,25 +2876,32 @@ export async function renderFigureMaps(
     const measured = rungs.filter((r) => r.s);
     if (!measured.length) return null;
     const bestMain = Math.max(...measured.map((r) => r.s!.mainCov));
-    const clean = (s: RenderShape) => s.frag <= KNEE_FRAG_MAX && s.mainCov >= KNEE_MAIN_MIN_FRAC * bestMain;
-    const dist = (r: Rung) => Math.abs(r.ratio - SCRIPT_LEVEL_RATIO);
-    const anchorFragTxt = anchorShape ? `${(anchorShape.frag * 100).toFixed(1)}%` : "未知";
-    const cleanRungs = measured.filter((r) => clean(r.s!));
+    const dist = (r: Rung) => Math.abs(r.ratio - anchorRatio);
+    const anchorWhy = !anchorShape
+      ? "探针不可用"
+      : anchorShape.frag > KNEE_FRAG_MAX
+        ? `碎片率 ${(anchorShape.frag * 100).toFixed(1)}%`
+        : anchorShape.holes > KNEE_HOLE_MAX
+          ? `孔洞 ${anchorShape.holes}`
+          : anchorShape.mainCov < KNEE_FAST_MAIN_MIN
+            ? `主体覆盖 ${(anchorShape.mainCov * 100).toFixed(1)}%（镂空/薄壳）`
+            : "主体覆盖偏低";
+    const cleanRungs = measured.filter((r) => cleanShape(r.s!, bestMain));
     if (cleanRungs.length) {
       const pick = cleanRungs.reduce((a, b) => (dist(a) < dist(b) || (dist(a) === dist(b) && a.ratio > b.ratio) ? a : b));
       return {
         level: pick.level,
-        rule: `探针校验 ${pick.ratio.toFixed(2)}×max（锚点 0.15×max 处碎片率 ${anchorFragTxt} 未清 — 就近${pick.ratio > SCRIPT_LEVEL_RATIO ? "上调" : "下调"}）`,
+        rule: `探针校验 ${pick.ratio.toFixed(2)}×max（锚点 ${anchorRatio.toFixed(3)}×max 处${anchorWhy}未清 — 就近${pick.ratio > anchorRatio ? "上调" : "下调"}）`,
       };
     }
     /* rung 3 — nothing clean even with dust: the minimum-frag rung
      * (tie → closer to the anchor), honestly logged. */
-    const fragOf = (r: Rung) => (r.s ? r.s.frag : Number.POSITIVE_INFINITY);
-    const pick = measured.reduce((a, b) => (fragOf(a) < fragOf(b) || (fragOf(a) === fragOf(b) && dist(a) <= dist(b)) ? a : b));
-    log(`  ⚠ 所有 level 档位均有碎片（最干净 ${(fragOf(pick) * 100).toFixed(1)}%）— 就近取最干净档，可改用手动 level`);
+    const dirtOf = (r: Rung) => (r.s ? r.s.frag + Math.min(r.s.holes, 50) * 0.004 : Number.POSITIVE_INFINITY);
+    const pick = measured.reduce((a, b) => (dirtOf(a) < dirtOf(b) || (dirtOf(a) === dirtOf(b) && dist(a) <= dist(b)) ? a : b));
+    log(`  ⚠ 所有 level 档位均有碎片/镂空（最干净 碎片 ${(pick.s ? (pick.s.frag * 100).toFixed(1) : "—")}% / 孔洞 ${pick.s?.holes ?? "—"}）— 就近取最干净档，可改用手动 level`);
     return {
       level: pick.level,
-      rule: `最低碎片 ${(fragOf(pick) * 100).toFixed(1)}%（${pick.ratio.toFixed(2)}×max 档 · 锚点 0.15×max 亦未通过）`,
+      rule: `最低碎片 ${(pick.s ? (pick.s.frag * 100).toFixed(1) : "—")}%（${pick.ratio.toFixed(2)}×max 档 · 锚点 ${anchorRatio.toFixed(3)}×max 亦未通过）`,
     };
   };
 
@@ -2749,6 +3006,15 @@ export async function renderFigureMaps(
     };
   };
 
+  /* v3.86 (round-46 “align是能去掉去垢剂后进行吗？”): the reference's
+   *  3-phase split + belt anchor, run-scoped so BOTH the probe view phase
+   *  (display anchor + membrane cameras) and the ALIGNMENT mask phase
+   *  (2.5 — belt-phase density zeroed out of the fitmap targets) read the
+   *  SAME /membrane2 reply. Populated inside the probe-capable branch;
+   *  beltLevelFrom(null, …) on REST/no-split transports keeps
+   *  proteinLevel null and the masks at their classic v3.67 ratios. */
+  let refMem2: Membrane2Reply | null = null;
+  let refBeltInfo: BeltLevelInfo = beltLevelFrom(null, null);
 
   if (probeCapable) {
     /* v3.80 (round-40 “map的朝向还是不对”): the base view is made
@@ -2770,14 +3036,20 @@ export async function renderFigureMaps(
     const refDispStats = await bridgeVolStats(t, refId);
     statsById.set(refId, refDispStats);
     const refMax = refDispStats?.max ?? refStats?.max ?? null;
+    /* v3.86: the reference's 3-phase split — fetched ONCE here and reused
+     * THREE ways: the display knee's belt-adaptive anchor, the membrane
+     * camera candidates (2b) and the ALIGNMENT masks' detergent removal
+     * (2.5, refBeltInfo.proteinLevel). */
+    refMem2 = t.canMembrane2 ? await bridgeMembrane2(t, refId) : null;
+    refBeltInfo = beltLevelFrom(refMem2, refDispStats ?? refStats);
     let refDisplayLevel: number | null = null;
     if (contourPolicy.mode === "manual" && refMax) {
       const ratio = Math.min(Math.max(Number.isFinite(contourPolicy.ratio) ? contourPolicy.ratio : LEVEL_RATIO, 0.01), 0.9);
       refDisplayLevel = refMax * ratio;
       log(`参考图截图 level ${refDisplayLevel.toFixed(4)}（手动 ${ratio}×max）`);
     } else if (kneeMode && refDispStats) {
-      progress("参考图 level 探针（逐档渲染找无噪点拐点）", 8);
-      const knee = await kneeLevelFor(refId, refDispStats, "ref");
+      progress("参考图 level 探针（胶束带自适应锚点 + 逐档渲染验证）", 8);
+      const knee = await kneeLevelFor(refId, refDispStats, "ref", refMem2);
       if (knee) {
         refDisplayLevel = knee.level;
         log(`参考图截图 level ${knee.level.toFixed(4)}（${knee.rule}）`);
@@ -2919,8 +3191,9 @@ export async function renderFigureMaps(
         }
         return { s, rejected: s == null };
       };
-      /* ---- the candidate axes sources, most trustworthy first ---- */
-      const mem2 = t.canMembrane2 ? await bridgeMembrane2(t, refId) : null;
+      /* the candidate axes sources, most trustworthy first — v3.86:
+       * reuses the 2a fetch (no second /membrane2 call). */
+      const mem2 = refMem2;
       const bands = (mem2?.bands ?? [])
         .filter((b) => b.count >= 64 && b.ratio > 0 && b.ratio < 1)
         .sort((a, b) => a.ratio - b.ratio);
@@ -3276,6 +3549,19 @@ export async function renderFigureMaps(
       refSmoothF = await gaussianSmooth(refId, SIGMA_FINE_A);
     }
   }
+  /* v3.86 (round-46 “align是能去掉去垢剂后进行吗？”) — DETERGENT
+   * REMOVAL for the ALIGNMENT TARGETS. The noise-mask clones are built at
+   * each model's OWN protein-band boundary (that model's /membrane2
+   * split) instead of the flat 0.125×max: with the belt phase zeroed out
+   * of the target, fitmap's cosine metric no longer rewards belt-on-belt
+   * overlap — the flat detergent torus used to dominate the objective and
+   * lock in arbitrary in-plane rolls (the delivered “align 存在问题”).
+   * The moving map keeps its belt (only dilutes, never biases — its
+   * points over the zeroed region contribute nothing). Graceful no-ops:
+   * hot-belt maps (belt = high band — a threshold cannot hide it), old
+   * relays (no /membrane2) and degenerate splits all keep the classic
+   * v3.67 mask level, each logged honestly. */
+  const maskNotes: string[] = [];
   for (const [sid, fine] of [
     [refSmoothC, false],
     [refSmoothF, true],
@@ -3284,15 +3570,40 @@ export async function renderFigureMaps(
     const sStats = await bridgeVolStats(t, sid);
     if (!sStats) continue;
     await exec(t, `volume #${sid} level ${(sStats.max * LEVEL_RATIO).toFixed(4)} step ${STEP}`, opts, true);
-    const mask = await thresholdZero(sid, sStats.max * MASK_RATIO);
+    let maskLevel = sStats.max * MASK_RATIO;
+    if (t.canMembrane2) {
+      /* the clone's OWN split — Gaussian smoothing reshapes the histogram,
+       * so the unsmoothed reference's t2 must not be reused verbatim. */
+      const m2c = await bridgeMembrane2(t, sid);
+      const beltC = beltLevelFrom(m2c, sStats);
+      if (beltC.proteinLevel != null) {
+        maskLevel = Math.max(maskLevel, beltC.proteinLevel);
+        maskNotes.push(`${fine ? "细" : "粗"}尺度屏蔽 ${maskLevel.toFixed(4)}（${(maskLevel / sStats.max).toFixed(3)}×max · 蛋白相带以下置零）`);
+      } else if (beltC.beltBand === "high") {
+        maskNotes.push(`${fine ? "细" : "粗"}尺度屏蔽保持 ${(maskLevel / sStats.max).toFixed(3)}×max（胶束相较蛋白更热 — 阈值无法去除）`);
+      }
+    }
+    const mask = await thresholdZero(sid, maskLevel);
     if (fine) refMaskF = mask;
     else refMaskC = mask;
   }
   // v3.67: the full-resolution masked reference needs no smoothing
   // pyramid — even the degraded fallbacks (no gaussian / no matrix
-  // round-trip) still get noise-masked fitting.
+  // round-trip) still get noise-masked fitting. v3.86: the full-res mask
+  // rides the reference's OWN protein-band boundary (beltLevelFrom was
+  // computed on this exact model in 2a).
   if (refStats) {
-    refMaskFull = await thresholdZero(refId, refStats.max * MASK_RATIO);
+    let maskLevel = refStats.max * MASK_RATIO;
+    if (refBeltInfo.proteinLevel != null) {
+      maskLevel = Math.max(maskLevel, refBeltInfo.proteinLevel);
+      maskNotes.push(`全分辨率屏蔽 ${maskLevel.toFixed(4)}（${(maskLevel / refStats.max).toFixed(3)}×max · 胶束相带以下置零）`);
+    } else if (refBeltInfo.beltBand === "high") {
+      maskNotes.push("全分辨率屏蔽保持经典比例（参考胶束相较蛋白更热 — 阈值无法去除）");
+    }
+    refMaskFull = await thresholdZero(refId, maskLevel);
+  }
+  if (maskNotes.length) {
+    log(`对齐目标已按三相分割去除胶束相: ${maskNotes.join(" · ")} — fitmap 不再奖励胶束-胶束重叠，姿态由蛋白质密度决定`);
   }
   if (refSmoothF != null && refMaskF != null) {
     log(
@@ -4264,11 +4575,18 @@ export async function previewReferenceLevels(
     const stats = await bridgeVolStats(t, id);
     if (stats) await ex(`volume #${id} color ${chimeraClassColor(0)}`);
     /* candidate levels: the auto chain FIRST, then the manual ratio
-     * ladder; near-duplicates (>88% agreement) are skipped. */
+     * ladder; near-duplicates (>88% agreement) are skipped. v3.86: the
+     * BELT-BAND adaptive anchor (the level the auto screenshots will
+     * actually ride) leads the list. */
     const candidates: Array<{ kind: "auto" | "ratio"; level: number; rule: string; srcRatio: number }> = [];
     if (stats) {
+      const m2 = t.canMembrane2 ? await bridgeMembrane2(t, id) : null;
+      const belt = beltLevelFrom(m2, stats);
+      if (Number.isFinite(belt.anchor) && belt.anchor > 0) {
+        candidates.push({ kind: "auto", level: belt.anchor, rule: belt.anchorRule, srcRatio: NaN });
+      }
       const auto = autoLevelFor(stats);
-      if (auto) candidates.push({ kind: "auto", level: auto.level, rule: auto.rule, srcRatio: NaN });
+      if (auto && !(belt.t1 != null && belt.t2 != null)) candidates.push({ kind: "auto", level: auto.level, rule: auto.rule, srcRatio: NaN });
     }
     if (stats) {
       for (const ratio of [0.06, 0.1, 0.15, 0.2, 0.25, 0.35, 0.5]) {
