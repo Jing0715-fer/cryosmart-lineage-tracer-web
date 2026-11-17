@@ -973,5 +973,30 @@
  * run's already-fetched FSC panel bytes (“__fsc__”) ride as a
  * zero-network rung that guarantees 交付文件 and HTML 报告 show the
  * SAME curve.
+ *
+ * v3.89 bump reason (round-49, deck (8)): the funnel head / delivery
+ * plots / levels were all FIXED by v3.88 (the deck's structure and the
+ * montage head read right, no detergent in the displays) — but the
+ * INTERMEDIATES' ORIENTATIONS still diverged from the reference (J9
+ * oblique globes, J48 end-on tops while J55 stands sideways). Two root
+ * causes: (1) fitmap's `envelope true` samples the MOVING map above its
+ * display level, which sat at the flat 0.25×max — BELOW the micelle's
+ * mid band t2, so every fit sampled a big blob of detergent points that
+ * could overlap the reference anywhere (micelle-on-protein rewards →
+ * yawed/tipped poses that still clear the correlation bars); (2) the
+ * v3.82 per-map orientation assist then gave every badly-fit map its OWN
+ * standing view (belt camera / standing scan with an arbitrary in-plane
+ * axis), so the deck showed a different face per map. Fixes: (1) the
+ * moving side's fit sampling level is now its OWN protein band (t2,
+ * per-model /membrane2 — mirrored on the σ-clone pyramid) so the
+ * alignment runs 去掉去垢剂 on BOTH sides; (2) REFERENCE-ANCHORED
+ * SILHOUETTE MATCHING — the reference's shared-view probe mask is cached
+ * once, every map's probe is IoU-matched against it, tier 1 keeps the
+ * shared view when it already matches, tier 2 scans camera yaws (±30…
+ * ±180, the model poses stay fitted — a 90°-yawed fit shows its own side
+ * view in the reference's frame), tier 3 stands the map up its own way
+ * and yaw-scans around THAT, and the standing sign is rolled to the
+ * reference's; below WEAK the map keeps the reference's viewing
+ * direction with an honest log (junk/near-symmetric classes).
  */
-export const FLOW_ENGINE_VERSION = "3.88";
+export const FLOW_ENGINE_VERSION = "3.89";

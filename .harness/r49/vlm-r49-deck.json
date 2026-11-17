@@ -1,0 +1,28 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "1) 是——J9 c0–c2、J41 c0–c3、J48 c0–c2 以及 J55 REF 这 11 张 3D 渲染图全部呈现相同的站立侧视剪影：顶部宽椭圆“头”+ 中间细柱 + 底部横向“底座”带，形态彼此一致。\n\n2) 没有——没有任何一张呈现俯视圆盘（圆形轮廓）或斜躺/杂乱碎片视角；全部都是同一方向的侧视剪影。\n\n3) 一致——各图（包括 J9、J41、J48 各 class）与右下角 J55 REF 参考图的视角、姿态完全相同，仅在颜色（灰/黄/青/紫）上不同，说明各 3D 分类重构均收敛到与参考一致的取向和形状。",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 1794924805,
+  "id": "20261117221320069896bcc5874ea4",
+  "model": "glm-5.3-flash",
+  "object": "chat.completion",
+  "request_id": "20261117221320069896bcc5874ea4",
+  "usage": {
+    "completion_tokens": 180,
+    "completion_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "prompt_tokens": 884,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "total_tokens": 1064
+  }
+}

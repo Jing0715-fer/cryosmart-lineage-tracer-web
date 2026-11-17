@@ -355,6 +355,17 @@ const server = Bun.serve({
       // UP from 0.15 to the clean 0.26 rung, and every map then anchors at
       // the reference's 0.26 ratio (the ref-ratio chaining drill).
       if (sp.get("noise") === "high") relayState.noiseFloor = 0.26;
+      // v3.89 E2E drill: ?pose=yaw90[:substr] — the maps whose open URL
+      // contains substr (default: none) are MISFIT (fitmap landed ~90°
+      // yawed): end-on (disc) at the shared camera, standing side view at
+      // camYaw ≈ ±90. Also arms the shape-aware FINAL saves so the deck's
+      // consistency is VLM-verifiable.
+      const poseDrill = sp.get("pose") || "";
+      if (poseDrill.startsWith("yaw90")) {
+        relayState.poseShapeFinal = true;
+        const substr = poseDrill.slice(5).replace(/^:/, "");
+        relayState.poseMisfitMatch = substr || "volume_class_1";
+      }
       return Response.json({
         ok: true,
         http_blocked: blockHttp,
@@ -367,6 +378,7 @@ const server = Bun.serve({
         belt_mode: relayState.beltMode,
         auth_expired: relayState.authExpiredUids,
         noise_floor: relayState.noiseFloor,
+        pose_misfit_match: relayState.poseMisfitMatch,
       });
     }
     if (pathname === "/flow-e2e/relay-stats") {
@@ -893,6 +905,13 @@ function mockRenderPng(): Uint8Array {
   const rgb =
     (relayState.shownModel != null && relayState.modelColors.get(relayState.shownModel)) ||
     ([178, 178, 178] as [number, number, number]);
+  /* v3.89 pose drill: the FINAL saves render camera-aware shapes too, so
+   * the deck's rows are visually comparable (a misfit map FIXED by the
+   * yaw scan renders the standing side view, not a disc). */
+  if (relayState.poseShapeFinal) {
+    const shaped = probeRenderPng("_final_shapeaware");
+    if (shaped) return shaped;
+  }
   return discPng(rgb as [number, number, number]);
 }
 
@@ -902,6 +921,7 @@ function mockRenderPng(): Uint8Array {
  * narrow). This is what the page's measureRender actually scores. */
 function probeRenderPng(name: string): Uint8Array | null {
   if (!name.startsWith("_")) return null;
+  if (name.startsWith("_sil_")) relayState.silhouetteProbes += 1;
   const rgb: [number, number, number] =
     (relayState.shownModel != null && relayState.modelColors.get(relayState.shownModel)) ||
     [178, 178, 178];
@@ -913,6 +933,16 @@ function probeRenderPng(name: string): Uint8Array | null {
    * the REFERENCE's 0.26 ratio (the round-47 ref-ratio chaining). */
   if (level < relayState.noiseFloor) return shapePng("snow", rgb as [number, number, number]);
   if (level > 0.5) return shapePng("sponge", rgb as [number, number, number]);
+  /* v3.89 pose drill: a MISFIT map (fitmap landed ~90°-yawed) reads END-ON
+   * (disc) at the shared camera and only shows its standing side view at
+   * camYaw ≈ ±90 — the page's silhouette yaw scan must find that yaw. */
+  if (relayState.shownModel != null && relayState.misfitModels.has(relayState.shownModel)) {
+    const yaw = ((relayState.camYaw % 360) + 360) % 360;
+    const side = (yaw >= 75 && yaw <= 105) || (yaw >= 255 && yaw <= 285);
+    return side
+      ? shapePng("mushroomWide", rgb as [number, number, number])
+      : discPng(rgb as [number, number, number]);
+  }
   const st = standingState();
   if (st === 0) return discPng(rgb as [number, number, number]);
   if (st < 0) return shapePng("mushroomDown", rgb as [number, number, number]);
@@ -932,9 +962,12 @@ function standingState(): 0 | 1 | -1 {
 }
 
 /** v3.82: at a standing elevation, is the azimuth aligned with the
- * disk's long axis (y ≡ 0 mod 180)? — the roll refinement's optimum. */
+ * disk's long axis (y ≡ 0 mod 180)? — the roll refinement's optimum.
+ * v3.89: reads the accumulated camYaw (the scan path's turn y accumulates
+ * it exactly like the old viewY; the camera path's post-camera yaws ride
+ * the same field). */
 function rollOkState(): boolean {
-  const y = ((relayState.viewY % 180) + 180) % 180;
+  const y = ((relayState.camYaw % 180) + 180) % 180;
   return y < 5 || y > 175;
 }
 
@@ -1235,6 +1268,28 @@ const relayState = {
    * up from the script 0.15 anchor to the clean 0.26 rung and every map
    * then anchors at the REFERENCE's 0.26 ratio. */
   noiseFloor: 0.12,
+  /** v3.89 E2E: the camera's accumulated YAW (turn y D) on top of a
+   * `view matrix camera` orientation — camDir is PRESERVED across yaw
+   * turns (a yawed standing view still stands; the old model reset camDir
+   * to 0 so any post-camera turn y rendered a disc, which no real ChimeraX
+   * does). Reset by view orient / view _cfbase / view matrix camera. */
+  camYaw: 0,
+  /** v3.89 E2E drill: ?pose=yaw90[:substr] — the maps whose OPEN URL
+   * contains substr are MISFIT (their fitmap alignment landed ~90°-yawed):
+   * at the shared camera (camYaw ≈ 0) they read END-ON (disc) and only
+   * show their standing side view at camYaw ≈ ±90 — the page's silhouette
+   * yaw scan must find and apply that yaw (the round-49 fix). */
+  poseMisfitMatch: null as string | null,
+  misfitModels: new Set<number>(),
+  /** v3.89 E2E drill: with ?pose=yaw90 the FINAL saves (render_*.png, the
+   * PPTX images) also render camera-aware shapes (mushroom/disc) instead
+   * of the plain discs — the deck's visual consistency becomes VLM-
+   * verifiable (every row standing side-view once the fix engages). */
+  poseShapeFinal: false,
+  /** v3.89 E2E stats: the `_sil_*` probe saves (the silhouette matching
+   * machinery) and every applied/scanned `turn y` value. */
+  silhouetteProbes: 0,
+  yawTurns: [] as number[],
 };
 
 function resetRelayState() {
@@ -1279,12 +1334,28 @@ function resetRelayState() {
   relayState.authExpiredUids = [];
   relayState.downloadResult401 = 0;
   relayState.noiseFloor = 0.12;
+  relayState.camYaw = 0;
+  relayState.poseMisfitMatch = null;
+  relayState.misfitModels.clear();
+  relayState.poseShapeFinal = false;
+  relayState.silhouetteProbes = 0;
+  relayState.yawTurns = [];
 }
 
 function relayNextModelId(): number {
   let max = 0;
   for (const id of relayState.models.keys()) if (id > max) max = id;
   return max + 1;
+}
+
+/** v3.89 pose drill: register a model — the MISFIT marking (the ?pose=
+ *  yaw90[:substr] drill) rides the URL, so the original, its flip hand and
+ *  the σ/mask clones all inherit it. */
+function registerModel(id: number, url: string) {
+  relayState.models.set(id, { url });
+  if (relayState.poseMisfitMatch && url.includes(relayState.poseMisfitMatch)) {
+    relayState.misfitModels.add(id);
+  }
 }
 
 function relayStats() {
@@ -1331,6 +1402,11 @@ function relayStats() {
     auth_expired: relayState.authExpiredUids,
     download_result_401: relayState.downloadResult401,
     noise_floor: relayState.noiseFloor,
+    // v3.89: the silhouette-matching drill (?pose=yaw90[:substr]).
+    pose_misfit_match: relayState.poseMisfitMatch,
+    misfit_models: [...relayState.misfitModels],
+    silhouette_probes: relayState.silhouetteProbes,
+    yaw_turns: [...relayState.yawTurns],
   };
 }
 function u_hasAsset(u: string): boolean {
@@ -1437,7 +1513,7 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
         return { text: "", error: `UserError: Unable to open ${url} — file not found on the ChimeraX machine (was it staged via /stage?)` };
       }
       const id = relayNextModelId();
-      relayState.models.set(id, { url });
+      registerModel(id, url);
       // v3.82: a newly opened model DISPLAYS by default (ChimeraX
       // semantics) — the probe renders are level-keyed per shown model.
       relayState.shownModel = id;
@@ -1463,7 +1539,7 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       }
       const bytes = new Uint8Array(await res.arrayBuffer());
       const id = relayNextModelId();
-      relayState.models.set(id, { url });
+      registerModel(id, url);
       // v3.82: a newly opened model DISPLAYS by default.
       relayState.shownModel = id;
       const idless = /\/J497\./.test(url);
@@ -1502,6 +1578,11 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       relayState.models.delete(id);
       // v3.82: closing the shown model leaves nothing displayed.
       if (relayState.shownModel === id) relayState.shownModel = null;
+      // v3.89: the misfit marking dies with the model — the mock REUSES
+      // freed ids (relayNextModelId = max+1 over the LIVING models), so a
+      // stale marking would leak onto the next map that draws the id (the
+      // r49 drill's J9 flip hand freed #10 and J41_c0 inherited its misfit).
+      relayState.misfitModels.delete(id);
     }
     return { text: "", error: null };
   }
@@ -1510,7 +1591,7 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   if (flipMatch) {
     const src = relayState.models.get(parseInt(flipMatch[1], 10));
     const next = flipMatch[3] ? parseInt(flipMatch[3], 10) : relayNextModelId();
-    relayState.models.set(next, { url: src?.url || "flipped" });
+    registerModel(next, src?.url || "flipped");
     return { text: `volume flip: new model (id #${next})`, error: null };
   }
 
@@ -1656,22 +1737,40 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   // v3.80→v3.82: view-state tracking for the probe renders — `view
   // orient` (deterministic base) and `view _cfbase` (restore) both reset
   // the accumulated turn state and the camera's standing direction.
+  // v3.89: also resets the accumulated yaw.
   if (/^view\s+orient$/i.test(command) || /^view\s+_cfbase$/i.test(command)) {
     relayState.viewX = 0;
     relayState.viewY = 0;
     relayState.camDir = 0;
+    relayState.camYaw = 0;
     return { text: "", error: null };
   }
   // v3.80→v3.82: NAMED-axis turns (the membrane scan uses only these —
   // `turn x 90`, `turn y 45`, `turn x -22.5` …). The accumulated state
   // drives the drill renders: viewX ≈ 90 stands the mushroom up (≈ 270 =
   // a `turn x 180` flip, head-down); the azimuth decides the roll variant.
+  // v3.89: `turn y` is the camera YAW — camDir (standing) is PRESERVED (a
+  // yawed standing view still stands; the old model reset camDir so any
+  // post-camera turn y rendered a disc, which no real ChimeraX does); a
+  // `turn x 180` on top of a camera orientation flips head-up ↔ head-down.
   const namedTurnMatch = /^turn\s+([xyz])\s+(-?\d+(?:\.\d+)?)$/i.exec(command);
   if (namedTurnMatch) {
     const deg = Number(namedTurnMatch[2]);
-    if (namedTurnMatch[1].toLowerCase() === "x") relayState.viewX += deg;
-    else relayState.viewY += deg;
-    relayState.camDir = 0;
+    const axis = namedTurnMatch[1].toLowerCase();
+    if (axis === "y") {
+      relayState.viewY += deg;
+      relayState.camYaw += deg;
+      relayState.yawTurns.push(deg);
+    } else if (axis === "x") {
+      if (relayState.camDir !== 0 && Math.abs(Math.abs(deg) - 180) < 1e-6) {
+        relayState.camDir = relayState.camDir === 1 ? -1 : 1;
+      } else {
+        relayState.viewX += deg;
+        relayState.camDir = 0;
+      }
+    } else {
+      relayState.camYaw += deg;
+    }
     return { text: "", error: null };
   }
   // v3.79 contract guard: `view matrix camera` REQUIRES 12 (or 16)
@@ -1721,6 +1820,7 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
     if (relayState.camDir !== 0) relayState.cameraAccepts += 1;
     relayState.viewX = 0;
     relayState.viewY = 0;
+    relayState.camYaw = 0;
     return { text: "", error: null };
   }
   // v3.79: the membrane view now orients via a single screen-frame

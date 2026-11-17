@@ -1504,6 +1504,35 @@ export interface RenderShape {
    *  noise silhouette ≫ 2.5). Diagnostics in the run log; NOT a gate
    *  (legit concave silhouettes — head+column+belt — also read high). */
   rough: number;
+  /** v3.89: the downsampled MAIN-component silhouette mask (binary,
+   *  labels==main only — the pose-comparable shape; stray dust/speckle
+   *  components are excluded so a noisy map can still pose-match its
+   *  clean reference). This is what every map's render is IoU-matched
+   *  against the reference's cached mask with (the round-49 orientation
+   * fix). null on degenerate renders (fg < 16 → nothing to compare). */
+  mask?: { w: number; h: number; data: Uint8Array } | null;
+}
+
+/** v3.89: silhouette agreement between two probe masks — the intersection
+ * over the union of the two main-component masks (both on the SAME
+ * downsampled probe grid). 1.0 = identical silhouettes; a same-pose
+ * same-pipeline map reads ≈ 0.6–0.9 (level/envelope differences), a
+ * 90°-yawed or face-on map reads well below. Pure + exported for the
+ * offline harness. */
+export function maskIou(
+  a: { w: number; h: number; data: Uint8Array },
+  b: { w: number; h: number; data: Uint8Array },
+): number | null {
+  if (a.w !== b.w || a.h !== b.h || a.data.length !== b.data.length) return null;
+  let inter = 0;
+  let union = 0;
+  for (let i = 0; i < a.data.length; i++) {
+    const x = a.data[i];
+    const y = b.data[i];
+    if (x || y) union++;
+    if (x && y) inter++;
+  }
+  return union > 0 ? inter / union : null;
 }
 
 async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
@@ -1542,7 +1571,7 @@ async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
       }
     }
   }
-  if (fg < 16) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0, holes: 0, rough: 0 };
+  if (fg < 16) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0, holes: 0, rough: 0, mask: null };
   /* connected components (4-neighbour BFS, iterative stack) */
   const labels = new Int32Array(mw * mh).fill(-1);
   const comps: Array<{ area: number; minX: number; minY: number; maxX: number; maxY: number; sx: number; sy: number; sxx: number; syy: number; sxy: number }> = [];
@@ -1574,7 +1603,7 @@ async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
     }
     comps.push(c);
   }
-  if (!comps.length) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0, holes: 0, rough: 0 };
+  if (!comps.length) return { aniso: 1, aspect: 0, coverage: 0, frag: 1, mainCov: 0, standing: 0, holes: 0, rough: 0, mask: null };
   let main = comps[0];
   let mainLabel = 0;
   for (let ci = 0; ci < comps.length; ci++) {
@@ -1676,6 +1705,11 @@ async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
       if (qy < mh - 1) push(q + mw);
     }
   }
+  /* v3.89: the main component's own mask — the pose-comparable
+   * silhouette (dust/speckle components excluded; the labels array already
+   * partitions the foreground). */
+  const mainMask = new Uint8Array(mw * mh);
+  for (let p = 0; p < mainMask.length; p++) mainMask[p] = labels[p] === mainLabel ? 1 : 0;
   return {
     aniso: Math.sqrt(Math.max(lMax, 1e-9) / lMin),
     aspect: bw / bh,
@@ -1685,6 +1719,7 @@ async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
     standing,
     holes,
     rough,
+    mask: { w: mw, h: mh, data: mainMask },
   };
 }
 
@@ -1772,8 +1807,40 @@ const STANDING_ACCEPT = 0.06;
 const STANDING_SCAN_NEED = 0.08;
 /** v3.82: a class map whose render at the shared camera reads below this
  * gets its OWN orientation assist (its fitmap alignment landed off-axis —
- * the delivered J9/J48 ab-initio obliques). */
+ * the delivered J9/J48 ab-initio obliques). v3.89: the assist is now the
+ * LAST tier of the silhouette matching (see SILHOUETTE_GOOD below) — it
+ * still stands a map up when nothing yaw-like can match the reference. */
 const STANDING_ASSIST_TRIGGER = 0.05;
+/** v3.89 (round-49 “中间过程的map角度还是不对 — J9 斜视 / J48 俯视，与
+ *  参考图侧视不一致”): the REFERENCE-ANCHORED SILHOUETTE MATCHING
+ *  thresholds. Every non-reference map's probe render at the shared camera
+ *  is IoU-matched (maskIou, main-component masks) against the reference's
+ *  CACHED shared-view silhouette:
+ *    tier 1 — IoU ≥ SILHOUETTE_GOOD at the shared view: the fitmap pose
+ *      shows the reference's face; keep it (most maps stop here);
+ *    tier 2 — yaw scan (turn y ±30…180 around the screen vertical) with
+ *      the best IoU ≥ GOOD: the fit landed yawed (the deck-8 J48 end-on
+ *      views); apply the winning yaw — the map shows its OWN side view in
+ *      the reference's viewing frame (what the reader compares);
+ *    tier 3 — the v3.82 standing assist (own belt-PCA camera / standing
+ *      scan) + the same yaw scan around IT: a face-down or tilted fit no
+ *      yaw can rescue; the assist stands it up and the yaw scan fixes the
+ *      belt camera's in-plane degeneracy, then the better of tiers 2/3
+ *      wins by IoU.
+ *  Below SILHOUETTE_WEAK even at the best yaw the map genuinely does not
+ *  look like the reference (a junk class / a near-symmetric blob) — the
+ *  shared view is KEPT (the reader still sees the same viewing direction)
+ *  and the log says so honestly. The standing sign fix (turn x 180) still
+ *  rolls a chosen view whose heavy end contradicts the reference's.
+ *  Calibration (the E2E mock shapes): same-pose head-radius variants
+ *  IoU ≈ 0.75+, disc-vs-standing ≈ 0.55, head-up-vs-head-down ≈ 0.45. */
+const SILHOUETTE_GOOD = 0.6;
+const SILHOUETTE_WEAK = 0.3;
+/** v3.89: the yaw scan order — the 90° family first (the dominant
+ *  fit-failure mode: end-on vs side), then 45°/30° obliques, early-exit
+ *  as soon as a candidate clears SILHOUETTE_GOOD. Camera-space turns only
+ *  — every model keeps its fitted pose (the delivered maps stay aligned). */
+const SILHOUETTE_YAWS = [90, -90, 180, 45, -45, 135, -135, 30, -30, 60, -60, 120, -120, 150, -150];
 /** v3.82: the level KNEE ladder (×max, log-spaced) — v3.85 (round-45):
  *  probed only AFTER the script anchor 0.15×max (auto_color_locres.py)
  *  fails its verification; the pick is the clean rung CLOSEST to the
@@ -3875,6 +3942,34 @@ export async function renderFigureMaps(
     ).join(" → ")}）；达标即止：初始姿态达标跳过拟合，原手达标跳过镜像手性对比`,
   );
 
+  /** v3.89 (round-49 “中间过程的map角度还是不对”): the MOVING side's fit
+   * sampling level. fitmap `envelope true` samples the moving map above
+   * its CURRENT DISPLAY level, and the open-time level was the flat
+   * 0.25×max — on the deck-8 intermediates the detergent micelle (mid-band
+   * density, t1 < ρ < t2) sat almost entirely ABOVE that level, so every
+   * fit sampled a big blob of micelle points that could overlap the
+   * reference anywhere (micelle-on-protein rewards → yawed/tipped poses
+   * that still pass the correlation bars — the J48 end-on / J9 oblique
+   * renders). The moving model's OWN 3-phase split gives the protein-only
+   * threshold (proteinLevel = t2, capped at half-max): when it sits above
+   * the classic level, the fit samples protein only, mirroring the v3.86
+   * reference-side detergent removal — the alignment now runs 去掉去垢剂
+   * on BOTH sides. The display level is unaffected (the knee re-decides it
+   * at export time). */
+  const fitSamplingLevelFor = async (
+    id: number,
+    stats: BridgeVolStats | null,
+    classic: number | null,
+  ): Promise<{ level: number | null; rule: string | null }> => {
+    if (classic == null || !stats || !Number.isFinite(stats.max) || stats.max <= 0) return { level: classic, rule: null };
+    if (!t.canMembrane2) return { level: classic, rule: null };
+    const m2 = await bridgeMembrane2(t, id);
+    const belt = beltLevelFrom(m2, stats);
+    if (belt.proteinLevel == null || !Number.isFinite(belt.proteinLevel)) return { level: classic, rule: null };
+    if (belt.proteinLevel <= classic + 1e-9) return { level: classic, rule: null };
+    return { level: belt.proteinLevel, rule: "本图蛋白/胶束分界 t2 — 移动侧同样不采样胶束密度" };
+  };
+
   for (const req of all) {
     if (threw(opts.signal)) throw new Error("aborted");
     const isReference = req.key === opts.reference.key;
@@ -3916,6 +4011,11 @@ export async function renderFigureMaps(
     const hands: Array<{ name: "original" | "flip_z"; modelId: number }> = [];
     {
       let origId: number | null = null;
+      /* v3.89: the original hand's protein-banded fit sampling level —
+       * hoisted so the flip hand can carry it over (the flip preserves
+       * the value distribution). */
+      let origFitLevel: number | null = null;
+      let origFitMax: number | null = null;
       try {
         const openRes = await bridgeOpenModel(t, req.sourceUrl);
         origId = openRes.modelId;
@@ -3924,13 +4024,24 @@ export async function renderFigureMaps(
         }
         openIds.add(origId);
         const stats = await bridgeVolStats(t, origId);
-        const level = stats ? stats.max * LEVEL_RATIO : refLevel;
+        const classicLevel = stats ? stats.max * LEVEL_RATIO : refLevel;
+        /* v3.89: the FIT sampling level — the moving model's own protein
+         * band when it sits above the classic 0.25×max (the micelle must
+         * not ride the fitmap envelope); the DISPLAY level is decided at
+         * export time by the knee (or the policy below in manual mode). */
+        const fit0 = await fitSamplingLevelFor(origId, stats, classicLevel);
+        const level = fit0.level;
+        origFitLevel = level;
+        origFitMax = stats && Number.isFinite(stats.max) && stats.max > 0 ? stats.max : null;
+        if (fit0.rule && level != null) {
+          log(`  ${req.key}: 拟合采样 level ${level.toFixed(4)}（${fit0.rule}）`);
+        }
         /* v3.77 → v3.82: the DISPLAY level for this map's screenshot. In
          * kneeMode (auto + probes) the level is decided AT EXPORT TIME by
          * the rendered knee ladder — nothing to preselect here. Otherwise
          * (manual / REST) the policy rule records it now. The fit level
-         * below stays 0.25×max; only the visible contour rides the
-         * policy. */
+         * below stays 0.25×max unless protein-banded; only the visible
+         * contour rides the policy. */
         statsById.set(origId, stats);
         if (!kneeMode) {
           const mapDisplayChoice = displayLevelFor(stats, contourPolicy, refAnchor);
@@ -3986,7 +4097,15 @@ export async function renderFigureMaps(
           if (flipId == null) throw new Error("flip produced no model");
           openIds.add(flipId);
           const stats2 = await bridgeVolStats(t, flipId);
-          const level2 = stats2 ? stats2.max * LEVEL_RATIO : refLevel;
+          /* v3.89: the flip preserves the value distribution, so the
+           * original hand's protein band carries over (scaled by the two
+           * maxima — identical in practice); only an independent fallback
+           * when the original never got one. */
+          const classic2 = stats2 ? stats2.max * LEVEL_RATIO : refLevel;
+          const level2 =
+            origFitLevel != null && origFitMax != null && stats2 && Number.isFinite(stats2.max) && stats2.max > 0
+              ? origFitLevel * (stats2.max / origFitMax)
+              : (await fitSamplingLevelFor(flipId, stats2, classic2)).level;
           /* v3.77 → v3.82: display level for the flipped hand's screenshot
            * (same policy as the original — the flip preserves the value
            * distribution, so the two levels coincide; kneeMode decides at
@@ -4089,7 +4208,14 @@ export async function renderFigureMaps(
             if (sid == null) continue;
             const sStats = await bridgeVolStats(t, sid);
             if (sStats) {
-              await exec(t, `volume #${sid} level ${(sStats.max * LEVEL_RATIO).toFixed(4)} step ${STEP}`, opts, true);
+              /* v3.89: each σ-clone's OWN 3-phase split (Gaussian smoothing
+               * reshapes the histogram — the same reason the reference's
+               * mask clones re-split); the protein band when it sits above
+               * the classic 0.25×max, so the pyramid fits sample protein
+               * only on the moving side too. */
+              const sFit = await fitSamplingLevelFor(sid, sStats, sStats.max * LEVEL_RATIO);
+              const sLevel = sFit.level ?? sStats.max * LEVEL_RATIO;
+              await exec(t, `volume #${sid} level ${sLevel.toFixed(4)} step ${STEP}`, opts, true);
             }
             await exec(t, `volume #${sid} color ${mapColor}`, opts, true);
           }
@@ -4389,6 +4515,39 @@ export async function renderFigureMaps(
       await exec(t, `hide #${id} models`, opts, true);
     }
     await exec(t, "wait 1", opts, true);
+    /* ---- v3.89: the reference's shared-view SILHOUETTE, cached once
+     * before the per-map loop — every non-reference map's probe render is
+     * IoU-matched (maskIou, main-component masks) against it (the
+     * round-49 orientation fix: the deck-8 intermediates read
+     * oblique/end-on while the reference stood, because each map's own
+     * low anchor + fit pose + assist camera diverged from the reference's
+     * viewing frame; the fit correlation cannot be trusted alone for
+     * low-resolution blobs). The reference's display level is the run's
+     * decided one (the knee re-run below is deterministic and lands on
+     * the same rung — the ref-ratio floor keeps its own anchor). ---- */
+    let refSilhouette: { mask: { w: number; h: number; data: Uint8Array }; standing: number } | null = null;
+    if (applySharedView && refId != null && openIds.has(refId)) {
+      const refLvl = displayLevelById.get(refId);
+      if (refLvl != null) {
+        await exec(t, `volume #${refId} level ${refLvl.toFixed(4)} step ${STEP}`, opts, true);
+        await exec(t, `surface dust #${refId} size ${DUST_SIZE_A}`, opts, true);
+      }
+      await exec(t, `show #${refId} models`, opts, true);
+      await applySharedView();
+      await exec(t, "wait 1", opts, true);
+      await exec(t, "view", opts, true);
+      await exec(t, "wait 1", opts, true);
+      const sil = await renderProbe("_refsil_shared.png");
+      if (sil?.mask) {
+        refSilhouette = { mask: sil.mask, standing: sil.standing };
+        log(
+          `参考图轮廓已缓存（共享视角 · 站立度 ${sil.standing >= 0 ? "+" : ""}${sil.standing.toFixed(3)}）— 各图按轮廓 IoU 与参考图同面呈现`,
+        );
+      } else {
+        log("⚠ 参考图轮廓探针失败 — 各图保持共享视角（无轮廓匹配）");
+      }
+      await exec(t, `hide #${refId} models`, opts, true);
+    }
     for (const r of renders) {
       if (threw(opts.signal)) throw new Error("aborted");
       const showId = r.modelId;
@@ -4420,15 +4579,193 @@ export async function renderFigureMaps(
         await setDisplayLevel(showId);
       }
       await exec(t, "wait 1", opts, true);
-      /* v3.82 (b): the orientation — re-derive the run's shared view
-       * (the previous map's assist may have moved the camera), then
-       * VERIFY this map actually stands in it; a map whose fitmap
-       * alignment landed off-axis (the delivered J9/J48 ab-initio
-       * obliques) gets its OWN side view (band camera / standing scan)
-       * for its screenshot, logged honestly — the alignment correlation
-       * in the log stays the honest record of the fit quality. */
+      /* v3.82 (b) → v3.89: the orientation — re-derive the run's shared
+       * view (the previous map's matching may have moved the camera),
+       * then the REFERENCE-ANCHORED SILHOUETTE MATCHING (see
+       * SILHOUETTE_GOOD above): tier 1 keeps the shared view when the
+       * map's render already matches the reference's silhouette; tier 2
+       * scans camera yaws (the model poses stay fitted); tier 3 stands
+       * the map up its own way (the v3.82 assists) and yaw-scans around
+       * THAT; the best IoU wins and the standing sign is rolled to the
+       * reference's. The alignment correlation in the log stays the
+       * honest record of the 3D fit quality. */
       if (applySharedView) await applySharedView();
-      if (opts.membraneView?.mode === "auto") {
+      const isRefRow = r.key === opts.reference.key;
+      if (applySharedView && refSilhouette && !isRefRow) {
+        const tagKey = safeKeyPart(r.key.replace(/\//g, "__"));
+        type SilCand = {
+          apply: () => Promise<void>;
+          yaw: number;
+          iou: number;
+          standing: number | null;
+          via: string;
+        };
+        const probeCand = async (
+          base: () => Promise<void>,
+          yaw: number,
+          via: string,
+        ): Promise<SilCand | null> => {
+          await base();
+          if (yaw) await exec(t, `turn y ${yaw}`, opts, true);
+          await exec(t, "wait 1", opts, true);
+          await exec(t, "view", opts, true);
+          await exec(t, "wait 1", opts, true);
+          const s = await renderProbe(`_sil_${tagKey}_y${yaw < 0 ? "m" : ""}${Math.abs(yaw)}.png`);
+          if (!s || !s.mask) return null;
+          const iou = maskIou(s.mask, refSilhouette.mask);
+          if (iou == null) return null;
+          return { apply: base, yaw, iou, standing: s.standing, via };
+        };
+        const sharedBase = async () => {
+          if (applySharedView) await applySharedView();
+        };
+        let best: SilCand | null = await probeCand(sharedBase, 0, "共享视角");
+        if (best && best.iou >= SILHOUETTE_GOOD) {
+          log(`  ${r.key}: 视角轮廓与参考一致（IoU ${best.iou.toFixed(2)}）— 共享侧视`);
+        } else {
+          /* tier 2: the yaw scan around the shared view — camera-space
+           * turns only, the model keeps its fitted pose (90° family
+           * first, early-exit at GOOD). */
+          for (const yaw of SILHOUETTE_YAWS) {
+            if (threw(opts.signal)) break;
+            const c = await probeCand(sharedBase, yaw, `共享视角 + 偏航 ${yaw}°`);
+            if (c && (!best || c.iou > best.iou + 0.01)) best = c;
+            if (best && best.iou >= SILHOUETTE_GOOD) break;
+          }
+          if (best && best.yaw !== 0 && best.iou >= SILHOUETTE_GOOD) {
+            log(
+              `  ${r.key}: ✓ 视角轮廓匹配: 偏航 ${best.yaw}°（IoU ${best.iou.toFixed(2)}）— 本图以参考图同面呈现（fitmap 落点偏航，姿态本身未改动）`,
+            );
+          } else if (best && best.yaw !== 0 && best.iou >= SILHOUETTE_WEAK) {
+            log(
+              `  ${r.key}: 视角轮廓最佳偏航 ${best.yaw}°（IoU ${best.iou.toFixed(2)}，中等相似 — 分辨率/包络差异所致）— 采用该视角`,
+            );
+          }
+          /* tier 3: the standing assist (own belt-PCA camera / standing
+           * scan) + the same yaw scan around it — a face-down or tilted
+           * fit no camera yaw can rescue; the assist stands the map up
+           * in its own frame and the yaw scan fixes the belt camera's
+           * in-plane degeneracy, then the better of tiers 2/3 wins. */
+          if (!best || best.iou < SILHOUETTE_GOOD) {
+            const assistBases: Array<{ label: string; apply: () => Promise<void> }> = [];
+            if (t.canMembrane2) {
+              const m2 = await bridgeMembrane2(t, showId);
+              const band = (m2?.bands ?? [])
+                .filter((b) => b.count >= 64 && b.ratio > 0 && b.ratio < 1)
+                .sort((a, b) => a.ratio - b.ratio)[0];
+              if (band) {
+                let n: [number, number, number] = [...band.normal];
+                for (const i of [1, 2, 0] as const) {
+                  if (Math.abs(n[i]) > 1e-6) {
+                    if (n[i] < 0) n = [n[0] * -1, n[1] * -1, n[2] * -1];
+                    break;
+                  }
+                }
+                const xAxis = band.ea;
+                const zRaw: [number, number, number] = [
+                  xAxis[1] * n[2] - xAxis[2] * n[1],
+                  xAxis[2] * n[0] - xAxis[0] * n[2],
+                  xAxis[0] * n[1] - xAxis[1] * n[0],
+                ];
+                const zLen = Math.hypot(zRaw[0], zRaw[1], zRaw[2]);
+                const zAxis: [number, number, number] = zLen > 1e-9 ? [zRaw[0] / zLen, zRaw[1] / zLen, zRaw[2] / zLen] : zRaw;
+                let camTrans: [number, number, number] = [0, 0, 0];
+                const vm = await exec(t, "view matrix", opts, true);
+                if (!vm.error) {
+                  const m = /camera[^\d\-+]*((?:[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?[\s,]+){11}[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?)/i.exec(vm.text);
+                  if (m) {
+                    const nums = m[1].match(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/g)?.map(Number) ?? [];
+                    if (nums.length >= 12 && [3, 7, 11].every((i) => Number.isFinite(nums[i]))) {
+                      camTrans = [nums[3], nums[7], nums[11]];
+                    }
+                  }
+                }
+                const camCmd = `view matrix camera ${[
+                  xAxis[0], n[0], zAxis[0], camTrans[0],
+                  xAxis[1], n[1], zAxis[1], camTrans[1],
+                  xAxis[2], n[2], zAxis[2], camTrans[2],
+                ]
+                  .map((v) => (Math.abs(v) < 5e-7 ? 0 : v).toFixed(6))
+                  .join(",")}`;
+                const camRes = await exec(t, camCmd, opts, true);
+                if (!camRes.error) {
+                  assistBases.push({
+                    label: "本图胶束带 PCA 相机",
+                    apply: async () => {
+                      await exec(t, "view _cfbase", opts, true);
+                      await exec(t, camCmd, opts, true);
+                    },
+                  });
+                }
+              }
+            }
+            if (!assistBases.length) {
+              const scan = await scanForStanding("轮廓匹配未达标，按本图自身密度立正", `a_${tagKey}_`, null);
+              if (scan) {
+                assistBases.push({
+                  label: scan.via,
+                  apply: async () => {
+                    await exec(t, "view _cfbase", opts, true);
+                    if (scan.x) await exec(t, `turn x ${scan.x}`, opts, true);
+                    await exec(t, `turn y ${scan.y}`, opts, true);
+                  },
+                });
+              }
+            }
+            for (const base of assistBases) {
+              let assistBest: SilCand | null = await probeCand(base.apply, 0, `${base.label} 立正`);
+              if (!assistBest || assistBest.iou < SILHOUETTE_GOOD) {
+                for (const yaw of SILHOUETTE_YAWS) {
+                  if (threw(opts.signal)) break;
+                  const c = await probeCand(base.apply, yaw, `${base.label} 立正 + 偏航 ${yaw}°`);
+                  if (c && (!assistBest || c.iou > assistBest.iou + 0.01)) assistBest = c;
+                  if (assistBest && assistBest.iou >= SILHOUETTE_GOOD) break;
+                }
+              }
+              if (assistBest && (!best || assistBest.iou > best.iou + 0.01)) {
+                best = assistBest;
+                log(
+                  `  ${r.key}: ✓ 立正后轮廓匹配: ${assistBest.via}（IoU ${assistBest.iou.toFixed(2)}）— 与参考图同面呈现`,
+                );
+              }
+            }
+          }
+          if (best && best.iou < SILHOUETTE_WEAK) {
+            log(
+              `  ${r.key}: ⚠ 本图与参考轮廓差异大（最佳 IoU ${best.iou.toFixed(2)} < ${SILHOUETTE_WEAK} — 垃圾类/近对称图）— 保持参考共享视角`,
+            );
+            best = await probeCand(sharedBase, 0, "共享视角");
+          }
+        }
+        /* apply the chosen camera state (idempotent re-apply + yaw); a
+         * null best (every probe failed / aborted mid-scan) falls back
+         * to the shared view so the camera never rests mid-scan. */
+        if (best && best.via !== "共享视角") {
+          await best.apply();
+          if (best.yaw) await exec(t, `turn y ${best.yaw}`, opts, true);
+          await exec(t, "wait 1", opts, true);
+        } else if (!best) {
+          await sharedBase();
+          await exec(t, "wait 1", opts, true);
+        }
+        /* the standing sign fix — a chosen view whose heavy end
+         * contradicts the reference's rolls 180° (the reference's own
+         * up-side is the figure's convention). */
+        if (
+          best &&
+          refStandingSign != null &&
+          best.standing != null &&
+          Math.abs(best.standing) >= STANDING_ACCEPT &&
+          Math.sign(best.standing) !== refStandingSign
+        ) {
+          await exec(t, "turn x 180", opts, true);
+          await exec(t, "wait 1", opts, true);
+          log(`  ${r.key}: 已上下翻转 180° 对齐参考图朝向（本图重端与参考相反）`);
+        }
+      } else if (opts.membraneView?.mode === "auto") {
+        /* the v3.82 standing check — still the fallback for the reference
+         * row itself and for runs without a cached reference silhouette
+         * (probe machinery unavailable); the assist paths are unchanged. */
         await exec(t, "wait 1", opts, true);
         await exec(t, "view", opts, true);
         await exec(t, "wait 1", opts, true);
