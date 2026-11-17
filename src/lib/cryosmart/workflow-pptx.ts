@@ -773,7 +773,11 @@ export async function buildWorkflowPptx(
     if (!key) return { bytes, width: 1, height: 1 };
     const hit = trimCache.get(key);
     if (hit) return hit;
-    const res = await trimPngAlpha(bytes);
+    /* v3.87: pad 40 px — the round-47 renders filled their ChimeraX frames
+     * edge-to-edge (VLM: "touches left/right edges, minor cropping"), so
+     * every placed thumbnail now carries a transparent breathing margin
+     * (synthesized beyond the canvas when the content touched it). */
+    const res = await trimPngAlpha(bytes, 8, 40);
     const out = { bytes: res.bytes, width: res.width, height: res.height };
     trimCache.set(key, out);
     return out;

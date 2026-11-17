@@ -875,5 +875,52 @@
  * orientation_distribution.png, the same route that delivers the .mrc
  * maps and the fsc.xml), walked first among the non-log candidates
  * after the fsc.xml re-draw.
+ *
+ * v3.87 bump reason (round-47 “标准模式下为何有些图片没有显示？框也有
+ * 问题。最终的map的角度和level倒是没有问题了，但是前面步骤的map角度
+ * 还是有问题，可能是在不正确的level下进行align？…目前最终map的level
+ * 选的0.25倍，但是前面的map目前也都是0.25吗？”): forensics on the
+ * delivered P283_J55_workflow (6).pptx — the FIRST 标准模式 run (9 jobs,
+ * 26 slots): only J41×4/J48×3/J55 rendered; J23+J10–J38's 18 slots came
+ * back as BARE EMPTY BLACK FRAMES (v3.75's missing-thumbnail placeholder)
+ * with zero visible explanation — the 18 never-before-cached maps failed
+ * the download ladder (most plausibly the CryoSmart session credential
+ * expired: the stable download_result_file URLs need auth, and only the
+ * previously-downloaded J41/J48/J55 hit the relay's local cache), and the
+ * footer's chirality counts (2+5+1=8) prove they never even entered the
+ * alignment pipeline. Meanwhile VLM read all 7 intermediate renders
+ * round/lying/oblique with sponge/speckle levels while the reference
+ * stood upright at 0.26×max — the round-46 guidance (“无需重新 open
+ * relay.py”) left the user on a bridge WITHOUT /membrane2, so the v3.86
+ * detergent-removal masks and per-map belt anchors NEVER ENGAGED (old-
+ * relay fallback = flat 0.125×max fit targets, belt + noise included →
+ * off-axis fits → the lying views). Fixes: (1) OLD-RELAY ALIGNMENT MASK
+ * rung — without a 3-phase split the fit targets are thresholded at the
+ * REFERENCE's OWN probe-verified display level (the knee just proved it
+ * renders clean: noise floor cleared, cold belt hidden, coverage
+ * verified) scaled onto each σ-clone's own max, capped at 0.5×max — the
+ * best protein-band proxy an old bridge can offer, honestly logged
+ * (参考图渲染验证 level) with an upgrade note; (2) REF-RATIO DISPLAY
+ * ANCHOR — a no-split (old relay) non-reference map anchors its level
+ * knee at the REFERENCE's final display RATIO instead of the flat script
+ * 0.15×max (same-pipeline maps share their histogram character — the
+ * user's exact “前面的map也都是最终map的倍率吗” ask); the ladder +
+ * render probes still verify and walk when the map's own noise floor
+ * sits elsewhere; (3) LABELLED PLACEHOLDERS — a missing thumbnail now
+ * renders as a slate box reading 渲染失败 + the per-map reason instead
+ * of the bare frame, and the result panel gains the amber missing-image
+ * block (every failed map + its reason + the CLASSIFIED remedy: 401/403
+ * → 重新登录并重新 Smart Capture, ENOSPC → 清理缓存目录); the run log
+ * carries the same summary; (4) the old-relay /membrane2 notice prints
+ * at CONNECT time (before the run starts), not only deep in the mask
+ * section; (5) every placed thumbnail carries a 40 px transparent margin
+ * (trimPngAlpha pad — synthesized beyond the canvas when the render
+ * touched its edges, the VLM “touches left/right edges, minor cropping”);
+ * (6) the engine also collects alignment-failed (双手全败) and
+ * screenshot-failed renders into the same failure map. envelope true on
+ * fitmap was QUESTIONED this round — verified already on since v3.67
+ * (probed first: “fitmap #N inMap #N metric correlation envelope true”,
+ * the moving map sampled only above its contour; the reference side is
+ * why our threshold-set-0 masked clones exist at all).
  */
-export const FLOW_ENGINE_VERSION = "3.86";
+export const FLOW_ENGINE_VERSION = "3.87";

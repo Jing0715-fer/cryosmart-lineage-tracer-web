@@ -837,6 +837,15 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
   } | null>(null);
   const [thumbs, setThumbs] = useState<{ key: string; url: string }[]>([]);
   const [renderReport, setRenderReport] = useState<MapRender[]>([]);
+  /** v3.87 (round-47 “标准模式下为何有些图片没有显示？”): the maps that never
+   *  made it to a thumbnail — download/relay failures collected across the
+   *  source ladder PLUS alignment/screenshot failures from the engine —
+   *  with the classified remedy hint. Drives BOTH the amber result-panel
+   *  block and the PPTX's labelled placeholder boxes. */
+  const [mapFailureReport, setMapFailureReport] = useState<{
+    items: Array<[string, string]>;
+    hint: string;
+  } | null>(null);
   /** v3.50: server engine version when THIS page bundle is older (stale
    *  tab from a previous dev-server session) — non-null shows the refresh
    *  banner and blocks 生成. */
@@ -1464,6 +1473,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       setResult(null);
       setThumbs([]);
       setRenderReport([]);
+      setMapFailureReport(null);
       setDeliverReport(null);
       setStep({ busy: true, phase: "准备", pct: 2, logs: [], error: null });
       pushLog(`流程图引擎 v${FLOW_ENGINE_VERSION}`);
@@ -1554,6 +1564,10 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       const images = new Map<string, Uint8Array>();
       const imageUrls: string[] = [];
       for (const group of model.groups) for (const item of group) if (item.imageUrl) imageUrls.push(item.imageUrl);
+      /* v3.87 (round-47): per-map render-pipeline failures (download/relay
+       * ladder + alignment/screenshot) — collected for the honest labelled
+       * placeholders and the amber result-panel block with its remedy. */
+      const mapFailures = new Map<string, string>();
 
       /* 2. per-mode thumbnails */
       let chiralityMeta = { corrected: 0, consistent: 0, ambiguous: 0, failed: 0, view: "" };
@@ -1669,6 +1683,16 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
             `${transport.canFetchFiles ? "" : " (仅命令，无截图回传)"}` +
             `${transport.kind === "relay" && transport.canDeliver ? " · 支持交付下载" : ""}`,
         );
+        /* v3.87 (round-47): the old-relay notice up front — the round-46
+         * guidance (“无需重新 open relay.py”) left the user on a bridge
+         * without /membrane2, so the v3.86 detergent-removal alignment and
+         * the per-map belt anchors never engaged. Say it BEFORE the run
+         * starts, not only in the mask section deep in the log. */
+        if (membraneView === "auto" && transport.kind === "relay" && !transport.canMembrane2) {
+          pushLog(
+            "⚠ 当前桥脚本无 /membrane2（三相分割）— 本图 level 锚点与对齐屏蔽将退回参考图倍率规则（可用但非最优）；在 ChimeraX 重新运行一次 relay.py 可启用完整三相分割（无需重启 ChimeraX）",
+          );
+        }
         transportOut = transport;
 
         if (transport.kind === "rest") {
@@ -1769,6 +1793,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                 if (run.path) {
                   sourceFor.set(key, run.path);
                 } else {
+                  mapFailures.set(key, `下载失败: ${run.error?.slice(0, 60) ?? "未知错误"}`);
                   pushLog(`⚠ 地图 ${key} 下载入本地目录失败 — ${run.error?.slice(0, 160) ?? "未知错误"}（该阶段将缺失，其余阶段照常渲染）`);
                 }
                 done += 1;
@@ -1846,6 +1871,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                       const item = uniqueMaps.get(key)!;
                       const pu = proxyUrlFor(item.downloadUrl);
                       if (!pu) {
+                        mapFailures.set(key, "无法构建代理 URL");
                         pushLog(`⚠ 地图 ${key} 无法构建代理 URL，将跳过`);
                         continue;
                       }
@@ -1854,6 +1880,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                       if (run.path) {
                         sourceFor.set(key, run.path);
                       } else {
+                        mapFailures.set(key, `代理下载失败: ${run.error?.slice(0, 60) ?? "未知错误"}`);
                         pushLog(`⚠ 地图 ${key} 代理下载失败 — ${run.error?.slice(0, 160) ?? "未知错误"}（该阶段将缺失，其余阶段照常渲染）`);
                       }
                       done += 1;
@@ -1924,6 +1951,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     );
                   }
                   failedKeys.push(key);
+                  mapFailures.set(key, `中转失败: ${msg.slice(0, 60)}`);
                   pushLog(`⚠ 地图 ${key} 中转失败，已跳过（${msg}）`);
                 }
               }
@@ -2030,6 +2058,20 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         for (const r of renderRes.renders) {
           if (r.png) rendered.set(r.key, r.png);
         }
+        /* v3.87 (round-47 “标准模式下为何有些图片没有显示？”): engine-side
+         * failures join the download failures — a map that entered the
+         * pipeline but lost both chirality hands (打开/拟合全败) or whose
+         * screenshot save/fetch failed gets the SAME honest labelled
+         * placeholder instead of silently vanishing from the deck. */
+        for (const r of renderRes.renders) {
+          if (r.png) continue;
+          if (!mapFailures.has(r.key)) {
+            mapFailures.set(
+              r.key,
+              r.modelId == null ? "对齐失败（打开/拟合未成功）" : "截图保存/回传失败",
+            );
+          }
+        }
         setRenderReport(renderRes.renders);
         chiralityMeta = {
           corrected: renderRes.renders.filter((r) => r.chirality === "corrected").length,
@@ -2108,6 +2150,22 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
         }
       }
 
+      /* v3.87: the honest missing-image summary — classified remedy + the
+       * labelled placeholders. The user's round-47 (6) deck had 18 silent
+       * empty frames and no visible explanation anywhere. */
+      if (mapFailures.size) {
+        const joined = [...mapFailures.values()].join(" ");
+        const hint = /401|403|authentic|credential|unauthorized|凭据/i.test(joined)
+          ? "CryoSmart 凭据疑似已过期 — 请在 CryoSmart 重新登录并重新运行 Smart Capture 刷新凭据后重试；本地已缓存的地图不受影响"
+          : /no space|enospc|disk full|磁盘/i.test(joined)
+            ? "ChimeraX 机器磁盘空间疑似不足 — 请清理地图缓存目录后重试"
+            : "请查看上方日志中各地图的失败原因（网络 / 中转 / 凭据）后重试";
+        pushLog(
+          `⚠ 共 ${mapFailures.size} 张地图未能渲染（${[...mapFailures.keys()].join("、")}）— 对应阶段在 PPTX 中以「渲染失败」占位框标出。${hint}`,
+        );
+        setMapFailureReport({ items: [...mapFailures.entries()], hint });
+      }
+
       /* 3. assemble pptx */
       setStep((s) => ({ ...s, phase: "组装竖版流程图 PPTX", pct: 94 }));
       const footnote =
@@ -2122,7 +2180,12 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               view: chiralityMeta.view || null,
               mode: mode === "chimerax" ? "ChimeraX aligned" : "session previews",
             });
-      const blob = await buildWorkflowPptx(model, { images, footnote, style: figStyle });
+      const blob = await buildWorkflowPptx(model, {
+        images,
+        footnote,
+        style: figStyle,
+        imageFailures: mapFailures.size ? mapFailures : null,
+      });
       const project = mode === "demo" ? "Demo" : `${summary?.project_uid ?? "P"}_${summary?.start_uid ?? "J"}`;
       const filename = `CryoSmart_${project}_workflow.pptx`;
       const blobUrl = URL.createObjectURL(blob);
@@ -3390,6 +3453,33 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {/* v3.87 (round-47 “标准模式下为何有些图片没有显示？”): the honest
+             * missing-image block — every map that never became a thumbnail,
+             * with its reason and the classified remedy, instead of 18 silent
+             * empty frames in the deck. */}
+            {mapFailureReport && mapFailureReport.items.length > 0 && (
+              <div className="rounded-md border border-amber-200 bg-amber-50/70 p-2.5 dark:border-amber-800 dark:bg-amber-950/20">
+                <div className="flex flex-wrap items-center gap-1.5 text-[11.5px] font-semibold text-amber-800 dark:text-amber-300">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    {mapFailureReport.items.length} 张地图未能渲染 — 对应阶段在 PPTX 中以「渲染失败」占位框标出
+                  </span>
+                </div>
+                <div className="mt-1.5 max-h-28 overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-amber-300 dark:[&::-webkit-scrollbar-thumb]:bg-amber-700">
+                  <div className="space-y-0.5">
+                    {mapFailureReport.items.map(([key, reason]) => (
+                      <div key={key} className="flex gap-2 text-[10.5px] leading-relaxed text-amber-900 dark:text-amber-200">
+                        <span className="shrink-0 font-mono">{key}</span>
+                        <span className="min-w-0 break-all text-amber-700 dark:text-amber-300">{reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-1.5 border-t border-amber-200/70 pt-1.5 text-[10.5px] leading-relaxed text-amber-800 dark:border-amber-800/60 dark:text-amber-300">
+                  {mapFailureReport.hint}
+                </div>
               </div>
             )}
             {/* v3.72: the per-file DELIVERY report — what landed in the

@@ -238,39 +238,36 @@ export async function trimPngAlpha(
     }
   }
   if (maxX < 0) return original(); // fully transparent — leave untouched
-  /* pad px of margin on every side — in-canvas where available, otherwise
-   * synthesized as transparent rows/columns by the re-encode below. */
+  /* The DESIRED output box (source coordinates): the tight content bbox
+   * grown by `pad` px on every side — outW/outH are exactly content + 2×pad
+   * (never double-padded, never wider). Where the box extends past the
+   * original canvas the re-encode below synthesizes transparent pixels; the
+   * in-canvas intersection is copied verbatim. */
   const padPx = Math.max(0, Math.min(256, Math.round(pad)));
-  const readX0 = Math.max(0, minX - padPx);
-  const readY0 = Math.max(0, minY - padPx);
-  const readX1 = Math.min(w - 1, maxX + padPx);
-  const readY1 = Math.min(h - 1, maxY + padPx);
-  const cw = readX1 - readX0 + 1;
-  const ch = readY1 - readY0 + 1;
-  const outW = cw + 2 * padPx;
-  const outH = ch + 2 * padPx;
-  const leftPad = readX0 - (minX - padPx); // 0 when the canvas edge cuts the pad
-  const topPad = readY0 - (minY - padPx);
-  if (cw === w && ch === h && leftPad === 0 && topPad === 0 && outW === w && outH === h) {
-    return original(); // already tight with no room for any margin
+  const cw0 = maxX - minX + 1;
+  const ch0 = maxY - minY + 1;
+  const outW = cw0 + 2 * padPx;
+  const outH = ch0 + 2 * padPx;
+  const originX = minX - padPx; // source x of output column 0
+  const originY = minY - padPx; // source y of output row 0
+  if (outW === w && outH === h && minX === 0 && minY === 0 && maxX === w - 1 && maxY === h - 1) {
+    return original(); // content IS the canvas and pad adds nothing
   }
 
-  /* re-encode the crop (padded with transparent pixels where the margin
-   * extends past the original canvas) with filter-0 rows */
+  /* re-encode: copy each row's in-canvas segment, transparent elsewhere */
   const outStride = outW * 4;
   const out = new Uint8Array(outH * (1 + outStride));
   for (let y = 0; y < outH; y++) {
     const o = y * (1 + outStride);
     out[o] = 0; // filter: none
-    const sy = readY0 + (y - topPad);
-    if (sy < readY0 || sy > readY1) continue; // synthesized transparent row
-    const row = out.subarray(o + 1, o + 1 + outStride);
-    /* the readable crop lands leftPad px in; the columns before/after stay
-     * transparent (the synthesized margin). */
-    const dst = row.subarray(leftPad * 4, leftPad * 4 + cw * 4);
-    const src = img.subarray(sy * stride + readX0 * 4, sy * stride + (readX0 + cw) * 4);
-    if (dst.length === src.length) dst.set(src);
-    else dst.set(src.subarray(0, dst.length));
+    const sy = originY + y;
+    if (sy < 0 || sy >= h) continue; // beyond the canvas — fully transparent row
+    const segX0 = Math.max(0, originX);
+    const segX1 = Math.min(w, originX + outW);
+    if (segX1 <= segX0) continue;
+    const dst = out.subarray(o + 1 + (segX0 - originX) * 4, o + 1 + (segX1 - originX) * 4);
+    const src = img.subarray(sy * stride + segX0 * 4, sy * stride + segX1 * 4);
+    dst.set(src);
   }
   let idat: Uint8Array;
   try {

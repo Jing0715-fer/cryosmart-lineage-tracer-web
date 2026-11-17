@@ -2825,7 +2825,7 @@ export async function renderFigureMaps(
      * (a map whose own noise floor sits elsewhere adjusts to its own
      * cleanest rung near the reference's). */
     let refRatioRule: string | null = null;
-    if (belt.t1 == null && belt.t2 == null && tag !== "ref") {
+    if (belt.t1 == null && belt.t2 == null && tag !== "ref" && refId != null) {
       const refLvl = displayLevelById.get(refId) ?? null;
       const refSt = statsById.get(refId) ?? null;
       if (refLvl != null && refSt && Number.isFinite(refSt.max) && refSt.max > 0) {

@@ -208,6 +208,21 @@ const server = Bun.serve({
           { status: 401 },
         );
       }
+      /* v3.87 drill: credential EXPIRY for the selected uids — 401 even
+       * WITH the cookie, so every rung of the page's ladder (relay /fetch,
+       * app proxy, page 中转) fails and the map gets the labelled
+       * placeholder + the amber failure block. */
+      if (
+        relayState.authExpiredUids.length &&
+        (relayState.authExpiredUids.includes("*") ||
+          relayState.authExpiredUids.some((uid) => pathname.includes(`/${uid}.`)))
+      ) {
+        relayState.downloadResult401 += 1;
+        return Response.json(
+          { detail: "Session expired — please log in again (simulated /flow-e2e/reset?auth=expire drill)." },
+          { status: 401 },
+        );
+      }
       /* v3.86: the volume output group's PLOT / XML faces — the page's
        * delivery ladder fetches {uid}.volume.fsc.png / guinier_plot.png /
        * orientation_distribution.png / fsc.xml through this same route
@@ -303,6 +318,25 @@ const server = Bun.serve({
       // ride the protein-band boundary (0.5×max cap) instead of 0.125.
       const beltMode = sp.get("belt") || "";
       relayState.beltMode = beltMode === "mid" ? "mid" : "";
+      // v3.87 E2E drill: ?auth=expire (every map) or ?auth=expire:J10,J11
+      // (selected uids) — the download_result_file route 401s those maps
+      // even with credentials, recreating the round-47 partial-failure
+      // deck (18 missing thumbnails with no visible explanation).
+      const authDrill = sp.get("auth") || "";
+      if (authDrill === "expire") {
+        relayState.authExpiredUids = ["*"];
+      } else if (authDrill.startsWith("expire:")) {
+        relayState.authExpiredUids = authDrill
+          .slice(7)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+      // v3.87 E2E drill: ?noise=high — the snow floor rises to 0.26 (see
+      // probeRenderPng): the old-relay reference must walk its knee ladder
+      // UP from 0.15 to the clean 0.26 rung, and every map then anchors at
+      // the reference's 0.26 ratio (the ref-ratio chaining drill).
+      if (sp.get("noise") === "high") relayState.noiseFloor = 0.26;
       return Response.json({
         ok: true,
         http_blocked: blockHttp,
@@ -313,6 +347,8 @@ const server = Bun.serve({
         cam_reject: camReject,
         relay_mode: relayState.relayMode,
         belt_mode: relayState.beltMode,
+        auth_expired: relayState.authExpiredUids,
+        noise_floor: relayState.noiseFloor,
       });
     }
     if (pathname === "/flow-e2e/relay-stats") {
@@ -853,7 +889,11 @@ function probeRenderPng(name: string): Uint8Array | null {
     [178, 178, 178];
   const level =
     relayState.shownModel != null ? relayState.modelLevels.get(relayState.shownModel) ?? 0.25 : 0.25;
-  if (level < 0.12) return shapePng("snow", rgb as [number, number, number]);
+  /* v3.87 drill: ?noise=high raises the noise floor 0.12 → 0.26 — the
+   * script anchor 0.15×max renders SNOW, so the reference's knee must walk
+   * up to the clean 0.26 rung and every same-pipeline map then anchors at
+   * the REFERENCE's 0.26 ratio (the round-47 ref-ratio chaining). */
+  if (level < relayState.noiseFloor) return shapePng("snow", rgb as [number, number, number]);
   if (level > 0.5) return shapePng("sponge", rgb as [number, number, number]);
   const st = standingState();
   if (st === 0) return discPng(rgb as [number, number, number]);
@@ -1100,6 +1140,19 @@ const relayState = {
   camReject: false,
   cameraAccepts: 0,
   cameraRejects: 0,
+  /** v3.87 E2E drill: /flow-e2e/reset?auth=expire[:J10,J11,…] — the
+   * CryoSmart session credential EXPIRES for the listed job uids ("*" =
+   * every map): download_result_file answers 401 even WITH the app-proxy
+   * cookie, so the page's source ladder fails per-map and the round-47
+   * failure UX must engage (labelled PPTX placeholders + the amber
+   * result-panel block with the 重新登录/重新 Smart Capture hint). */
+  authExpiredUids: [] as string[],
+  downloadResult401: 0,
+  /** v3.87 E2E drill: ?noise=high — the probe-render snow floor rises
+   * 0.12 → 0.26, so a no-split (old-relay) reference walks its knee ladder
+   * up from the script 0.15 anchor to the clean 0.26 rung and every map
+   * then anchors at the REFERENCE's 0.26 ratio. */
+  noiseFloor: 0.12,
 };
 
 function resetRelayState() {
@@ -1141,6 +1194,9 @@ function resetRelayState() {
   relayState.camReject = false;
   relayState.cameraAccepts = 0;
   relayState.cameraRejects = 0;
+  relayState.authExpiredUids = [];
+  relayState.downloadResult401 = 0;
+  relayState.noiseFloor = 0.12;
 }
 
 function relayNextModelId(): number {
@@ -1188,6 +1244,11 @@ function relayStats() {
     close_ids_closed: [...relayState.closedIds],
     close_all_commands: relayState.closeAllCommands,
     models_open: relayState.models.size,
+    // v3.87: the credential-expiry drill (?auth=expire[:uids]) — how many
+    // download_result_file requests answered 401 despite the cookie.
+    auth_expired: relayState.authExpiredUids,
+    download_result_401: relayState.downloadResult401,
+    noise_floor: relayState.noiseFloor,
   };
 }
 function u_hasAsset(u: string): boolean {
