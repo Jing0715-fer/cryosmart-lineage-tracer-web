@@ -144,7 +144,19 @@ export interface TrimResult {
  * width/height always describe the OUTPUT bytes (cropped or original),
  * so callers can skip a separate IHDR parse.
  */
-export async function trimPngAlpha(bytes: Uint8Array, alphaThreshold = 8): Promise<TrimResult> {
+/** Alpha-trim a PNG to its content bounding box.
+ *
+ * v3.87 (round-47 “框也有问题” — renders touching/cut at the image
+ * edges): `pad` adds a transparent margin of that many pixels AROUND the
+ * content — synthesized beyond the original canvas when the content
+ * touched it, so every placed thumbnail keeps a breathing gap from its
+ * slot/selection frame. The v3.75 default (pad 2, clamped inside the
+ * canvas) is unchanged for existing callers. */
+export async function trimPngAlpha(
+  bytes: Uint8Array,
+  alphaThreshold = 8,
+  pad = 2,
+): Promise<TrimResult> {
   const original = (): TrimResult => {
     const dims = pngDimsOf(bytes);
     return { bytes, width: dims?.width ?? 1, height: dims?.height ?? 1, trimmed: false };
@@ -226,22 +238,39 @@ export async function trimPngAlpha(bytes: Uint8Array, alphaThreshold = 8): Promi
     }
   }
   if (maxX < 0) return original(); // fully transparent — leave untouched
-  /* +2 px breathing pad, clamped to the canvas */
-  minX = Math.max(0, minX - 2);
-  minY = Math.max(0, minY - 2);
-  maxX = Math.min(w - 1, maxX + 2);
-  maxY = Math.min(h - 1, maxY + 2);
-  const cw = maxX - minX + 1;
-  const ch = maxY - minY + 1;
-  if (cw === w && ch === h) return original(); // already tight
+  /* pad px of margin on every side — in-canvas where available, otherwise
+   * synthesized as transparent rows/columns by the re-encode below. */
+  const padPx = Math.max(0, Math.min(256, Math.round(pad)));
+  const readX0 = Math.max(0, minX - padPx);
+  const readY0 = Math.max(0, minY - padPx);
+  const readX1 = Math.min(w - 1, maxX + padPx);
+  const readY1 = Math.min(h - 1, maxY + padPx);
+  const cw = readX1 - readX0 + 1;
+  const ch = readY1 - readY0 + 1;
+  const outW = cw + 2 * padPx;
+  const outH = ch + 2 * padPx;
+  const leftPad = readX0 - (minX - padPx); // 0 when the canvas edge cuts the pad
+  const topPad = readY0 - (minY - padPx);
+  if (cw === w && ch === h && leftPad === 0 && topPad === 0 && outW === w && outH === h) {
+    return original(); // already tight with no room for any margin
+  }
 
-  /* re-encode the crop with filter-0 rows */
-  const out = new Uint8Array(ch * (1 + cw * 4));
-  for (let y = 0; y < ch; y++) {
-    const o = y * (1 + cw * 4);
+  /* re-encode the crop (padded with transparent pixels where the margin
+   * extends past the original canvas) with filter-0 rows */
+  const outStride = outW * 4;
+  const out = new Uint8Array(outH * (1 + outStride));
+  for (let y = 0; y < outH; y++) {
+    const o = y * (1 + outStride);
     out[o] = 0; // filter: none
-    const src = img.subarray((minY + y) * stride + minX * 4, (minY + y) * stride + (minX + cw) * 4);
-    out.set(src, o + 1);
+    const sy = readY0 + (y - topPad);
+    if (sy < readY0 || sy > readY1) continue; // synthesized transparent row
+    const row = out.subarray(o + 1, o + 1 + outStride);
+    /* the readable crop lands leftPad px in; the columns before/after stay
+     * transparent (the synthesized margin). */
+    const dst = row.subarray(leftPad * 4, leftPad * 4 + cw * 4);
+    const src = img.subarray(sy * stride + readX0 * 4, sy * stride + (readX0 + cw) * 4);
+    if (dst.length === src.length) dst.set(src);
+    else dst.set(src.subarray(0, dst.length));
   }
   let idat: Uint8Array;
   try {
@@ -251,8 +280,8 @@ export async function trimPngAlpha(bytes: Uint8Array, alphaThreshold = 8): Promi
   }
   const ihdr = new Uint8Array(13);
   const hv = new DataView(ihdr.buffer);
-  hv.setUint32(0, cw);
-  hv.setUint32(4, ch);
+  hv.setUint32(0, outW);
+  hv.setUint32(4, outH);
   ihdr[8] = 8; // bit depth
   ihdr[9] = 6; // RGBA
   const sig = new Uint8Array(PNG_SIG);
@@ -264,7 +293,7 @@ export async function trimPngAlpha(bytes: Uint8Array, alphaThreshold = 8): Promi
     png.set(p, o);
     o += p.length;
   }
-  return { bytes: png, width: cw, height: ch, trimmed: true };
+  return { bytes: png, width: outW, height: outH, trimmed: true };
 }
 
 function isPng(bytes: Uint8Array): boolean {

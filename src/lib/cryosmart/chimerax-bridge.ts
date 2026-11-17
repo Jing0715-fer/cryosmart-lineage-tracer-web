@@ -2813,12 +2813,34 @@ export async function renderFigureMaps(
      * + alignment masks); every other map fetches its own here. */
     const m2 = m2In !== undefined ? m2In : (t.canMembrane2 ? await bridgeMembrane2(t, id) : null);
     const belt = beltLevelFrom(m2, stats);
-    const anchorLevel = Number.isFinite(belt.anchor) && belt.anchor > 0 ? belt.anchor : max * SCRIPT_LEVEL_RATIO;
+    let anchorLevel = Number.isFinite(belt.anchor) && belt.anchor > 0 ? belt.anchor : max * SCRIPT_LEVEL_RATIO;
+    /* v3.87 (round-47 “目前最终map的level选的0.25倍，但是前面的map目前
+     * 也都是0.25吗？感觉可能需要优化一下”): NO-SPLIT maps (old relay —
+     * no /membrane2) anchor at the REFERENCE's final probe-verified display
+     * RATIO instead of the flat script 0.15×max. Same-pipeline maps share
+     * their histogram character (sharpening, noise floor), so the level the
+     * reference just PROVED clean is the best prior for every upstream
+     * class map — the exact per-map 倍率 chaining the user asked for. The
+     * ladder + render probes still verify and walk when the anchor misses
+     * (a map whose own noise floor sits elsewhere adjusts to its own
+     * cleanest rung near the reference's). */
+    let refRatioRule: string | null = null;
+    if (belt.t1 == null && belt.t2 == null && tag !== "ref") {
+      const refLvl = displayLevelById.get(refId) ?? null;
+      const refSt = statsById.get(refId) ?? null;
+      if (refLvl != null && refSt && Number.isFinite(refSt.max) && refSt.max > 0) {
+        const r = Math.min(Math.max(refLvl / refSt.max, ANCHOR_MIN_RATIO), ANCHOR_MAX_RATIO);
+        if (Math.abs(r - SCRIPT_LEVEL_RATIO) > 0.01) {
+          anchorLevel = max * r;
+          refRatioRule = `参考图倍率 ${r.toFixed(3)}×max（同流程管线锚点 · 无三相分割时的旧桥退化）`;
+        }
+      }
+    }
     const anchorRatio = anchorLevel / max;
     if (belt.t1 != null && belt.t2 != null) {
       log(`  三相分割: t1=${belt.t1.toFixed(4)}（噪声底）· t2=${belt.t2.toFixed(4)}（${belt.beltBand ? `胶束=${belt.beltBand} 相带（扁率 ${belt.beltRatio?.toFixed(2)}）` : "无胶束相带"}）→ 锚点 ${anchorRatio.toFixed(3)}×max`);
     } else {
-      log(`  三相分割不可用（${belt.anchorRule}）→ 锚点 ${anchorRatio.toFixed(3)}×max`);
+      log(`  三相分割不可用（${belt.anchorRule}）→ 锚点 ${anchorRatio.toFixed(3)}×max${refRatioRule ? ` · ${refRatioRule}` : ""}`);
     }
     type Rung = { level: number; ratio: number; s: RenderShape | null };
     const rungs: Rung[] = [];
@@ -2859,7 +2881,7 @@ export async function renderFigureMaps(
     if (anchorClean && anchorShape) {
       return {
         level: anchorLevel,
-        rule: `${belt.anchorRule} + surface dust ${DUST_SIZE_A} Å（探针验证通过：碎片率 ${(anchorShape.frag * 100).toFixed(1)}%，孔洞 ${anchorShape.holes}，主体覆盖 ${(anchorShape.mainCov * 100).toFixed(1)}%）`,
+        rule: `${refRatioRule ?? `${belt.anchorRule} + surface dust ${DUST_SIZE_A} Å`}（探针验证通过：碎片率 ${(anchorShape.frag * 100).toFixed(1)}%，孔洞 ${anchorShape.holes}，主体覆盖 ${(anchorShape.mainCov * 100).toFixed(1)}%）`,
       };
     }
     /* rung 2 — the anchor was dirty: probe the rest of the ladder
@@ -3561,7 +3583,30 @@ export async function renderFigureMaps(
    * hot-belt maps (belt = high band — a threshold cannot hide it), old
    * relays (no /membrane2) and degenerate splits all keep the classic
    * v3.67 mask level, each logged honestly. */
+  /* v3.87 (round-47 “可能是在不正确的level下进行align？…目前最终map的
+   * level选的0.25倍，但是前面的map目前也都是0.25吗？”): the OLD-RELAY
+   * ALIGNMENT MASK rung. The v3.86 detergent removal reads each model's
+   * /membrane2 split — an old relay.py (the round-46 guidance said no
+   * re-open needed) has none, so the user's real run silently kept the
+   * flat 0.125×max targets (belt + noise included) and EVERY intermediate
+   * map fit off-axis (the delivered (6) deck: only the reference stands).
+   * Without a split, the best available protein-band proxy is the
+   * REFERENCE's OWN probe-verified display level — the knee just proved it
+   * renders clean (noise floor cleared, cold belt hidden, main coverage
+   * verified), so masking the fit targets there zeroes exactly the density
+   * the screenshots do not show. Hot belts (detergent above the display
+   * level) survive — logged honestly, same as v3.86's hot-belt case. */
+  const refDispLevel = displayLevelById.get(refId) ?? null;
+  const refDispRatio =
+    refDispLevel != null && refStats && Number.isFinite(refStats.max) && refStats.max > 0
+      ? refDispLevel / refStats.max
+      : null;
   const maskNotes: string[] = [];
+  if (opts.membraneView?.mode === "auto" && t.kind === "relay" && !t.canMembrane2) {
+    log(
+      "⚠ 当前桥脚本无 /membrane2 三相分割 — 对齐屏蔽退回参考图渲染验证 level（低于该值的噪声/冷胶束密度不参与拟合）；在 ChimeraX 重新运行一次 relay.py 可启用完整三相分割（无需重启 ChimeraX）",
+    );
+  }
   for (const [sid, fine] of [
     [refSmoothC, false],
     [refSmoothF, true],
@@ -3582,6 +3627,15 @@ export async function renderFigureMaps(
       } else if (beltC.beltBand === "high") {
         maskNotes.push(`${fine ? "细" : "粗"}尺度屏蔽保持 ${(maskLevel / sStats.max).toFixed(3)}×max（胶束相较蛋白更热 — 阈值无法去除）`);
       }
+    } else if (refDispRatio != null) {
+      /* v3.87: the old-relay rung — the reference's clean display ratio
+       * (probe-verified above) replaces the flat 0.125×max, scaled onto the
+       * smoothed clone's own max (smoothing reshapes the histogram). */
+      const ratio = Math.min(refDispRatio, MASK_LEVEL_CAP_RATIO);
+      maskLevel = Math.max(maskLevel, sStats.max * ratio);
+      maskNotes.push(
+        `${fine ? "细" : "粗"}尺度屏蔽 ${maskLevel.toFixed(4)}（${(maskLevel / sStats.max).toFixed(3)}×max · 参考图渲染验证 level — 旧桥无三相分割）`,
+      );
     }
     const mask = await thresholdZero(sid, maskLevel);
     if (fine) refMaskF = mask;
@@ -3599,11 +3653,24 @@ export async function renderFigureMaps(
       maskNotes.push(`全分辨率屏蔽 ${maskLevel.toFixed(4)}（${(maskLevel / refStats.max).toFixed(3)}×max · 胶束相带以下置零）`);
     } else if (refBeltInfo.beltBand === "high") {
       maskNotes.push("全分辨率屏蔽保持经典比例（参考胶束相较蛋白更热 — 阈值无法去除）");
+    } else if (!t.canMembrane2 && refDispLevel != null) {
+      /* v3.87: the old-relay rung — the reference's probe-verified display
+       * level replaces the flat 0.125×max (see the clone loop above). */
+      const capped = Math.min(refDispLevel, refStats.max * MASK_LEVEL_CAP_RATIO);
+      if (capped > maskLevel) {
+        maskLevel = capped;
+        maskNotes.push(
+          `全分辨率屏蔽 ${maskLevel.toFixed(4)}（${(maskLevel / refStats.max).toFixed(3)}×max · 参考图渲染验证 level — 旧桥无三相分割）`,
+        );
+      }
     }
     refMaskFull = await thresholdZero(refId, maskLevel);
   }
   if (maskNotes.length) {
-    log(`对齐目标已按三相分割去除胶束相: ${maskNotes.join(" · ")} — fitmap 不再奖励胶束-胶束重叠，姿态由蛋白质密度决定`);
+    const oldRung = maskNotes.some((n) => n.includes("参考图渲染验证"));
+    log(
+      `${oldRung ? "对齐目标已按参考图渲染验证 level 屏蔽（旧桥无三相分割）" : "对齐目标已按三相分割去除胶束相"}: ${maskNotes.join(" · ")} — fitmap 不再奖励胶束-胶束重叠，姿态由蛋白质密度决定`,
+    );
   }
   if (refSmoothF != null && refMaskF != null) {
     log(

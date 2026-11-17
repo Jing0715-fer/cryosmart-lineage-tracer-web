@@ -150,6 +150,24 @@ interface FrameOp {
   h: number;
 }
 
+/** v3.87 (round-47 “标准模式下为何有些图片没有显示？框也有问题”): a
+ * MISSING thumbnail renders as a labelled placeholder — a light slate box
+ * with “渲染失败” + the per-map reason — instead of the old bare empty
+ * black frame (which read as a broken artifact, not an honest omission;
+ * the user's (6) deck had 18 of them). */
+interface PlaceholderOp {
+  kind: "ph";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Primary label — "渲染失败" (map acquired but alignment/screenshot
+   * failed) or "无图片" (nothing attempted, e.g. session-preview miss). */
+  label: string;
+  /** Optional one-line reason (download/alignment error, truncated). */
+  reason?: string;
+}
+
 /** v3.59: a connector is ALWAYS a straight arrow — fixed length, fixed
  *  weight (1 pt), triangle head, exactly like the reference. The old
  *  bent/elbow/plain-segment machinery is deleted. */
@@ -174,7 +192,7 @@ interface PicOp {
   bytes: Uint8Array;
 }
 
-type Op = TextOp | FrameOp | ConnOp | PicOp;
+type Op = TextOp | FrameOp | PlaceholderOp | ConnOp | PicOp;
 
 interface Box {
   x: number;
@@ -218,6 +236,17 @@ function frameXml(id: number, op: FrameOp): string {
   return `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="矩形 ${id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${IN(op.x)}" y="${IN(op.y)}"/><a:ext cx="${IN(op.w)}" cy="${IN(op.h)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr rtlCol="0" anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:endParaRPr lang="zh-CN" altLang="en-US"/></a:p></p:txBody></p:sp>`;
 }
 
+/** v3.87: the missing-thumbnail placeholder — slate-100 fill, slate-300
+ * hairline border, centered grey label (+ optional reason line). */
+function placeholderXml(id: number, op: PlaceholderOp): string {
+  const paragraphs =
+    `<a:p><a:pPr algn="ctr"/><a:r>${rPr({ sz: 750, color: "64748B" })}<a:t>${esc(op.label)}</a:t></a:r></a:p>` +
+    (op.reason
+      ? `<a:p><a:pPr algn="ctr"/><a:r>${rPr({ sz: 600, color: "94A3B8" })}<a:t>${esc(op.reason)}</a:t></a:r></a:p>`
+      : "");
+  return `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="占位 ${id}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${IN(op.x)}" y="${IN(op.y)}"/><a:ext cx="${IN(op.w)}" cy="${IN(op.h)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="F1F5F9"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="CBD5E1"/></a:solidFill></a:ln></p:spPr><p:txBody><a:bodyPr rtlCol="0" anchor="ctr" lIns="36000" tIns="18000" rIns="36000" bIns="18000"><a:normAutofit/></a:bodyPr><a:lstStyle/>${paragraphs}</p:txBody></p:sp>`;
+}
+
 /** v3.59: fixed-weight (1 pt) straight connector with a triangle head —
  *  the reference deck's 直接箭头连接符. Only straight lines are emitted
  *  anywhere in the deck. */
@@ -245,6 +274,10 @@ export interface BuildPptxOptions {
   footnote?: string | null;
   /** Thumbnail image bytes keyed by `item.mapKey` OR `item.imageUrl`. */
   images: Map<string, Uint8Array>;
+  /** v3.87 (round-47): per-map render/render-pipeline failures keyed by
+   * map key — drives the labelled placeholder (“渲染失败” + reason) so a
+   * missing thumbnail reads as an honest omission, not a broken frame. */
+  imageFailures?: Map<string, string> | null;
   /** v3.59 (round-18 极简模式): "minimal" = the upload/workflow.pptx
    *  reference look (no job ids, selection rectangles around the flow
    *  anchor class, arrow retention labels, final Å under the last map);
@@ -810,7 +843,16 @@ export async function buildWorkflowPptx(
             bytes: t.bytes,
           });
         } else {
-          ops.push({ kind: "frame", ...s.thumb });
+          /* v3.87: the labelled placeholder — the bare empty black frame of
+           * v3.75 read as a broken artifact (the user's round-47 “框也有
+           * 问题”: 18 mystery boxes in the standard deck). */
+          const why = (s.key && options.imageFailures?.get(s.key)) || null;
+          ops.push({
+            kind: "ph",
+            ...s.thumb,
+            label: why ? "渲染失败" : "无图片",
+            reason: why ? why.slice(0, 40) : undefined,
+          });
         }
         if (s.stats && s.statsLines.length) {
           ops.push({
@@ -944,6 +986,7 @@ function assemble(ops: Op[], pics: PicOp[], fig: FlowFigureModel, slideHIn: numb
       id += 1;
       if (op.kind === "text") return textXml(id, op);
       if (op.kind === "frame") return frameXml(id, op);
+      if (op.kind === "ph") return placeholderXml(id, op);
       if (op.kind === "conn") return connXml(id, op);
       return "";
     })
