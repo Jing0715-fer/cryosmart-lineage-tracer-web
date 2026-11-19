@@ -366,6 +366,14 @@ const server = Bun.serve({
         const substr = poseDrill.slice(5).replace(/^:/, "");
         relayState.poseMisfitMatch = substr || "volume_class_1";
       }
+      // v3.92 E2E drill: ?shot=sigma — the σ gaussian clones' closes become
+      // silent no-ops, so the lowpass copies LEAK into the screenshot phase
+      // and every final save renders the leaked clone (the round-14 stray
+      // disease). The relay-stats detector (clone_final_shots /
+      // final_shot_kinds) must read kind "gauss" — the round-52 guarantee's
+      // teeth check (the DEFAULT drills assert it stays 0).
+      const shotDrill = sp.get("shot") || "";
+      relayState.shotSigmaLeak = shotDrill === "sigma";
       return Response.json({
         ok: true,
         http_blocked: blockHttp,
@@ -379,6 +387,7 @@ const server = Bun.serve({
         auth_expired: relayState.authExpiredUids,
         noise_floor: relayState.noiseFloor,
         pose_misfit_match: relayState.poseMisfitMatch,
+        shot_sigma_drill: relayState.shotSigmaLeak,
       });
     }
     if (pathname === "/flow-e2e/relay-stats") {
@@ -1297,6 +1306,19 @@ const relayState = {
   layersCalls: 0,
   shellmaskCalls: 0,
   shellmaskSpecs: [] as Array<{ src: number; id: number; band: string; r0: number; r1: number; minval: number | null }>,
+  /** v3.92: per-model DATA PROVENANCE (see registerModel) — the final-shot
+   *  subjects are verdict-checked against it. */
+  modelKinds: new Map<number, string>(),
+  /** v3.92: every FINAL save (render_*.png — the deck screenshots) records
+   *  the model it actually rendered + its kind. The default drills assert
+   *  every kind is original/flip; ?shot=sigma plants the leak (below). */
+  finalShotSubjects: [] as Array<{ save: string; model: number | null; kind: string }>,
+  /** v3.92 E2E drill: ?shot=sigma — gaussian-clone closes become silent
+   *  no-ops (the σ lowpass clone LEAKS into the screenshot phase — the
+   *  round-14 stray disease) and every final save renders the leaked
+   *  clone. The stats detector (clone_final_shots) must catch it — the
+   *  round-52 guarantee's teeth check. */
+  shotSigmaLeak: false,
 };
 
 function resetRelayState() {
@@ -1350,6 +1372,9 @@ function resetRelayState() {
   relayState.layersCalls = 0;
   relayState.shellmaskCalls = 0;
   relayState.shellmaskSpecs = [];
+  relayState.modelKinds.clear();
+  relayState.finalShotSubjects = [];
+  relayState.shotSigmaLeak = false;
 }
 
 function relayNextModelId(): number {
@@ -1360,9 +1385,16 @@ function relayNextModelId(): number {
 
 /** v3.89 pose drill: register a model — the MISFIT marking (the ?pose=
  *  yaw90[:substr] drill) rides the URL, so the original, its flip hand and
- *  the σ/mask clones all inherit it. */
-function registerModel(id: number, url: string) {
+ *  the σ/mask clones all inherit it.
+ *  v3.92: every registration also carries its DATA PROVENANCE kind —
+ *  "original" (an opened map), "flip" (its z-mirror twin — full-res
+ *  original data mirrored), "gauss" (σ-lowpass clone), "mask" (threshold
+ *  noise-mask clone), "shellmask" (belt-free /shellmask clone). The FINAL
+ *  saves record which kind they rendered — the round-52 rule: the deck's
+ *  screenshots must be "original"/"flip" only (比对可用低通，截图必用原图). */
+function registerModel(id: number, url: string, kind: string = "original") {
   relayState.models.set(id, { url });
+  relayState.modelKinds.set(id, kind);
   if (relayState.poseMisfitMatch && url.includes(relayState.poseMisfitMatch)) {
     relayState.misfitModels.add(id);
   }
@@ -1424,6 +1456,18 @@ function relayStats() {
     shellmask_calls: relayState.shellmaskCalls,
     shellmask_bands: [...new Set(relayState.shellmaskSpecs.map((s) => s.band))],
     shellmask_minvals: [...new Set(relayState.shellmaskSpecs.map((s) => s.minval))],
+    // v3.92 (round-52 比对可用低通 · 截图必用原图): the FINAL saves' render
+    // subjects + their DATA PROVENANCE kinds. A clean run reads only
+    // "original"/"flip" (the deck screenshots the full-resolution
+    // originals at their transferred poses); any gauss/shellmask/mask entry
+    // means a fitting clone rode a screenshot (clone_final_shots > 0 — the
+    // ?shot=sigma drill plants exactly that to prove the detector's teeth).
+    final_shot_subjects: relayState.finalShotSubjects,
+    final_shot_kinds: [...new Set(relayState.finalShotSubjects.map((s) => s.kind))],
+    clone_final_shots: relayState.finalShotSubjects.filter(
+      (s) => s.kind === "gauss" || s.kind === "shellmask" || s.kind === "mask",
+    ).length,
+    shot_sigma_drill: relayState.shotSigmaLeak,
   };
 }
 function u_hasAsset(u: string): boolean {
@@ -1591,8 +1635,14 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   if (/^close\s+#\d+/i.test(command)) {
     for (const m of command.matchAll(/#(\d+)/g)) {
       const id = parseInt(m[1], 10);
+      /* v3.92 ?shot=sigma drill: gaussian-clone closes are silent no-ops —
+       * the σ lowpass clone survives every close (hand finally, phase 3.5,
+       * the stray sweep) and LEAKS into the screenshot phase; the final
+       * saves then render it and the stats detector must catch the kind. */
+      if (relayState.shotSigmaLeak && relayState.modelKinds.get(id) === "gauss") continue;
       if (relayState.models.has(id)) relayState.closedIds.push(id);
       relayState.models.delete(id);
+      relayState.modelKinds.delete(id);
       // v3.82: closing the shown model leaves nothing displayed.
       if (relayState.shownModel === id) relayState.shownModel = null;
       // v3.89: the misfit marking dies with the model — the mock REUSES
@@ -1608,7 +1658,7 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   if (flipMatch) {
     const src = relayState.models.get(parseInt(flipMatch[1], 10));
     const next = flipMatch[3] ? parseInt(flipMatch[3], 10) : relayNextModelId();
-    registerModel(next, src?.url || "flipped");
+    registerModel(next, src?.url || "flipped", "flip");
     return { text: `volume flip: new model (id #${next})`, error: null };
   }
 
@@ -1625,14 +1675,14 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   if (gaussClone) {
     const src = relayState.models.get(parseInt(gaussClone[1], 10));
     const next = gaussClone[2] ? parseInt(gaussClone[2], 10) : relayNextModelId();
-    relayState.models.set(next, { url: src ? `${src.url}#gauss` : "gaussian-clone" });
+    registerModel(next, src ? `${src.url}#gauss` : "gaussian-clone", "gauss");
     return { text: `made gaussian copy of model #${gaussClone[1]} (id #${next})`, error: null };
   }
   const threshClone = /^(?:volume|vop)\s+threshold\s+#(\d+)\s+minimum\s+-?[\d.]+\s+set\s+0(?:\s+modelId\s+(\d+))?\s*$/i.exec(command);
   if (threshClone) {
     const src = relayState.models.get(parseInt(threshClone[1], 10));
     const next = threshClone[2] ? parseInt(threshClone[2], 10) : relayNextModelId();
-    relayState.models.set(next, { url: src ? `${src.url}#mask` : "threshold-clone" });
+    registerModel(next, src ? `${src.url}#mask` : "threshold-clone", "mask");
     return { text: `made threshold copy of model #${threshClone[1]} (id #${next})`, error: null };
   }
 
@@ -1714,6 +1764,37 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
     }
     const target = saveMatch[1];
     const isAbsolute = /[\\/]/.test(target) || /^[A-Za-z]:/.test(target);
+    /* v3.92: the FINAL saves (render_*.png — non-underscore names; every
+     * probe save is `_`-prefixed) record their SUBJECT and honor the
+     * ?shot=sigma leak redirect — the rendered model's provenance kind is
+     * what the round-52 E2E asserts (original/flip only). Returns the
+     * restore state when the render subject was overridden (the caller
+     * puts shownModel back after generating the bytes). */
+    const recordFinalSubject = (name: string): { overridden: boolean; restore: number | null } => {
+      if (name.startsWith("_")) return { overridden: false, restore: relayState.shownModel };
+      let subjModel = relayState.shownModel;
+      let subjKind =
+        subjModel != null ? relayState.modelKinds.get(subjModel) ?? "unknown" : "none";
+      if (relayState.shotSigmaLeak) {
+        /* the planted leak: an open σ clone (its closes were no-ops) rides
+         * the screenshot — exactly like a stray fitmap copy on a real
+         * ChimeraX (the round-14 disease). The save renders IT. */
+        const leaked = [...relayState.models.entries()].find(
+          ([, m]) => (m?.url ?? "").endsWith("#gauss"),
+        );
+        if (leaked) {
+          subjModel = leaked[0];
+          subjKind = "gauss";
+        }
+      }
+      relayState.finalShotSubjects.push({ save: name, model: subjModel, kind: subjKind });
+      if (subjModel != null && subjModel !== relayState.shownModel) {
+        const restore = relayState.shownModel;
+        relayState.shownModel = subjModel;
+        return { overridden: true, restore };
+      }
+      return { overridden: false, restore: relayState.shownModel };
+    };
     if (isAbsolute) {
       if (relayState.divertAbsSave) {
         // Clean save that landed OUTSIDE the workdir — /file will 404.
@@ -1721,13 +1802,17 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
         return { text: `saved ${target}`, error: null };
       }
       const name = target.split(/[\\/]/).pop() || "img.png";
+      const subj = recordFinalSubject(name);
       relayState.files.set(name, probeRenderPng(name) ?? mockRenderPng());
+      if (subj.overridden) relayState.shownModel = subj.restore;
       return { text: `saved ${target}`, error: null };
     }
     // Relative save — ChimeraX writes into its process cwd.
     if (relayState.cwd === relayState.workdir) {
       relayState.saveRelativeOk += 1;
+      const subj = recordFinalSubject(target);
       relayState.files.set(target, probeRenderPng(target) ?? mockRenderPng());
+      if (subj.overridden) relayState.shownModel = subj.restore;
     } else {
       relayState.saveRelativeMissed += 1;
     }
@@ -2334,7 +2419,7 @@ const relayServer = Bun.serve({
         const minvalRaw = u.searchParams.get("minval");
         const minval = minvalRaw != null && minvalRaw !== "" && Number.isFinite(Number(minvalRaw)) ? Number(minvalRaw) : null;
         const next = relayNextModelId();
-        registerModel(next, `${src.url}#shellmask`);
+        registerModel(next, `${src.url}#shellmask`, "shellmask");
         relayState.shellmaskCalls += 1;
         relayState.shellmaskSpecs.push({ src: Number(mid), id: next, band, r0, r1, minval });
         return reply(200, {

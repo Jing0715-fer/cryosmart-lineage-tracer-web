@@ -1791,6 +1791,26 @@ export function maskIou(
   return union > 0 ? inter / union : null;
 }
 
+/** v3.92 (round-52 “比对的时候可以用lowpass的map，但是最终截图还是要把
+ * 原map转到对应位置再截图，不要用lowpass后的map截图”): the FINAL-SHOT
+ * SUBJECT verdict — which map a deck screenshot is allowed to render.
+ * `processedIds` is the run's fitting-only clone registry (σ-lowpass
+ * gaussian clones, belt-free /shellmask clones, threshold noise-mask
+ * clones, polish clones — populated at clone creation); a render subject
+ * NOT in it is an original-data model (the reference or a winning hand —
+ * the z-flip twin is full-resolution original DATA mirrored for the hand
+ * verdict, still an original). "processed" must never ride a final
+ * screenshot: the clones close before the shot phase and their poses
+ * transfer back to the originals. Pure + exported for the offline
+ * harness. */
+export function shotSubjectVerdict(
+  processedIds: ReadonlySet<number>,
+  id: number | null,
+): "original" | "processed" | "unknown" {
+  if (id == null || !Number.isFinite(id)) return "unknown";
+  return processedIds.has(id) ? "processed" : "original";
+}
+
 async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
   if (typeof createImageBitmap === "undefined" || typeof document === "undefined") return null;
   const blob = new Blob([png as BlobPart], { type: "image/png" });
@@ -2463,6 +2483,16 @@ export interface MapRender {
   png: Uint8Array | null;
   /** ChimeraX model id of the kept (best) candidate — used for screenshots. */
   modelId: number | null;
+  /** v3.92 (round-52 “比对的时候可以用lowpass的map，但是最终截图还是
+   * 要把原map转到对应位置再截图”): true when this map's winning hand was
+   * fitted via the σ-lowpass / belt-free CLONES — the pose was transferred
+   * back to the FULL-RESOLUTION original hand (matrixget/matrixset), the
+   * clones are closed before the screenshot phase, and the final save
+   * renders the ORIGINAL map at the fitted pose (never the lowpass data).
+   * The screenshot phase logs the subject per map; modelId is always an
+   * original-data model (the reference, or the winning hand — the z-flip
+   * twin is full-resolution original DATA mirrored for the hand verdict). */
+  viaLowpass?: boolean;
 }
 
 export interface RenderProgress {
@@ -3826,6 +3856,27 @@ export async function renderFigureMaps(
     const r = await exec(t, `matrixset "${path}" models #${id}`, opts, true);
     return !r.error;
   };
+  /** v3.92 (round-52): the pose-transfer RETRY — a single transient relay
+   * hiccup on `matrixset` must not strand the lowpass-found pose on the
+   * fitting clone (the final screenshot would then show the ORIGINAL at a
+   * stale pose instead of 把原map转到对应位置). One fresh re-issue before
+   * giving up; every failure is still honestly noted by the caller. */
+  const matrixLoadRetry = async (id: number, path: string): Promise<boolean> => {
+    if (await matrixLoad(id, path)) return true;
+    return matrixLoad(id, path);
+  };
+  /* v3.92 (round-52 “不要用lowpass后的map截图”): the run's FITTING-ONLY
+   * clone registry — every σ-lowpass gaussian clone, belt-free /shellmask
+   * clone, threshold noise-mask clone and polish clone lands here at
+   * CREATION (the three factories below are the choke points). The
+   * screenshot phase consults it (shotSubjectVerdict) so the final saves
+   * can never silently render processed data: the clones close in each
+   * hand's finally + sweepStrayVolumes, and a subject id found in this set
+   * is flagged loudly. Ids stay in the set after close — a REUSED id is
+   * re-registered as an original hand by the open path (openIds), and the
+   * verdict is only consulted for render subjects, which are always the
+   * surviving hand models. */
+  const processedIds = new Set<number>();
   /** v3.67: run-scoped Gaussian smoothing — probes the command shape on
    * first use (volume gaussian sDev → vop gaussian sDev → vgaussian sDev
    * → vgaussian sigma) and remembers the winner; returns the NEW clone's
@@ -3850,6 +3901,7 @@ export async function renderFigureMaps(
           gaussianShape = s;
           log(`平滑命令: ${s.cmd} #N ${s.kw} σ ✓ — 低通金字塔以该命令形态生成`);
         }
+        processedIds.add(next as number);
         return next;
       }
       res = await exec(t, `${s.cmd} #${id} ${s.kw} ${sigma}`, opts, true);
@@ -3858,7 +3910,9 @@ export async function renderFigureMaps(
           gaussianShape = s;
           log(`平滑命令: ${s.cmd} #N ${s.kw} σ ✓ — 低通金字塔以该命令形态生成`);
         }
-        return parseOpenModelId(res.text);
+        const parsed = parseOpenModelId(res.text);
+        if (parsed != null) processedIds.add(parsed);
+        return parsed;
       }
     }
     if (gaussianShape === undefined) {
@@ -3886,6 +3940,7 @@ export async function renderFigureMaps(
           thresholdShape = cmd;
           log(`阈值屏蔽命令: ${cmd} #N minimum … set 0 ✓ — 参考图信号包络以外的噪声将被置零`);
         }
+        processedIds.add(next as number);
         return next;
       }
       res = await exec(t, `${cmd} #${id} minimum ${level.toFixed(5)} set 0`, opts, true);
@@ -3894,7 +3949,9 @@ export async function renderFigureMaps(
           thresholdShape = cmd;
           log(`阈值屏蔽命令: ${cmd} #N minimum … set 0 ✓ — 参考图信号包络以外的噪声将被置零`);
         }
-        return parseOpenModelId(res.text);
+        const parsed = parseOpenModelId(res.text);
+        if (parsed != null) processedIds.add(parsed);
+        return parsed;
       }
     }
     if (thresholdShape === undefined) {
@@ -4301,7 +4358,10 @@ export async function renderFigureMaps(
    * force the source's current pose onto it via the PROVEN matrix round
    * trip (the endpoint also copies the scene position — belt and
    * suspenders: a pose mismatch would poison the matrix bookkeeping).
-   * Null on any failure (the caller keeps the belt with an honest log). */
+   * Null on any failure (the caller keeps the belt with an honest log).
+   * v3.92: the clone registers in processedIds (fitting-only data — it
+   * must never ride a final screenshot) and the pose inheritance rides
+   * the retry rung. */
   const beltFreeClone = async (
     id: number,
     shell: BeltShell,
@@ -4310,8 +4370,9 @@ export async function renderFigureMaps(
   ): Promise<number | null> => {
     const sm = await bridgeShellMask(t, id, shell, null);
     if (sm == null) return null;
+    processedIds.add(sm.id);
     const xfSrc = await matrixSave(id, `${safeKeyPart(tag)}_src`);
-    if (xfSrc) await matrixLoad(sm.id, xfSrc);
+    if (xfSrc) await matrixLoadRetry(sm.id, xfSrc);
     if (level != null && Number.isFinite(level)) {
       await exec(t, `volume #${sm.id} level ${level.toFixed(4)} step ${STEP}`, opts, true);
     }
@@ -4376,6 +4437,10 @@ export async function renderFigureMaps(
           throw new Error(openRes.error || logSnippet(openRes.text) || "open produced no model");
         }
         openIds.add(origId);
+        /* v3.92: an original hand RE-REGISTERS its id — ChimeraX may reuse
+         * a freed clone's id, and the final-shot verdict must read the
+         * ORIGINAL as an original (never a stale processedIds entry). */
+        processedIds.delete(origId);
         const stats = await bridgeVolStats(t, origId);
         const classicLevel = stats ? stats.max * LEVEL_RATIO : refLevel;
         /* v3.89: the FIT sampling level — the moving model's own protein
@@ -4457,6 +4522,8 @@ export async function renderFigureMaps(
           }
           if (flipId == null) throw new Error("flip produced no model");
           openIds.add(flipId);
+          /* v3.92: same re-registration as the original hand (id reuse). */
+          processedIds.delete(flipId);
           const stats2 = await bridgeVolStats(t, flipId);
           /* v3.89: the flip preserves the value distribution, so the
            * original hand's protein band carries over (scaled by the two
@@ -4534,6 +4601,10 @@ export async function renderFigureMaps(
     let priorHandMetTarget = false;
     let priorHandMetWhy = "";
     let flipHandSkipped = false;
+    /* v3.92: per-hand lowpass usage — the winning hand's flag rides onto
+     * MapRender.viaLowpass (the screenshot phase prints the 原图截图
+     * guarantee from it). */
+    const lowpassByHand = new Map<string, boolean>();
     for (const hand of hands) {
       if (threw(opts.signal)) throw new Error("aborted");
       /* v3.69 镜像跳过: the mirror hand is CONDITIONAL — skipped when the
@@ -4562,6 +4633,12 @@ export async function renderFigureMaps(
       /* v3.90: the no-pyramid fallback pair's belt-free clone (== handId
        * unless swapped below) — closed in this hand's finally. */
       let fullFitId = handId;
+      /* v3.92 (round-52): true when THIS hand's ladder ran on fitting-only
+       * clones (σ-lowpass pyramid and/or belt-free /shellmask swaps) — the
+       * winner's pose transfers back to the full-resolution original and
+       * the final screenshot renders the ORIGINAL (把原map转到对应位置再
+       * 截图). Carried onto MapRender.viaLowpass for the winning hand. */
+      let handUsedLowpass = false;
       let pre: number | null = null;
       let corr1: number | null = null;
       let corr2: number | null = null;
@@ -4574,6 +4651,7 @@ export async function renderFigureMaps(
           if (smoothC != null) {
             smoothF = await gaussianSmooth(handId, SIGMA_FINE_A);
           }
+          if (smoothC != null || smoothF != null) handUsedLowpass = true;
           const sigmaIds: Array<number | null> = [smoothC, smoothF];
           for (let si = 0; si < sigmaIds.length; si++) {
             let sid = sigmaIds[si];
@@ -4733,8 +4811,15 @@ export async function renderFigureMaps(
           track = searchRounds > 1 ? `全局搜索×${searchRounds}轮` : "全局搜索";
         }
         if (xf) {
-          const applied = await matrixLoad(handId, xf);
-          if (!applied) note = "最优姿态矩阵应用失败 — 保持当前姿态继续细化";
+          /* v3.92: the winner-pose transfer onto the FULL-RESOLUTION original
+           * rides the retry rung — the pose the lowpass comparison found
+           * must LAND on the original map (把原map转到对应位置), never stay
+           * stranded on the fitting clone. */
+          const applied = await matrixLoadRetry(handId, xf);
+          if (!applied) {
+            note = "最优姿态矩阵应用失败（已重试）— 原图保持当前姿态继续细化";
+            log(`  ${req.key} · ${hand.name}: ⚠ 最优姿态转回原图失败（已重试）— 精修后仍以原图本体截图`);
+          }
         } else if ((pairF || pairC) && fitShape !== null) {
           note = "低通姿态捕获失败 — 全分辨率地图按原姿态继续细化";
         }
@@ -4772,8 +4857,18 @@ export async function renderFigureMaps(
           }
           await runFit(polishId, refFullT);
           if (polishId !== handId) {
+            /* v3.92: the refined pose transfers back to the ORIGINAL hand
+             * on the retry rung; a failure is no longer SILENT — the
+             * original keeps the lowpass winner pose (exactly the pose the
+             * comparison found — the user's 截图用原图要求 still holds),
+             * and the log says so honestly. */
             const xfp = await matrixSave(polishId, `${fileStem}_${hand.name}_polish`);
-            if (xfp) await matrixLoad(handId, xfp);
+            const polishApplied = xfp ? await matrixLoadRetry(handId, xfp) : false;
+            if (!polishApplied) {
+              log(
+                `  ${req.key} · ${hand.name}: ⚠ 精修姿态未能转回原图（${xfp ? "矩阵应用失败，已重试" : "姿态捕获失败"}）— 原图保持比对最优姿态截图（仍为原图本体）`,
+              );
+            }
           }
           if (polishFresh) {
             await exec(t, `close #${polishId}`, opts, true);
@@ -4811,6 +4906,7 @@ export async function renderFigureMaps(
           priorHandMetTarget = true;
           priorHandMetWhy = `低通相关性 ${fineBestHand.toFixed(4)} ≥ ${corrTarget}`;
         }
+        lowpassByHand.set(hand.name, handUsedLowpass);
         rows.push({
           candidate: hand.name,
           score,
@@ -4905,6 +5001,7 @@ export async function renderFigureMaps(
         rows,
         png: null,
         modelId: bestId,
+        viaLowpass: lowpassByHand.get(bestRow.candidate) ?? false,
       });
     } else {
       for (const id of handById.values()) {
@@ -4943,7 +5040,10 @@ export async function renderFigureMaps(
   refMaskFull = null;
 
   /* ---- 4. screenshots — v3.82: per-map level KNEE + per-map orientation
-   * assist + per-map re-framing, before the same 1600×1200 export. ---- */
+   * assist + per-map re-framing, before the same 1600×1200 export.
+   * v3.92 (round-52): the FINAL-SHOT SUBJECT rule — 比对用低通/去垢副本
+   * 已全部关闭，最终截图只渲染原图模型（姿态已转回原图）。 Every
+   * subject is verdict-checked (shotSubjectVerdict) and logged per map. */
   if (t.canFetchFiles && t.workdir) {
     const shotTargets = renders.filter((r) => r.modelId != null);
     const shotTotal = Math.max(1, shotTargets.length);
@@ -4953,6 +5053,16 @@ export async function renderFigureMaps(
       await exec(t, `hide #${id} models`, opts, true);
     }
     await exec(t, "wait 1", opts, true);
+    {
+      /* v3.92: the phase guarantee, printed once — the fitting-only clones
+       * (σ 低通 / 分层去垢 / 噪声屏蔽 / 精修副本) all closed in their
+       * hand's finally + sweepStrayVolumes and at 3.5 above; what remains
+       * open are the ORIGINAL models only. */
+      const viaLowpassCount = shotTargets.filter((r) => r.viaLowpass).length;
+      log(
+        `截图阶段: ${shotTargets.length} 个原图模型（${viaLowpassCount} 张经低通比对 — 比对用副本已全部关闭，低通姿态已转回原图，最终截图不使用任何处理后的副本）`,
+      );
+    }
     /* ---- v3.89: the reference's shared-view SILHOUETTE, cached once
      * before the per-map loop — every non-reference map's probe render is
      * IoU-matched (maskIou, main-component masks) against it (the
@@ -4991,6 +5101,22 @@ export async function renderFigureMaps(
       const showId = r.modelId;
       if (showId == null) continue;
       await exec(t, `show #${showId} models`, opts, true);
+      /* v3.92: the final-shot subject verdict — the deck renders the
+       * ORIGINAL map at the fitted pose, never a lowpass/processed clone
+       * (比对可用低通，截图必用原图). "processed" is impossible by
+       * construction (clones close before this phase) — a trip means a
+       * bookkeeping bug and is flagged loudly rather than silently
+       * delivering smoothed data. */
+      const subjectVerdict = shotSubjectVerdict(processedIds, showId);
+      if (subjectVerdict === "processed") {
+        log(
+          `  ${r.key}: ⚠ 截图对象 #${showId} 是比对用副本（低通/去垢）— 违反「原图截图」约定，请检查副本关闭逻辑（不应发生）`,
+        );
+      } else if (r.viaLowpass) {
+        log(
+          `  ${r.key}: 截图对象: 原 map #${showId}${r.candidate === "flip_z" ? "（z 镜像手 · 全分辨率原数据）" : ""} — 比对用低通/去垢副本已关闭，比对姿态已转回原图后再截图`,
+        );
+      }
       /* v3.82 (a): the per-map level KNEE — this map's own ladder of
        * rendered probes (fragmentation kills snowball speckle and the
        * free micelle blobs; the main-coverage floor kills the sponge).

@@ -1039,5 +1039,30 @@
  * (input_type ≠ volume/mask) pops before volume/mask-only side parents,
  * exactly the v3.58 intent. P222 now reads 2D selection → J817 → J871
  * ab-initio → J895 → J897 → J906; the 手动 catalog lists all 6 jobs.
+ *
+ * v3.92 bump reason (round-52 “比对的时候可以用lowpass的map，但是最终
+ * 截图还是要把原map转到对应位置再截图，不要用lowpass后的map截图”):
+ * the σ-lowpass pyramid + belt-free clones stay FITTING-ONLY, and the
+ * ORIGINAL-map screenshot guarantee becomes explicit and verifiable:
+ * (1) matrixLoadRetry — the winner pose (and the polish's refined pose)
+ * transfers back to the FULL-RESOLUTION original hand on a retry rung; a
+ * transient relay hiccup can no longer strand the lowpass-found pose on
+ * the fitting clone, and a failed transfer is logged honestly (原图保持
+ * 比对最优姿态截图); (2) processedIds — every fitting-only clone (σ
+ * gaussian / /shellmask / threshold mask / polish) registers at creation,
+ * and the screenshot phase verdict-checks every render subject
+ * (shotSubjectVerdict, exported): the final saves render ONLY original-
+ * data models, each logged per map (截图对象: 原 map #N — 比对用低通/去垢
+ * 副本已关闭，比对姿态已转回原图后再截图), a processed subject is
+ * impossible-by-construction and flagged loudly; (3) MapRender.viaLowpass
+ * carries the winning hand's lowpass usage onto the report. The E2E mock
+ * now tags every model's DATA PROVENANCE (original/flip/gauss/shellmask/
+ * mask) and records each final save's subject — relay-stats final_shot_
+ * subjects / clone_final_shots; the ?shot=sigma drill plants the leak (σ
+ * clone closes become no-ops, the final saves render the leaked clone)
+ * to prove the detector has teeth. Zero behavior change on the delivered
+ * path: the clones closed before screenshots before, and the poses
+ * transferred before — this round makes both guarantees loud, retried,
+ * and machine-checked.
  */
-export const FLOW_ENGINE_VERSION = "3.91";
+export const FLOW_ENGINE_VERSION = "3.92";
