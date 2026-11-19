@@ -102,6 +102,25 @@ CryoSmart Flow Bridge (in-ChimeraX CORS relay)
                         点在这类样品上给出任意法线）依然可靠。网页对
                         每个候选相机都会渲染探针验证，旧桥自动退回纯
                         探针站立度扫描 — 本端点是加速器而非必需项。
+      GET  /layers?id=   v3.90 分层去垢分析（径向分层 — 移植自用户脚
+                        本 ini.py 的分层机制）：对当前打开的 volume 模
+                        型以溶剂阈值之上的密度加权重心为中心，把包络
+                        体素按离心距切成 N 层（默认 8，与
+                        recommend_volume_threshold 的 6 层径向分层同
+                        源），逐层统计体素数/均值/胶束相带占比；占比
+                        ≥0.5 的连续外层即胶束带（蛋白核心永不命中），
+                        返回胶束带的径向壳 r∈[r0,r1]（体素单位）+ 逐
+                        层剖面。回复同时携带与 /membrane2 兼容的
+                        splits/bands（网页的 beltLevelFrom 原样可读）。
+      GET  /shellmask?id=&r0=&r1=&band=mid|high[&minval=]
+                        v3.90 分层去垢（去除胶束后 align）：把当前模型克
+                        隆一份，胶束带的径向壳内、胶束相带取值窗内的
+                        体素全部置零（ρ/|z| 双谷切割保护跨膜柱与可溶
+                        头），可选 minval 把低于噪声底的体素一并置零
+                        （v3.86 阈值屏蔽的并集，一个副本完成）；副本
+                        继承源的 scene position（fitmap 姿态簿记），返
+                        回新模型 id 与置零统计。热胶束（比蛋白更热的
+                        胶束带 — 阈值无法隐藏）从此也能按位置剔除。
       GET  /nextid      下一个空闲 model id（volume flip 需要）
       GET  /volumes    当前已打开的 volume 模型清单（id + 名称）。
                         v3.55：流程图网页在截图前先经此清单精确关闭
@@ -578,6 +597,445 @@ def main(session):
                 "splits": splits,
                 "bands": bands,
                 "envelope": envelope,
+            }
+        return ui_run(f)
+
+    # ------------------------------------------------------------------
+    # v3.90 (round-50 “参考附件中的脚本，增加分层机制来去除去垢剂后
+    # 进行 align 的机制”): the RADIAL-LAYER detergent analysis + removal,
+    # ported from the user's ini.py / analyze_volume_layers.py 分层机制 —
+    # their recommend_volume_threshold / recommend_locres_range walk 6
+    # radial layers of density at the ATOM positions; the fitmap alignment
+    # here is map-vs-map (no atoms), so the same layering walks the MAP's
+    # above-solvent voxels around their density-weighted centroid.
+    # ------------------------------------------------------------------
+
+    # the belt layer detection constants (mirroring the page's
+    # BELT_OBLATE_MAX and the scripts' radial layering):
+    LAYER_DEFAULT_N = 8          # radial layers (scripts use 6; 8 gives a
+                                 # finer belt boundary on big envelopes)
+    BELT_LAYER_FRAC = 0.5        # a layer joins the belt run when ≥50% of
+                                 # its above-solvent voxels sit inside the
+                                 # belt band's value window
+    BELT_LAYER_OBLATE_MAX = 0.6  # same oblateness gate as the page
+
+    def _hist_valley(np, values, nbins=48, min_count=64, depth_ratio=0.55):
+        """The deepest valley between the two tallest SEPARATE peaks of a
+        1-D histogram; None when unimodal or the valley is shallow. Used
+        to cut the belt torus away from the protein: the belt-candidate
+        voxels' in-plane radius ρ histogram (around the membrane normal)
+        is bimodal on a column+disk particle — the transmembrane column
+        at small ρ, the belt ring at large ρ — and the |z| histogram
+        separates the belt slab (small |z|) from the soluble heads."""
+        if len(values) < min_count:
+            return None
+        v = np.asarray(values, dtype=np.float64)
+        vlo, vhi = float(v.min()), float(v.max())
+        if vhi <= vlo:
+            return None
+        hist, edges = np.histogram(v, bins=nbins, range=(vlo, vhi))
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        order = np.argsort(hist)[::-1]
+        p1 = int(order[0])
+        if hist[p1] <= 0:
+            return None
+        p2 = None
+        for cand in order:
+            c = int(cand)
+            if hist[c] <= 0:
+                break  # argsort is descending — nothing positive beyond
+            if c == p1 or abs(c - p1) < 2:
+                continue  # the same lobe's shoulder bin
+            left = hist[c - 1] if c > 0 else -1
+            right = hist[c + 1] if c < nbins - 1 else -1
+            if hist[c] >= left and hist[c] >= right:
+                p2 = c
+                break
+        if p2 is None:
+            return None
+        a, b = (p1, p2) if p1 < p2 else (p2, p1)
+        vi = a + int(np.argmin(hist[a:b + 1]))
+        if float(hist[vi]) > depth_ratio * min(float(hist[a]), float(hist[b])):
+            return None  # no deep valley — treat as unimodal
+        return float(centers[vi])
+
+    def _layer_band_pca(np, mat, blo, bhi):
+        """Density-weighted PCA of ONE value band (window [blo, bhi)) — the
+        same math as membrane_bands' inner band_pca, hoisted for /layers
+        and /shellmask. None when the band is too small/degenerate."""
+        bmask = (mat >= blo) & (mat < bhi)
+        bcount = int(bmask.sum())
+        if bcount < 64:
+            return None
+        bkk, bjj, bii = np.nonzero(bmask)
+        bvals = mat[bkk, bjj, bii]
+        bw = np.maximum(bvals - blo, 0.0)
+        bsw = float(bw.sum())
+        if bsw <= 0:
+            bw = np.ones(bcount, dtype=np.float64)
+            bsw = float(bcount)
+        bc = np.vstack([bii, bjj, bkk]).astype(np.float64)
+        bmu = (bc * bw).sum(axis=1) / bsw
+        bd = bc - bmu[:, None]
+        bcov = (bd * bw) @ bd.T / bsw
+        bevals, bevecs = np.linalg.eigh(bcov)
+        if bevals[1] <= 0:
+            return None
+        n = bevecs[:, 0]
+        ea = bevecs[:, 2]
+        eb = bevecs[:, 1]
+        if float(np.dot(np.cross(ea, eb), n)) < 0:
+            eb = -eb
+        return {
+            "normal": [float(x) for x in n],
+            "ea": [float(x) for x in ea],
+            "eb": [float(x) for x in eb],
+            "ratio": float(bevals[0] / bevals[1]),
+            "lambdas": [float(x) for x in bevals],
+            "count": bcount,
+        }
+
+    def _layer_geometry(np, mat):
+        """Shared geometry for /layers + /shellmask: the 3-phase split
+        (the same 2-level Otsu as /membrane2), the solvent mask + its
+        density-weighted centroid (INDEX coordinates — cryo-EM maps have
+        isotropic voxels and standard axis order, so index-space radii
+        are consistent across both endpoints), and the above-solvent
+        voxel list. Raises RuntimeError on degenerate inputs."""
+        lo = float(mat.min())
+        hi = float(mat.max())
+        if hi <= lo:
+            raise RuntimeError("degenerate value range")
+        edges = np.linspace(lo, hi, 257)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        hist, _ = np.histogram(mat, bins=edges)
+        hist = hist.astype(np.float64)
+        total = float(hist.sum())
+        if total <= 0:
+            raise RuntimeError("empty histogram")
+        # ---- the 2-level Otsu (identical math to membrane_bands) ----
+        w0 = np.cumsum(hist)
+        csum = np.cumsum(hist * centers)
+        sum_all = float(csum[-1])
+        nb = len(centers)
+        best = (-1.0, None, None)
+        for i in range(nb - 2):
+            wi = w0[i]
+            if wi <= 0:
+                continue
+            wj = w0[i + 1:] - wi
+            wk = total - w0[i + 1:]
+            valid = (wj > 0) & (wk > 0)
+            if not valid.any():
+                continue
+            mu_i = csum[i] / wi
+            cj = csum[i + 1:] - csum[i]
+            ck = sum_all - csum[i + 1:]
+            mu_j = cj / np.maximum(wj, 1.0)
+            mu_k = ck / np.maximum(wk, 1.0)
+            between = (wi * wj * (mu_i - mu_j) ** 2
+                       + wj * wk * (mu_j - mu_k) ** 2
+                       + wi * wk * (mu_i - mu_k) ** 2)
+            between = np.where(valid, between, -1.0)
+            jrel = int(np.argmax(between))
+            if between[jrel] > best[0]:
+                best = (float(between[jrel]), i, i + 1 + jrel)
+        splits = None
+        if best[1] is not None and best[2] is not None:
+            t1 = float(centers[best[1]])
+            t2 = float(centers[best[2]])
+            if t2 > t1 and t1 > lo:
+                splits = (t1, t2)
+        # ---- the solvent level (t1 when the split exists, else 1-level
+        # Otsu) + the above-solvent mask + its density-weighted centroid
+        if splits is not None:
+            solvent = splits[0]
+        else:
+            w0b = np.cumsum(hist)
+            w1b = total - w0b
+            validb = (w0b > 0) & (w1b > 0)
+            mu0b = csum / np.maximum(w0b, 1.0)
+            mu1b = (sum_all - csum) / np.maximum(w1b, 1.0)
+            betweenb = np.where(validb, w0b * w1b * (mu0b - mu1b) ** 2, -1.0)
+            solvent = float(centers[int(np.argmax(betweenb))])
+        mask = mat >= solvent
+        count = int(mask.sum())
+        if count < 64:
+            raise RuntimeError("above-solvent voxels too few (%d)" % count)
+        kk, jj, ii = np.nonzero(mask)
+        vals = mat[kk, jj, ii]
+        w = np.maximum(vals - solvent, 0.0)
+        sw = float(w.sum())
+        if sw <= 0:
+            w = np.ones(count, dtype=np.float64)
+            sw = float(count)
+        coords = np.vstack([ii, jj, kk]).astype(np.float64)
+        centroid = (coords * w).sum(axis=1) / sw
+        return {
+            "splits": splits,
+            "solvent": solvent,
+            "mask": mask,
+            "nz": (kk, jj, ii),
+            "coords": coords,
+            "vals": vals,
+            "centroid": centroid,
+            "hi": hi,
+        }
+
+    def belt_layers(model_id, nlayers):
+        """v3.90 GET /layers — the radial 分层 profile of an open volume:
+        the attached scripts' layering (ini.py recommend_volume_threshold
+        walks 6 radial layers of density at the atoms) mapped onto the
+        MAP's above-solvent voxels. Per layer: voxel count, mean value and
+        the BELT fraction (share of the layer's voxels inside the belt
+        band's value window — the belt band is the oblate one of the
+        3-phase split, exactly the page's beltLevelFrom rule). The belt's
+        radial shell = the contiguous run of layers with fraction ≥ 0.5,
+        never touching layer 0 (the protein core); free micelles and
+        stray noise beyond p99 of the radius never squash the layer
+        resolution. The reply carries the /membrane2-compatible
+        splits/bands so beltLevelFrom reads it unchanged."""
+        def f():
+            import numpy as np
+            target = None
+            for m in session.models.list():
+                if str(getattr(m, "id_string", "")) == str(model_id):
+                    target = m
+                    break
+            if target is None:
+                raise RuntimeError("model #%s not found" % model_id)
+            mat = np.asarray(target.data.full_matrix(), dtype=np.float64)
+            if mat.size == 0:
+                raise RuntimeError("empty grid")
+            try:
+                nl = max(4, min(16, int(nlayers)))
+            except (TypeError, ValueError):
+                nl = LAYER_DEFAULT_N
+            geo = _layer_geometry(np, mat)
+            # ---- the m2-compatible bands + the belt band by oblateness ----
+            bands = []
+            belt_band = None
+            if geo["splits"] is not None:
+                t1, t2 = geo["splits"]
+                for name, blo, bhi in (("mid", t1, t2), ("high", t2, geo["hi"])):
+                    bp = _layer_band_pca(np, mat, blo, bhi)
+                    if bp:
+                        bands.append({"name": name, "lo": blo, "hi": bhi,
+                                      "normal": bp["normal"], "ea": bp["ea"],
+                                      "eb": bp["eb"], "ratio": bp["ratio"],
+                                      "lambdas": bp["lambdas"],
+                                      "count": bp["count"]})
+                oblate = [b for b in bands
+                          if 0 < b["ratio"] <= BELT_LAYER_OBLATE_MAX]
+                belt_band = sorted(oblate, key=lambda b: b["ratio"])[0] if oblate else None
+            # ---- the radial layer table around the centroid ----
+            d = geo["coords"] - geo["centroid"][:, None]
+            r = np.sqrt((d ** 2).sum(axis=0))
+            rlo, rhi = np.percentile(r, [1.0, 99.0])
+            if rhi <= rlo:
+                raise RuntimeError("degenerate radial range")
+            bounds = np.linspace(rlo, rhi, nl + 1)
+            li = np.clip(np.searchsorted(bounds, r, side="right") - 1, 0, nl - 1)
+            inbelt = None
+            if belt_band is not None:
+                inbelt = ((geo["vals"] >= belt_band["lo"])
+                          & (geo["vals"] < belt_band["hi"]))
+            layers = []
+            fracs = []
+            for i in range(nl):
+                lm = li == i
+                cnt = int(lm.sum())
+                belt_n = int((lm & inbelt).sum()) if inbelt is not None else 0
+                frac = (belt_n / cnt) if cnt else 0.0
+                fracs.append(frac)
+                layers.append({
+                    "i": i,
+                    "r0": float(bounds[i]),
+                    "r1": float(bounds[i + 1]),
+                    "count": cnt,
+                    "mean": float(geo["vals"][lm].mean()) if cnt else 0.0,
+                    "belt_frac": float(frac),
+                })
+            # ---- the belt shell: the contiguous ≥0.5 run around the peak,
+            # never touching layer 0 (the protein core) ----
+            belt = None
+            reason = None
+            if belt_band is None:
+                reason = ("无扁率相带（带内 PCA 近各向同性）"
+                          if geo["splits"] is not None
+                          else "无三相分割（直方图无双峰结构）")
+            else:
+                peak = int(np.argmax(fracs))
+                qual = [i for i, fr in enumerate(fracs) if fr >= BELT_LAYER_FRAC]
+                if fracs[peak] < BELT_LAYER_FRAC:
+                    reason = "分层信号不足（胶束带占比峰值 %.2f < %.2f）" % (
+                        fracs[peak], BELT_LAYER_FRAC)
+                elif 0 in qual:
+                    reason = "胶束层与蛋白核心无法分离（第 1 层即命中）"
+                else:
+                    frm = peak
+                    while frm - 1 >= 0 and fracs[frm - 1] >= BELT_LAYER_FRAC:
+                        frm -= 1
+                    to = peak
+                    while to + 1 < nl and fracs[to + 1] >= BELT_LAYER_FRAC:
+                        to += 1
+                    try:
+                        step = [float(s) for s in target.data.step]
+                    except Exception:
+                        step = [1.0, 1.0, 1.0]
+                    step_mean = sum(step) / 3.0
+                    r0 = float(bounds[frm])
+                    r1 = float(bounds[to + 1])
+                    belt = {
+                        "band": belt_band["name"],
+                        "r0": r0,
+                        "r1": r1,
+                        "layer_from": frm,
+                        "layer_to": to,
+                        "frac": float(fracs[peak]),
+                        "rho_cut": None,   # decided at /shellmask time
+                        "z_cut": None,
+                        "step": step,
+                        "note": ("胶束带=%s 相带（扁率 %.2f）· 第 %d-%d/%d 层 "
+                                 "r %.1f-%.1f 体素（≈ %.0f-%.0f Å）· 层内"
+                                 "胶束占比峰值 %.2f") % (
+                                    belt_band["name"], belt_band["ratio"],
+                                    frm + 1, to + 1, nl, r0, r1,
+                                    r0 * step_mean, r1 * step_mean,
+                                    fracs[peak]),
+                    }
+            return {
+                "ok": True,
+                "splits": [geo["splits"][0], geo["splits"][1]]
+                          if geo["splits"] is not None else None,
+                "bands": bands,
+                "envelope": None,
+                "layers": layers,
+                "belt": belt,
+                "reason": reason,
+            }
+        return ui_run(f)
+
+    def shell_mask(model_id, r0, r1, band, minval):
+        """v3.90 GET /shellmask — clone an open volume with the detergent
+        belt's radial shell zeroed (belt-band values within r∈[r0,r1] of
+        the density centroid, further cut by the belt torus's in-plane
+        radius ρ and slab height |z| histogram valleys — the cuts protect
+        the transmembrane column at small ρ and the soluble heads at
+        large |z|). `minval` additionally zeroes every value below it (the
+        v3.86/v3.67 noise-floor mask — ONE clone carries the union). The
+        clone inherits the source's scene position (fitmap pose
+        bookkeeping) and gets a fresh model id; everything is recomputed
+        on the clone's OWN data (splits, band window, axis, centroid), so
+        smoothed σ clones and z-flipped hands are self-consistent."""
+        def f():
+            import numpy as np
+            target = None
+            for m in session.models.list():
+                if str(getattr(m, "id_string", "")) == str(model_id):
+                    target = m
+                    break
+            if target is None:
+                raise RuntimeError("model #%s not found" % model_id)
+            mat = np.asarray(target.data.full_matrix(), dtype=np.float64)
+            if mat.size == 0:
+                raise RuntimeError("empty grid")
+            if band not in ("mid", "high"):
+                raise RuntimeError("band must be mid or high")
+            try:
+                r0 = float(r0)
+                r1 = float(r1)
+            except (TypeError, ValueError):
+                raise RuntimeError("shell radii must be numbers")
+            if not (r1 > r0 and r0 >= 0):
+                raise RuntimeError("shell radii inverted (r0=%.4g r1=%.4g)" % (r0, r1))
+            geo = _layer_geometry(np, mat)
+            if geo["splits"] is None:
+                raise RuntimeError("no 3-phase split — the belt band window is unknown")
+            t1, t2 = geo["splits"]
+            blo, bhi = (t1, t2) if band == "mid" else (t2, geo["hi"])
+            bp = _layer_band_pca(np, mat, blo, bhi)
+            if bp is None:
+                raise RuntimeError("belt band too small for a PCA")
+            n = np.asarray(bp["normal"], dtype=np.float64)
+            # ---- the belt candidates: shell ∧ belt value window ----
+            d = geo["coords"] - geo["centroid"][:, None]
+            r = np.sqrt((d ** 2).sum(axis=0))
+            vals = geo["vals"]
+            cand = (r >= r0) & (r <= r1) & (vals >= blo) & (vals < bhi)
+            belt_n = int(cand.sum())
+            # ---- the ρ / |z| valley cuts (protect column + heads) ----
+            rho_cut = None
+            z_cut = None
+            if belt_n >= 256:
+                h = n @ d
+                rho = np.sqrt(np.maximum((d ** 2).sum(axis=0) - h * h, 0.0))
+                rho_cut = _hist_valley(np, rho[cand])
+                if rho_cut is not None:
+                    cand = cand & (rho >= rho_cut)
+                z_cut = _hist_valley(np, np.abs(h)[cand])
+                if z_cut is not None:
+                    cand = cand & (np.abs(h) <= z_cut)
+            # ---- back to grid indices; zero set = belt ∪ noise floor ----
+            kk, jj, ii = geo["nz"]
+            zero = np.zeros(mat.shape, dtype=bool)
+            zero[kk[cand], jj[cand], ii[cand]] = True
+            noise_n = 0
+            if minval is not None:
+                try:
+                    mv = float(minval)
+                except (TypeError, ValueError):
+                    mv = None
+                if mv is not None:
+                    noise = mat < mv
+                    noise_n = int((noise & ~zero).sum())
+                    zero |= noise
+            new_mat = mat.astype(np.float32)
+            new_mat[zero] = 0.0
+            # ---- build the clone volume (ChimeraX map Python API) ----
+            try:
+                from chimerax.map_data import ArrayGridData
+            except ImportError:
+                raise RuntimeError("this ChimeraX build lacks chimerax.map_data")
+            vfg = None
+            try:
+                from chimerax.volume.volume import volume_from_grid_data
+                vfg = volume_from_grid_data
+            except ImportError:
+                try:
+                    from chimerax.volume import volume_from_grid_data
+                    vfg = volume_from_grid_data
+                except ImportError:
+                    vfg = None
+            if vfg is None:
+                raise RuntimeError("this ChimeraX build lacks volume_from_grid_data")
+            src_data = target.data
+            g = ArrayGridData(new_mat,
+                              origin=tuple(float(x) for x in src_data.origin),
+                              step=tuple(float(x) for x in src_data.step),
+                              name="belt-masked #%s" % model_id)
+            v = vfg(g, session)
+            if isinstance(v, (list, tuple)):
+                v = v[0]
+            try:
+                v.name = "%s 分层去垢" % (target.name or ("#%s" % model_id))
+            except Exception:
+                pass
+            # the clone rides the source's pose (fitmap pose bookkeeping;
+            # the page also forces the matrix via matrixget/matrixset)
+            try:
+                v.position = target.scene_position
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "id": str(getattr(v, "id_string", "")),
+                "zeroed": int(zero.sum()),
+                "belt_zeroed": belt_n,
+                "noise_zeroed": noise_n,
+                "rho_cut": rho_cut,
+                "z_cut": z_cut,
+                "total": int(mat.size),
             }
         return ui_run(f)
 
@@ -1059,6 +1517,13 @@ def main(session):
                         # the flag; newer pages degrade to the probe-only
                         # standing scan without it.
                         "membrane2": True,
+                        # v3.90: GET /layers (the radial 分层 belt
+                        # analysis) + GET /shellmask (the belt-shell
+                        # zeroed clone) exist — the page's 分层去垢
+                        # alignment masks. Older relays don't send the
+                        # flag; newer pages keep the v3.86/v3.89
+                        # value-threshold rungs without it.
+                        "layers": True,
                         "cacheDir": staging_dir,
                         "cached": sum(1 for _ in _cache_entries()),
                         "volumes": sum(1 for m in ui_run(lambda: list(session.models.list()))
@@ -1157,6 +1622,52 @@ def main(session):
                         return
                     try:
                         self._reply(200, membrane_bands(model_id))
+                    except Exception as exc:  # noqa: BLE001
+                        self._reply(500, {"error": str(exc)})
+                    return
+                if r.path == "/layers":
+                    # v3.90 (round-50 分层去垢): ?id=<model>&nlayers=<n> —
+                    # the radial layer profile + the belt's radial shell
+                    # (the attached scripts' 分层机制 on voxels). Errors
+                    # ride back as {"error": …}; the page falls back to
+                    # the /membrane2 value rungs — never fatal.
+                    model_id = (q.get("id") or [""])[0]
+                    if not model_id:
+                        self._reply(400, {"error": "missing id"})
+                        return
+                    nl_raw = (q.get("nlayers") or [""])[0]
+                    try:
+                        nlayers = int(nl_raw) if nl_raw else LAYER_DEFAULT_N
+                    except ValueError:
+                        nlayers = LAYER_DEFAULT_N
+                    try:
+                        self._reply(200, belt_layers(model_id, nlayers))
+                    except Exception as exc:  # noqa: BLE001
+                        self._reply(500, {"error": str(exc)})
+                    return
+                if r.path == "/shellmask":
+                    # v3.90 (round-50 “去除去垢剂后进行 align”): ?id=<model>
+                    # &r0=&r1=&band=mid|high[&minval=] — clone the model
+                    # with the belt shell's band voxels zeroed (ρ/|z| cuts
+                    # protect the column/heads; minval adds the noise
+                    # floor). The clone keeps the source's scene position;
+                    # the page forces the pose via matrixget/matrixset
+                    # anyway. Errors → {"error": …}; the page falls back
+                    # to the v3.86 threshold mask.
+                    model_id = (q.get("id") or [""])[0]
+                    if not model_id:
+                        self._reply(400, {"error": "missing id"})
+                        return
+                    r0 = (q.get("r0") or [""])[0]
+                    r1 = (q.get("r1") or [""])[0]
+                    band = (q.get("band") or [""])[0]
+                    minval_raw = (q.get("minval") or [""])[0]
+                    try:
+                        mv = float(minval_raw) if minval_raw not in ("", "null") else None
+                    except ValueError:
+                        mv = None
+                    try:
+                        self._reply(200, shell_mask(model_id, r0, r1, band, mv))
                     except Exception as exc:  # noqa: BLE001
                         self._reply(500, {"error": str(exc)})
                     return

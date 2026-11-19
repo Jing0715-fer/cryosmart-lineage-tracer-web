@@ -998,5 +998,30 @@
  * and yaw-scans around THAT, and the standing sign is rolled to the
  * reference's; below WEAK the map keeps the reference's viewing
  * direction with an honest log (junk/near-symmetric classes).
+ *
+ * v3.90 bump reason (round-50, “参考附件中的脚本，增加分层机制来
+ * 去除去垢剂后进行 align 的机制”): the value-threshold detergent
+ * removal (v3.86 target masks / v3.89 moving levels) only works when
+ * the belt is COLDER than the protein — a HOT belt (the detergent band
+ * the hotter phase) admits defeat with “阈值无法去除” and the micelle
+ * keeps riding the fit. The attached scripts' 分层机制 (ini.py
+ * recommend_volume_threshold / recommend_locres_range — radial layers
+ * of density around the particle center) is now ported onto the
+ * map-vs-map fitmap targets: the relay's GET /layers cuts the
+ * above-solvent envelope into 8 radial layers around the
+ * density-weighted centroid and finds the belt's radial shell (the
+ * contiguous layers whose belt-band share ≥ 0.5, never touching the
+ * core layer), and GET /shellmask clones any fit model with that
+ * shell's belt-band voxels zeroed by LOCATION (ρ/|z| histogram-valley
+ * cuts protect the transmembrane column and the soluble heads; an
+ * optional minval folds the v3.86 noise-floor zeroing into the same
+ * clone). The bridge engages the layer rung exactly where the value
+ * rungs have no answer (proteinLevel null + the hot band —
+ * beltShellPlanFor, shared by both sides): the reference's fit targets
+ * become 分层去垢 clones, and each moving model's σ-pyramid clones +
+ * the full-res polish run on belt-free clones (pose transfer via the
+ * proven matrix round trip). Cold belts, degenerate splits and old
+ * relays keep the delivered v3.86/v3.87/v3.89 behavior verbatim —
+ * zero regression, one relay.py re-open to enable.
  */
-export const FLOW_ENGINE_VERSION = "3.89";
+export const FLOW_ENGINE_VERSION = "3.90";

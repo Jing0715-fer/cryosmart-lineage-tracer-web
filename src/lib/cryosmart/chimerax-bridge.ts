@@ -312,6 +312,14 @@ export interface FlowTransport {
    *  scan still finds the side view, so THIS flag is an accelerator, not
    *  a requirement. */
   canMembrane2?: boolean;
+  /** v3.90: relay-only — the bridge script advertises GET /layers (the
+   *  radial 分层 belt analysis — the attached ini.py scripts' layering
+   *  mechanism on voxels) + GET /shellmask (the belt-shell zeroed
+   *  clone). The alignment's detergent removal engages the LAYER rung
+   *  exactly where the value rungs have no answer (a HOT belt — the
+   *  detergent band hotter than the protein, which no threshold can
+   *  hide); relays without it keep the v3.86/v3.89 value rungs. */
+  canLayers?: boolean;
   /** v3.50: which save rung last produced a /file-fetchable PNG — cached
    *  per transport so later saves go straight to the working shape. */
   saveMode?: SaveMode;
@@ -381,10 +389,10 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
           logs.push(`relay ${host}:${port} → HTTP ${res.status}`);
           continue;
         }
-        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean; membrane?: boolean; membrane2?: boolean };
+        const data = (await res.json()) as { ok?: boolean; workdir?: string; version?: string; stage?: boolean; cache?: boolean; cacheDir?: string; fetch?: boolean; cachedir_set?: boolean; deliver?: boolean; membrane?: boolean; membrane2?: boolean; layers?: boolean };
         if (data?.ok) {
           logs.push(
-            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""}${data.cachedir_set ? ", 可自定义目录" : ""}${data.deliver ? ", 交付下载" : ""}${data.membrane ? ", 膜法线检测" : ""}${data.membrane2 ? ", 胶束带检测" : ""})`,
+            `relay ${host}:${port} → OK (ChimeraX ${data.version ?? "?"}${data.stage ? ", /stage" : ""}${data.cache ? ", 地图缓存" : ""}${data.fetch ? ", 本地目录下载" : ""}${data.cachedir_set ? ", 可自定义目录" : ""}${data.deliver ? ", 交付下载" : ""}${data.membrane ? ", 膜法线检测" : ""}${data.membrane2 ? ", 胶束带检测" : ""}${data.layers ? ", 分层去垢" : ""})`,
           );
           return {
             transport: {
@@ -402,6 +410,7 @@ export async function probeFlowBridge(opts: ProbeOptions = {}): Promise<ProbeRes
               canDeliver: !!data.deliver,
               canMembrane: !!data.membrane,
               canMembrane2: !!data.membrane2,
+              canLayers: !!data.layers,
             },
             logs,
           };
@@ -768,6 +777,253 @@ export async function bridgeMembrane2(
   } catch {
     return null;
   }
+}
+
+/** v3.90 (round-50 “参考附件中的脚本，增加分层机制来去除去垢剂后进行
+ * align 的机制”): one radial layer of the /layers reply — the attached
+ * scripts' 分层机制 (ini.py recommend_volume_threshold /
+ * recommend_locres_range walk 6 radial layers of density at the atoms'
+ * positions) mapped onto the MAP's above-solvent voxels, because the
+ * fitmap alignment here is map-vs-map (no atoms involved). */
+export interface LayerRow {
+  i: number;
+  /** [r0, r1] radial window (index-space voxels, from the density
+   *  centroid — /layers and /shellmask share the same center rule). */
+  r0: number;
+  r1: number;
+  count: number;
+  mean: number;
+  /** share of the layer's above-solvent voxels inside the belt band's
+   *  value window — the belt is the contiguous run of layers ≥ 0.5. */
+  beltFrac: number;
+}
+
+/** v3.90: the detergent belt's radial shell as found by /layers — WHERE
+ * the belt lives (the value rungs only ever knew its density window). */
+export interface BeltShell {
+  /** which 3-phase band the belt torus occupies ("high" = the HOT belt —
+   *  hotter than the protein, the case no threshold can hide). */
+  band: "mid" | "high";
+  r0: number;
+  r1: number;
+  layerFrom: number;
+  layerTo: number;
+  frac: number;
+  /** in-plane-radius / slab-height valley cuts — decided at /shellmask
+   *  time (null when the histograms were unimodal); they protect the
+   *  transmembrane column (small ρ) and the soluble heads (large |z|). */
+  rhoCut: number | null;
+  zCut: number | null;
+  /** Å per voxel (log display). */
+  step: [number, number, number];
+  note: string;
+}
+
+/** v3.90: the /layers reply — the 3-phase split + per-band PCAs (a
+ * structural SUPERSET of Membrane2Reply, so beltLevelFrom reads it
+ * unchanged) PLUS the radial layer profile and the belt shell. */
+export interface LayersReply {
+  ok: true;
+  splits: [number, number] | null;
+  bands: MembraneBand[];
+  envelope: MembraneAxis | null;
+  layers: LayerRow[] | null;
+  belt: BeltShell | null;
+  reason?: string;
+}
+
+/** v3.90: parse + validate a /layers reply — null on any malformed
+ * payload (pure, exported for the offline harness). */
+export function parseLayersReply(data: unknown): LayersReply | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+  if (d.ok !== true) return null;
+  const unitVec = (v: unknown): [number, number, number] | null => {
+    if (!Array.isArray(v) || v.length !== 3) return null;
+    const a = v.map(Number);
+    if (a.some((x) => !Number.isFinite(x))) return null;
+    const len = Math.hypot(a[0], a[1], a[2]);
+    return len > 1e-9 ? [a[0] / len, a[1] / len, a[2] / len] : null;
+  };
+  const bands: MembraneBand[] = [];
+  if (Array.isArray(d.bands)) {
+    for (const b of d.bands) {
+      if (!b || typeof b !== "object") continue;
+      const r = b as Record<string, unknown>;
+      const normal = unitVec(r.normal);
+      const ea = unitVec(r.ea);
+      const eb = unitVec(r.eb);
+      const ratio = Number(r.ratio);
+      const lo = Number(r.lo);
+      const hi = Number(r.hi);
+      if (!normal || !ea || !eb || !Number.isFinite(ratio) || !Number.isFinite(lo) || !Number.isFinite(hi)) continue;
+      bands.push({
+        name: String(r.name ?? "band"),
+        lo,
+        hi,
+        normal,
+        ea,
+        eb,
+        ratio,
+        count: Number(r.count) || 0,
+      });
+    }
+  }
+  let splits: [number, number] | null = null;
+  if (
+    Array.isArray(d.splits) &&
+    d.splits.length === 2 &&
+    d.splits.every((x) => typeof x === "number" && Number.isFinite(x)) &&
+    Number(d.splits[1]) > Number(d.splits[0])
+  ) {
+    splits = [Number(d.splits[0]), Number(d.splits[1])];
+  }
+  const layers: LayerRow[] = [];
+  if (Array.isArray(d.layers)) {
+    for (const row of d.layers) {
+      if (!row || typeof row !== "object") continue;
+      const r = row as Record<string, unknown>;
+      const i = Number(r.i);
+      const r0 = Number(r.r0);
+      const r1 = Number(r.r1);
+      if (!Number.isFinite(i) || !Number.isFinite(r0) || !Number.isFinite(r1) || !(r1 > r0)) continue;
+      const frac = Number(r.belt_frac);
+      layers.push({
+        i,
+        r0,
+        r1,
+        count: Number(r.count) || 0,
+        mean: Number(r.mean) || 0,
+        beltFrac: Number.isFinite(frac) ? Math.min(1, Math.max(0, frac)) : 0,
+      });
+    }
+  }
+  let belt: BeltShell | null = null;
+  if (d.belt && typeof d.belt === "object") {
+    const b = d.belt as Record<string, unknown>;
+    const band = b.band === "mid" ? "mid" : b.band === "high" ? "high" : null;
+    const r0 = Number(b.r0);
+    const r1 = Number(b.r1);
+    const step = Array.isArray(b.step) ? b.step.map(Number) : null;
+    const cut = (v: unknown): number | null => {
+      if (v == null) return null; /* Number(null) coerces to 0 — guard it */
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    if (band && Number.isFinite(r0) && Number.isFinite(r1) && r1 > r0 && step && step.length === 3 && step.every((x) => Number.isFinite(x))) {
+      belt = {
+        band,
+        r0,
+        r1,
+        layerFrom: Number(b.layer_from) || 0,
+        layerTo: Number(b.layer_to) || 0,
+        frac: Number(b.frac) || 0,
+        rhoCut: cut(b.rho_cut),
+        zCut: cut(b.z_cut),
+        step: step as [number, number, number],
+        note: String(b.note ?? ""),
+      };
+    }
+  }
+  return {
+    ok: true,
+    splits,
+    bands,
+    envelope: null,
+    layers: layers.length ? layers : null,
+    belt,
+    reason: d.reason != null ? String(d.reason) : undefined,
+  };
+}
+
+/** v3.90: the radial 分层 analysis of an open volume (relay GET /layers)
+ *  — null on any failure (old relay 404 / endpoint error / malformed
+ *  reply); callers degrade to the /membrane2 value rungs. */
+export async function bridgeLayers(t: FlowTransport, modelId: number | string): Promise<LayersReply | null> {
+  if (t.kind !== "relay") return null;
+  try {
+    const res = await fetchWithTimeout(
+      `${t.base}/layers?id=${encodeURIComponent(String(modelId))}`,
+      { method: "GET" },
+      180_000,
+    );
+    if (!res.ok) return null;
+    return parseLayersReply(await res.json());
+  } catch {
+    return null;
+  }
+}
+
+/** v3.90: one /shellmask result — the belt-shell zeroed clone. */
+export interface ShellMaskResult {
+  id: number;
+  zeroed: number;
+  beltZeroed: number;
+  noiseZeroed: number;
+  rhoCut: number | null;
+  zCut: number | null;
+}
+
+/** v3.90: clone an open volume with the belt shell's band voxels zeroed
+ *  (relay GET /shellmask) — null on any failure (the caller falls back
+ *  to the v3.86 threshold mask on the target side, or keeps the belt
+ *  with an honest log on the moving side). */
+export async function bridgeShellMask(
+  t: FlowTransport,
+  modelId: number,
+  shell: Pick<BeltShell, "r0" | "r1" | "band">,
+  minval: number | null,
+): Promise<ShellMaskResult | null> {
+  if (t.kind !== "relay") return null;
+  try {
+    const p = new URLSearchParams({
+      id: String(modelId),
+      r0: String(shell.r0),
+      r1: String(shell.r1),
+      band: shell.band,
+    });
+    if (minval != null && Number.isFinite(minval)) p.set("minval", String(minval));
+    const res = await fetchWithTimeout(`${t.base}/shellmask?${p.toString()}`, { method: "GET" }, 180_000);
+    if (!res.ok) return null;
+    const data = (await res.json()) as Record<string, unknown>;
+    const id = parseInt(String(data?.id ?? ""), 10);
+    if (data?.ok !== true || !Number.isFinite(id)) return null;
+    const num = (v: unknown): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const cut = (v: unknown): number | null => {
+      if (v == null) return null; /* Number(null) coerces to 0 — guard it */
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    return {
+      id,
+      zeroed: num(data.zeroed),
+      beltZeroed: num(data.belt_zeroed),
+      noiseZeroed: num(data.noise_zeroed),
+      rhoCut: cut(data.rho_cut),
+      zCut: cut(data.z_cut),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** v3.90: WHEN the radial layer mechanism owns the belt removal — the
+ * policy both alignment sides share. The value rungs already remove a
+ * belt COLDER than the protein (v3.86 target masks / v3.89 moving levels
+ * ride proteinLevel = the t2 protein band), so the layer shell engages
+ * exactly where they have NO answer: the belt is the HOT phase
+ * (proteinLevel null — no threshold can hide it without erasing the
+ * protein first) AND the relay's /layers found the radial shell. Cold
+ * belts, no-belt maps, degenerate splits and old relays all keep the
+ * delivered behavior. Pure, exported for the offline harness. */
+export function beltShellPlanFor(belt: BeltLevelInfo, layers: LayersReply | null): BeltShell | null {
+  if (!layers?.belt) return null;
+  if (belt.proteinLevel != null) return null;
+  if (belt.beltBand !== "high") return null;
+  return layers.belt;
 }
 
 /** v3.55 (round-14): one currently-open volume model in ChimeraX. */
@@ -3700,6 +3956,17 @@ export async function renderFigureMaps(
       "⚠ 当前桥脚本无 /membrane2 三相分割 — 对齐屏蔽退回参考图渲染验证 level（低于该值的噪声/冷胶束密度不参与拟合）；在 ChimeraX 重新运行一次 relay.py 可启用完整三相分割（无需重启 ChimeraX）",
     );
   }
+  /* v3.90 (round-50 分层机制 — 参考侧): the radial layer analysis runs on
+   * each fit target. /layers is a SUPERSET of /membrane2 (the same
+   * 3-phase split + band PCAs, so beltLevelFrom reads it unchanged) plus
+   * the belt's radial shell — and the shell engages exactly where the
+   * value rung admits defeat: a HOT belt (proteinLevel null — the belt
+   * band is hotter than the protein, no threshold can hide it). Then
+   * /shellmask builds the masked clone IN ONE PASS: the belt shell's
+   * band voxels zeroed by LOCATION plus everything below the noise-floor
+   * `minval` (the v3.86 threshold mask's union). Cold belts keep the
+   * v3.86 threshold clone verbatim (the shell would be a strict subset
+   * of the below-t2 zeroing — zero regression on the delivered path). */
   for (const [sid, fine] of [
     [refSmoothC, false],
     [refSmoothF, true],
@@ -3709,18 +3976,29 @@ export async function renderFigureMaps(
     if (!sStats) continue;
     await exec(t, `volume #${sid} level ${(sStats.max * LEVEL_RATIO).toFixed(4)} step ${STEP}`, opts, true);
     let maskLevel = sStats.max * MASK_RATIO;
-    if (t.canMembrane2) {
-      /* the clone's OWN split — Gaussian smoothing reshapes the histogram,
-       * so the unsmoothed reference's t2 must not be reused verbatim. */
-      const m2c = await bridgeMembrane2(t, sid);
-      const beltC = beltLevelFrom(m2c, sStats);
-      if (beltC.proteinLevel != null) {
-        maskLevel = Math.max(maskLevel, beltC.proteinLevel);
-        maskNotes.push(`${fine ? "细" : "粗"}尺度屏蔽 ${maskLevel.toFixed(4)}（${(maskLevel / sStats.max).toFixed(3)}×max · 蛋白相带以下置零）`);
-      } else if (beltC.beltBand === "high") {
-        maskNotes.push(`${fine ? "细" : "粗"}尺度屏蔽保持 ${(maskLevel / sStats.max).toFixed(3)}×max（胶束相较蛋白更热 — 阈值无法去除）`);
+    /* the clone's OWN split — Gaussian smoothing reshapes the histogram,
+     * so the unsmoothed reference's t2 must not be reused verbatim. */
+    const layersC = t.canLayers ? await bridgeLayers(t, sid) : null;
+    const m2c: Membrane2Reply | null = layersC ?? (t.canMembrane2 ? await bridgeMembrane2(t, sid) : null);
+    const beltC = beltLevelFrom(m2c, sStats);
+    let maskId: number | null = null;
+    if (beltC.proteinLevel != null) {
+      maskLevel = Math.max(maskLevel, beltC.proteinLevel);
+      maskNotes.push(`${fine ? "细" : "粗"}尺度屏蔽 ${maskLevel.toFixed(4)}（${(maskLevel / sStats.max).toFixed(3)}×max · 蛋白相带以下置零${layersC?.belt ? `；分层分析：${layersC.belt.note} — 冷胶束已由 t2 覆盖` : ""}）`);
+    } else if (beltC.beltBand === "high") {
+      const shellC = beltShellPlanFor(beltC, layersC);
+      if (shellC) {
+        const smC = await bridgeShellMask(t, sid, shellC, maskLevel);
+        if (smC != null) {
+          maskId = smC.id;
+          maskNotes.push(`${fine ? "细" : "粗"}尺度分层去垢 #${smC.id}（${shellC.note}；屏蔽值 ${maskLevel.toFixed(4)} 以下一并置零 · 置零体素 ${Math.round(smC.zeroed).toLocaleString("en-US")}${smC.rhoCut != null ? ` · ρ≥${smC.rhoCut.toFixed(1)}` : ""}${smC.zCut != null ? ` · |z|≤${smC.zCut.toFixed(1)}` : ""}）`);
+        } else {
+          maskNotes.push(`${fine ? "细" : "粗"}尺度屏蔽保持 ${(maskLevel / sStats.max).toFixed(3)}×max（分层屏蔽命令失败 — 胶束相较蛋白更热，阈值无法去除）`);
+        }
+      } else {
+        maskNotes.push(`${fine ? "细" : "粗"}尺度屏蔽保持 ${(maskLevel / sStats.max).toFixed(3)}×max（胶束相较蛋白更热 — ${layersC?.reason ?? "无扁率相带"} — 阈值无法去除）`);
       }
-    } else if (refDispRatio != null) {
+    } else if (!t.canMembrane2 && !t.canLayers && refDispRatio != null) {
       /* v3.87: the old-relay rung — the reference's clean display ratio
        * (probe-verified above) replaces the flat 0.125×max, scaled onto the
        * smoothed clone's own max (smoothing reshapes the histogram). */
@@ -3730,22 +4008,34 @@ export async function renderFigureMaps(
         `${fine ? "细" : "粗"}尺度屏蔽 ${maskLevel.toFixed(4)}（${(maskLevel / sStats.max).toFixed(3)}×max · 参考图渲染验证 level — 旧桥无三相分割）`,
       );
     }
-    const mask = await thresholdZero(sid, maskLevel);
-    if (fine) refMaskF = mask;
-    else refMaskC = mask;
+    if (maskId == null) {
+      maskId = await thresholdZero(sid, maskLevel);
+    }
+    if (fine) refMaskF = maskId;
+    else refMaskC = maskId;
   }
   // v3.67: the full-resolution masked reference needs no smoothing
   // pyramid — even the degraded fallbacks (no gaussian / no matrix
   // round-trip) still get noise-masked fitting. v3.86: the full-res mask
   // rides the reference's OWN protein-band boundary (beltLevelFrom was
-  // computed on this exact model in 2a).
+  // computed on this exact model in 2a). v3.90: a HOT belt rides the
+  // radial layer shell instead (beltShellPlanFor — same rule as the σ
+  // clones above).
   if (refStats) {
     let maskLevel = refStats.max * MASK_RATIO;
+    const layersRef = t.canLayers ? await bridgeLayers(t, refId) : null;
     if (refBeltInfo.proteinLevel != null) {
       maskLevel = Math.max(maskLevel, refBeltInfo.proteinLevel);
       maskNotes.push(`全分辨率屏蔽 ${maskLevel.toFixed(4)}（${(maskLevel / refStats.max).toFixed(3)}×max · 胶束相带以下置零）`);
     } else if (refBeltInfo.beltBand === "high") {
-      maskNotes.push("全分辨率屏蔽保持经典比例（参考胶束相较蛋白更热 — 阈值无法去除）");
+      const shellRef = beltShellPlanFor(refBeltInfo, layersRef);
+      const smRef = shellRef ? await bridgeShellMask(t, refId, shellRef, maskLevel) : null;
+      if (smRef != null) {
+        refMaskFull = smRef.id;
+        maskNotes.push(`全分辨率分层去垢 #${smRef.id}（${shellRef?.note ?? ""}；屏蔽值 ${maskLevel.toFixed(4)} 以下一并置零 · 置零体素 ${Math.round(smRef.zeroed).toLocaleString("en-US")}${smRef.rhoCut != null ? ` · ρ≥${smRef.rhoCut.toFixed(1)}` : ""}${smRef.zCut != null ? ` · |z|≤${smRef.zCut.toFixed(1)}` : ""}）`);
+      } else {
+        maskNotes.push(`全分辨率屏蔽保持经典比例（${shellRef ? "分层屏蔽命令失败" : `参考胶束相较蛋白更热 — ${layersRef?.reason ?? "无扁率相带"}`} — 阈值无法去除）`);
+      }
     } else if (!t.canMembrane2 && refDispLevel != null) {
       /* v3.87: the old-relay rung — the reference's probe-verified display
        * level replaces the flat 0.125×max (see the clone loop above). */
@@ -3757,12 +4047,20 @@ export async function renderFigureMaps(
         );
       }
     }
-    refMaskFull = await thresholdZero(refId, maskLevel);
+    if (refMaskFull == null) {
+      refMaskFull = await thresholdZero(refId, maskLevel);
+    }
+  }
+  if (t.kind === "relay" && !t.canLayers && refBeltInfo.beltBand === "high") {
+    log(
+      "ℹ 参考图胶束相较蛋白更热（阈值无法去除）— 当前桥脚本无 /layers 分层去垢；在 ChimeraX 重新运行一次 relay.py 后，热胶束也将按径向分层（附件脚本 ini.py 的分层机制）从对齐目标中剔除",
+    );
   }
   if (maskNotes.length) {
+    const layered = maskNotes.some((n) => n.includes("分层去垢"));
     const oldRung = maskNotes.some((n) => n.includes("参考图渲染验证"));
     log(
-      `${oldRung ? "对齐目标已按参考图渲染验证 level 屏蔽（旧桥无三相分割）" : "对齐目标已按三相分割去除胶束相"}: ${maskNotes.join(" · ")} — fitmap 不再奖励胶束-胶束重叠，姿态由蛋白质密度决定`,
+      `${layered ? "对齐目标已按分层机制去除胶束相（径向分层定位胶束带 — 热胶束按位置置零，阈值无法去除的亦可去除）" : oldRung ? "对齐目标已按参考图渲染验证 level 屏蔽（旧桥无三相分割）" : "对齐目标已按三相分割去除胶束相"}: ${maskNotes.join(" · ")} — fitmap 不再奖励胶束-胶束重叠，姿态由蛋白质密度决定`,
     );
   }
   if (refSmoothF != null && refMaskF != null) {
@@ -3942,32 +4240,82 @@ export async function renderFigureMaps(
     ).join(" → ")}）；达标即止：初始姿态达标跳过拟合，原手达标跳过镜像手性对比`,
   );
 
-  /** v3.89 (round-49 “中间过程的map角度还是不对”): the MOVING side's fit
-   * sampling level. fitmap `envelope true` samples the moving map above
-   * its CURRENT DISPLAY level, and the open-time level was the flat
-   * 0.25×max — on the deck-8 intermediates the detergent micelle (mid-band
-   * density, t1 < ρ < t2) sat almost entirely ABOVE that level, so every
-   * fit sampled a big blob of micelle points that could overlap the
-   * reference anywhere (micelle-on-protein rewards → yawed/tipped poses
-   * that still pass the correlation bars — the J48 end-on / J9 oblique
-   * renders). The moving model's OWN 3-phase split gives the protein-only
-   * threshold (proteinLevel = t2, capped at half-max): when it sits above
-   * the classic level, the fit samples protein only, mirroring the v3.86
-   * reference-side detergent removal — the alignment now runs 去掉去垢剂
-   * on BOTH sides. The display level is unaffected (the knee re-decides it
-   * at export time). */
-  const fitSamplingLevelFor = async (
+  /** v3.89 → v3.90: the moving side's detergent plan. The v3.89 LEVEL
+   * rung: fitmap `envelope true` samples the moving map above its CURRENT
+   * DISPLAY level, and the open-time level was the flat 0.25×max — on the
+   * deck-8 intermediates the detergent micelle (mid-band density, t1 <
+   * ρ < t2) sat almost entirely ABOVE that level, so every fit sampled a
+   * big blob of micelle points that could overlap the reference anywhere
+   * (micelle-on-protein rewards → yawed/tipped poses that still pass the
+   * correlation bars — the J48 end-on / J9 oblique renders). The moving
+   * model's OWN 3-phase split gives the protein-only threshold
+   * (proteinLevel = t2, capped at half-max): when it sits above the
+   * classic level, the fit samples protein only.
+   * v3.90 adds the LAYER rung for the case the level rung has NO answer:
+   * a HOT belt (proteinLevel null — the belt band is the HOTTER phase;
+   * raising the level would erase the protein before the belt). Then the
+   * radial 分层 analysis (/layers — the attached scripts' mechanism on
+   * voxels) locates the belt's radial shell and the CALLER swaps the fit
+   * models for /shellmask clones (belt zeroed by LOCATION — the fits
+   * never sample the micelle whatever its density). */
+  const fitDetergentFor = async (
     id: number,
     stats: BridgeVolStats | null,
     classic: number | null,
-  ): Promise<{ level: number | null; rule: string | null }> => {
-    if (classic == null || !stats || !Number.isFinite(stats.max) || stats.max <= 0) return { level: classic, rule: null };
-    if (!t.canMembrane2) return { level: classic, rule: null };
-    const m2 = await bridgeMembrane2(t, id);
+  ): Promise<{
+    level: number | null;
+    rule: string | null;
+    proteinLevel: number | null;
+    beltBand: "mid" | "high" | null;
+    shell: BeltShell | null;
+    layers: LayersReply | null;
+  }> => {
+    if (classic == null || !stats || !Number.isFinite(stats.max) || stats.max <= 0) {
+      return { level: classic, rule: null, proteinLevel: null, beltBand: null, shell: null, layers: null };
+    }
+    /* /layers subsumes /membrane2 (same split + bands) — one call when the
+     * relay runs it; the v3.89 /membrane2 rung survives on older relays. */
+    const layers = t.canLayers ? await bridgeLayers(t, id) : null;
+    const m2 = layers ?? (t.canMembrane2 ? await bridgeMembrane2(t, id) : null);
+    if (!m2) {
+      return { level: classic, rule: null, proteinLevel: null, beltBand: null, shell: null, layers };
+    }
     const belt = beltLevelFrom(m2, stats);
-    if (belt.proteinLevel == null || !Number.isFinite(belt.proteinLevel)) return { level: classic, rule: null };
-    if (belt.proteinLevel <= classic + 1e-9) return { level: classic, rule: null };
-    return { level: belt.proteinLevel, rule: "本图蛋白/胶束分界 t2 — 移动侧同样不采样胶束密度" };
+    const shell = beltShellPlanFor(belt, layers);
+    if (belt.proteinLevel != null && Number.isFinite(belt.proteinLevel)) {
+      if (belt.proteinLevel > classic + 1e-9) {
+        return {
+          level: belt.proteinLevel,
+          rule: "本图蛋白/胶束分界 t2 — 移动侧同样不采样胶束密度",
+          proteinLevel: belt.proteinLevel,
+          beltBand: belt.beltBand,
+          shell,
+          layers,
+        };
+      }
+      return { level: classic, rule: null, proteinLevel: belt.proteinLevel, beltBand: belt.beltBand, shell, layers };
+    }
+    return { level: classic, rule: null, proteinLevel: null, beltBand: belt.beltBand, shell, layers };
+  };
+  /** v3.90: create a belt-free /shellmask clone of a moving fit model and
+   * force the source's current pose onto it via the PROVEN matrix round
+   * trip (the endpoint also copies the scene position — belt and
+   * suspenders: a pose mismatch would poison the matrix bookkeeping).
+   * Null on any failure (the caller keeps the belt with an honest log). */
+  const beltFreeClone = async (
+    id: number,
+    shell: BeltShell,
+    tag: string,
+    level: number | null,
+  ): Promise<number | null> => {
+    const sm = await bridgeShellMask(t, id, shell, null);
+    if (sm == null) return null;
+    const xfSrc = await matrixSave(id, `${safeKeyPart(tag)}_src`);
+    if (xfSrc) await matrixLoad(sm.id, xfSrc);
+    if (level != null && Number.isFinite(level)) {
+      await exec(t, `volume #${sm.id} level ${level.toFixed(4)} step ${STEP}`, opts, true);
+    }
+    return sm.id;
   };
 
   for (const req of all) {
@@ -4003,6 +4351,11 @@ export async function renderFigureMaps(
     // never touched volume surfaces on the real machine.
     const mapColor = requestColor(req);
     const fileStem = safeKeyPart(req.key.replace(/\//g, "__"));
+    /* v3.90: this map's radial belt shell (set when the original hand
+     * opens — the flip hand carries it over: a z-mirror preserves radial
+     * distances, and /shellmask recomputes the axis/centroid on the
+     * clone's own data, so the mirrored geometry stays self-consistent). */
+    let mapShell: BeltShell | null = null;
 
     /* v3.66: the map opens ONCE (the v3.63–65 ladder re-opened it for
      * each of the 8 candidates) and the z-flip hand is created from the
@@ -4028,13 +4381,21 @@ export async function renderFigureMaps(
         /* v3.89: the FIT sampling level — the moving model's own protein
          * band when it sits above the classic 0.25×max (the micelle must
          * not ride the fitmap envelope); the DISPLAY level is decided at
-         * export time by the knee (or the policy below in manual mode). */
-        const fit0 = await fitSamplingLevelFor(origId, stats, classicLevel);
+         * export time by the knee (or the policy below in manual mode).
+         * v3.90: a HOT belt (proteinLevel null) instead carries the radial
+         * belt shell — the σ clones / full-res polish swap to belt-free
+         * /shellmask clones below. */
+        const fit0 = await fitDetergentFor(origId, stats, classicLevel);
         const level = fit0.level;
         origFitLevel = level;
         origFitMax = stats && Number.isFinite(stats.max) && stats.max > 0 ? stats.max : null;
+        mapShell = fit0.shell;
         if (fit0.rule && level != null) {
           log(`  ${req.key}: 拟合采样 level ${level.toFixed(4)}（${fit0.rule}）`);
+        } else if (fit0.shell != null && stats) {
+          log(
+            `  ${req.key}: 拟合采样 level 保持 ${(classicLevel != null && stats.max > 0 ? classicLevel / stats.max : LEVEL_RATIO).toFixed(3)}×max — 本图胶束相较蛋白更热（阈值无法隐藏），改用分层去垢（${fit0.shell.note}）`,
+          );
         }
         /* v3.77 → v3.82: the DISPLAY level for this map's screenshot. In
          * kneeMode (auto + probes) the level is decided AT EXPORT TIME by
@@ -4102,10 +4463,16 @@ export async function renderFigureMaps(
            * maxima — identical in practice); only an independent fallback
            * when the original never got one. */
           const classic2 = stats2 ? stats2.max * LEVEL_RATIO : refLevel;
-          const level2 =
-            origFitLevel != null && origFitMax != null && stats2 && Number.isFinite(stats2.max) && stats2.max > 0
-              ? origFitLevel * (stats2.max / origFitMax)
-              : (await fitSamplingLevelFor(flipId, stats2, classic2)).level;
+          let level2: number | null;
+          if (origFitLevel != null && origFitMax != null && stats2 && Number.isFinite(stats2.max) && stats2.max > 0) {
+            level2 = origFitLevel * (stats2.max / origFitMax);
+          } else {
+            /* v3.90: the independent fallback also carries the flip hand's
+             * OWN shell plan when the original never got one. */
+            const fd2 = await fitDetergentFor(flipId, stats2, classic2);
+            level2 = fd2.level;
+            if (fd2.shell != null && mapShell == null) mapShell = fd2.shell;
+          }
           /* v3.77 → v3.82: display level for the flipped hand's screenshot
            * (same policy as the original — the flip preserves the value
            * distribution, so the two levels coincide; kneeMode decides at
@@ -4192,6 +4559,9 @@ export async function renderFigureMaps(
       const handId = hand.modelId;
       let smoothC: number | null = null;
       let smoothF: number | null = null;
+      /* v3.90: the no-pyramid fallback pair's belt-free clone (== handId
+       * unless swapped below) — closed in this hand's finally. */
+      let fullFitId = handId;
       let pre: number | null = null;
       let corr1: number | null = null;
       let corr2: number | null = null;
@@ -4204,7 +4574,9 @@ export async function renderFigureMaps(
           if (smoothC != null) {
             smoothF = await gaussianSmooth(handId, SIGMA_FINE_A);
           }
-          for (const sid of [smoothC, smoothF]) {
+          const sigmaIds: Array<number | null> = [smoothC, smoothF];
+          for (let si = 0; si < sigmaIds.length; si++) {
+            let sid = sigmaIds[si];
             if (sid == null) continue;
             const sStats = await bridgeVolStats(t, sid);
             if (sStats) {
@@ -4212,13 +4584,31 @@ export async function renderFigureMaps(
                * reshapes the histogram — the same reason the reference's
                * mask clones re-split); the protein band when it sits above
                * the classic 0.25×max, so the pyramid fits sample protein
-               * only on the moving side too. */
-              const sFit = await fitSamplingLevelFor(sid, sStats, sStats.max * LEVEL_RATIO);
+               * only on the moving side too.
+               * v3.90: a HOT belt (proteinLevel null — the level rung has
+               * no answer) instead swaps the σ clone for a BELT-FREE
+               * /shellmask clone: the belt's radial shell (this clone's
+               * OWN /layers — smoothing shifts the radii) zeroed by
+               * location, so the pyramid fits never sample the micelle
+               * whatever its density. The pose transfer is unchanged. */
+              const sFit = await fitDetergentFor(sid, sStats, sStats.max * LEVEL_RATIO);
+              if (sFit.shell != null) {
+                const smId = await beltFreeClone(sid, sFit.shell, `${fileStem}_${hand.name}_s${si}`, sFit.level ?? sStats.max * LEVEL_RATIO);
+                if (smId != null) {
+                  log(`  ${req.key} · ${hand.name}: ${si === 0 ? "σ粗" : "σ细"}拟合副本 #${smId} 已按分层去除胶束带（${sFit.shell.note}）`);
+                  await exec(t, `close #${sid}`, opts, true);
+                  sigmaIds[si] = sid = smId;
+                } else {
+                  log(`  ${req.key} · ${hand.name}: ⚠ ${si === 0 ? "σ粗" : "σ细"}分层屏蔽副本生成失败 — 该尺度拟合保留胶束（热胶束）`);
+                }
+              }
               const sLevel = sFit.level ?? sStats.max * LEVEL_RATIO;
               await exec(t, `volume #${sid} level ${sLevel.toFixed(4)} step ${STEP}`, opts, true);
             }
             await exec(t, `volume #${sid} color ${mapColor}`, opts, true);
           }
+          smoothC = sigmaIds[0];
+          smoothF = sigmaIds[1];
         }
         /* v3.67: every fit target is the MASKED reference clone when one
          * exists (signal envelope only), falling back to its unmasked
@@ -4230,7 +4620,22 @@ export async function renderFigureMaps(
         const refFullT = refMaskFull ?? refId;
         const pairC = smoothC != null && refCt != null ? { a: smoothC, b: refCt } : null;
         const pairF = smoothF != null && refFt != null ? { a: smoothF, b: refFt } : null;
-        const pairFull = { a: handId, b: refFullT };
+        /* v3.90: the no-pyramid fallback pair rides a BELT-FREE clone when
+         * this map's belt is the hot phase (the pyramid path replaced the
+         * σ clones instead; the polish below creates its own clone from
+         * the posed hand). */
+        if (mapShell != null && pairC == null && pairF == null) {
+          const hStats = statsById.get(handId) ?? null;
+          const fLevel = hStats && Number.isFinite(hStats.max) && hStats.max > 0 ? hStats.max * LEVEL_RATIO : refLevel;
+          const smId = await beltFreeClone(handId, mapShell, `${fileStem}_${hand.name}_full`, fLevel);
+          if (smId != null) {
+            fullFitId = smId;
+            log(`  ${req.key} · ${hand.name}: 全分辨率拟合副本 #${smId} 已按分层去除胶束带（${mapShell.note}）`);
+          } else {
+            log(`  ${req.key} · ${hand.name}: ⚠ 全分辨率分层屏蔽副本生成失败 — 拟合保留胶束（热胶束）`);
+          }
+        }
+        const pairFull = { a: fullFitId, b: refFullT };
         const workPair = pairF ?? pairC ?? pairFull;
 
         pre = await measureCorr(workPair.a, workPair.b);
@@ -4340,9 +4745,39 @@ export async function renderFigureMaps(
          * whole-box correlation ranked the two hands partly by noise.
          * With the mask the polish objective is signal-only, and `post`
          * measures the signal envelope alone (u = the hand's above-level
-         * points — set at open; v = the masked reference). */
+         * points — set at open; v = the masked reference).
+         * v3.90: a HOT-belt map polishes on a BELT-FREE clone (the
+         * envelope-level rung cannot hide a hot belt — fitting the
+         * belt-carrying hand would reward micelle-on-protein overlaps
+         * during the refinement). Created HERE, after the winner pose
+         * landed on handId, so the clone inherits the pose (the endpoint
+         * copies the scene position; the matrix round trip forces it
+         * regardless); the refined pose transfers back to the display
+         * model, and `post` still measures the REAL hand (honest number,
+         * diluted — never biased). The no-pyramid path reuses its ladder
+         * clone (already at the winner pose). */
         if (fitShape !== null) {
-          await runFit(handId, refFullT);
+          let polishId = fullFitId;
+          let polishFresh = false;
+          if (polishId === handId && mapShell != null) {
+            const hStats = statsById.get(handId) ?? null;
+            const pLevel = hStats && Number.isFinite(hStats.max) && hStats.max > 0 ? hStats.max * LEVEL_RATIO : refLevel;
+            const smId = await beltFreeClone(handId, mapShell, `${fileStem}_${hand.name}_pol`, pLevel);
+            if (smId != null) {
+              polishId = smId;
+              polishFresh = true;
+            } else {
+              log(`  ${req.key} · ${hand.name}: ⚠ 精修分层屏蔽副本生成失败 — 全分辨率精修保留胶束（热胶束）`);
+            }
+          }
+          await runFit(polishId, refFullT);
+          if (polishId !== handId) {
+            const xfp = await matrixSave(polishId, `${fileStem}_${hand.name}_polish`);
+            if (xfp) await matrixLoad(handId, xfp);
+          }
+          if (polishFresh) {
+            await exec(t, `close #${polishId}`, opts, true);
+          }
         }
         post = await measureCorr(handId, refFullT);
         const score = post ?? corr ?? pre;
@@ -4403,6 +4838,9 @@ export async function renderFigureMaps(
       } finally {
         if (smoothC != null) await exec(t, `close #${smoothC}`, opts, true);
         if (smoothF != null) await exec(t, `close #${smoothF}`, opts, true);
+        /* v3.90: the no-pyramid belt-free clone (the σ replacements were
+         * closed at swap time; the polish clone at polish time). */
+        if (fullFitId !== handId) await exec(t, `close #${fullFitId}`, opts, true);
         await sweepStrayVolumes([refSmoothC, refSmoothF, refMaskC, refMaskF, refMaskFull]);
       }
     }

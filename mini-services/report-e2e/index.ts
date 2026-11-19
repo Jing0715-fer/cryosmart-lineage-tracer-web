@@ -1290,6 +1290,13 @@ const relayState = {
    * machinery) and every applied/scanned `turn y` value. */
   silhouetteProbes: 0,
   yawTurns: [] as number[],
+  /** v3.90 E2E stats: GET /layers calls (the radial 分层 analysis) and the
+   * /shellmask clones (id + band + minval per call — the default hot-belt
+   * drill asserts the layer mechanism owns the belt removal; ?belt=mid
+   * asserts it stays on the v3.86 threshold path). */
+  layersCalls: 0,
+  shellmaskCalls: 0,
+  shellmaskSpecs: [] as Array<{ src: number; id: number; band: string; r0: number; r1: number; minval: number | null }>,
 };
 
 function resetRelayState() {
@@ -1340,6 +1347,9 @@ function resetRelayState() {
   relayState.poseShapeFinal = false;
   relayState.silhouetteProbes = 0;
   relayState.yawTurns = [];
+  relayState.layersCalls = 0;
+  relayState.shellmaskCalls = 0;
+  relayState.shellmaskSpecs = [];
 }
 
 function relayNextModelId(): number {
@@ -1407,6 +1417,13 @@ function relayStats() {
     misfit_models: [...relayState.misfitModels],
     silhouette_probes: relayState.silhouetteProbes,
     yaw_turns: [...relayState.yawTurns],
+    // v3.90: the 分层去垢 drill — /layers analysis calls + /shellmask
+    // clones (the hot-belt default asserts the shell engaged; ?belt=mid
+    // asserts zero shellmasks — the v3.86 threshold path stays).
+    layers_calls: relayState.layersCalls,
+    shellmask_calls: relayState.shellmaskCalls,
+    shellmask_bands: [...new Set(relayState.shellmaskSpecs.map((s) => s.band))],
+    shellmask_minvals: [...new Set(relayState.shellmaskSpecs.map((s) => s.minval))],
   };
 }
 function u_hasAsset(u: string): boolean {
@@ -1899,6 +1916,12 @@ const relayServer = Bun.serve({
           // per-band PCAs). Drills: ?relay=old drops it (pre-3.82 relay);
           // ?relay=nomembrane drops BOTH membrane flags (pre-3.77).
           membrane2: relayState.relayMode === "",
+          // v3.90: mirrors relay.py's GET /layers + GET /shellmask (the
+          // radial 分层 belt analysis + the belt-shell zeroed clone —
+          // the 分层去垢 alignment masks). Drills: ?relay=old / nomembrane
+          // drop it (older relays); the page keeps the v3.86/v3.89 value
+          // rungs without the flag.
+          layers: relayState.relayMode === "",
           cacheDir: relayState.cacheDir,
           cached: relayState.staged.size,
           volumes: relayState.models.size,
@@ -2203,6 +2226,126 @@ const relayServer = Bun.serve({
             count: 250000,
             total: 512000,
           },
+        });
+      }
+      if (u.pathname === "/layers") {
+        // v3.90 E2E: mirrors relay.py's GET /layers — the radial 分层
+        // profile + the belt's radial shell (the attached ini.py scripts'
+        // layering mechanism on voxels). The mock particle is FIXED: 8
+        // radial layers over r∈[2,64] with the belt living in layers 5-7
+        // (belt_frac 0.62/0.78/0.71 — the contiguous ≥0.5 run around the
+        // peak), so the belt shell is r0=33.0 / r1=56.25 (the mock's
+        // grid spacing 1.25 → ≈41-70 Å). The DEFAULT particle is HOT-BELT
+        // (the belt = the high band, oblateness 0.30 — the P283 regime
+        // the page's layer mechanism exists for); ?belt=mid swaps the
+        // belt to the mid band. ?relay=old / ?relay=nomembrane drills:
+        // 404 (pre-3.90 relays).
+        if (relayState.relayMode !== "") {
+          return reply(404, { error: `unknown route (${relayState.relayMode} relay drill)` });
+        }
+        const mid = u.searchParams.get("id") || "";
+        if (!mid) return reply(400, { error: "missing id" });
+        if (!relayState.models.has(Number(mid))) {
+          return reply(404, { error: `model #${mid} not found` });
+        }
+        relayState.layersCalls += 1;
+        const beltMid = relayState.beltMode === "mid";
+        const beltBand = beltMid ? "mid" : "high";
+        const beltRatio = beltMid ? 0.3 : 0.3;
+        const fr = [0.05, 0.12, 0.2, 0.35, 0.62, 0.78, 0.71, 0.3];
+        const bounds = [2, 9.75, 17.5, 25.25, 33, 40.75, 48.5, 56.25, 64];
+        const counts = [52000, 61000, 58000, 49000, 55000, 51000, 42000, 18000];
+        const means = [0.62, 0.58, 0.52, 0.44, 0.38, 0.4, 0.36, 0.24];
+        const layers = fr.map((_, i) => ({
+          i,
+          r0: bounds[i],
+          r1: bounds[i + 1],
+          count: counts[i],
+          mean: means[i],
+          belt_frac: fr[i],
+        }));
+        return reply(200, {
+          ok: true,
+          splits: [0.18, 0.54],
+          bands: [
+            {
+              name: "mid",
+              lo: 0.18,
+              hi: 0.54,
+              normal: beltMid ? [0.666667, 0.333333, 0.666667] : [0.57735, 0.57735, 0.57735],
+              ea: beltMid ? [0.447214, -0.894427, 0.0] : [0.7071, -0.7071, 0.0],
+              eb: beltMid ? [0.596285, 0.298142, -0.745356] : [0.40825, 0.40825, -0.8165],
+              ratio: beltMid ? 0.3 : 0.99,
+              lambdas: beltMid ? [0.3, 1.0, 1.05] : [0.99, 1.0, 1.6],
+              count: beltMid ? 90000 : 140000,
+            },
+            {
+              name: "high",
+              lo: 0.54,
+              hi: 1.0,
+              normal: beltMid ? [0.57735, 0.57735, 0.57735] : [0.666667, 0.333333, 0.666667],
+              ea: beltMid ? [0.7071, -0.7071, 0.0] : [0.447214, -0.894427, 0.0],
+              eb: beltMid ? [0.40825, 0.40825, -0.8165] : [0.596285, 0.298142, -0.745356],
+              ratio: beltMid ? 0.99 : 0.3,
+              lambdas: beltMid ? [0.99, 1.0, 1.6] : [0.3, 1.0, 1.05],
+              count: beltMid ? 140000 : 90000,
+            },
+          ],
+          envelope: null,
+          layers,
+          belt: {
+            band: beltBand,
+            r0: 33,
+            r1: 56.25,
+            layer_from: 4,
+            layer_to: 6,
+            frac: 0.78,
+            rho_cut: null,
+            z_cut: null,
+            step: [1.25, 1.25, 1.25],
+            note: `胶束带=${beltBand} 相带（扁率 ${beltRatio.toFixed(2)}）· 第 5-7/8 层 r 33.0-56.3 体素（≈ 41-70 Å）· 层内胶束占比峰值 0.78`,
+          },
+          reason: null,
+        });
+      }
+      if (u.pathname === "/shellmask") {
+        // v3.90 E2E: mirrors relay.py's GET /shellmask — the belt-shell
+        // zeroed CLONE. The mock registers a new model (inheriting the
+        // source's URL so the ?pose=yaw90 MISFIT marking rides along) and
+        // returns fixed zeroing stats: 45,000 belt voxels + (minval given)
+        // 120,000 noise-floor voxels. ?relay=old / ?relay=nomembrane
+        // drills: 404 (pre-3.90 relays).
+        if (relayState.relayMode !== "") {
+          return reply(404, { error: `unknown route (${relayState.relayMode} relay drill)` });
+        }
+        const mid = u.searchParams.get("id") || "";
+        if (!mid) return reply(400, { error: "missing id" });
+        const src = relayState.models.get(Number(mid));
+        if (!src) return reply(404, { error: `model #${mid} not found` });
+        const band = u.searchParams.get("band") || "";
+        if (band !== "mid" && band !== "high") {
+          return reply(400, { error: "band must be mid or high" });
+        }
+        const r0 = Number(u.searchParams.get("r0"));
+        const r1 = Number(u.searchParams.get("r1"));
+        if (!Number.isFinite(r0) || !Number.isFinite(r1) || !(r1 > r0) || r0 < 0) {
+          return reply(400, { error: "shell radii inverted" });
+        }
+        const minvalRaw = u.searchParams.get("minval");
+        const minval = minvalRaw != null && minvalRaw !== "" && Number.isFinite(Number(minvalRaw)) ? Number(minvalRaw) : null;
+        const next = relayNextModelId();
+        registerModel(next, `${src.url}#shellmask`);
+        relayState.shellmaskCalls += 1;
+        relayState.shellmaskSpecs.push({ src: Number(mid), id: next, band, r0, r1, minval });
+        return reply(200, {
+          ok: true,
+          id: String(next),
+          zeroed: 45000 + (minval != null ? 120000 : 0),
+          belt_zeroed: 45000,
+          noise_zeroed: minval != null ? 120000 : 0,
+          rho_cut: 14.5,
+          z_cut: 11.0,
+          total: 512000,
         });
       }
       if (u.pathname === "/file") {
