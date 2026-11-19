@@ -1023,5 +1023,21 @@
  * proven matrix round trip). Cold belts, degenerate splits and old
  * relays keep the delivered v3.86/v3.87/v3.89 behavior verbatim —
  * zero regression, one relay.py re-open to enable.
+ *
+ * v3.91 bump reason (round-51 “为何这个项目的流程图部分只能看到 J815
+ * 2D class selection / J901 Import Volumes / J906 Local refinement 这
+ * 3 个job”): the spine DFS classified a parent by its VOLUME edge alone,
+ * so the classic refine shape — one upstream job feeding BOTH the
+ * particles AND the reference map (P222: J897 → J906) — was pushed to
+ * the BOTTOM of the LIFO stack, while a MASK-only side parent
+ * (J904 volume_tools → J901 import_volumes, map-bearing) popped FIRST
+ * and terminated the search. The whole particle mainline (J897 → J895
+ * → J871 → J817) never entered the figure and every mode collapsed:
+ * 手动 catalog = [J815, J901, J906], 标准 deck = [J815, J906] (the
+ * import strip then ate J901). Fix: per-PARENT particle-first priority
+ * in spineUpstreamOf — a parent with ANY particle-family edge
+ * (input_type ≠ volume/mask) pops before volume/mask-only side parents,
+ * exactly the v3.58 intent. P222 now reads 2D selection → J817 → J871
+ * ab-initio → J895 → J897 → J906; the 手动 catalog lists all 6 jobs.
  */
-export const FLOW_ENGINE_VERSION = "3.90";
+export const FLOW_ENGINE_VERSION = "3.91";

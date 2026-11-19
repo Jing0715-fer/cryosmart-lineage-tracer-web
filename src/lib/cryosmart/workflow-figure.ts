@@ -376,6 +376,12 @@ interface LineageGraph {
   byUid: Map<string, LineageNode>;
   parentsOf: Map<string, string[]>;
   volParentsOf: Map<string, string[]>;
+  /** v3.89 (round-49): parents connected by ≥1 PARTICLE-family edge
+   *  (any input_type other than volume/mask — particle, exposure,
+   *  template, parent fallback …). A parent feeding BOTH the particles
+   *  AND the reference map of a refine sits here, not in volParentsOf —
+   *  the spine must treat it as the mainline upstream. */
+  particleParentsOf: Map<string, string[]>;
   /** Longest-path depth from the roots (0 = import/seed). */
   depth: Map<string, number>;
   /** Ancestors of the final job over ALL incoming edges, every family. */
@@ -388,6 +394,8 @@ function collectLineageGraph(summary: LineageSummary): LineageGraph {
 
   const parentsOf = new Map<string, string[]>();
   const volParentsOf = new Map<string, string[]>();
+  const particleParentsOf = new Map<string, string[]>();
+  const isVolumeFamilyType = (t: string) => t === "volume" || t === "mask";
   for (const e of summary.edges || []) {
     if (!byUid.has(e.source) || !byUid.has(e.target)) continue;
     if (!parentsOf.has(e.target)) parentsOf.set(e.target, []);
@@ -395,6 +403,15 @@ function collectLineageGraph(summary: LineageSummary): LineageGraph {
     if (e.input_type === "volume") {
       if (!volParentsOf.has(e.target)) volParentsOf.set(e.target, []);
       volParentsOf.get(e.target)!.push(e.source);
+    }
+    // v3.89: per-PARENT particle-family membership — one particle edge
+    // is enough (dedup keeps the push order of first appearance).
+    if (!isVolumeFamilyType(e.input_type)) {
+      const list = particleParentsOf.get(e.target) ?? [];
+      if (!list.includes(e.source)) {
+        if (!particleParentsOf.has(e.target)) particleParentsOf.set(e.target, list);
+        list.push(e.source);
+      }
     }
   }
 
@@ -425,7 +442,7 @@ function collectLineageGraph(summary: LineageSummary): LineageGraph {
       }
     }
   }
-  return { byUid, parentsOf, volParentsOf, depth, ancestorUids };
+  return { byUid, parentsOf, volParentsOf, particleParentsOf, depth, ancestorUids };
 }
 
 /** v3.58 (round-17 “怎么缺少了 J28”): particle-first spine search. The old
@@ -449,7 +466,21 @@ function collectLineageGraph(summary: LineageSummary): LineageGraph {
  *  stop and hide the ab-initio behind it. The 极简 walk refuses to STOP on
  *  an import_* seed (it explores THROUGH it like a map-less step) so the
  *  real initial-model stage stays on the curated mainline; the standard
- *  walk keeps the old stop-on-first-map semantics (v3.58 unchanged). */
+ *  walk keeps the old stop-on-first-map semantics (v3.58 unchanged).
+ *
+ *  v3.89 (round-49 “流程图只能看到 J815/J901/J906 这 3 个job”): the priority
+ *  is now per-PARENT, not per-edge. The v3.58 push order classified a
+ *  parent by its VOLUME edge alone, so the classic refine shape — the
+ *  upstream job supplying BOTH the particles AND the reference map
+ *  (P222: J897 → J906) — was pushed at the BOTTOM of the LIFO stack while
+ *  a mask-only side parent (J904 volume_tools, explored through to the
+ *  map-bearing J901 import_volumes) popped FIRST and terminated the
+ *  search. The whole particle mainline (J897 → J895 → J871 → J817) never
+ *  entered the spine and the figure collapsed to [select_2D montage,
+ *  Import Volumes, final]. Now: a parent with ANY particle-family edge
+ *  (input_type ≠ volume/mask — particles, exposures, templates, parent
+ *  fallback) pops FIRST; volume/mask-ONLY parents (reference maps, masks)
+ *  are explored after the particle subtree, matching the v3.58 intent. */
 function spineUpstreamOf(
   uid: string,
   graph: LineageGraph,
@@ -462,12 +493,19 @@ function spineUpstreamOf(
   };
   const stack: string[] = [];
   const pushParents = (u: string) => {
-    const vol = graph.volParentsOf.get(u) || [];
+    const particle = graph.particleParentsOf.get(u) || [];
     const all = graph.parentsOf.get(u) || [];
-    // LIFO: non-volume parents go in LAST so they pop FIRST.
-    for (const p of vol) if (!seen.has(p) && !stack.includes(p)) stack.push(p);
-    for (const p of all)
-      if (!seen.has(p) && !vol.includes(p) && !stack.includes(p)) stack.push(p);
+    // LIFO: particle-family parents go in LAST so they pop FIRST (v3.89
+    // per-parent rule — see the doc comment above). Volume/mask-only side
+    // parents ride the bottom and are only explored once the particle
+    // subtree is exhausted.
+    for (const p of all) {
+      if (particle.includes(p)) continue;
+      if (!seen.has(p) && !stack.includes(p)) stack.push(p);
+    }
+    for (const p of particle) {
+      if (!seen.has(p) && !stack.includes(p)) stack.push(p);
+    }
   };
   pushParents(uid);
   let expansions = 0;
@@ -1164,6 +1202,10 @@ export function buildFlowFigureModel(
         {
           uid: s2d.uid,
           label: jobTypeLabel(s2d.job_type),
+          // v3.89: type filters (dropNonClassificationMiddles & friends) read
+          // jobType — the inline-built montage rows must carry it like
+          // itemFromNode rows do.
+          jobType: s2d.job_type,
           stats,
           mapKey: null,
           map: null,
