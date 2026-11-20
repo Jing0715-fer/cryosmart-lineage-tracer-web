@@ -1064,5 +1064,46 @@
  * path: the clones closed before screenshots before, and the poses
  * transferred before — this round makes both guarantees loud, retried,
  * and machine-checked.
+ *
+ * v3.93 bump reason (round-53 “class2的图还是有问题，我打开map看到的
+ * 不是这样的”): three render-fidelity gates restore the opened-map look
+ * on the maps the previous rules silently broke. (1) KNEE_ROUGH_MAX —
+ * the knee cleanliness ladder gains the BOUNDARY-ROUGHNESS bar
+ * (measureRender.rough, isoperimetric P²/4πA): the deck-4 forensics
+ * re-measured every delivered render — healthy maps 1.0–2.4 (the mock's
+ * mushroom reads 3.75) while J817_c1, the CONNECTED snowfield whose
+ * level sat below its noise floor (frag 0% because the noise is
+ * connected, holes 6 only TYING the v3.86 bar), read 8.15 — rough was
+ * measured and logged on every probe since v3.86 but never gated; it
+ * now gates every rung (kneeShapeClean/kneeAnchorClean exported), the
+ * honest rung-3 fallback is rough-aware, and the mock's ?knee=rough
+ * drills the exact shape (measured frag 0.000 / holes 0 / mainCov 21% /
+ * rough 8.18 — passes every v3.86 bar, dies on the new one). (2) The
+ * HOT-BELT display rules — on a map whose oblate belt occupies the HIGH
+ * band (detergent hotter than protein, the P222 class maps) NO threshold
+ * can hide the micelle and RAISING the level walks the surface INTO the
+ * micelle core: the deck-4 class_2 renders were perfect smooth capsules
+ * (the mock's ?knee=hotcap capsule: frag 0 / holes 0 / mainCov 29% /
+ * rough 0.84 — every bar loves a capsule) with the protein swallowed,
+ * because the round-48 参考倍率下限 lifted their display level above
+ * their own 蛋白/胶束 boundary into that core regime. The floor no longer
+ * applies to a hot-belt map (a map can only be affected if its own
+ * anchor sat BELOW the floor — exactly the maps the floor was lifting
+ * into the core), and the ladder pool is CAPPED at t2 (the mid|high
+ * boundary): rungs above t2 only ever render the micelle core, so they
+ * leave the pool entirely — the 蛋白+胶束晕轮 the user sees opening the
+ * map is what renders. (3) UNALIGNED_CORR_BAR — a map whose WINNING
+ * score (post ?? corr ?? pre) stays below unalignedCorrBar (0.55,
+ * dragged under a user-lowered corrTarget) never validated a pose
+ * against the reference: the fitted pose is noise-driven and the
+ * silhouette yaw-matching against the reference frame is meaningless.
+ * Such a map renders exactly as the user sees it on open — the ORIGINAL
+ * hand restored to its OPEN pose (matrixget captured before any
+ * fitting, matrixset at screenshot time), the DEFAULT camera (no shared
+ * view, no silhouette matching, no standing assist), its OWN display
+ * knee — and the figure footnote counts it 未对齐 honestly (所有地图已
+ * 对齐 flips to 其余地图…（N 个未对齐，按开图原样呈现）when any exist);
+ * the mock's ?unaligned=<substr> drill routes those maps' measure
+ * correlation to 0.30 to prove the whole path.
  */
-export const FLOW_ENGINE_VERSION = "3.92";
+export const FLOW_ENGINE_VERSION = "3.93";

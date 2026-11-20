@@ -2508,7 +2508,11 @@ export function imageDims(bytes: Uint8Array): { width: number; height: number; e
   return { width: 1, height: 1, ext };
 }
 
-/** Compose the bottom-left footnote about alignment & handedness. */
+/** Compose the bottom-left footnote about alignment & handedness.
+ * v3.93 (round-53): `unaligned` counts the maps whose winning correlation
+ * stayed below the alignability bar — the deck renders them as opened
+ * (original map, open pose, default camera), and the footnote must not
+ * claim 所有地图已对齐 while any of them exist. */
 export function figureFootnote(
   meta: {
     referenceKey?: string | null;
@@ -2516,12 +2520,22 @@ export function figureFootnote(
     consistent: number;
     ambiguous: number;
     failed: number;
+    unaligned?: number;
     view?: string | null;
     mode: string;
   },
 ): string {
   const parts: string[] = [];
-  if (meta.referenceKey) parts.push(`所有地图已对齐至参考 ${meta.referenceKey}`);
+  const unaligned = meta.unaligned ?? 0;
+  if (meta.referenceKey) {
+    parts.push(
+      unaligned > 0
+        ? `除 ${unaligned} 张未对齐（按开图原样呈现）外，其余地图已对齐至参考 ${meta.referenceKey}`
+        : `所有地图已对齐至参考 ${meta.referenceKey}`,
+    );
+  } else if (unaligned > 0) {
+    parts.push(`${unaligned} 张未对齐（按开图原样呈现）`);
+  }
   const chiral: string[] = [];
   if (meta.corrected) chiral.push(`${meta.corrected} 个已翻正`);
   if (meta.consistent) chiral.push(`${meta.consistent} 个一致`);

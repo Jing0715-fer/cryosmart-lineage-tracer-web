@@ -374,6 +374,22 @@ const server = Bun.serve({
       // teeth check (the DEFAULT drills assert it stays 0).
       const shotDrill = sp.get("shot") || "";
       relayState.shotSigmaLeak = shotDrill === "sigma";
+      // v3.93 E2E drills: ?knee=hotcap (the reference reads COLD-belt and
+      // anchors at its own t2=0.54 while every hot-belt map would be lifted
+      // into the capsule regime by the ref-ratio floor; levels > 0.5 render
+      // the SMOOTH CAPSULE — the class_2 disease) / ?knee=rough (noise
+      // floor 0.26; levels below it render the CONNECTED ROUGH snowfield —
+      // frag 0, holes ≤ 6, rough ≈ 8 — only the boundary-roughness gate
+      // rejects it).
+      const kneeDrill = sp.get("knee") || "";
+      relayState.kneeMode = kneeDrill === "hotcap" || kneeDrill === "rough" ? kneeDrill : "";
+      if (relayState.kneeMode === "rough") relayState.noiseFloor = 0.26;
+      // v3.93 E2E drill: ?unaligned=<substr> — measure correlation reports
+      // 0.30 (below the 0.55 alignability bar) whenever the MOVING model's
+      // open URL contains substr; the engine must render that map as
+      // opened (original hand, open pose, default camera, own knee).
+      const unalignedDrill = sp.get("unaligned") || "";
+      relayState.unalignedMatch = unalignedDrill || null;
       return Response.json({
         ok: true,
         http_blocked: blockHttp,
@@ -388,6 +404,8 @@ const server = Bun.serve({
         noise_floor: relayState.noiseFloor,
         pose_misfit_match: relayState.poseMisfitMatch,
         shot_sigma_drill: relayState.shotSigmaLeak,
+        knee_mode: relayState.kneeMode,
+        unaligned_match: relayState.unalignedMatch,
       });
     }
     if (pathname === "/flow-e2e/relay-stats") {
@@ -867,6 +885,56 @@ function shapePng(kind: string, rgb: [number, number, number]): Uint8Array {
         }
       }
     });
+  } else if (kind === "roughsnow") {
+    /* v3.93 ?knee=rough — the CONNECTED ROUGH SNOWFIELD (the deck-4
+     * J817_c1 shape): a solid core + 20 well-separated thin spikes.
+     * Measured with the engine's exact measureRender: frag 0.000, holes
+     * 0, mainCov 21.0%, rough 8.18 — it passes EVERY v3.86 bar (the
+     * speckle frag gate, the holes gate, the mainCov floors) and only
+     * the v3.93 boundary-roughness bar (6.0) rejects it. */
+    out = drawShape(rgb, (set) => {
+      const coreR = 21;
+      for (let y = 0; y < 96; y++) {
+        for (let x = 0; x < 96; x++) {
+          if (Math.hypot(x + 0.5 - 48, y + 0.5 - 48) <= coreR) set(x, y);
+        }
+      }
+      let seed = 987654321;
+      const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+      const width = 1.4;
+      for (let i = 0; i < 20; i++) {
+        const a = ((i + rnd() * 0.5) / 20) * Math.PI * 2;
+        const len = 7 + rnd() * 5;
+        const nSeg = Math.ceil(len);
+        for (let s = 0; s <= nSeg; s++) {
+          const r = coreR - width + (s / nSeg) * len;
+          const cx = 48 + Math.cos(a) * r;
+          const cy = 48 + Math.sin(a) * r;
+          for (let y = Math.floor(cy - width) - 1; y <= Math.ceil(cy + width) + 1; y++) {
+            for (let x = Math.floor(cx - width) - 1; x <= Math.ceil(cx + width) + 1; x++) {
+              if (x < 0 || y < 0 || x >= 96 || y >= 96) continue;
+              if (Math.hypot(x + 0.5 - cx, y + 0.5 - cy) <= width) set(x, y);
+            }
+          }
+        }
+      }
+    });
+  } else if (kind === "capsule") {
+    /* v3.93 ?knee=hotcap — the SMOOTH CAPSULE (the deck-4 class_2
+     * disease): a plain 34×25 ellipse. Measured: frag 0, holes 0,
+     * mainCov 29.0%, rough 0.84 — it passes EVERY cleanliness bar
+     * INCLUDING the new roughness one; only the hot-belt rules (the
+     * ref-ratio floor skip + the t2 ladder cap) keep a hot-belt map out
+     * of the >t2 regime that renders it. */
+    out = drawShape(rgb, (set) => {
+      for (let y = 0; y < 96; y++) {
+        for (let x = 0; x < 96; x++) {
+          const ex = (x + 0.5 - 48) / 34;
+          const ey = (y + 0.5 - 48) / 25;
+          if (ex * ex + ey * ey <= 1) set(x, y);
+        }
+      }
+    });
   } else {
     // mushroomUp / mushroomDown / mushroomWide / mushroomNarrow — the
     // standing membrane particle: a mass-heavy head ellipse at one end +
@@ -939,9 +1007,30 @@ function probeRenderPng(name: string): Uint8Array | null {
   /* v3.87 drill: ?noise=high raises the noise floor 0.12 → 0.26 — the
    * script anchor 0.15×max renders SNOW, so the reference's knee must walk
    * up to the clean 0.26 rung and every same-pipeline map then anchors at
-   * the REFERENCE's 0.26 ratio (the round-47 ref-ratio chaining). */
-  if (level < relayState.noiseFloor) return shapePng("snow", rgb as [number, number, number]);
-  if (level > 0.5) return shapePng("sponge", rgb as [number, number, number]);
+   * the REFERENCE's 0.26 ratio (the round-47 ref-ratio chaining).
+   * v3.93 ?knee=rough — below the floor the render is the CONNECTED ROUGH
+   * SNOWFIELD instead of speckle (frag 0, holes ≤ 6, rough ≈ 8 — the
+   * J817_c1 shape that passed every v3.86 bar; only the new
+   * boundary-roughness gate rejects it). */
+  if (level < relayState.noiseFloor) {
+    if (relayState.kneeMode === "rough") {
+      relayState.kneeShapeRenders.roughsnow += 1;
+      return shapePng("roughsnow", rgb as [number, number, number]);
+    }
+    return shapePng("snow", rgb as [number, number, number]);
+  }
+  /* v3.93 ?knee=hotcap — above 0.5 the render is the SMOOTH CAPSULE
+   * instead of the sponge ring (the deck-4 class_2 disease: the capsule
+   * passes EVERY cleanliness bar — frag 0, holes 0, mainCov high, rough
+   * ≈ 1.1 — with the protein swallowed; only the hot-belt floor-skip +
+   * t2 ladder cap keep a hot-belt map out of this regime). */
+  if (level > 0.5) {
+    if (relayState.kneeMode === "hotcap") {
+      relayState.kneeShapeRenders.capsule += 1;
+      return shapePng("capsule", rgb as [number, number, number]);
+    }
+    return shapePng("sponge", rgb as [number, number, number]);
+  }
   /* v3.89 pose drill: a MISFIT map (fitmap landed ~90°-yawed) reads END-ON
    * (disc) at the shared camera and only shows its standing side view at
    * camYaw ≈ ±90 — the page's silhouette yaw scan must find that yaw. */
@@ -1319,6 +1408,28 @@ const relayState = {
    *  clone. The stats detector (clone_final_shots) must catch it — the
    *  round-52 guarantee's teeth check. */
   shotSigmaLeak: false,
+  /** v3.93 E2E drills (?knee=…): "hotcap" — levels > 0.5 render a SMOOTH
+   *  CAPSULE (the deck-4 class_2 disease: every cleanliness bar loves a
+   *  capsule with the protein swallowed) and the FIRST opened model (the
+   *  reference) reads as a COLD belt so its own anchor legitimately lands
+   *  at t2=0.54 — the round-48 ref-ratio floor would then lift every
+   *  hot-belt map into its micelle-core regime; the v3.93 hot-belt rules
+   *  (floor skip + the t2 ladder cap) must keep the maps at their own
+   *  anchors. "rough" — the noise floor rises to 0.26 and levels below it
+   *  render a CONNECTED ROUGH snowfield (frag 0, holes ≤ 6, rough ≈ 8 —
+   *  the J817_c1 shape that passed every v3.86 bar); only the new
+   *  boundary-roughness gate rejects it. */
+  kneeMode: "" as "" | "hotcap" | "rough",
+  hotcapRefId: null as number | null,
+  kneeShapeRenders: { capsule: 0, roughsnow: 0 } as { capsule: number; roughsnow: number },
+  /** v3.93 E2E drill: ?unaligned=<substr> — every `measure correlation`
+   *  whose MOVING model's open URL contains substr reports 0.30 (below
+   *  the 0.55 alignability bar): the map never validates a pose against
+   *  the reference, and the engine must render it as opened (original
+   *  hand, open pose via matrixget/matrixset, default camera, own knee)
+   *  with the honest 未对齐 logs + the footnote count. */
+  unalignedMatch: null as string | null,
+  unalignedCorrReplies: 0,
 };
 
 function resetRelayState() {
@@ -1375,6 +1486,11 @@ function resetRelayState() {
   relayState.modelKinds.clear();
   relayState.finalShotSubjects = [];
   relayState.shotSigmaLeak = false;
+  relayState.kneeMode = "";
+  relayState.hotcapRefId = null;
+  relayState.kneeShapeRenders = { capsule: 0, roughsnow: 0 };
+  relayState.unalignedMatch = null;
+  relayState.unalignedCorrReplies = 0;
 }
 
 function relayNextModelId(): number {
@@ -1467,6 +1583,15 @@ function relayStats() {
     clone_final_shots: relayState.finalShotSubjects.filter(
       (s) => s.kind === "gauss" || s.kind === "shellmask" || s.kind === "mask",
     ).length,
+    // v3.93 (round-53): the knee drills + the unaligned routing — the E2E
+    // asserts the hot-belt maps kept their OWN anchors (hotcap), the rough
+    // snowfield was rejected by the boundary-roughness gate (rough), and
+    // the unaligned map's correlations actually read 0.30.
+    knee_mode: relayState.kneeMode,
+    hotcap_ref: relayState.hotcapRefId,
+    knee_shape_renders: { ...relayState.kneeShapeRenders },
+    unaligned_match: relayState.unalignedMatch,
+    unaligned_corr_replies: relayState.unalignedCorrReplies,
     shot_sigma_drill: relayState.shotSigmaLeak,
   };
 }
@@ -1578,6 +1703,16 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       // v3.82: a newly opened model DISPLAYS by default (ChimeraX
       // semantics) — the probe renders are level-keyed per shown model.
       relayState.shownModel = id;
+      // v3.93 ?knee=hotcap: the FIRST opened model is the run's REFERENCE
+      // (the engine opens it before the per-map loop; the v3.65 local-dir
+      // mode stages every map first, so THIS is the path the engine's
+      // opens take) — under the drill it reads as a COLD-belt map (its
+      // own t2 anchor legitimately lands at 0.54) so the ref-ratio floor
+      // would lift every hot-belt map into the capsule regime;
+      // /membrane2 + /layers key off this id.
+      if (relayState.kneeMode === "hotcap" && relayState.hotcapRefId == null) {
+        relayState.hotcapRefId = id;
+      }
       relayState.opens.push({ url, status: 200, modelId: id, idless: false, local: true });
       return {
         text: `Opened ${staged.name}, grid size 8,8,8, grid spacing 1.25,1.25,1.25 on 1 model (id #${id})`,
@@ -1603,6 +1738,14 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       registerModel(id, url);
       // v3.82: a newly opened model DISPLAYS by default.
       relayState.shownModel = id;
+      // v3.93 ?knee=hotcap: the FIRST opened model is the run's REFERENCE
+      // (the engine opens it before the per-map loop) — under the drill it
+      // reads as a COLD-belt map (its own t2 anchor legitimately lands at
+      // 0.54) so the ref-ratio floor would lift every hot-belt map into
+      // the capsule regime; /membrane2 + /layers key off this id.
+      if (relayState.kneeMode === "hotcap" && relayState.hotcapRefId == null) {
+        relayState.hotcapRefId = id;
+      }
       const idless = /\/J497\./.test(url);
       relayState.opens.push({ url, status: res.status, modelId: id, idless });
       if (idless) {
@@ -1692,6 +1835,20 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
     // default 0.42 (below the 0.85 target → all 3 search rounds append)
     // and an override ≥ 0.85 (target reached in round 1 → later rounds
     // skip, and a local track already ≥ target skips the search entirely).
+    // v3.93 E2E drill ?unaligned=<substr>: the MOVING model (the first
+    // #N in the command) whose open URL contains substr reads 0.30 —
+    // below the 0.55 alignability bar, so the engine must render that
+    // map as opened. Clones/flip hands inherit the source URL, so every
+    // fit target of the map reads 0.30 whichever model carried it.
+    if (relayState.unalignedMatch) {
+      const mm = /#(\d+(?:\.\d+)?)\s+(?:in|inMap)\s+#/i.exec(command) ?? /^measure\s+correlation\s+#(\d+(?:\.\d+)?)\s+#/i.exec(command);
+      const movingId = mm ? parseInt(mm[1], 10) : null;
+      const movingUrl = movingId != null ? relayState.models.get(movingId)?.url ?? null : null;
+      if (movingUrl != null && movingUrl.includes(relayState.unalignedMatch)) {
+        relayState.unalignedCorrReplies += 1;
+        return { text: `  correlation = 0.30`, error: null };
+      }
+    }
     return { text: `  correlation = ${relayState.corrOverride.toFixed(2)}`, error: null };
   }
   if (/^fit\s+#\d+\s+in\s+#\d+\s+search/i.test(command)) {
@@ -2268,8 +2425,12 @@ const relayServer = Bun.serve({
          * rung) and the alignment masks ride the protein-band boundary
          * min(0.54, 0.5×max) = 0.5 instead of the classic 0.125. The belt
          * band keeps the SAME normal/axes (2,1,2)/3 etc. so the membrane
-         * camera chain and the standing probes behave identically. */
-        const beltMid = relayState.beltMode === "mid";
+         * camera chain and the standing probes behave identically.
+         * v3.93 ?knee=hotcap — the REFERENCE model (the first opened)
+         * reads as the SAME cold-belt map: its own anchor legitimately
+         * lands at t2=0.54, so the round-48 ref-ratio floor would lift
+         * every hot-belt map into its micelle-core (capsule) regime. */
+        const beltMid = relayState.beltMode === "mid" || (relayState.kneeMode === "hotcap" && Number(mid) === relayState.hotcapRefId);
         return reply(200, {
           ok: true,
           splits: [0.18, 0.54],
@@ -2334,7 +2495,11 @@ const relayServer = Bun.serve({
           return reply(404, { error: `model #${mid} not found` });
         }
         relayState.layersCalls += 1;
-        const beltMid = relayState.beltMode === "mid";
+        /* v3.93 ?knee=hotcap: the REFERENCE model reads as a COLD-belt map
+         * here too (its /layers belt band flips to "mid" — beltLevelFrom
+         * then anchors its display at t2=0.54 and the alignment masks
+         * take the v3.86 threshold path instead of the /shellmask plan). */
+        const beltMid = relayState.beltMode === "mid" || (relayState.kneeMode === "hotcap" && Number(mid) === relayState.hotcapRefId);
         const beltBand = beltMid ? "mid" : "high";
         const beltRatio = beltMid ? 0.3 : 0.3;
         const fr = [0.05, 0.12, 0.2, 0.35, 0.62, 0.78, 0.71, 0.3];

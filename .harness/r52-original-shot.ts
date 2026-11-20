@@ -257,7 +257,9 @@ console.log("[C] final-shot subjects + ?shot=sigma drill");
 /* ---- D. version ---- */
 console.log("[D] version");
 {
-  check("FLOW_ENGINE_VERSION is 3.92", FLOW_ENGINE_VERSION === "3.92", FLOW_ENGINE_VERSION);
+  /* v3.93 bump: the pin follows the engine (the round-52 guarantees are
+ * unchanged — r53's harness re-asserts them against the new gates). */
+check("FLOW_ENGINE_VERSION is 3.93 (v3.93 bump)", FLOW_ENGINE_VERSION === "3.93", FLOW_ENGINE_VERSION);
 }
 
 console.log(fail === 0 ? `\nALL ${pass} CHECKS PASSED` : `\n${fail} FAILED (of ${pass + fail})`);

@@ -1619,7 +1619,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
       const mapFailures = new Map<string, string>();
 
       /* 2. per-mode thumbnails */
-      let chiralityMeta = { corrected: 0, consistent: 0, ambiguous: 0, failed: 0, view: "" };
+      let chiralityMeta = { corrected: 0, consistent: 0, ambiguous: 0, failed: 0, unaligned: 0, view: "" };
       const uniqueMaps = figureMapSources(model);
       // v3.54 (round-13): Chimera classic 的默认打开色序 —— class 0 灰、
       // class 1 淡黄、class 2 淡青、class 3 淡蓝、class 4-7 淡品红/淡红/
@@ -2127,6 +2127,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
           consistent: renderRes.renders.filter((r) => r.chirality === "consistent").length,
           ambiguous: renderRes.renders.filter((r) => r.chirality === "ambiguous").length,
           failed: renderRes.renders.filter((r) => r.chirality === "unknown" || r.candidate === "none").length,
+          unaligned: renderRes.renders.filter((r) => r.unaligned).length,
           view: renderRes.view.desc,
         };
 
@@ -2226,6 +2227,7 @@ export function FlowFigureCard({ summary, loaded }: { summary: LineageSummary | 
               consistent: chiralityMeta.consistent,
               ambiguous: chiralityMeta.ambiguous,
               failed: chiralityMeta.failed,
+              unaligned: chiralityMeta.unaligned,
               view: chiralityMeta.view || null,
               mode: mode === "chimerax" ? "ChimeraX aligned" : "session previews",
             });

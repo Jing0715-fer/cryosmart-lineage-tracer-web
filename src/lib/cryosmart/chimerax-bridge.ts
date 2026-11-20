@@ -2175,6 +2175,38 @@ export function unalignedCorrBar(corrTarget: number): number {
   if (!Number.isFinite(corrTarget)) return UNALIGNED_CORR_BAR;
   return Math.max(0.25, Math.min(UNALIGNED_CORR_BAR, corrTarget - 0.05));
 }
+/** v3.93 (round-53): the LADDER rung cleanliness gate — the v3.82/v3.86
+ *  bars (frag, holes, the relative mainCov sponge floor) plus the NEW
+ *  boundary-roughness bar, as ONE predicate shared by every rung pool
+ *  (anchor fast-path excluded — it uses the absolute floor). Exported so
+ *  the offline harness gates the REAL formula, not a replica: the deck
+ *  (4) forensics' J817_c1 shape (frag 0, holes 6, mainCov healthy, rough
+ *  8.15) passes every v3.86 bar and must die HERE. */
+export function kneeShapeClean(
+  s: { frag: number; holes: number; rough: number; mainCov: number },
+  bestMain: number,
+): boolean {
+  return (
+    s.frag <= KNEE_FRAG_MAX &&
+    s.holes <= KNEE_HOLE_MAX &&
+    s.rough <= KNEE_ROUGH_MAX &&
+    s.mainCov >= KNEE_MAIN_MIN_FRAC * bestMain
+  );
+}
+/** v3.93: the ANCHOR fast-path gate — same bars but the ABSOLUTE
+ *  main-coverage floor (KNEE_FAST_MAIN_MIN; the relative 45%-of-best
+ *  sponge bar only exists once the ladder walk has run). Exported for
+ *  the harness alongside kneeShapeClean. */
+export function kneeAnchorClean(
+  s: { frag: number; holes: number; rough: number; mainCov: number },
+): boolean {
+  return (
+    s.frag <= KNEE_FRAG_MAX &&
+    s.holes <= KNEE_HOLE_MAX &&
+    s.rough <= KNEE_ROUGH_MAX &&
+    s.mainCov >= KNEE_FAST_MAIN_MIN
+  );
+}
 /** v3.86: the FAST-PATH main-coverage floor — the knee probes re-frame
  *  with bare `view` (the silhouette fills the frame), so a healthy
  *  particle reads ≫10% of the probe whatever its size; a degenerate
@@ -2527,6 +2559,15 @@ export interface MapRender {
    * original-data model (the reference, or the winning hand — the z-flip
    * twin is full-resolution original DATA mirrored for the hand verdict). */
   viaLowpass?: boolean;
+  /** v3.93 (round-53 “class2的图还是有问题，我打开map看到的不是这样的”):
+   * true when this map's WINNING score stayed below unalignedCorrBar — it
+   * never validated a pose against the reference, so the deck renders it
+   * exactly as the user sees opening the map: the ORIGINAL hand at its
+   * OPEN pose (captured by matrixget before any fitting), the DEFAULT
+   * camera (no shared view, no silhouette matching) and its OWN display
+   * knee (the reference's 倍率链 does not describe it). The footnote
+   * counts it 未对齐; the candidate label carries the verdict. */
+  unaligned?: boolean;
 }
 
 export interface RenderProgress {
@@ -3287,11 +3328,19 @@ export async function renderFigureMaps(
     const note = (r: Rung, extra = "") =>
       r.s
         ? `  level ${(r.level / max).toFixed(3)}×max${extra}: 碎片率 ${(r.s.frag * 100).toFixed(1)}% · 孔洞 ${r.s.holes} · 主体覆盖 ${(r.s.mainCov * 100).toFixed(1)}% · 边界粗糙度 ${r.s.rough.toFixed(2)}${
-            r.s.frag > KNEE_FRAG_MAX ? "（斑点/游离胶束未清）" : r.s.holes > KNEE_HOLE_MAX ? "（镂空/噪声间隙未清）" : ""
+            r.s.frag > KNEE_FRAG_MAX
+              ? "（斑点/游离胶束未清）"
+              : r.s.holes > KNEE_HOLE_MAX
+                ? "（镂空/噪声间隙未清）"
+                : r.s.rough > KNEE_ROUGH_MAX
+                  ? "（边界粗糙 — 噪声表面/雪原未清）"
+                  : ""
           }`
         : "";
-    const cleanShape = (s: RenderShape, bestMain: number): boolean =>
-      s.frag <= KNEE_FRAG_MAX && s.holes <= KNEE_HOLE_MAX && s.mainCov >= KNEE_MAIN_MIN_FRAC * bestMain;
+    /* v3.93: the rung gate is the exported kneeShapeClean (frag + holes
+     * + ROUGH + the relative mainCov sponge floor) — the deck (4)
+     * snowfield passed every v3.86 bar; the rough bar is what kills it. */
+    const cleanShape = (s: RenderShape, bestMain: number): boolean => kneeShapeClean(s, bestMain);
     /* rung 1 — the v3.86 anchor, probed FIRST (with dust). The clean bar
      * needs no ladder: frag ≤ bar AND holes ≤ bar AND the absolute
      * mainCov floor (the probe re-frames, so a healthy particle always
@@ -3302,11 +3351,7 @@ export async function renderFigureMaps(
     const anchorRung: Rung = { level: anchorLevel, ratio: anchorRatio, s: anchorShape };
     rungs.push(anchorRung);
     if (anchorShape) log(note(anchorRung, `（锚点 · surface dust ${DUST_SIZE_A} Å）`));
-    const anchorClean =
-      anchorShape != null &&
-      anchorShape.frag <= KNEE_FRAG_MAX &&
-      anchorShape.holes <= KNEE_HOLE_MAX &&
-      anchorShape.mainCov >= KNEE_FAST_MAIN_MIN;
+    const anchorClean = anchorShape != null && kneeAnchorClean(anchorShape);
     if (anchorClean && anchorShape) {
       return {
         level: anchorLevel,
@@ -3314,10 +3359,14 @@ export async function renderFigureMaps(
       };
     }
     /* rung 2 — the anchor was dirty: probe the rest of the ladder
-     * (dusted) and pick the clean rung CLOSEST to the anchor. */
+     * (dusted) and pick the clean rung CLOSEST to the anchor. v3.93: a
+     * HOT-BELT map's pool never contains rungs above its own t2 — above
+     * the mid|high boundary only the micelle core renders (the capsule
+     * disease), so those rungs leave the pool entirely. */
     for (const ratio of LEVEL_KNEE_RATIOS) {
       if (threw(opts.signal)) break;
       if (Math.abs(ratio - anchorRatio) < 0.015) continue; // anchor already probed
+      if (beltCap != null && max * ratio > beltCap + 1e-9) continue; // v3.93: above t2 = micelle core only
       const level = max * ratio;
       const s = await probeLevel(level);
       const r: Rung = { level, ratio, s };
@@ -3334,9 +3383,11 @@ export async function renderFigureMaps(
         ? `碎片率 ${(anchorShape.frag * 100).toFixed(1)}%`
         : anchorShape.holes > KNEE_HOLE_MAX
           ? `孔洞 ${anchorShape.holes}`
-          : anchorShape.mainCov < KNEE_FAST_MAIN_MIN
-            ? `主体覆盖 ${(anchorShape.mainCov * 100).toFixed(1)}%（镂空/薄壳）`
-            : "主体覆盖偏低";
+          : anchorShape.rough > KNEE_ROUGH_MAX
+            ? `边界粗糙度 ${anchorShape.rough.toFixed(2)}（连通噪声表面）`
+            : anchorShape.mainCov < KNEE_FAST_MAIN_MIN
+              ? `主体覆盖 ${(anchorShape.mainCov * 100).toFixed(1)}%（镂空/薄壳）`
+              : "主体覆盖偏低";
     const cleanRungs = measured.filter((r) => cleanShape(r.s!, bestMain));
     if (cleanRungs.length) {
       /* v3.88: rungs BELOW the reference-ratio floor only qualify when
@@ -3361,12 +3412,20 @@ export async function renderFigureMaps(
     }
     /* rung 3 — nothing clean even with dust: the minimum-frag rung
      * (tie → closer to the anchor), honestly logged. v3.88: prefer rungs
-     * at/above the reference floor (same pool rule as rung 2). */
-    const dirtOf = (r: Rung) => (r.s ? r.s.frag + Math.min(r.s.holes, 50) * 0.004 : Number.POSITIVE_INFINITY);
+     * at/above the reference floor (same pool rule as rung 2). v3.93:
+     * the dirt metric is ROUGH-AWARE — a connected snowfield (frag 0,
+     * holes ≤ 6) used to read as the cleanest rung of all; its roughness
+     * now counts as dirt so the fallback prefers any smoother rung. */
+    const dirtOf = (r: Rung) =>
+      r.s
+        ? r.s.frag +
+          Math.min(r.s.holes, 50) * 0.004 +
+          (r.s.rough > KNEE_ROUGH_MAX ? (r.s.rough - KNEE_ROUGH_MAX) * 0.05 : 0)
+        : Number.POSITIVE_INFINITY;
     const floorPool = measured.filter((r) => refRatioFloor == null || r.ratio >= refRatioFloor - 0.005);
     const dirtPool = floorPool.length ? floorPool : measured;
     const pick = dirtPool.reduce((a, b) => (dirtOf(a) < dirtOf(b) || (dirtOf(a) === dirtOf(b) && dist(a) <= dist(b)) ? a : b));
-    log(`  ⚠ 所有 level 档位均有碎片/镂空（最干净 碎片 ${(pick.s ? (pick.s.frag * 100).toFixed(1) : "—")}% / 孔洞 ${pick.s?.holes ?? "—"}）— 就近取最干净档，可改用手动 level`);
+    log(`  ⚠ 所有 level 档位均有碎片/镂空/粗糙（最干净 碎片 ${(pick.s ? (pick.s.frag * 100).toFixed(1) : "—")}% / 孔洞 ${pick.s?.holes ?? "—"} / 边界粗糙度 ${pick.s ? pick.s.rough.toFixed(2) : "—"}）— 就近取最干净档，可改用手动 level`);
     return {
       level: pick.level,
       rule: `最低碎片 ${(pick.s ? (pick.s.frag * 100).toFixed(1) : "—")}%（${pick.ratio.toFixed(2)}×max 档 · 锚点 ${anchorRatio.toFixed(3)}×max 亦未通过）`,
@@ -4446,6 +4505,16 @@ export async function renderFigureMaps(
     return sm.id;
   };
 
+  /* v3.93 (round-53): the run's ALIGNABILITY verdicts per map — the
+   * winning score against unalignedCorrBar(corrTarget) — and each map's
+   * OPEN pose file (matrixget captured at open, before any fitting; null
+   * when the matrix round-trip is unavailable). A map that never validated
+   * a pose renders as the user sees it on open: original hand + open pose
+   * + DEFAULT camera + its OWN knee. */
+  const corrBar = unalignedCorrBar(corrTarget);
+  const openPoseByKey = new Map<string, string | null>();
+  log(`可对齐下限: 相关性 ≥ ${corrBar} — 低于该值的 map 比对姿态不可信，按开图原样呈现（原始 map · 开图姿态 · 默认视角）`);
+
   for (const req of all) {
     if (threw(opts.signal)) throw new Error("aborted");
     const isReference = req.key === opts.reference.key;
@@ -4508,6 +4577,14 @@ export async function renderFigureMaps(
          * a freed clone's id, and the final-shot verdict must read the
          * ORIGINAL as an original (never a stale processedIds entry). */
         processedIds.delete(origId);
+        /* v3.93 (round-53 “我打开map看到的不是这样的”): the OPEN pose,
+         * captured BEFORE any fitting touches this model — a map that
+         * never validates a pose (score < unalignedCorrBar) is rendered
+         * at exactly this pose with the DEFAULT camera, i.e. what the
+         * user sees when they open the map themselves. Null when the
+         * matrix round-trip is unavailable (the unaligned render then
+         * keeps the live pose and says so honestly). */
+        openPoseByKey.set(req.key, await matrixSave(origId, `${fileStem}_open`));
         const stats = await bridgeVolStats(t, origId);
         const classicLevel = stats ? stats.max * LEVEL_RATIO : refLevel;
         /* v3.89: the FIT sampling level — the moving model's own protein
@@ -5011,11 +5088,26 @@ export async function renderFigureMaps(
     const handById = new Map<string, number>(hands.map((h) => [h.name as string, h.modelId]));
     const valid = rows.filter((r) => r.ok && r.score != null && handById.has(r.candidate));
     const bestRow = valid.sort((a, b) => (b.score as number) - (a.score as number))[0] ?? null;
+    /* v3.93 (round-53 “class2的图还是有问题”): the ALIGNABILITY verdict —
+     * the winning hand's honest masked correlation against the bar. Below
+     * it, the fitted pose is noise-driven and the silhouette matching
+     * against the reference frame is meaningless; the deck renders this
+     * map as the user sees it on open instead (original hand, open pose,
+     * default camera, own knee) and the footnote counts it 未对齐. The
+     * chirality comparison between two noise poses is meaningless too —
+     * the label says so. */
+    const mapUnaligned = bestRow != null && (bestRow.score as number) < corrBar;
     if (bestRow) {
       const bestId = handById.get(bestRow.candidate) as number;
+      /* v3.93: an UNALIGNED map keeps its ORIGINAL hand — the open pose
+       * belongs to it, and the winning hand (possibly the z-mirror of a
+       * noise pose) carries no information worth showing. Every other
+       * hand closes exactly like a losing hand. */
+      const origHandId = handById.get("original") ?? null;
+      const showId = mapUnaligned && origHandId != null ? origHandId : bestId;
       // Close the losing hand's model.
       for (const [name, id] of handById) {
-        if (name !== bestRow.candidate) {
+        if (id !== showId) {
           await exec(t, `close #${id}`, opts, true);
           openIds.delete(id);
         }
@@ -5033,7 +5125,7 @@ export async function renderFigureMaps(
       } else {
         chirality = "consistent";
       }
-      log(`  → ${req.key} 选中 ${bestRow.candidate}（score=${bestRow.score}），手性: ${chirality}${flipHandSkipped ? "（翻转手已按达标跳过）" : ""}，配色 ${mapColor}`);
+      log(`  → ${req.key} 选中 ${bestRow.candidate}（score=${bestRow.score}），手性: ${chirality}${flipHandSkipped ? "（翻转手已按达标跳过）" : ""}，配色 ${mapColor}${mapUnaligned ? " — ⚠ 未对齐（score 低于可对齐下限 " + corrBar + "）：按开图原样呈现，手性判定不适用" : ""}`);
       /* v3.71: with the reference's OWN hand established (anchor/manual
        * policy), the per-map verdict gains its BIOLOGICAL meaning — the
        * canonical reference is the correct hand (a mirrored verdict
@@ -5062,13 +5154,14 @@ export async function renderFigureMaps(
         key: req.key,
         uid: req.uid,
         group: req.group,
-        candidate: bestRow.candidate,
+        candidate: mapUnaligned ? `${bestRow.candidate}（未对齐）` : bestRow.candidate,
         score: bestRow.score,
         chirality,
         rows,
         png: null,
-        modelId: bestId,
+        modelId: showId,
         viaLowpass: lowpassByHand.get(bestRow.candidate) ?? false,
+        unaligned: mapUnaligned || undefined,
       });
     } else {
       for (const id of handById.values()) {
@@ -5124,10 +5217,12 @@ export async function renderFigureMaps(
       /* v3.92: the phase guarantee, printed once — the fitting-only clones
        * (σ 低通 / 分层去垢 / 噪声屏蔽 / 精修副本) all closed in their
        * hand's finally + sweepStrayVolumes and at 3.5 above; what remains
-       * open are the ORIGINAL models only. */
+       * open are the ORIGINAL models only. v3.93: the unaligned count
+       * rides the same line — those renders show the open pose. */
       const viaLowpassCount = shotTargets.filter((r) => r.viaLowpass).length;
+      const unalignedCount = shotTargets.filter((r) => r.unaligned).length;
       log(
-        `截图阶段: ${shotTargets.length} 个原图模型（${viaLowpassCount} 张经低通比对 — 比对用副本已全部关闭，低通姿态已转回原图，最终截图不使用任何处理后的副本）`,
+        `截图阶段: ${shotTargets.length} 个原图模型（${viaLowpassCount} 张经低通比对 — 比对用副本已全部关闭，低通姿态已转回原图，最终截图不使用任何处理后的副本${unalignedCount ? `；${unalignedCount} 张未对齐 — 按开图原样呈现（原始 map · 开图姿态 · 默认视角 · 自身 level）` : ""}）`,
       );
     }
     /* ---- v3.89: the reference's shared-view SILHOUETTE, cached once
@@ -5179,6 +5274,29 @@ export async function renderFigureMaps(
         log(
           `  ${r.key}: ⚠ 截图对象 #${showId} 是比对用副本（低通/去垢）— 违反「原图截图」约定，请检查副本关闭逻辑（不应发生）`,
         );
+      } else if (r.unaligned) {
+        /* v3.93 (round-53): the UNALIGNED render — exactly what the user
+         * sees opening the map: the ORIGINAL hand restored to its OPEN
+         * pose (matrixget captured before any fitting), the DEFAULT
+         * camera (the deterministic base — no shared view, no silhouette
+         * matching against a frame this map never validated), and its OWN
+         * display knee below. */
+        log(
+          `  ${r.key}: 截图对象: 原 map #${showId}（未对齐 — 相关性 ${r.score != null ? r.score.toFixed(4) : "—"} 低于可对齐下限 ${corrBar}）— 按开图原样呈现`,
+        );
+        const openPose = openPoseByKey.get(r.key) ?? null;
+        if (openPose) {
+          const restored = await matrixLoadRetry(showId, openPose);
+          log(
+            restored
+              ? `  ${r.key}: 已恢复开图姿态（matrixset 开图捕获姿态）— 默认视角截图`
+              : `  ${r.key}: ⚠ 开图姿态恢复失败（已重试）— 保持当前姿态，仍为原图本体`,
+          );
+        } else {
+          log(`  ${r.key}: ⚠ 开图姿态未捕获（matrix 桥不可用）— 保持比对后姿态，仍为原图本体`);
+        }
+        await exec(t, "view _cfbase", opts, true);
+        await exec(t, "wait 1", opts, true);
       } else if (r.viaLowpass) {
         log(
           `  ${r.key}: 截图对象: 原 map #${showId}${r.candidate === "flip_z" ? "（z 镜像手 · 全分辨率原数据）" : ""} — 比对用低通/去垢副本已关闭，比对姿态已转回原图后再截图`,
@@ -5194,7 +5312,13 @@ export async function renderFigureMaps(
        * level (setDisplayLevel). */
       if (kneeMode) {
         const stats = statsById.get(showId) ?? (await bridgeVolStats(t, showId));
-        const knee = await kneeLevelFor(showId, stats, safeKeyPart(r.key.replace(/\//g, "__")));
+        const knee = await kneeLevelFor(
+          showId,
+          stats,
+          safeKeyPart(r.key.replace(/\//g, "__")),
+          undefined,
+          r.unaligned === true,
+        );
         if (knee) {
           await exec(t, `volume #${showId} level ${knee.level.toFixed(4)} step ${STEP}`, opts, true);
           /* v3.85: re-issue the dust after the final level application —
@@ -5219,10 +5343,14 @@ export async function renderFigureMaps(
        * the map up its own way (the v3.82 assists) and yaw-scans around
        * THAT; the best IoU wins and the standing sign is rolled to the
        * reference's. The alignment correlation in the log stays the
-       * honest record of the 3D fit quality. */
-      if (applySharedView) await applySharedView();
+       * honest record of the 3D fit quality.
+       * v3.93: an UNALIGNED map skips all of it — the default camera it
+       * just received IS the render's orientation (open-pose look), and
+       * silhouette matching against a frame the map never validated is
+       * exactly the meaningless matching the round-53 deck showed. */
       const isRefRow = r.key === opts.reference.key;
-      if (applySharedView && refSilhouette && !isRefRow) {
+      if (!r.unaligned && applySharedView) await applySharedView();
+      if (!r.unaligned && applySharedView && refSilhouette && !isRefRow) {
         const tagKey = safeKeyPart(r.key.replace(/\//g, "__"));
         type SilCand = {
           apply: () => Promise<void>;
@@ -5393,10 +5521,12 @@ export async function renderFigureMaps(
           await exec(t, "wait 1", opts, true);
           log(`  ${r.key}: 已上下翻转 180° 对齐参考图朝向（本图重端与参考相反）`);
         }
-      } else if (opts.membraneView?.mode === "auto") {
+      } else if (opts.membraneView?.mode === "auto" && !r.unaligned) {
         /* the v3.82 standing check — still the fallback for the reference
          * row itself and for runs without a cached reference silhouette
-         * (probe machinery unavailable); the assist paths are unchanged. */
+         * (probe machinery unavailable); the assist paths are unchanged.
+         * v3.93: unaligned maps keep the default camera they just
+         * received (open-pose look — no standing assist either). */
         await exec(t, "wait 1", opts, true);
         await exec(t, "view", opts, true);
         await exec(t, "wait 1", opts, true);

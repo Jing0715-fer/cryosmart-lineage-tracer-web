@@ -1,0 +1,399 @@
+{
+  "opens": [
+    {
+      "url": "/tmp/cryoflow-mock/staged/J55.volume.60dc58f1.mrc",
+      "status": 200,
+      "modelId": 1,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J9.volume_class_0.1979fe16.mrc",
+      "status": 200,
+      "modelId": 7,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J9.volume_class_1.19af2f57.mrc",
+      "status": 200,
+      "modelId": 8,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J9.volume_class_2.199c0e14.mrc",
+      "status": 200,
+      "modelId": 9,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J11.volume_class_0.21b7658f.mrc",
+      "status": 200,
+      "modelId": 10,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J11.volume_class_1.2182564e.mrc",
+      "status": 200,
+      "modelId": 11,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J11.volume_class_2.21d9758d.mrc",
+      "status": 200,
+      "modelId": 12,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J41.volume_class_0.e8d3728a.mrc",
+      "status": 200,
+      "modelId": 13,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J41.volume_class_1.e908a3cb.mrc",
+      "status": 200,
+      "modelId": 14,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J41.volume_class_2.e8f58288.mrc",
+      "status": 200,
+      "modelId": 15,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J41.volume_class_3.e92a92c9.mrc",
+      "status": 200,
+      "modelId": 16,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J48.volume_class_0.99f6ed23.mrc",
+      "status": 200,
+      "modelId": 17,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J48.volume_class_1.9a07ed62.mrc",
+      "status": 200,
+      "modelId": 18,
+      "idless": false,
+      "local": true
+    },
+    {
+      "url": "/tmp/cryoflow-mock/staged/J48.volume_class_2.9a18dc21.mrc",
+      "status": 200,
+      "modelId": 19,
+      "idless": false,
+      "local": true
+    }
+  ],
+  "files": [
+    "_knee_ref_0.1800.png",
+    "_mprobe_band-hightop.png",
+    "_mprobe_band-highcam.png",
+    "_refsil_shared.png",
+    "_knee_J55__volume_0.1800.png",
+    "_view_J55__volume.png",
+    "render_J55__volume.png",
+    "_knee_J9__volume_class_0_0.1800.png",
+    "_sil_J9__volume_class_0_y0.png",
+    "render_J9__volume_class_0.png",
+    "_knee_J9__volume_class_1_0.1800.png",
+    "_sil_J9__volume_class_1_y0.png",
+    "render_J9__volume_class_1.png",
+    "_knee_J9__volume_class_2_0.1800.png",
+    "_sil_J9__volume_class_2_y0.png",
+    "render_J9__volume_class_2.png",
+    "_knee_J11__volume_class_0_0.1800.png",
+    "_sil_J11__volume_class_0_y0.png",
+    "render_J11__volume_class_0.png",
+    "_knee_J11__volume_class_1_0.1800.png",
+    "_sil_J11__volume_class_1_y0.png",
+    "render_J11__volume_class_1.png",
+    "_knee_J11__volume_class_2_0.1800.png",
+    "_sil_J11__volume_class_2_y0.png",
+    "render_J11__volume_class_2.png",
+    "_knee_J41__volume_class_0_0.1800.png",
+    "_sil_J41__volume_class_0_y0.png",
+    "render_J41__volume_class_0.png",
+    "_knee_J41__volume_class_1_0.1800.png",
+    "_sil_J41__volume_class_1_y0.png",
+    "render_J41__volume_class_1.png",
+    "_knee_J41__volume_class_2_0.1800.png",
+    "_sil_J41__volume_class_2_y0.png",
+    "render_J41__volume_class_2.png",
+    "_knee_J41__volume_class_3_0.1800.png",
+    "_sil_J41__volume_class_3_y0.png",
+    "render_J41__volume_class_3.png",
+    "_knee_J48__volume_class_0_0.1800.png",
+    "_sil_J48__volume_class_0_y0.png",
+    "render_J48__volume_class_0.png",
+    "_knee_J48__volume_class_1_0.1800.png",
+    "_sil_J48__volume_class_1_y0.png",
+    "render_J48__volume_class_1.png",
+    "_knee_J48__volume_class_2_0.1800.png",
+    "_sil_J48__volume_class_2_y0.png",
+    "render_J48__volume_class_2.png"
+  ],
+  "commands": 859,
+  "http_blocked": false,
+  "staged_files": [
+    "/tmp/cryoflow-mock/staged/J55.volume.60dc58f1.mrc",
+    "/tmp/cryoflow-mock/staged/J9.volume_class_0.1979fe16.mrc",
+    "/tmp/cryoflow-mock/staged/J9.volume_class_1.19af2f57.mrc",
+    "/tmp/cryoflow-mock/staged/J9.volume_class_2.199c0e14.mrc",
+    "/tmp/cryoflow-mock/staged/J11.volume_class_0.21b7658f.mrc",
+    "/tmp/cryoflow-mock/staged/J11.volume_class_1.2182564e.mrc",
+    "/tmp/cryoflow-mock/staged/J11.volume_class_2.21d9758d.mrc",
+    "/tmp/cryoflow-mock/staged/J41.volume_class_0.e8d3728a.mrc",
+    "/tmp/cryoflow-mock/staged/J41.volume_class_1.e908a3cb.mrc",
+    "/tmp/cryoflow-mock/staged/J41.volume_class_2.e8f58288.mrc",
+    "/tmp/cryoflow-mock/staged/J41.volume_class_3.e92a92c9.mrc",
+    "/tmp/cryoflow-mock/staged/J48.volume_class_0.99f6ed23.mrc",
+    "/tmp/cryoflow-mock/staged/J48.volume_class_1.9a07ed62.mrc",
+    "/tmp/cryoflow-mock/staged/J48.volume_class_2.9a18dc21.mrc"
+  ],
+  "open_total": 14,
+  "open_direct_401": 0,
+  "open_proxy_200": 0,
+  "open_asset": 0,
+  "open_idless_resolved": 0,
+  "open_legacy_text": 14,
+  "open_staged_local": 14,
+  "open_http_format_rejected": 0,
+  "save_image_rejected": 0,
+  "save_rejected_mode": false,
+  "file404_abs_mode": false,
+  "workdir": "/tmp/cryoflow-mock",
+  "save_absolute_diverted": 0,
+  "cd_ok": 0,
+  "save_relative_ok": 0,
+  "save_relative_missed": 0,
+  "color_commands": 53,
+  "color_hexes": [
+    "#b2b2b2",
+    "#ffffb2",
+    "#b2ffff",
+    "#b2b2ff"
+  ],
+  "save_transparent_bg": 46,
+  "save_opaque_bg": 0,
+  "set_bgcolor_commands": 0,
+  "dust_commands": 31,
+  "mask_commands": 0,
+  "mask_levels": [],
+  "close_ids_closed": [
+    9,
+    10,
+    13,
+    11,
+    12,
+    8,
+    10,
+    11,
+    14,
+    12,
+    13,
+    9,
+    11,
+    12,
+    15,
+    13,
+    14,
+    10,
+    12,
+    13,
+    16,
+    14,
+    15,
+    11,
+    13,
+    14,
+    17,
+    15,
+    16,
+    12,
+    14,
+    15,
+    18,
+    16,
+    17,
+    13,
+    15,
+    16,
+    19,
+    17,
+    18,
+    14,
+    16,
+    17,
+    20,
+    18,
+    19,
+    15,
+    17,
+    18,
+    21,
+    19,
+    20,
+    16,
+    18,
+    19,
+    22,
+    20,
+    21,
+    17,
+    19,
+    20,
+    23,
+    21,
+    22,
+    18,
+    20,
+    21,
+    24,
+    22,
+    23,
+    19,
+    21,
+    22,
+    25,
+    23,
+    24,
+    20,
+    2,
+    3,
+    4,
+    5,
+    6,
+    1,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19
+  ],
+  "close_all_commands": 0,
+  "models_open": 0,
+  "auth_expired": [],
+  "download_result_401": 0,
+  "noise_floor": 0.12,
+  "pose_misfit_match": null,
+  "misfit_models": [],
+  "silhouette_probes": 13,
+  "yaw_turns": [],
+  "layers_calls": 42,
+  "shellmask_calls": 42,
+  "shellmask_bands": [
+    "high"
+  ],
+  "shellmask_minvals": [
+    0.125,
+    null
+  ],
+  "final_shot_subjects": [
+    {
+      "save": "render_J55__volume.png",
+      "model": 1,
+      "kind": "original"
+    },
+    {
+      "save": "render_J9__volume_class_0.png",
+      "model": 7,
+      "kind": "original"
+    },
+    {
+      "save": "render_J9__volume_class_1.png",
+      "model": 8,
+      "kind": "original"
+    },
+    {
+      "save": "render_J9__volume_class_2.png",
+      "model": 9,
+      "kind": "original"
+    },
+    {
+      "save": "render_J11__volume_class_0.png",
+      "model": 10,
+      "kind": "original"
+    },
+    {
+      "save": "render_J11__volume_class_1.png",
+      "model": 11,
+      "kind": "original"
+    },
+    {
+      "save": "render_J11__volume_class_2.png",
+      "model": 12,
+      "kind": "original"
+    },
+    {
+      "save": "render_J41__volume_class_0.png",
+      "model": 13,
+      "kind": "original"
+    },
+    {
+      "save": "render_J41__volume_class_1.png",
+      "model": 14,
+      "kind": "original"
+    },
+    {
+      "save": "render_J41__volume_class_2.png",
+      "model": 15,
+      "kind": "original"
+    },
+    {
+      "save": "render_J41__volume_class_3.png",
+      "model": 16,
+      "kind": "original"
+    },
+    {
+      "save": "render_J48__volume_class_0.png",
+      "model": 17,
+      "kind": "original"
+    },
+    {
+      "save": "render_J48__volume_class_1.png",
+      "model": 18,
+      "kind": "original"
+    },
+    {
+      "save": "render_J48__volume_class_2.png",
+      "model": 19,
+      "kind": "original"
+    }
+  ],
+  "final_shot_kinds": [
+    "original"
+  ],
+  "clone_final_shots": 0,
+  "knee_mode": "",
+  "hotcap_ref": null,
+  "knee_shape_renders": {
+    "capsule": 0,
+    "roughsnow": 0
+  },
+  "unaligned_match": null,
+  "unaligned_corr_replies": 0,
+  "shot_sigma_drill": false
+}
