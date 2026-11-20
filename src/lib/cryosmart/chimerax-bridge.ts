@@ -2141,6 +2141,40 @@ const KNEE_MAIN_MIN_FRAC = 0.45;
  *  round-45 reference was a CONNECTED cauliflower at 0.15×max (below the
  *  noise floor of a sharpened map) and passed every fragmentation check. */
 const KNEE_HOLE_MAX = 6;
+/** v3.93 (round-53 “class2的图还是有问题，我打开map看到的不是这样的”):
+ *  the knee cleanliness bar for BOUNDARY ROUGHNESS (measureRender.rough,
+ *  the isoperimetric ratio P²/(4π·A) of the main component). The deck (4)
+ *  forensics re-measured the delivered renders: every healthy map read
+ *  1.0–2.4 while J817_c1 — the connected SNOWFIELD (its level sat below
+ *  the map's noise floor; frag stayed 0% because the noise is CONNECTED
+ *  and holes 6 only tied the v3.86 bar) — read 8.15. rough was measured
+ *  and logged on every probe since v3.86 but never gated; it now is.
+ *  6.0 sits far above any legitimate concave silhouette (head+column+belt
+ *  reads ≲4) and far below a noise surface; when NO rung passes, the
+ *  honest rung-3 fallback (minimum dirt, now rough-aware) still fires. */
+export const KNEE_ROUGH_MAX = 6.0;
+/** v3.93 (round-53): the ALIGNABILITY bar — a map whose WINNING score
+ *  (post ?? corr ?? pre, the honest masked correlation of the kept hand)
+ *  stays below this never validated a pose against the reference: the
+ *  fitted pose is noise-driven, the silhouette yaw-matching against the
+ *  reference frame is meaningless, and the round-48 参考倍率下限 (built
+ *  for same-complex intermediates) lands wherever that map's histogram
+ *  happens to put it. Such a map is rendered as the user sees it on open
+ *  instead: the ORIGINAL map at its OPEN pose (matrixget/matrixset
+ *  round-trip captured before any fitting), the DEFAULT camera, its OWN
+ *  display knee — and the figure footnote counts it 未对齐 honestly.
+ *  0.55: well under the 0.85 target a same-pipeline map clears (v3.68),
+ *  far above what a detergent-envelope blob overlaid on a masked protein
+ *  reference can correlate. Clamped under a user-lowered corrTarget via
+ *  unalignedCorrBar(). */
+export const UNALIGNED_CORR_BAR = 0.55;
+/** v3.93: the alignability bar actually applied for a run — a lowered
+ *  corrTarget drags the bar with it (a 0.50 target must not raw-pose a
+ *  map that just validated at 0.52). Pure, exported for the harness. */
+export function unalignedCorrBar(corrTarget: number): number {
+  if (!Number.isFinite(corrTarget)) return UNALIGNED_CORR_BAR;
+  return Math.max(0.25, Math.min(UNALIGNED_CORR_BAR, corrTarget - 0.05));
+}
 /** v3.86: the FAST-PATH main-coverage floor — the knee probes re-frame
  *  with bare `view` (the silhouette fills the frame), so a healthy
  *  particle reads ≫10% of the probe whatever its size; a degenerate
@@ -3158,6 +3192,11 @@ export async function renderFigureMaps(
     stats: BridgeVolStats | null,
     tag: string,
     m2In?: Membrane2Reply | null,
+    /** v3.93 (round-53): true for an UNALIGNED map (winning score below
+     * unalignedCorrBar) — its display knee rides its OWN signal anchor
+     * (the reference's 倍率链 does not describe a map that never matched
+     * the reference) and the honest log says so. */
+    unalignedIn: boolean = false,
   ): Promise<{ level: number; rule: string } | null> => {
     if (!stats || !Number.isFinite(stats.max) || stats.max <= 0) return null;
     const max = stats.max;
@@ -3167,6 +3206,29 @@ export async function renderFigureMaps(
     const m2 = m2In !== undefined ? m2In : (t.canMembrane2 ? await bridgeMembrane2(t, id) : null);
     const belt = beltLevelFrom(m2, stats);
     let anchorLevel = Number.isFinite(belt.anchor) && belt.anchor > 0 ? belt.anchor : max * SCRIPT_LEVEL_RATIO;
+    /* v3.93 (round-53): the HOT-BELT display rules. On a map whose oblate
+     * belt occupies the HIGH band (detergent hotter than protein — the
+     * P222 class maps) NO threshold can hide the micelle, and RAISING the
+     * level walks the surface INTO the micelle core: the deck (4)'s
+     * class_2 renders were perfect smooth capsules (rough ≈ 1.0, zero
+     * holes, zero frag — every v3.86 bar LOVES a capsule) with the
+     * protein swallowed, because the round-48 参考倍率下限 lifted the
+     * display level above the map's own 蛋白/胶束 boundary into that core
+     * regime. Two rules restore the opened-map look (蛋白+胶束晕轮 —
+     * exactly what the user sees opening the map):
+     *   - the ref-ratio floor does NOT apply to a hot-belt map (the
+     *     floor's premise — same-histogram intermediates — fails when the
+     *     belt is the hot phase; a map can only be affected if its own
+     *     anchor sat BELOW the floor, i.e. exactly the maps the floor was
+     *     lifting into the core), and never to an unaligned map (its
+     *     histogram is not on the reference's chain at all);
+     *   - the ladder is CAPPED at t2 (the mid|high boundary = the belt
+     *     band's bottom): rungs above t2 only ever render the micelle
+     *     core, so they leave the pool entirely — the bars can no longer
+     *     "clean" their way into a capsule. */
+    const hotBelt = belt.beltBand === "high" && belt.t2 != null && belt.t2 > 0;
+    const beltCap: number | null = hotBelt ? (belt.t2 as number) : null;
+    if (beltCap != null && anchorLevel > beltCap) anchorLevel = beltCap;
     /* v3.87 (round-47 “目前最终map的level选的0.25倍，但是前面的map目前
      * 也都是0.25吗？感觉可能需要优化一下”) → v3.88 (round-48 “中间过程
      * 的map还是受到了胶束影响？”): EVERY non-reference map now floors its
@@ -3184,7 +3246,10 @@ export async function renderFigureMaps(
      * sponge bar would reject an over-levelled pick anyway). */
     let refRatioRule: string | null = null;
     let refRatioFloor: number | null = null;
-    if (tag !== "ref" && refId != null) {
+    const floorSkipWhy: string[] = [];
+    if (hotBelt) floorSkipWhy.push("热胶束图（胶束比蛋白更热 — 参考倍率会把 level 推进胶束核，蛋白被包进平滑胶囊）");
+    if (unalignedIn) floorSkipWhy.push("未对齐图（不在参考倍率链上）");
+    if (tag !== "ref" && refId != null && floorSkipWhy.length === 0) {
       const refLvl = displayLevelById.get(refId) ?? null;
       const refSt = statsById.get(refId) ?? null;
       if (refLvl != null && refSt && Number.isFinite(refSt.max) && refSt.max > 0) {
@@ -3197,6 +3262,8 @@ export async function renderFigureMaps(
           refRatioRule = `本图锚点已达 ${belt.t1 != null ? "蛋白/胶束分割" : "脚本"}水平（≥ 参考图倍率 ${r.toFixed(3)}×max — 保留本图锚点）`;
         }
       }
+    } else if (tag !== "ref" && floorSkipWhy.length) {
+      refRatioRule = `参考倍率下限不适用（${floorSkipWhy.join(" · ")}）— 按本图自身信号锚点${beltCap != null ? `，档位上限 t2=${(beltCap).toFixed(4)}（胶束相带底部 — 不进胶束核）` : ""}`;
     }
     const anchorRatio = anchorLevel / max;
     if (belt.t1 != null && belt.t2 != null) {
