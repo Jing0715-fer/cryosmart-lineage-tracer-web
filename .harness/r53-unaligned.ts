@@ -402,7 +402,7 @@ console.log("[D] figureFootnote");
 
 /* ---- E. version ---- */
 console.log("[E] version");
-check("FLOW_ENGINE_VERSION is 3.93", FLOW_ENGINE_VERSION === "3.93", FLOW_ENGINE_VERSION);
+check("FLOW_ENGINE_VERSION is ≥ 3.93 (v3.94 bump carried the round-54 enforcement)", Number(FLOW_ENGINE_VERSION) >= 3.93, FLOW_ENGINE_VERSION);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

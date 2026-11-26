@@ -259,7 +259,7 @@ console.log("[D] version");
 {
   /* v3.93 bump: the pin follows the engine (the round-52 guarantees are
  * unchanged — r53's harness re-asserts them against the new gates). */
-check("FLOW_ENGINE_VERSION is 3.93 (v3.93 bump)", FLOW_ENGINE_VERSION === "3.93", FLOW_ENGINE_VERSION);
+check("FLOW_ENGINE_VERSION is ≥ 3.93 (v3.94 bump carried the round-54 enforcement)", Number(FLOW_ENGINE_VERSION) >= 3.93, FLOW_ENGINE_VERSION);
 }
 
 console.log(fail === 0 ? `\nALL ${pass} CHECKS PASSED` : `\n${fail} FAILED (of ${pass + fail})`);

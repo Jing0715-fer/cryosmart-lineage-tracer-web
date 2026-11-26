@@ -1811,6 +1811,40 @@ export function shotSubjectVerdict(
   return processedIds.has(id) ? "processed" : "original";
 }
 
+/** v3.94 (round-54 “流程图中还是会出现非原始map的截图，感觉有的还是
+ * 用了lowpass的map”): the SHOT-VISIBLE enforcement plan — given the relay's
+ * CURRENT /volumes listing, the render subject and the run's open ids, decide
+ * what must happen before the save fires so the PNG can only ever contain
+ * the subject: every volume that is NOT the subject gets `hide #<id> models`
+ * when it is one of the run's own models (another map's winning hand — hidden
+ * already in the normal flow, re-issued as belt-and-suspenders), or `close
+ * #<id>` when it is a STRAY (a fitting clone whose close failed transiently,
+ * a phantom the engine's bookkeeping never saw, a mid-run leftover). The
+ * subject id compares as a STRING against /volumes id_strings so submodels
+ * ("5.2") route correctly; a stray stays a stray whatever it parses to.
+ * Pure + exported for the offline harness. */
+export function shotVisiblePlan(
+  volumeRefs: ReadonlyArray<{ id: string }>,
+  showId: number | null,
+  openIds: ReadonlySet<number>,
+): { hide: string[]; strays: string[]; subject: string | null } {
+  const subject = showId != null && Number.isFinite(showId) ? String(showId) : null;
+  const hide: string[] = [];
+  const strays: string[] = [];
+  for (const v of volumeRefs) {
+    const id = typeof v?.id === "string" ? v.id : null;
+    if (!id) continue;
+    if (subject != null && id === subject) continue;
+    const numeric = parseInt(id, 10);
+    if (Number.isFinite(numeric) && openIds.has(numeric)) {
+      hide.push(id);
+    } else {
+      strays.push(id);
+    }
+  }
+  return { hide, strays, subject };
+}
+
 async function measureRender(png: Uint8Array): Promise<RenderShape | null> {
   if (typeof createImageBitmap === "undefined" || typeof document === "undefined") return null;
   const blob = new Blob([png as BlobPart], { type: "image/png" });
@@ -3991,6 +4025,19 @@ export async function renderFigureMaps(
     if (await matrixLoad(id, path)) return true;
     return matrixLoad(id, path);
   };
+  /** v3.94 (round-54): the CLOSE retry — one fresh re-issue before giving up.
+   * The phase-3.5 reference-clone closes had NO retry and NO sweep behind
+   * them (the per-hand sweeps run INSIDE the map loop, which 3.5 follows):
+   * a single transient close failure there left the σ-lowpass / noise-mask
+   * reference clone OPEN and VISIBLE through every deck screenshot — the
+   * round-54 disease (流程图里混入低通参考副本). The verdict only inspects
+   * the SUBJECT id; what is on SCREEN is what the PNG records. */
+  const closeRetry = async (id: number | string): Promise<boolean> => {
+    const first = await exec(t, `close #${id}`, opts, true);
+    if (!first.error) return true;
+    const second = await exec(t, `close #${id}`, opts, true);
+    return !second.error;
+  };
   /* v3.92 (round-52 “不要用lowpass后的map截图”): the run's FITTING-ONLY
    * clone registry — every σ-lowpass gaussian clone, belt-free /shellmask
    * clone, threshold noise-mask clone and polish clone lands here at
@@ -5187,10 +5234,20 @@ export async function renderFigureMaps(
    * AND their noise-mask clones — the pose search is done and the
    * screenshots below must render ONLY the full-resolution originals
    * (none of the clones were ever in openIds, so the hide-all loop
-   * would have missed them). */
+   * would have missed them).
+   * v3.94 (round-54): every close here RETRIES — a single transient
+   * failure used to leave the σ-lowpass/noise-mask reference clone open
+   * AND VISIBLE for the whole screenshot phase (no sweep ran after 3.5),
+   * and the leaked smoothed reference then rode every deck PNG (the
+   * round-54 流程图里出现低通-looking renders). Failures after the retry
+   * are logged loudly and the shot-phase sweep below still catches the
+   * survivor. */
   for (const sid of [refSmoothC, refSmoothF, refMaskC, refMaskF, refMaskFull]) {
     if (sid != null) {
-      await exec(t, `close #${sid}`, opts, true);
+      const closed = await closeRetry(sid);
+      if (!closed) {
+        log(`⚠ 参考副本 #${sid} 关闭失败（已重试）— 截图前清扫阶段将再次尝试关闭`);
+      }
     }
   }
   refSmoothC = null;
@@ -5203,12 +5260,49 @@ export async function renderFigureMaps(
    * assist + per-map re-framing, before the same 1600×1200 export.
    * v3.92 (round-52): the FINAL-SHOT SUBJECT rule — 比对用低通/去垢副本
    * 已全部关闭，最终截图只渲染原图模型（姿态已转回原图）。 Every
-   * subject is verdict-checked (shotSubjectVerdict) and logged per map. */
+   * subject is verdict-checked (shotSubjectVerdict) and logged per map.
+   * v3.94 (round-54): the VISIBLE-SET enforcement — the subject check only
+   * reads the id the engine THINKS it is showing; what the PNG records is
+   * EVERYTHING on screen. A stray volume that survived its close (phase
+   * 3.5 had no sweep behind it; a transient close failure anywhere) stays
+   * OPEN and VISIBLE and rides every screenshot invisibly — the deck then
+   * shows lowpass-looking composites while the log honestly claims
+   * 原图本体. Three new layers close that gap: (a) the LAST sweep right
+   * here (legit = openIds — anything else closes), (b) a per-save /volumes
+   * audit that hides/closes whatever is not the subject (shotVisiblePlan),
+   * and (c) the phase-3.5 closes themselves retry (see above). */
   if (t.canFetchFiles && t.workdir) {
     const shotTargets = renders.filter((r) => r.modelId != null);
     const shotTotal = Math.max(1, shotTargets.length);
     let shotDone = 0;
     progress("逐图导出高清截图 (1600×1200)", 60);
+    /* v3.94: the FINAL sweep — legit is exactly openIds (the surviving
+     * original hands + the reference); every other volume CLOSES now,
+     * before any hide/show/save. This is the layer that catches a leaked
+     * σ-lowpass / noise-mask / shellmask clone whose close failed after its
+     * retry, or a phantom the engine's bookkeeping never registered. The
+     * per-hand sweeps cannot do this — they run inside the map loop, and
+     * phase 3.5 follows it. */
+    let shotSweepFailures = 0;
+    {
+      const vols = await bridgeVolumeIds(t);
+      if (vols == null) {
+        log("⚠ 截图前清扫无法获取模型清单（/volumes 无响应）— 逐图审计将继续检查并关闭混入模型");
+      } else {
+        const legitNums = new Set<number>(openIds);
+        for (const v of vols) {
+          const numeric = parseInt(v.id, 10);
+          if (Number.isFinite(numeric) && legitNums.has(numeric)) continue;
+          const closed = await closeRetry(v.id);
+          if (closed) {
+            log(`  已关闭混入截图阶段的非本体模型 #${v.id}（${logSnippet(v.name, 60)}）— 比对副本/残留模型不会进入任何截图`);
+          } else {
+            shotSweepFailures += 1;
+            log(`  ⚠ 混入模型 #${v.id}（${logSnippet(v.name, 60)}）关闭失败（已重试）— 逐图审计将在每张截图前再次尝试`);
+          }
+        }
+      }
+    }
     for (const id of openIds) {
       await exec(t, `hide #${id} models`, opts, true);
     }
@@ -5218,11 +5312,12 @@ export async function renderFigureMaps(
        * (σ 低通 / 分层去垢 / 噪声屏蔽 / 精修副本) all closed in their
        * hand's finally + sweepStrayVolumes and at 3.5 above; what remains
        * open are the ORIGINAL models only. v3.93: the unaligned count
-       * rides the same line — those renders show the open pose. */
+       * rides the same line — those renders show the open pose.
+       * v3.94: the final sweep ran (any survivor is re-tried per save). */
       const viaLowpassCount = shotTargets.filter((r) => r.viaLowpass).length;
       const unalignedCount = shotTargets.filter((r) => r.unaligned).length;
       log(
-        `截图阶段: ${shotTargets.length} 个原图模型（${viaLowpassCount} 张经低通比对 — 比对用副本已全部关闭，低通姿态已转回原图，最终截图不使用任何处理后的副本${unalignedCount ? `；${unalignedCount} 张未对齐 — 按开图原样呈现（原始 map · 开图姿态 · 默认视角 · 自身 level）` : ""}）`,
+        `截图阶段: ${shotTargets.length} 个原图模型（${viaLowpassCount} 张经低通比对 — 比对用副本已全部关闭，低通姿态已转回原图，最终截图不使用任何处理后的副本${unalignedCount ? `；${unalignedCount} 张未对齐 — 按开图原样呈现（原始 map · 开图姿态 · 默认视角 · 自身 level）` : ""}${shotSweepFailures ? `；⚠ ${shotSweepFailures} 个混入模型关闭失败 — 每张截图前将再次尝试关闭` : ""}）`,
       );
     }
     /* ---- v3.89: the reference's shared-view SILHOUETTE, cached once
@@ -5263,6 +5358,36 @@ export async function renderFigureMaps(
       const showId = r.modelId;
       if (showId == null) continue;
       await exec(t, `show #${showId} models`, opts, true);
+      /* v3.94 (round-54): the per-save VISIBLE-SET audit — the subject check
+       * below reads the engine's INTENT; this reads the relay's REALITY.
+       * /volumes lists every open volume RIGHT NOW: anything that is not
+       * the subject gets hidden (the run's own other models — idempotent
+       * belt-and-suspenders for the hide-all above) or CLOSED (a stray —
+       * a clone that beat its close-retry, or a phantom the bookkeeping
+       * never saw). The PNG that this save writes can then contain nothing
+       * but the original map at its transferred pose. A /volumes failure
+       * here is logged honestly and costs nothing else. */
+      {
+        const volsNow = await bridgeVolumeIds(t);
+        if (volsNow == null) {
+          if (shotSweepFailures > 0) {
+            log(`  ${r.key}: ⚠ 截图前可见性审计不可用（/volumes 无响应）— 无法排除混入模型`);
+          }
+        } else {
+          const plan = shotVisiblePlan(volsNow, showId, openIds);
+          for (const sid of plan.strays) {
+            const closed = await closeRetry(sid);
+            log(
+              closed
+                ? `  ${r.key}: ⚠ 截图前关闭混入画面的非本体模型 #${sid} — 本张只渲染原 map #${showId}`
+                : `  ${r.key}: ⚠ 混入模型 #${sid} 关闭失败（已重试）— 本张截图可能受影响，请检查 ChimeraX 会话`,
+            );
+          }
+          for (const hid of plan.hide) {
+            await exec(t, `hide #${hid} models`, opts, true);
+          }
+        }
+      }
       /* v3.92: the final-shot subject verdict — the deck renders the
        * ORIGINAL map at the fitted pose, never a lowpass/processed clone
        * (比对可用低通，截图必用原图). "processed" is impossible by

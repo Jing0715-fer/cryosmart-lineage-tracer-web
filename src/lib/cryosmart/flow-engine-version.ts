@@ -1105,5 +1105,31 @@
  * 对齐 flips to 其余地图…（N 个未对齐，按开图原样呈现）when any exist);
  * the mock's ?unaligned=<substr> drill routes those maps' measure
  * correlation to 0.30 to prove the whole path.
+ *
+ * v3.94 bump reason (round-54 “目前流程图中还是会出现非原始map的截图，
+ * 感觉有的还是用了lowpass的map”): the v3.92 original-shot guarantee
+ * verified the SUBJECT id but never the VISIBLE SET — what a PNG records
+ * is EVERYTHING on screen, and a fitting clone whose close failed once
+ * stayed open AND visible through the whole screenshot phase with no
+ * detector: the phase-3.5 reference-clone closes (σ-lowpass gauss +
+ * noise-mask threshold clones) had NO retry and NO sweep behind them
+ * (the per-hand sweepStrayVolumes runs INSIDE the map loop, which 3.5
+ * follows), so one transient relay hiccup on a single `close` leaked a
+ * smoothed reference overlay into EVERY deck image while the log still
+ * claimed 原图本体. Three enforcement layers now close the gap: (1) the
+ * 3.5 closes RETRY (closeRetry — one fresh re-issue, failures logged);
+ * (2) a FINAL sweep at screenshot-phase start (legit = openIds exactly —
+ * every other volume closes before any hide/show/save, each close
+ * logged); (3) a PER-SAVE visible-set audit — every final save first
+ * queries /volumes and hides/closes whatever is not the subject
+ * (shotVisiblePlan exported pure: string-id comparison so submodels
+ * route correctly, run models hide, strays close). The mock tracks a
+ * true visible set now (open/gauss/threshold/flip/shellmask creations
+ * display by ChimeraX semantics; show/hide/close update it) and the
+ * final saves record it (final_shot_visible_sets /
+ * final_shot_extra_visible) — the ?shot=leak drill (first mask-kind
+ * close fails once — exactly the 3.5 transient) makes the OLD code
+ * deliver 14 polluted renders the stats can see, and the ?shot=leak2
+ * variant (fails twice, beating the retry) proves the sweep layer.
  */
-export const FLOW_ENGINE_VERSION = "3.93";
+export const FLOW_ENGINE_VERSION = "3.94";

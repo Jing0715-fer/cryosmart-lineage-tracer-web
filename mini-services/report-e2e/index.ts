@@ -374,6 +374,15 @@ const server = Bun.serve({
       // teeth check (the DEFAULT drills assert it stays 0).
       const shotDrill = sp.get("shot") || "";
       relayState.shotSigmaLeak = shotDrill === "sigma";
+      // v3.94 E2E drills: ?shot=leak / ?shot=leak2 — the first 1/2 closes of
+      // MASK-kind models (the reference noise-mask clones; phase 3.5 is
+      // their only close) fail transiently: the v3.94 closeRetry must
+      // recover from leak, and the shot-phase final sweep must recover from
+      // leak2 (the retry is beaten too). The OLD code leaked the visible
+      // clone into every deck PNG — final_shot_extra_visible is the
+      // detector that would have caught it.
+      relayState.shotLeakMode = shotDrill === "leak" || shotDrill === "leak2" ? shotDrill : "";
+      relayState.leakCloseBudget = relayState.shotLeakMode === "leak2" ? 2 : relayState.shotLeakMode === "leak" ? 1 : 0;
       // v3.93 E2E drills: ?knee=hotcap (the reference reads COLD-belt and
       // anchors at its own t2=0.54 while every hot-belt map would be lifted
       // into the capsule regime by the ref-ratio floor; levels > 0.5 render
@@ -404,6 +413,7 @@ const server = Bun.serve({
         noise_floor: relayState.noiseFloor,
         pose_misfit_match: relayState.poseMisfitMatch,
         shot_sigma_drill: relayState.shotSigmaLeak,
+        shot_leak_mode: relayState.shotLeakMode,
         knee_mode: relayState.kneeMode,
         unaligned_match: relayState.unalignedMatch,
       });
@@ -1430,6 +1440,37 @@ const relayState = {
    *  with the honest 未对齐 logs + the footnote count. */
   unalignedMatch: null as string | null,
   unalignedCorrReplies: 0,
+  /** v3.94: the TRUE visible set — every model ChimeraX would currently
+   *  draw (open/flip/gauss/threshold/shellmask creations display by
+   *  default — real ChimeraX semantics; show/hide/close update it). The
+   *  final saves record it so the E2E can assert every deck PNG contained
+   *  EXACTLY the subject and nothing else. */
+  visibleModels: new Set<number>(),
+  /** v3.94 E2E drills: ?shot=leak / ?shot=leak2 — the first N closes of
+   *  MASK-kind models (the reference's noise-mask clones; phase 3.5 is
+   *  their ONLY close of the whole run — the per-hand sweeps list them as
+   *  legit extras) fail with a transient error: leak=1 defeats a single
+   *  close (the v3.94 closeRetry must recover), leak=2 defeats the retry
+   *  too (the shot-phase final sweep must recover). The OLD code had
+   *  neither layer — the leaked noise-mask reference stayed OPEN and
+   *  VISIBLE through every deck screenshot (the round-54 disease: the
+   *  deck showed lowpass-looking renders while the log claimed 原图本体). */
+  shotLeakMode: "" as "" | "leak" | "leak2",
+  leakCloseBudget: 0,
+  leakCloseFailures: 0,
+  /** v3.94 stats: the final saves' full VISIBLE sets (what the PNG can
+   *  contain) + the close commands that removed a visible non-subject
+   *  model (the v3.94 enforcement's signature — 已关闭混入…/关闭失败…). */
+  finalShotVisibleSets: [] as Array<{ save: string; subject: number | null; visible: number[]; kinds: string[] }>,
+  shotVisibleCloses: 0,
+  /** v3.94: total close commands targeting MASK-kind models (the
+   *  reference noise-mask clones — phase 3.5 is their only close in the
+   *  old code). The LEAK drills read it together with
+   *  leak_close_failures: new+leak → 2 attempts/1 failure (the retry
+   *  recovered), new+leak2 → ≥3 attempts/2 failures (the shot-phase sweep
+   *  recovered), old+leak → 1 attempt/1 failure (LEAKED — the clone stayed
+   *  visible through every save). */
+  maskCloseAttempts: 0,
 };
 
 function resetRelayState() {
@@ -1491,6 +1532,13 @@ function resetRelayState() {
   relayState.kneeShapeRenders = { capsule: 0, roughsnow: 0 };
   relayState.unalignedMatch = null;
   relayState.unalignedCorrReplies = 0;
+  relayState.visibleModels.clear();
+  relayState.shotLeakMode = "";
+  relayState.leakCloseBudget = 0;
+  relayState.leakCloseFailures = 0;
+  relayState.finalShotVisibleSets = [];
+  relayState.shotVisibleCloses = 0;
+  relayState.maskCloseAttempts = 0;
 }
 
 function relayNextModelId(): number {
@@ -1511,6 +1559,9 @@ function relayNextModelId(): number {
 function registerModel(id: number, url: string, kind: string = "original") {
   relayState.models.set(id, { url });
   relayState.modelKinds.set(id, kind);
+  /* v3.94: a newly created model DISPLAYS by default (real ChimeraX
+   * semantics — open, flip, gaussian, threshold, shellmask alike). */
+  relayState.visibleModels.add(id);
   if (relayState.poseMisfitMatch && url.includes(relayState.poseMisfitMatch)) {
     relayState.misfitModels.add(id);
   }
@@ -1583,6 +1634,21 @@ function relayStats() {
     clone_final_shots: relayState.finalShotSubjects.filter(
       (s) => s.kind === "gauss" || s.kind === "shellmask" || s.kind === "mask",
     ).length,
+    // v3.94 (round-54 流程图中仍出现非原始map截图): the final saves' FULL
+    // VISIBLE SETS — what each PNG can actually contain. A clean run reads
+    // exactly {subject} per save; final_shot_extra_visible counts any save
+    // whose screen held anything else (a leaked clone/stray — the round-54
+    // detector). shot_visible_closes counts the engine's on-screen stray
+    // closes (the enforcement signature); leak_close_failures is the
+    // ?shot=leak/leak2 drill's planted transient failures.
+    final_shot_visible_sets: relayState.finalShotVisibleSets,
+    final_shot_extra_visible: relayState.finalShotVisibleSets.filter(
+      (s) => s.visible.length !== 1 || s.visible[0] !== s.subject,
+    ).length,
+    shot_visible_closes: relayState.shotVisibleCloses,
+    shot_leak_mode: relayState.shotLeakMode,
+    leak_close_failures: relayState.leakCloseFailures,
+    mask_close_attempts: relayState.maskCloseAttempts,
     // v3.93 (round-53): the knee drills + the unaligned routing — the E2E
     // asserts the hot-belt maps kept their OWN anchors (hotcap), the rough
     // snowfield was rejected by the boundary-roughness gate (rough), and
@@ -1652,10 +1718,15 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
   // v3.53: track the on-screen model (drives per-class disc colors on
   // save) and tripwire the retired `set bgColor` command.
   const showMatch = /^show\s+#(\d+)\s+models/i.exec(command);
-  if (showMatch) relayState.shownModel = parseInt(showMatch[1], 10);
+  if (showMatch) {
+    relayState.shownModel = parseInt(showMatch[1], 10);
+    relayState.visibleModels.add(relayState.shownModel);
+  }
   const hideMatch = /^hide\s+#(\d+)\s+models/i.exec(command);
-  if (hideMatch && relayState.shownModel === parseInt(hideMatch[1], 10)) {
-    relayState.shownModel = null;
+  if (hideMatch) {
+    const hid = parseInt(hideMatch[1], 10);
+    if (relayState.shownModel === hid) relayState.shownModel = null;
+    relayState.visibleModels.delete(hid);
   }
   if (/^set\s+bgColor\b/i.test(command)) relayState.setBgColorCommands += 1;
 
@@ -1772,10 +1843,36 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
       relayState.closedIds.push(id);
       relayState.models.delete(id);
     }
+    relayState.visibleModels.clear();
     return { text: "", error: null };
   }
 
   if (/^close\s+#\d+/i.test(command)) {
+    /* v3.94 ?shot=leak / ?shot=leak2 drill: the first N closes of
+     * MASK-kind models (the reference's noise-mask clones — phase 3.5
+     * is their only close of the run) fail with a TRANSIENT ERROR and
+     * the model survives, exactly like a real relay hiccup: leak=1
+     * defeats a single close (the v3.94 closeRetry must recover), leak=2
+     * defeats the retry too (the shot-phase final sweep must recover).
+     * The engine's exec sees the error (so the retry fires); the model
+     * stays open AND visible — the OLD code's deck screenshots then
+     * carried it in every PNG while the log claimed 原图本体. */
+    if (relayState.leakCloseBudget > 0) {
+      const drillIds = [...command.matchAll(/#(\d+)/g)].map((m) => parseInt(m[1], 10));
+      if (drillIds.some((id) => relayState.modelKinds.get(id) === "mask")) {
+        relayState.leakCloseBudget -= 1;
+        relayState.leakCloseFailures += 1;
+        relayState.maskCloseAttempts += 1;
+        return {
+          text: "",
+          error: "OSError: [Errno 5] transient close failure (simulated ?shot=leak drill)",
+        };
+      }
+    }
+    {
+      const ids = [...command.matchAll(/#(\d+)/g)].map((m) => parseInt(m[1], 10));
+      if (ids.some((id) => relayState.modelKinds.get(id) === "mask")) relayState.maskCloseAttempts += 1;
+    }
     for (const m of command.matchAll(/#(\d+)/g)) {
       const id = parseInt(m[1], 10);
       /* v3.92 ?shot=sigma drill: gaussian-clone closes are silent no-ops —
@@ -1784,8 +1881,15 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
        * saves then render it and the stats detector must catch the kind. */
       if (relayState.shotSigmaLeak && relayState.modelKinds.get(id) === "gauss") continue;
       if (relayState.models.has(id)) relayState.closedIds.push(id);
+      /* v3.94: the enforcement's signature — this close removed a model
+       * that was on screen and was NOT the currently shown subject (the
+       * engine's stray-close / audit-close commands are exactly this). */
+      if (relayState.visibleModels.has(id) && relayState.shownModel !== id) {
+        relayState.shotVisibleCloses += 1;
+      }
       relayState.models.delete(id);
       relayState.modelKinds.delete(id);
+      relayState.visibleModels.delete(id);
       // v3.82: closing the shown model leaves nothing displayed.
       if (relayState.shownModel === id) relayState.shownModel = null;
       // v3.89: the misfit marking dies with the model — the mock REUSES
@@ -1945,6 +2049,19 @@ async function relaySimulate(raw: string): Promise<{ text: string; error: string
         }
       }
       relayState.finalShotSubjects.push({ save: name, model: subjModel, kind: subjKind });
+      /* v3.94 (round-54): the final save also records the FULL VISIBLE SET —
+       * what the PNG can actually contain. A clean run reads exactly
+       * {subject}; any extra entry means a stray volume was on screen (a
+       * clone whose close failed, a phantom the bookkeeping never saw) —
+       * the final_shot_extra_visible detector. The visible set is captured
+       * BEFORE the sigma drill's subject override touches shownModel. */
+      const visIds = [...relayState.visibleModels].sort((a, b) => a - b);
+      relayState.finalShotVisibleSets.push({
+        save: name,
+        subject: subjModel,
+        visible: visIds,
+        kinds: visIds.map((id) => relayState.modelKinds.get(id) ?? "unknown"),
+      });
       if (subjModel != null && subjModel !== relayState.shownModel) {
         const restore = relayState.shownModel;
         relayState.shownModel = subjModel;
